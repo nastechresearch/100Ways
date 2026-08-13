@@ -119,7 +119,23 @@ def pull_hermes(updates_dir: str, hermes_url: str = DEFAULT_HERMES_URL) -> str:
         url = os.path.abspath(url)
     if os.path.isdir(os.path.join(dest, ".git")):
         _run_ok(["git", "-C", dest, "fetch", "--all", "--prune"], "hermes fetch")
-        _run_ok(["git", "-C", dest, "reset", "--hard", "origin/HEAD"], "hermes reset")
+        # Ask the remote which branch it points at; a fresh clone sets
+        # origin/HEAD, but an existing checkout (or a shallow/local source)
+        # may not.  Without this, reset --hard origin/HEAD is a hard error.
+        try:
+            _run_ok(["git", "-C", dest, "remote", "set-head", "origin", "-a"], "hermes set-head")
+        except RuntimeError:
+            pass
+        ref = "origin/HEAD"
+        try:
+            _run_ok(["git", "-C", dest, "rev-parse", "--verify", ref], "hermes head resolve")
+        except RuntimeError:
+            ref = "origin/main"
+        try:
+            _run_ok(["git", "-C", dest, "rev-parse", "--verify", ref], "hermes head resolve")
+        except RuntimeError:
+            ref = "FETCH_HEAD"
+        _run_ok(["git", "-C", dest, "reset", "--hard", ref], "hermes reset")
     else:
         _run_ok(["git", "clone", url, dest], "hermes clone")
     return _run_ok(["git", "-C", dest, "rev-parse", "HEAD"], "hermes head")
