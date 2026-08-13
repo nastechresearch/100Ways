@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@nastech/ink": ["src/types/nastech-ink.d.ts"]
+    }
+  }
+}
