@@ -318,3 +318,80 @@ def test_update_manager_threads_owned_into_all_stages(tmp_path):
     assert os.path.isfile(snap_banner)
     assert open(snap_banner, "rb").read() == b"OUR-BANNER-BYTES"
     assert res.brand.owned == 1
+
+
+def _hermes_repo_with_reconcile_patterns(tmp_path):
+    """A fake hermes repo carrying the exact patterns that need reconciliation:
+    a uv.lock whose root record names hermes-agent, a package-lock.json with a
+    root name, and a Dockerfile FTS5 trigram self-test written against hermes."""
+    hermes = _hermes_repo(tmp_path)
+    import pathlib
+    hermes_path = pathlib.Path(hermes)
+    (hermes_path / "pyproject.toml").write_text('name = "hermes-agent"\nversion = "0.20.1"\n')
+    (hermes_path / "package.json").write_text('{"name": "hermes-agent", "version": "1.0.0"}\n')
+    (hermes_path / "uv.lock").write_text(
+        'version = 1\n'
+        '[[package]]\n'
+        'name = "hermes-agent"\n'
+        'version = "0.20.1"\n'
+        'source = { editable = "." }\n'
+        'dependencies = [\n'
+        '    { name = "certifi" },\n'
+        ']\n'
+    )
+    (hermes_path / "package-lock.json").write_text(
+        '{\n'
+        '  "name": "hermes-agent",\n'
+        '  "version": "1.0.0",\n'
+        '  "lockfileVersion": 3\n'
+        '}\n'
+    )
+    (hermes_path / "Dockerfile").write_text(
+        'FROM python:3.11\n'
+        'RUN python3 -c "import sqlite3, sys; \\\n'
+        '    db = sqlite3.connect(\':memory:\'); \\\n'
+        '    db.execute(\\"CREATE VIRTUAL TABLE docs USING fts5(content, tokenize=\'trigram\')\\"); \\\n'
+        '    db.execute(\\"INSERT INTO docs VALUES (\'hermes\')\\"); \\\n'
+        '    sys.exit(\'SQLite FTS5 trigram self-test failed\') if db.execute(\\"SELECT count(*) FROM docs WHERE docs MATCH \'erm\'\\").fetchone()[0] != 1 else None"\n'
+    )
+    subprocess.run(["git", "-C", hermes, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", hermes, "commit", "-q", "-m", "add reconcile patterns"], check=True)
+    return hermes
+
+
+def test_reconcile_fixes_lockfile_roots_and_dockerfile_trigram(tmp_path):
+    hermes = _hermes_repo_with_reconcile_patterns(tmp_path)
+    updates_dir = str(tmp_path / "Updates-Commits")
+    res = UpdateManager(updates_dir, hermes_url=hermes).run()
+    assert res.gate, f"gate FAILED: {[s for s in res.stages if s.status == 'fail']}"
+    assert set(res.reconcile.fixed) == {"Dockerfile", "package-lock.json", "uv.lock"}
+
+    root_record = [l.strip() for l in open(os.path.join(res.dir, "uv.lock"), encoding="utf-8")
+                   if l.strip().startswith("name =")]
+    assert root_record[:1] == ['name = "nastech-agent"']
+
+    with open(os.path.join(res.dir, "package-lock.json"), encoding="utf-8") as fh:
+        plock = fh.read()
+    assert '"name": "nastech-agent"' in plock
+    assert "hermes" not in plock
+
+    with open(os.path.join(res.dir, "Dockerfile"), encoding="utf-8") as fh:
+        dockerfile = fh.read()
+    assert "MATCH 'erm'" not in dockerfile
+    assert "'nastech'" in dockerfile
+    trigrams = {"nas", "ast", "ste", "tec", "ech"}
+    import re
+    match = re.search(r"MATCH '([^']{3})'", dockerfile)
+    assert match and match.group(1) in trigrams, dockerfile
+
+    # every stage is green and counted
+    assert [s.name for s in res.stages] == STAGES
+    assert all(s.status == "ok" for s in res.stages)
+
+
+def test_reconcile_noop_when_no_patterns(tmp_path):
+    hermes = _hermes_repo(tmp_path)
+    updates_dir = str(tmp_path / "Updates-Commits")
+    res = UpdateManager(updates_dir, hermes_url=hermes).run()
+    assert res.gate
+    assert res.reconcile.fixed == []

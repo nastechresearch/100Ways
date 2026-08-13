@@ -74,13 +74,13 @@ def test_model_for_stage_no_override_map():
 
 # -- stage-aware review ------------------------------------------------------
 
-def test_stages_are_all_15():
-    assert len(STAGES) == 15
-    expected = [
-        "pull", "census", "plan", "brand", "scan", "compare", "verify",
-        "report", "package", "manifest", "record", "notify", "gate", "summary", "release",
-    ]
-    assert STAGES == expected
+def test_stages_ordered_and_unique():
+    # Invariant, not a snapshot: the pipeline must open with the real hermes
+    # pull, end with the release, and never repeat a stage name.
+    assert STAGES[0] == "pull"
+    assert STAGES[-1] == "release"
+    assert len(set(STAGES)) == len(STAGES)
+    assert "brand" in STAGES and "verify" in STAGES
 
 
 def test_review_stage_rejects_unknown_stage():

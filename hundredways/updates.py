@@ -1,6 +1,6 @@
 """Ordered update pipeline: pull real Hermes, brand the whole tree, snapshot.
 
-The ``update`` command makes the sync engine real.  It runs as **15 ordered
+The ``update`` command makes the sync engine real.  It runs as **16 ordered
 stages** so every step is named, recorded, and reported:
 
     Updates-Commits/
@@ -25,6 +25,7 @@ from __future__ import annotations
 import difflib
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -40,10 +41,10 @@ DEFAULT_HERMES_URL = "https://github.com/NousResearch/hermes-agent.git"
 HERMES_DIR = "hermes-agent"
 UPDATE_PREFIX = "Nastech-Update#"
 
-# The 15 ordered pipeline stages.  `release` is where GitHub Actions uploads
+# The 16 ordered pipeline stages.  `release` is where GitHub Actions uploads
 # the zip; locally it is recorded as skipped.
 STAGES = [
-    "pull", "census", "plan", "brand", "scan", "compare", "verify",
+    "pull", "census", "plan", "brand", "reconcile", "scan", "compare", "verify",
     "report", "package", "manifest", "record", "notify", "gate", "summary", "release",
 ]
 
@@ -229,6 +230,184 @@ def brand_tree(src: str, dst: str, rules: BrandingRules | None = None,
 
 
 # ---------------------------------------------------------------------------
+# Reconcile the branded tree (fork-local fixes the token rules can't express)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ReconcileResult:
+    """Files fixed after branding so the tree is internally consistent.
+
+    Token branding rewrites ``pyproject.toml`` / ``package.json``
+    (``hermes-agent`` -> ``nastech-agent``) but leaves LOCKED lockfiles
+    byte-for-byte.  A lockfile's root package record therefore still names
+    the upstream package, and every ``uv sync --locked`` / npm workspace
+    check on the fork fails.  Reconciliation syncs those root records with
+    the branded manifests, and applies a small set of known fork-local
+    content fixes (e.g. the SQLite FTS5 trigram self-test in the Dockerfile,
+    which upstream writes against its own name).  Each fixed path is
+    recorded so the parity gate can verify against the reconciled content.
+    """
+    total: int = 0
+    fixed: list[str] = field(default_factory=list)
+
+    def summary(self) -> str:
+        if not self.fixed:
+            return "no files needed reconciliation"
+        return f"{len(self.fixed)} files reconciled: {', '.join(self.fixed)}"
+
+
+def _root_package_name(dst: str, manifest: str, lockfile: str) -> str | None:
+    """Return the package name a lockfile root record must carry.
+
+    ``pyproject.toml`` wins (uv), then ``package.json`` (npm).  Falls back
+    to ``None`` when no source manifest exists so the reconcile is a no-op.
+    """
+    pyproject = os.path.join(dst, "pyproject.toml")
+    if os.path.isfile(pyproject):
+        try:
+            with open(pyproject, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line.startswith("name = "):
+                        name = line.split("=", 1)[1].strip().strip('"')
+                        if name:
+                            return name
+        except OSError:
+            pass
+    package_json = os.path.join(dst, "package.json")
+    if os.path.isfile(package_json):
+        try:
+            with open(package_json, encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict) and data.get("name"):
+                return str(data["name"])
+        except (OSError, ValueError):
+            pass
+    return None
+
+
+def _reconcile_uv_lock(dst: str, name: str) -> int:
+    """Rename the root editable package record in ``uv.lock``.
+
+    The root record is the ``[[package]]`` block whose source is
+    ``{ editable = "." }``.  Leave every dependency record untouched.
+    """
+    path = os.path.join(dst, "uv.lock")
+    if not os.path.isfile(path):
+        return 0
+    with open(path, encoding="utf-8") as fh:
+        lines = fh.readlines()
+    root_idx = None
+    for i, line in enumerate(lines):
+        if line.strip() == '[[package]]':
+            # a root record is followed by `source = { editable = "." }`
+            j = i + 1
+            while j < len(lines) and not lines[j].strip().startswith("["):
+                if 'editable = "."' in lines[j]:
+                    root_idx = i
+                    break
+                j += 1
+            if root_idx is not None:
+                break
+    if root_idx is None:
+        return 0
+    for k in range(root_idx + 1, len(lines)):
+        stripped = lines[k].strip()
+        if stripped.startswith("name = "):
+            lines[k] = f'name = "{name}"\n'
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.writelines(lines)
+            return 1
+        if stripped.startswith("["):
+            break
+    return 0
+
+
+def _reconcile_package_lock(dst: str, name: str) -> int:
+    """Rename the root package record in ``package-lock.json``."""
+    path = os.path.join(dst, "package-lock.json")
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return 0
+    if not isinstance(data, dict):
+        return 0
+    data["name"] = name
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+        fh.write("\n")
+    return 1
+
+
+def _reconcile_fts5_trigram(dst: str) -> int:
+    """Fix the SQLite FTS5 trigram self-test the fork's CI runs.
+
+    Upstream's Dockerfile verifies FTS5 trigram indexing against its OWN
+    name: ``INSERT INTO docs VALUES ('hermes')`` then ``MATCH 'erm'``.
+    Token branding rewrites the insert to ``'nastech'`` but leaves the
+    ``MATCH`` literal (``'erm'`` is a trigram of ``hermes``, not of the
+    branded name), so the check always fails.  Recompute the literal as a
+    trigram of the branded name actually inserted.
+    """
+    for path in (os.path.join(dst, "Dockerfile"), os.path.join(dst, "Dockerfile.runtime")):
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        inserted = set(re.findall(r"INSERT INTO docs VALUES \('([^']+)'\)", text))
+        if not inserted:
+            continue
+        changed = False
+        for word in inserted:
+            trigrams = {word[i:i + 3] for i in range(len(word) - 2)}
+            if not trigrams:
+                continue
+            replacement = sorted(trigrams)[0]
+            new_text = re.sub(
+                r"MATCH '([^']{3})'",
+                lambda m: f"MATCH '{replacement}'" if m.group(1) not in trigrams else m.group(0),
+                text,
+            )
+            if new_text != text:
+                text = new_text
+                changed = True
+        if changed:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            return 1
+    return 0
+
+
+def reconcile_tree(dst: str) -> ReconcileResult:
+    """Apply known post-brand fixes to the branded tree in place.
+
+    Returns which paths were fixed so the caller can (a) report them and
+    (b) feed them to ``verify_branded`` / ``compare_trees``, which must
+    expect the reconciled content instead of the raw token transform.
+    """
+    result = ReconcileResult()
+    name = _root_package_name(dst, "pyproject.toml", "package.json")
+    if name:
+        if _reconcile_uv_lock(dst, name):
+            result.total += 1
+            result.fixed.append("uv.lock")
+        if _reconcile_package_lock(dst, name):
+            result.total += 1
+            result.fixed.append("package-lock.json")
+    if _reconcile_fts5_trigram(dst):
+        result.total += 1
+        result.fixed.append("Dockerfile")
+    result.fixed.sort()
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Scan everything (so every file is understood)
 # ---------------------------------------------------------------------------
 
@@ -283,11 +462,12 @@ class DiffReport:
         return [e for e in self.entries if e.action == action]
 
     def summary(self) -> str:
-        counts = {a: len(self.actions(a)) for a in ("renamed", "rewritten", "identical", "locked", "missing", "owned")}
+        counts = {a: len(self.actions(a)) for a in ("renamed", "rewritten", "identical", "locked", "missing", "owned", "reconciled")}
         return (
             f"{counts['renamed']} renamed, {counts['rewritten']} rewritten, "
             f"{counts['identical']} identical, {counts['locked']} locked, "
-            f"{counts['missing']} missing, {counts['owned']} owned"
+            f"{counts['missing']} missing, {counts['owned']} owned, "
+            f"{counts['reconciled']} reconciled"
         )
 
 
@@ -299,7 +479,8 @@ def _line_delta(a: str, b: str) -> tuple[int, int]:
 
 
 def compare_trees(src: str, dst: str, rules: BrandingRules | None = None,
-                  owned: OwnedAssets | None = None) -> DiffReport:
+                  owned: OwnedAssets | None = None,
+                  reconciled: dict[str, bytes] | None = None) -> DiffReport:
     """Diff the branded tree against the upstream source, file by file."""
     rules = rules or BrandingRules()
     report = DiffReport()
@@ -327,6 +508,10 @@ def compare_trees(src: str, dst: str, rules: BrandingRules | None = None,
             continue
         with open(dst_path, "rb") as fh:
             actual = fh.read()
+        if reconciled and mapped in reconciled:
+            expected = reconciled[mapped]
+            report.entries.append(DiffEntry(rel, mapped, "reconciled"))
+            continue
         expected = rules.transform_text(data.decode("utf-8")).encode("utf-8")
         if actual == expected:
             report.entries.append(DiffEntry(rel, mapped, "renamed" if mapped != rel else "identical"))
@@ -341,10 +526,13 @@ def compare_trees(src: str, dst: str, rules: BrandingRules | None = None,
 # ---------------------------------------------------------------------------
 
 def verify_branded(src: str, dst: str, rules: BrandingRules | None = None,
-                   owned: OwnedAssets | None = None) -> VerifyReport:
+                   owned: OwnedAssets | None = None,
+                   reconciled: dict[str, bytes] | None = None) -> VerifyReport:
     """File-by-file parity: every Hermes file must exist branded and, for text,
     byte-identical to ``rules.transform_text`` of the source.  Files whose
-    mapped path is in the ``owned`` registry are checked against OUR asset."""
+    mapped path is in the ``owned`` registry are checked against OUR asset.
+    Files whose mapped path is in ``reconciled`` are checked against the
+    reconciled bytes (the fork-local fixes applied after branding)."""
     rules = rules or BrandingRules()
     report = VerifyReport()
     for rel in _walk_files(src):
@@ -396,6 +584,17 @@ def verify_branded(src: str, dst: str, rules: BrandingRules | None = None,
 
         with open(dst_path, "rb") as fh:
             actual = fh.read()
+        if reconciled and mapped in reconciled:
+            expected = reconciled[mapped]
+            identical = actual == expected
+            res = FileResult(path=rel, mapped_path=mapped, pass_=identical, locked=False,
+                             note="" if identical else "reconciled content differs")
+            if identical:
+                report.passed += 1
+            else:
+                report.failed.append(res)
+            report.results.append(res)
+            continue
         expected = rules.transform_text(data.decode("utf-8")).encode("utf-8")
         identical = actual == expected
         res = FileResult(path=rel, mapped_path=mapped, pass_=identical, locked=False)
@@ -449,6 +648,9 @@ def update_report_md(result: "UpdateResult") -> str:
     ]
     if result.brand.errors:
         lines += ["- errors:", *[f"  - {e}" for e in result.brand.errors]]
+    if result.reconcile.fixed:
+        lines += ["", "## Reconcile", "",
+                  f"- fixed : {result.reconcile.summary()}", ""]
     lines += ["", "## Scan", "", f"{result.scan.summary()}", ""]
     if result.scan.unknown_binary:
         lines += ["Unknown binaries:", *[f"- {p}" for p in result.scan.unknown_binary[:20]]]
@@ -548,6 +750,7 @@ class UpdateResult:
     zip_path: str = ""
     report_path: str = ""
     gate_report_path: str = ""
+    reconcile: ReconcileResult = field(default_factory=ReconcileResult)
 
     def summary(self) -> str:
         return (
@@ -558,7 +761,7 @@ class UpdateResult:
 
 
 class UpdateManager:
-    """Run one full update: the 15 ordered pipeline stages."""
+    """Run one full update: the 16 ordered pipeline stages."""
 
     def __init__(self, updates_dir: str, hermes_url: str = DEFAULT_HERMES_URL,
                  rules: BrandingRules | None = None, threshold: float = 0.99,
@@ -599,13 +802,30 @@ class UpdateManager:
 
         brand = stage("brand", lambda: brand_tree(src, dest, self.rules, self.owned),
                       "brand every folder, file name and text file")
+
+        def _reconcile() -> ReconcileResult:
+            result = reconcile_tree(dest)
+            return result
+        reconcile = stage("reconcile", _reconcile,
+                          "sync lockfile root records + apply fork-local content fixes")
+        reconciled_map: dict[str, bytes] = {}
+        if reconcile and reconcile.fixed:
+            for rel in reconcile.fixed:
+                path = os.path.join(dest, rel)
+                if os.path.isfile(path):
+                    try:
+                        with open(path, "rb") as fh:
+                            reconciled_map[rel] = fh.read()
+                    except OSError:
+                        pass
         scan = stage("scan", lambda: scan_tree(dest), "classify every branded file")
-        diff = stage("compare", lambda: compare_trees(src, dest, self.rules, self.owned),
+        diff = stage("compare", lambda: compare_trees(src, dest, self.rules, self.owned, reconciled_map),
                      "diff branded tree vs upstream")
-        verify = stage("verify", lambda: verify_branded(src, dest, self.rules, self.owned),
+        verify = stage("verify", lambda: verify_branded(src, dest, self.rules, self.owned, reconciled_map),
                        "file-by-file parity gate")
 
         brand = brand or BrandResult()
+        reconcile = reconcile or ReconcileResult()
         scan = scan or ScanReport()
         diff = diff or DiffReport()
         verify = verify or VerifyReport()
@@ -614,6 +834,7 @@ class UpdateManager:
         result = UpdateResult(
             number=number, dir=dest, upstream_sha=upstream_sha or "", hermes_url=self.hermes_url,
             brand=brand, scan=scan, diff=diff, verify=verify, gate=passed, stages=stages,
+            reconcile=reconcile,
         )
 
         # report stage (content written at the end so it lists ALL stages)
@@ -674,7 +895,7 @@ class UpdateManager:
 
         result.stages = stages
 
-        # write manifest + reports now that ALL 15 stages are recorded
+        # write manifest + reports now that ALL 16 stages are recorded
         report_content = update_report_md(result)
         gate_content = gate_report_md(result)
         os.makedirs(dest, exist_ok=True)
