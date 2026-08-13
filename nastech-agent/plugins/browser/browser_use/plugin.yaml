@@ -1,0 +1,7 @@
+name: browser-browser-use
+version: 1.0.0
+description: "Browser Use (https://browser-use.com) cloud browser backend. Supports both direct BROWSER_USE_API_KEY and the managed Nastech tool gateway. Also powers the 'Nastech Subscription' UX flow that bills usage to a Nastech subscription."
+author: NastechResearch
+kind: backend
+provides_browser_providers:
+  - browser-use
