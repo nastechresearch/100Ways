@@ -46,23 +46,13 @@ jobs:
           mkdir -p tree
           cd tree
           python3 - <<'EOF'
-          import zipfile, os
+          import zipfile
           with zipfile.ZipFile("../artifact/nastech-agent-update.zip") as zf:
-              for name in zf.namelist():
-                  # reports live OUTSIDE the project folder
-                  if name.endswith("UPDATE-REPORT.md"):
-                      os.makedirs("../reports", exist_ok=True)
-                      with open("../reports/UPDATE-REPORT.md", "wb") as fh:
-                          fh.write(zf.read(name))
-                  elif name.endswith("GATE-REPORT.md"):
-                      os.makedirs("../reports", exist_ok=True)
-                      with open("../reports/GATE-REPORT.md", "wb") as fh:
-                          fh.write(zf.read(name))
               zf.extractall(".")
               top = sorted(set(n.split("/", 1)[0] for n in zf.namelist()))
           print("extracted:", top)
           EOF
-          # the project folder keeps its name (nastech-agent); reports go at the repo root
+          # tree/ = nastech-agent/ + UPDATE-REPORT.md + GATE-REPORT.md (zip root)
 
       - name: Commit branded tree to test branch
         env:
@@ -88,8 +78,10 @@ jobs:
           git fetch origin "$BASE"
           git checkout -B "$TEST" "origin/$BASE"
           rm -rf -- nastech-agent reports 2>/dev/null || true
+          mkdir -p reports
           mv tree/nastech-agent ./nastech-agent
-          mv reports ./reports
+          mv tree/UPDATE-REPORT.md reports/UPDATE-REPORT.md
+          mv tree/GATE-REPORT.md reports/GATE-REPORT.md
           rm -rf tree
           git add -A
           git -c user.name="github-actions[bot]" \
