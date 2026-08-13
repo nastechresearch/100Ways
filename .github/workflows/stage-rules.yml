@@ -1,0 +1,38 @@
+name: stage-rules
+
+# Stage 4: prove the branding rules still reproduce the fork birth commit
+# (0cafd22fb from parent 03fa32c92).  Clones the public nastech-agent fork
+# with a blobless filter and runs `100ways verify` against it.  Fails if
+# any file drifts from the birth tree or the pass ratio drops < 0.99.
+
+on:
+  workflow_call:
+
+env:
+  BIRTH_COMMIT: 0cafd22fb
+  BIRTH_PARENT: 03fa32c92
+
+jobs:
+  rules:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install 100ways
+        run: pip install -e .
+
+      - name: Blobless clone of the fork birth history
+        run: |
+          git clone --filter=blob:none --no-checkout \
+            https://github.com/nastechresearch/nastech-agent.git nastech-agent
+          git -C nastech-agent fetch --depth=1 origin "$BIRTH_PARENT"
+          git -C nastech-agent fetch --depth=1 origin "$BIRTH_COMMIT"
+
+      - name: Verify rebrand parity vs birth commit
+        run: |
+          HUNDREDWAYS_REPO="$PWD/nastech-agent" \
+          python3 -m hundredways.cli --repo "$PWD/nastech-agent" verify

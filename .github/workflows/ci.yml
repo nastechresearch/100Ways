@@ -1,0 +1,59 @@
+name: CI
+
+# Orchestrator.  Runs the 100Ways validation in STAGES:
+#
+#   lint    -> tests  -> ways  -> rules  -> pipeline  -> upload
+#
+# Each job ``needs`` the previous, so a failure stops the chain early and
+# the whole chain is re-triggered on every push / PR / schedule.  The
+# release workflow (release-update.yml) reuses the same stage workflows and
+# adds the GitHub release step on top.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 4 * * 1" # weekly Monday 04:00 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    uses: ./.github/workflows/stage-lint.yml
+
+  tests:
+    needs: lint
+    uses: ./.github/workflows/stage-tests.yml
+
+  ways:
+    needs: tests
+    uses: ./.github/workflows/stage-ways.yml
+
+  rules:
+    needs: ways
+    uses: ./.github/workflows/stage-rules.yml
+
+  pipeline:
+    needs: rules
+    uses: ./.github/workflows/stage-pipeline.yml
+
+  upload:
+    needs: pipeline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nastech-agent-update
+          path: artifact
+      - name: Show artifact
+        run: |
+          ls -la artifact
+          unzip -l artifact/nastech-agent-update.zip | head -20
+
+  all-checks-pass:
+    needs: upload
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "All 100Ways CI stages passed."

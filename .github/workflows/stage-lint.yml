@@ -1,0 +1,40 @@
+name: stage-lint
+
+# Stage 1: syntax-check every Python file with py_compile (no deps needed).
+
+on:
+  workflow_call:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: py_compile everything
+        run: |
+          python3 - <<'EOF'
+          import pathlib, py_compile
+          failed = []
+          for p in pathlib.Path("hundredways").rglob("*.py"):
+              try:
+                  py_compile.compile(str(p), doraise=True)
+              except py_compile.PyCompileError as exc:
+                  failed.append(str(exc))
+          for p in pathlib.Path("tests").rglob("*.py"):
+              try:
+                  py_compile.compile(str(p), doraise=True)
+              except py_compile.PyCompileError as exc:
+                  failed.append(str(exc))
+          if failed:
+              raise SystemExit("\n".join(failed))
+          print("py_compile: all modules OK")
+          EOF
+
+      - name: ways registry import check
+        run: |
+          python3 -c "from hundredways.ways import build_registry; r=build_registry(); assert r.count >= 200; print(f'registry: {r.count} ways')"

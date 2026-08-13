@@ -1,0 +1,19 @@
+[project]
+name = "100ways"
+version = "0.1.0"
+description = "100Ways: 200 ways to sync the Hermes fork, rebrand it, verify parity, and release. 15-stage update pipeline with a per-snapshot parity gate."
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+100ways = "hundredways.cli:main"
+
+[project.optional-dependencies]
+ai = ["httpx>=0.28,<1"]
+telegram = ["httpx>=0.28,<1"]
+
+[tool.setuptools]
+packages = ["hundredways"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

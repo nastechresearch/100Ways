@@ -1,0 +1,33 @@
+name: stage-ways
+
+# Stage 3: validate the ways registry — every category has exactly 20 ways,
+# every way id is unique, and the registry count is >= 200.  No network.
+
+on:
+  workflow_call:
+
+jobs:
+  ways:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Validate 200 ways
+        run: |
+          python3 - <<'EOF'
+          from collections import Counter
+          from hundredways.ways import build_registry
+          r = build_registry()
+          by_cat = Counter(w.category for w in r.ways.values())
+          ids = list(r.ways.keys())
+          assert len(ids) == len(set(ids)), "duplicate way ids"
+          assert r.count >= 200, f"registry count {r.count} < 200"
+          for cat, n in sorted(by_cat.items()):
+              print(f"  {cat}: {n}")
+              assert n == 20, f"{cat} has {n} ways, expected 20"
+          print(f"ways: {r.count} unique ids OK")
+          EOF

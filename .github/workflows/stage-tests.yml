@@ -1,0 +1,24 @@
+name: stage-tests
+
+# Stage 2: the full pytest suite (stdlib + pytest only, no network, no
+# writes to ~/.nastech).
+
+on:
+  workflow_call:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install 100ways
+        run: pip install -e .
+
+      - name: Run test suite
+        run: |
+          python3 -m pytest tests/ -q

@@ -1,0 +1,38 @@
+# 100Ways configuration
+# Copy to .env / environment or edit directly. Secrets live in the env, not here.
+
+# --- target repos ---
+repo: /home/nascode/Documents/A1/nastech-agent
+local_hermes: /home/nascode/Documents/A1/hermes-agent
+upstream: upstream/main
+live_ref: origin/main
+branch: sync-upstream
+
+# --- branding rules ---
+# validated against the fork birth commit (0cafd22fb).  Do not weaken without
+# re-running `100ways status`.
+
+# --- parity gate ---
+threshold: 0.99
+
+# --- watcher ---
+interval_seconds: 300
+
+# --- ways registry ---
+# one active way per category; browse with `100ways ways list`, change with
+# `100ways ways show <way_id>`.
+
+# --- notifications ---
+# Set in the environment (secrets):
+#   HUNDREDWAYS_TELEGRAM_TOKEN      (legacy: SYNCBRIDGE_TELEGRAM_TOKEN)
+#   HUNDREDWAYS_TELEGRAM_CHAT_ID    (legacy: SYNCBRIDGE_TELEGRAM_CHAT_ID)
+#   HUNDREDWAYS_AGENT_COMMAND       (legacy: SYNCBRIDGE_AGENT_COMMAND)
+telegram_enabled: true
+agent_enabled: true
+
+# --- AI ---
+# Set in the environment (secrets):
+#   HUNDREDWAYS_AI_API_KEY
+#   HUNDREDWAYS_AI_BASE_URL
+#   HUNDREDWAYS_AI_MODEL
+ai_enabled: true

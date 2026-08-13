@@ -1,0 +1,68 @@
+name: stage-pipeline
+
+# Stage 5: run the full 15-stage update pipeline against the real Hermes
+# repo, gate it, and upload the branded zip + reports as an artifact.
+# Keeps the immutable data files (contributors/emails) verbatim.
+
+on:
+  workflow_call:
+    inputs:
+      hermes_url:
+        description: Hermes repo URL (defaults to NousResearch/hermes-agent)
+        type: string
+        required: false
+        default: "https://github.com/NousResearch/hermes-agent.git"
+      project_name:
+        description: Branded project folder name inside the zip
+        type: string
+        required: false
+        default: "nastech-agent"
+    outputs:
+      update_number:
+        description: Sequential Nastech-Update#N assigned by the pipeline
+        value: ${{ jobs.pipeline.outputs.update_number }}
+      upstream_sha:
+        description: Upstream Hermes commit that was branded
+        value: ${{ jobs.pipeline.outputs.upstream_sha }}
+      gate:
+        description: Final gate result (PASS / FAIL)
+        value: ${{ jobs.pipeline.outputs.gate }}
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    outputs:
+      update_number: ${{ steps.update.outputs.update_number }}
+      upstream_sha: ${{ steps.update.outputs.upstream_sha }}
+      gate: ${{ steps.update.outputs.gate }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install 100ways
+        run: pip install -e .
+
+      - name: Run 15-stage update pipeline
+        id: update
+        env:
+          HUNDREDWAYS_HERMES_URL: ${{ inputs.hermes_url }}
+          HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
+        run: |
+          python3 -m hundredways.cli update \
+            --updates-dir "$HUNDREDWAYS_UPDATES_DIR" \
+            --hermes-url "$HUNDREDWAYS_HERMES_URL" \
+            --zip "${{ runner.temp }}/nastech-agent-update.zip" \
+            --project-name "${{ inputs.project_name }}"
+
+      - name: Upload branded zip + reports
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nastech-agent-update
+          path: |
+            ${{ runner.temp }}/nastech-agent-update.zip
+            ${{ runner.temp }}/Updates-Commits/*/UPDATE-REPORT.md
+            ${{ runner.temp }}/Updates-Commits/*/GATE-REPORT.md
+          if-no-files-found: error
