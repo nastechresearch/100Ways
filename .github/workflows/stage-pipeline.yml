@@ -50,12 +50,22 @@ jobs:
         env:
           HUNDREDWAYS_HERMES_URL: ${{ inputs.hermes_url }}
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
+          HUNDREDWAYS_OUTPUTS: ${{ runner.temp }}/update-outputs.json
         run: |
           python3 -m hundredways.cli update \
             --updates-dir "$HUNDREDWAYS_UPDATES_DIR" \
             --hermes-url "$HUNDREDWAYS_HERMES_URL" \
             --zip "${{ runner.temp }}/nastech-agent-update.zip" \
-            --project-name "${{ inputs.project_name }}"
+            --project-name "${{ inputs.project_name }}" \
+            --emit-outputs "$HUNDREDWAYS_OUTPUTS"
+          python3 - <<'EOF'
+          import json, os
+          with open(os.environ["HUNDREDWAYS_OUTPUTS"]) as fh:
+              out = json.load(fh)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as gh:
+              for key in ("update_number", "upstream_sha", "gate"):
+                  gh.write(f"{key}={out.get(key, '')}\n")
+          EOF
 
       - name: Upload branded zip + reports
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

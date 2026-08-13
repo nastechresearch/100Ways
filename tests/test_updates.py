@@ -4,6 +4,7 @@ release zip layout, sequential numbering, and reports."""
 import json
 import os
 import subprocess
+import sys
 import zipfile
 
 from hundredways.assets import OwnedAssets
@@ -123,6 +124,31 @@ def test_reports_written_in_snapshot(tmp_path):
     assert "# Nastech Update Report #1" in report
     assert "## Stages" in report
     assert all(stage in report for stage in STAGES)
+
+
+def test_cli_emit_outputs_writes_github_outputs(tmp_path):
+    hermes = _hermes_repo(tmp_path)
+    updates_dir = str(tmp_path / "Updates-Commits")
+    out_path = str(tmp_path / "outputs.json")
+    env = dict(os.environ)
+    env.pop("OLLAMA_API_KEY", None)
+    env.pop("SYNCBRIDGE_AI_MODEL", None)
+    subprocess.run(
+        [sys.executable, "-m", "hundredways.cli", "update",
+         "--updates-dir", updates_dir,
+         "--hermes-url", hermes,
+         "--zip", str(tmp_path / "release.zip"),
+         "--project-name", "nastech-agent",
+         "--emit-outputs", out_path],
+        check=True, env=env,
+        cwd=str(tmp_path),
+    )
+    with open(out_path, encoding="utf-8") as fh:
+        out = json.load(fh)
+    assert out["gate"] == "PASS"
+    assert out["update_number"] == 1
+    assert len(out["upstream_sha"]) == 40
+
 
 
 def test_manifest_records_pipeline(tmp_path):

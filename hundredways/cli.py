@@ -34,6 +34,7 @@ codes      Print the gap code legend.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 
@@ -433,6 +434,13 @@ class Cli:
         if zip_path and zip_path.endswith(os.sep):
             zip_path = ""
         result = mgr.run(zip_path=zip_path, project_name=self.args.project_name)
+        if self.args.emit_outputs:
+            with open(self.args.emit_outputs, "w") as fh:
+                json.dump({
+                    "update_number": result.number,
+                    "upstream_sha": result.upstream_sha,
+                    "gate": "PASS" if result.gate else "FAIL",
+                }, fh)
         for stage in result.stages:
             mark = "ok" if stage.status == "ok" else ("SKIP" if stage.status == "skip" else "FAIL")
             print(f"  [{mark:>4}] {stage.name:<10} {stage.detail}")
@@ -563,6 +571,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--zip", default="", help="also build the release zip at this path (project folder + 2 md reports)")
     p.add_argument("--project-name", default="nastech-agent", help="name of the project folder inside the zip")
     p.add_argument("--state-dir", default="", help="state dir (default: repo-sibling 100ways-state)")
+    p.add_argument("--emit-outputs", default="",
+                   help="write JSON {update_number, upstream_sha, gate} to this file "
+                        "(CI emits these into $GITHUB_OUTPUT)")
     p.set_defaults(func="cmd_update")
 
     return parser
