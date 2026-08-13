@@ -84,13 +84,25 @@ jobs:
           # fresh branch off the fork's main, then drop the branded tree in
           git fetch "$REMOTE" "$BASE"
           git checkout -B "$TEST" "FETCH_HEAD"
-          rm -rf -- nastech-agent reports artifact 2>/dev/null || true
+
+          # Overlay the branded tree ONTO the checkout root.  The zip's
+          # nastech-agent/ folder IS the whole project — the fork's content
+          # lives at the repo root, NOT in a nastech-agent/ subdir.  Nesting
+          # it was the bug: the fork .gitignore has `nastech-*/*`, so a
+          # root-level nastech-agent/ dir was silently ignored by git add -A
+          # and the PR ended up containing only the reports.
+          # wipe the fork checkout (keep .git + untracked tree/ + artifact/)
+          find . -mindepth 1 -maxdepth 1 ! -name .git ! -name tree \
+             ! -name artifact -exec rm -rf -- {} +
           mkdir -p reports
-          mv tree/nastech-agent ./nastech-agent
+          cp -a tree/nastech-agent/. .
           mv tree/UPDATE-REPORT.md reports/UPDATE-REPORT.md
           mv tree/GATE-REPORT.md reports/GATE-REPORT.md
-          rm -rf tree
-          git add -A
+          rm -rf tree artifact
+
+          # force-add beats the nastech-*/* gitignore pattern; -A captures
+          # upstream deletions too so the PR diff = what changed (branded)
+          git add -f -A
           git -c user.name="github-actions[bot]" \
              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
              commit -m "chore: branded update ${SHA:+($SHA)}" || echo "nothing to commit"
