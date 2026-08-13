@@ -16,8 +16,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install 100ways
-        run: pip install -e .
+      - name: Install 100ways + pytest
+        run: |
+          pip install -e .
+          pip install "pytest>=7,<9"
 
       - name: Run test suite
         run: |
