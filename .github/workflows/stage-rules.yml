@@ -32,7 +32,8 @@ jobs:
           from hundredways.cli import BIRTH_COMMIT, BIRTH_PARENT
           from hundredways.rules import BrandingRules
           from hundredways.verify import verify_rebrand
-          repo = "$PWD/nastech-agent"
+          import os
+          repo = os.path.join(os.getcwd(), "nastech-agent")
           report = verify_rebrand(repo, BIRTH_PARENT, BIRTH_COMMIT, BrandingRules())
           print(report.summary())
 
