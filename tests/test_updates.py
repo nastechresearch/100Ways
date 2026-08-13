@@ -198,3 +198,14 @@ def test_immutable_data_files_keep_real_names(tmp_path):
     assert "Nastech" in (res.dir + "/README.md") or True
     with open(os.path.join(res.dir, "README.md"), encoding="utf-8") as fh:
         assert "Nastech Agent" in fh.read()
+
+
+def test_cli_defaults_have_no_machine_paths():
+    """CLI defaults must not bake in developer-machine paths (breaks CI)."""
+    from hundredways.cli import build_parser
+
+    parser = build_parser()
+    for sub in ("update", "pull", "dashboard", "achievements"):
+        p = parser._subparsers._group_actions[0].choices[sub]
+        sd = p.get_default("state-dir")
+        assert sd in (None, ""), f"{sub} --state-dir default leaks a machine path: {sd!r}"

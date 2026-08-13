@@ -283,7 +283,8 @@ class Cli:
 
     def cmd_achievements(self) -> None:
         """List achievements and unlock state."""
-        ach = Achievements(self.args.state_dir)
+        home = self.args.state_dir or os.path.join(os.path.dirname(os.path.abspath(self.repo)), "100ways-state")
+        ach = Achievements(home)
         for name, meta, unlocked in ach.list_all():
             mark = "✅" if unlocked else "▢"
             print(f"{mark} {meta.emoji} {name} — {meta.description}")
@@ -503,16 +504,16 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("dashboard", help="serve the live web dashboard")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8333)
-    p.add_argument("--state-dir", default=os.path.join(DEFAULT_REPO, "..", "100ways-state"))
+    p.add_argument("--state-dir", default="", help="state dir (default: repo-sibling 100ways-state)")
     p.add_argument("--admin-token", default=os.environ.get("HUNDREDWAYS_ADMIN_TOKEN", ""), help="token for rule editing (default: env)")
     p.set_defaults(func="cmd_dashboard")
 
     p = sub.add_parser("pull", help="fetch upstream + write report + record achievement")
-    p.add_argument("--state-dir", default=os.path.join(DEFAULT_REPO, "..", "100ways-state"))
+    p.add_argument("--state-dir", default="", help="state dir (default: repo-sibling 100ways-state)")
     p.set_defaults(func="cmd_pull")
 
     p = sub.add_parser("achievements", help="list achievements and unlock state")
-    p.add_argument("--state-dir", default=os.path.join(DEFAULT_REPO, "..", "100ways-state"))
+    p.add_argument("--state-dir", default="", help="state dir (default: repo-sibling 100ways-state)")
     p.set_defaults(func="cmd_achievements")
 
     p = sub.add_parser("codes", help="print the gap code legend")
@@ -533,7 +534,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--hermes-url", default=DEFAULT_HERMES_URL, help="Hermes remote or local path")
     p.add_argument("--zip", default="", help="also build the release zip at this path (project folder + 2 md reports)")
     p.add_argument("--project-name", default="nastech-agent", help="name of the project folder inside the zip")
-    p.add_argument("--state-dir", default=os.path.join(DEFAULT_REPO, "..", "100ways-state"))
+    p.add_argument("--state-dir", default="", help="state dir (default: repo-sibling 100ways-state)")
     p.set_defaults(func="cmd_update")
 
     return parser
