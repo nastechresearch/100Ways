@@ -41,6 +41,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
+        with:
+          # Critical: without this, checkout writes http.extraheader with the
+          # GITHUB_TOKEN, which OVERRIDES the PAT embedded in our remote URL on
+          # every request. The push then authenticates as github-actions[bot]
+          # (read works on public repos, write 403s). The PAT in the URL is
+          # the only credential we want here.
+          persist-credentials: false
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -65,7 +72,6 @@ jobs:
           GH_TOKEN: ${{ secrets.NAS_TECH_AGENT_TOKEN }}
         run: |
           set -eux
-          if [ -n "$GH_TOKEN" ]; then echo "PAT_PRESENT length=${#GH_TOKEN}"; else echo "PAT_MISSING"; fi
           FORK="nastechresearch/nastech-agent"
           BASE="main"
           TEST="nasbot/update-latest"
