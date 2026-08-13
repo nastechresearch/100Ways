@@ -67,7 +67,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           # ensure the base branch exists (create from main on first run)
-          if ! git show-ref --verify --quiet "refs/remotes/origin/$BASE"; then
+          if ! git ls-remote --exit-code --quiet origin "refs/heads/$BASE"; then
             echo "creating base branch $BASE from main"
             git fetch origin main
             git branch "$BASE" origin/main
