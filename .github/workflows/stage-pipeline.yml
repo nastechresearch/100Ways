@@ -57,8 +57,7 @@ jobs:
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
           HUNDREDWAYS_OUTPUTS: ${{ runner.temp }}/update-outputs.json
         run: |
-          python3 -m hundredways.cli update \
-            --repo nastech-agent \
+          python3 -m hundredways.cli --repo nastech-agent update \
             --updates-dir "$HUNDREDWAYS_UPDATES_DIR" \
             --hermes-url "$HUNDREDWAYS_HERMES_URL" \
             --zip "${{ runner.temp }}/nastech-agent-update.zip" \

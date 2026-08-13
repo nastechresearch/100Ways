@@ -34,7 +34,7 @@ jobs:
 
       - name: Regenerate README
         run: |
-          100ways readme --repo nastech-agent --state-dir "$GITHUB_WORKSPACE"
+          100ways --repo nastech-agent readme --state-dir "$GITHUB_WORKSPACE"
 
       - name: Fail if README is stale
         run: |
