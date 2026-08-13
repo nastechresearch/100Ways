@@ -1,15 +1,18 @@
 name: stage-update-pr
 
 # Stage 6: when the pipeline passes, push the branded tree to a test branch
-# and open/update a PR so the update is reviewable as a normal GitHub PR.
+# in the nastech-agent FORK and open/update a PR against its main.  The fork
+# runs its own full CI (Python slices, JS checks, E2E, CodeQL) on that PR, so
+# a green result proves the freshly-branded Hermes tree is sound enough to
+# merge upstream.
 #
-#   pipeline (artifact: nastech-agent-update) --(this)--> test/update-latest
-#   PR: test/update-latest  ->  nastech-update
+#   pipeline (artifact: nastech-agent-update) --(this)--> test/update-latest (fork)
+#   PR: test/update-latest  ->  main  (nastechresearch/nastech-agent)
 #
+# Cross-repo writes need a PAT (contents: write + pull-requests: write scoped
+# to nastechresearch/nastech-agent) in the NAS_TECH_AGENT_TOKEN secret.
 # Each successful run force-pushes the same test branch, so the PR always
-# shows the latest branded tree diff against the nastech-update branch.
-# The branch is force-pushed (history on a review branch is irrelevant); the
-# PR is created once and updated on subsequent runs.
+# shows the latest branded tree diff against fork main.
 
 on:
   workflow_call:
@@ -26,8 +29,7 @@ on:
         default: "PASS"
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   update-pr:
@@ -54,29 +56,23 @@ jobs:
           EOF
           # tree/ = nastech-agent/ + UPDATE-REPORT.md + GATE-REPORT.md (zip root)
 
-      - name: Commit branded tree to test branch
+      - name: Commit branded tree to fork test branch
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.NAS_TECH_AGENT_TOKEN }}
         run: |
           set -eux
-          BASE="nastech-update"
+          FORK="nastechresearch/nastech-agent"
+          BASE="main"
           TEST="test/update-latest"
           SHA="${{ inputs.upstream_sha }}"
+          REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${FORK}.git"
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # ensure the base branch exists (create from main on first run)
-          if ! git ls-remote --exit-code --quiet origin "refs/heads/$BASE"; then
-            echo "creating base branch $BASE from main"
-            git fetch origin main
-            git branch "$BASE" origin/main
-            git push origin "$BASE"
-          fi
-
-          # fresh branch off the base, then drop the branded tree in
-          git fetch origin "$BASE"
-          git checkout -B "$TEST" "origin/$BASE"
+          # fresh branch off the fork's main, then drop the branded tree in
+          git fetch "$REMOTE" "$BASE"
+          git checkout -B "$TEST" "FETCH_HEAD"
           rm -rf -- nastech-agent reports artifact 2>/dev/null || true
           mkdir -p reports
           mv tree/nastech-agent ./nastech-agent
@@ -89,15 +85,16 @@ jobs:
              commit -m "chore: branded update ${SHA:+($SHA)}" || echo "nothing to commit"
 
           # force-push (review branch; history is irrelevant)
-          git push --force origin "$TEST"
+          git push --force "$REMOTE" "$TEST"
 
-          # open or update the PR test -> base
+          # open or update the PR test -> main on the fork
           PR_TITLE="Update ${SHA:+(${SHA:0:8})}"
-          BODY="Pipeline gate: PASS. Auto-generated from the 100Ways release pipeline."
-          PR_URL=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$TEST" --base "$BASE" --json url --jq '.[0].url' 2>/dev/null) || true
+          BODY="Pipeline gate: PASS. Auto-generated from the 100Ways release pipeline. Runs the fork's full CI against the freshly-branded Hermes tree."
+          PR_URL=$(gh pr list --repo "$FORK" --head "$TEST" --base "$BASE" --json url --jq '.[0].url' 2>/dev/null) || true
           if [ -n "$PR_URL" ]; then
             gh pr edit "$PR_URL" --title "$PR_TITLE" --body "$BODY"
           else
-            gh pr create --repo "$GITHUB_REPOSITORY" --base "$BASE" --head "$TEST" \
+            gh pr create --repo "$FORK" --base "$BASE" --head "$TEST" \
               --title "$PR_TITLE" --body "$BODY"
           fi
+          gh pr view "$FORK#$TEST" --json url --jq .url || true
