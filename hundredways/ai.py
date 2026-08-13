@@ -4,19 +4,27 @@ Wraps an LLM (OpenAI-compatible chat completions) to:
 
   * summarize what a Hermes commit actually changes in plain language;
   * review a ported diff for correctness and branding compliance;
-  * classify whether a commit is "safe to port" vs "needs human eyes".
+  * classify whether a commit is "safe to port" vs "needs human eyes";
+  * review any of the 15 pipeline stages by name (stage-aware AI).
 
 The module is optional: when no API key / provider is configured, the CLI
 falls back to deterministic summaries built from commit metadata.
+
+Providers: OpenAI by default, or ``ollama-cloud`` (Ollama Cloud's
+OpenAI-compatible ``https://ollama.com/v1`` endpoint).  Ollama Cloud's
+default model is ``gemma4:31b-cloud`` — set ``SYNCBRIDGE_AI_MODEL`` to
+switch (e.g. ``deepseek-v4:cloud``).  The ollama-cloud key comes from
+``OLLAMA_API_KEY``.
 """
 
 from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .analyzer import GapReport
+from .updates import STAGES
 from .verify import VerifyReport
 
 
@@ -25,14 +33,52 @@ class AIConfig:
     base_url: str = "https://api.openai.com/v1"
     api_key: str = ""
     model: str = "gpt-4o-mini"
+    provider: str = "openai"
     timeout: int = 60
+    # Per-stage model overrides: {"<stage>": "<model>"}.  A stage without an
+    # override uses ``model``.  Lets each of the 15 pipeline stages pick a
+    # cheaper/faster model while the main model stays frontier.
+    stage_models: dict[str, str] = field(default_factory=dict)
+
+
+# Ollama Cloud's OpenAI-compatible endpoint + default model.  gemma4:31b-cloud
+# is a 31B open model; the id follows Ollama-style ``gemma4:<size>-cloud``
+# naming (see agent/model_metadata.py "gemma4": 256000).
+OLLAMA_CLOUD_BASE_URL = "https://ollama.com/v1"
+OLLAMA_CLOUD_DEFAULT_MODEL = "gemma4:31b-cloud"
 
 
 def ai_config_from_env() -> AIConfig:
+    """Build AIConfig from env, with an ollama-cloud shortcut.
+
+    ``SYNCBRIDGE_AI_PROVIDER=ollama-cloud`` (or leaving ``SYNCBRIDGE_AI_BASE_URL``
+    pointing at ollama.com) switches to Ollama Cloud and reads
+    ``OLLAMA_API_KEY``.  ``SYNCBRIDGE_AI_MODEL`` always wins for the model.
+    """
+    provider = os.getenv("SYNCBRIDGE_AI_PROVIDER", "").strip().lower() or "openai"
+    base_url = os.getenv("SYNCBRIDGE_AI_BASE_URL", "")
+    api_key = os.getenv("SYNCBRIDGE_AI_API_KEY", "")
+    model = os.getenv("SYNCBRIDGE_AI_MODEL", "")
+
+    if provider in {"ollama", "ollama-cloud", "ollama_cloud"} or "ollama.com" in base_url:
+        if not base_url:
+            base_url = OLLAMA_CLOUD_BASE_URL
+        if not api_key:
+            api_key = os.getenv("OLLAMA_API_KEY", "")
+        if not model:
+            model = OLLAMA_CLOUD_DEFAULT_MODEL
+        provider = "ollama-cloud"
+
+    if not model:
+        model = "gpt-4o-mini"
+    if not base_url:
+        base_url = "https://api.openai.com/v1"
+
     return AIConfig(
-        base_url=os.getenv("SYNCBRIDGE_AI_BASE_URL", "https://api.openai.com/v1"),
-        api_key=os.getenv("SYNCBRIDGE_AI_API_KEY", ""),
-        model=os.getenv("SYNCBRIDGE_AI_MODEL", "gpt-4o-mini"),
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        provider=provider,
     )
 
 
@@ -44,14 +90,19 @@ class AIEngine:
     def available(self) -> bool:
         return bool(self.cfg.api_key)
 
-    def _chat(self, system: str, user: str) -> str:
+    def model_for_stage(self, stage: str) -> str:
+        """Resolve the model a pipeline stage should use (per-stage override
+        first, then the configured default)."""
+        return self.cfg.stage_models.get(stage, self.cfg.model)
+
+    def _chat(self, system: str, user: str, model: str | None = None) -> str:
         import httpx
 
         resp = httpx.post(
             f"{self.cfg.base_url}/chat/completions",
             headers={"Authorization": f"Bearer {self.cfg.api_key}"},
             json={
-                "model": self.cfg.model,
+                "model": model or self.cfg.model,
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
@@ -117,7 +168,35 @@ class AIEngine:
         except Exception as exc:
             return f"Port of {sha}: {report.summary()} [AI review unavailable: {exc}]"
 
+    def review_stage(self, stage: str, context: str) -> str:
+        """Review one of the 15 pipeline stages with the per-stage model.
+
+        ``context`` is stage-specific context (diff stats, violation list,
+        gate results, ...).  Returns a plain-language assessment.  Uses
+        ``model_for_stage(stage)`` so a per-stage override can back this
+        stage with a cheaper model while the main model stays frontier.
+        """
+        if stage not in STAGES:
+            raise ValueError(f"unknown stage {stage!r}; expected one of {STAGES}")
+        if not self.available:
+            return self._fallback_stage_review(stage, context)
+        model = self.model_for_stage(stage)
+        try:
+            return self._chat(
+                f"You are SyncBridge's {stage} stage reviewer for a rebrand-safe "
+                "fork-sync pipeline. Assess the stage's output for correctness, "
+                "branding compliance, and anything that should block the update.",
+                f"Stage '{stage}' output:\n{context[:4000]}",
+                model=model,
+            )
+        except Exception as exc:
+            return self._fallback_stage_review(stage, context) + f" [AI unavailable: {exc}]"
+
     # -- deterministic fallbacks --------------------------------------------
+
+    @staticmethod
+    def _fallback_stage_review(stage: str, context: str) -> str:
+        return f"Stage '{stage}': {context[:300] or 'no output'}."
 
     @staticmethod
     def _fallback_commit_summary(sha: str, subject: str, diff_preview: str) -> str:

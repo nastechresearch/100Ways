@@ -25,6 +25,7 @@ report     Write a markdown gap report to config/reports.
 dashboard  Serve the live web dashboard (admin = Nastech@Pass or its compiled token).
 pull       Fetch upstream + write report + record achievement.
 achievements  List achievements and unlock state.
+readme     Regenerate README.md from the ways + achievements + owned-asset registries.
 release    Verify the code table and incoming codes.
 admin      Compile/verify the admin password into its system-only token.
 codes      Print the gap code legend.
@@ -39,6 +40,7 @@ import sys
 from .achievements import Achievements
 from .ai import AIEngine
 from .analyzer import analyze
+from .assets import OwnedAssets
 from .codes import CODE_DETAILS, code_name
 from .dashboard import serve as serve_dashboard
 from .git_ops import ensure_branch
@@ -296,6 +298,21 @@ class Cli:
         for code, meta in sorted(CODE_DETAILS.items()):
             print(f" {code:>3}  {meta.name:<11}  {meta.meaning}")
 
+    def cmd_readme(self) -> None:
+        """Regenerate README.md from the ways + achievements + owned-asset registries."""
+        from .readme import ReadmeInputs, render_readme
+
+        state_dir = self.args.state_dir or os.path.join(os.path.dirname(os.path.abspath(self.repo)), "100ways-state")
+        owned = OwnedAssets(repo=self.repo)
+        target = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "README.md"))
+        content = render_readme(ReadmeInputs(
+            state_dir=state_dir,
+            owned_count=owned.count,
+        ))
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write(content + "\n")
+        print(f"README.md regenerated ({len(content)} bytes, {owned.count} owned-asset entries)")
+
     def cmd_release(self) -> None:
         """Verify the code table and (optionally) an incoming payload of codes."""
         errors = release_check_table()
@@ -405,7 +422,13 @@ class Cli:
     def cmd_update(self) -> None:
         """Pull real Hermes, brand the whole tree, verify, save as Nastech-Update#N."""
         updates_dir = self.args.updates_dir or default_updates_dir(self.repo)
-        mgr = UpdateManager(updates_dir, hermes_url=self.args.hermes_url, rules=self.rules)
+        owned = OwnedAssets(repo=self.repo)
+        if owned.count:
+            print(f"owned-assets registry: {owned.count} target paths in {owned.root}")
+        else:
+            print("owned-assets registry: none found (expected at config/owned-assets/)")
+        mgr = UpdateManager(updates_dir, hermes_url=self.args.hermes_url,
+                            rules=self.rules, owned=owned, ai=AIEngine())
         zip_path = self.args.zip or ""
         if zip_path and zip_path.endswith(os.sep):
             zip_path = ""
@@ -418,7 +441,8 @@ class Cli:
               f"({result.verify.pass_ratio * 100:.1f}%)")
         print(f"brand: {result.brand.total} files "
               f"({result.brand.renamed} renamed, {result.brand.rewritten} text-rewritten, "
-              f"{result.brand.locked_copied} locked, {result.brand.binary_copied} binary)")
+              f"{result.brand.locked_copied} locked, {result.brand.binary_copied} binary, "
+              f"{result.brand.owned} owned assets)")
         print(f"diff: {result.diff.summary()}")
         print(f"scan: {result.scan.summary()}")
         if result.zip_path:
@@ -519,6 +543,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("codes", help="print the gap code legend")
     p.set_defaults(func="cmd_codes")
 
+    p = sub.add_parser("readme", help="regenerate README.md from the registries")
+    p.add_argument("--state-dir", default="", help="state dir (default: repo-sibling 100ways-state)")
+    p.set_defaults(func="cmd_readme")
+
     p = sub.add_parser("release", help="verify the code table and incoming codes")
     p.add_argument("--payload", default="", help="JSON with a 'codes'/'entries' list to verify")
     p.set_defaults(func="cmd_release")
@@ -540,7 +568,30 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _load_secret_env() -> None:
+    """Load secrets from the repo-local .env (gitignored) into the process env.
+
+    Only secrets live here — API keys, tokens.  The file is gitignored so it
+    never reaches the repository.  In CI the same values come from GitHub
+    Secrets, not from a committed file.  Missing file is fine (no AI).
+    """
+    env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+    try:
+        with open(env_path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key, value = key.strip(), value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except OSError:
+        pass
+
+
 def main() -> None:
+    _load_secret_env()
     parser = build_parser()
     args = parser.parse_args()
     cli = Cli(args)

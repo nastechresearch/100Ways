@@ -1,10 +1,12 @@
 """Tests for the ordered update pipeline: staged runs, folder-name branding,
 release zip layout, sequential numbering, and reports."""
 
+import json
 import os
 import subprocess
 import zipfile
 
+from hundredways.assets import OwnedAssets
 from hundredways.updates import (
     STAGES,
     UpdateManager,
@@ -209,3 +211,84 @@ def test_cli_defaults_have_no_machine_paths():
         p = parser._subparsers._group_actions[0].choices[sub]
         sd = p.get_default("state-dir")
         assert sd in (None, ""), f"{sub} --state-dir default leaks a machine path: {sd!r}"
+
+
+def _owned_registry(tmp_path):
+    """A config/owned-assets/ registry: manifest.json + one owned binary."""
+    root = tmp_path / "config" / "owned-assets"
+    root.mkdir(parents=True)
+    asset = root / "banner.png"
+    asset.write_bytes(b"OUR-BANNER-BYTES")
+    (root / "manifest.json").write_text(
+        json.dumps({"static/img/banner.png": "banner.png"})
+    )
+    return str(root)
+
+
+def test_owned_assets_override_upstream_bytes_in_brand(tmp_path):
+    """brand_tree must write OUR asset (not upstream's renamed copy) for an owned path."""
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    os.makedirs(src / "static" / "img")
+    (src / "static" / "img" / "banner.png").write_bytes(b"HERMES-BANNER-BYTES")
+    (src / "static" / "img" / "other.png").write_bytes(b"HERMES-OTHER")
+    owned = OwnedAssets(_owned_registry(tmp_path))
+    res = brand_tree(str(src), str(dst), BrandingRules(), owned)
+    assert res.owned == 1
+    assert (dst / "static" / "img" / "banner.png").read_bytes() == b"OUR-BANNER-BYTES"
+    assert (dst / "static" / "img" / "other.png").read_bytes() == b"HERMES-OTHER"
+
+
+def test_owned_assets_verify_passes_only_against_our_bytes(tmp_path):
+    """verify_branded compares owned paths to our registry, not upstream."""
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    os.makedirs(src / "static" / "img")
+    (src / "static" / "img" / "banner.png").write_bytes(b"HERMES-BANNER-BYTES")
+    owned = OwnedAssets(_owned_registry(tmp_path))
+
+    # correct: destination holds OUR asset -> passes
+    brand_tree(str(src), str(dst), BrandingRules(), owned)
+    report = verify_branded(str(src), str(dst), BrandingRules(), owned)
+    assert not report.failed
+    assert report.passed == report.total
+
+    # wrong: upstream bytes land in the snapshot -> parity must fail
+    dst2 = tmp_path / "dst2"
+    brand_tree(str(src), str(dst2), BrandingRules())
+    report2 = verify_branded(str(src), str(dst2), BrandingRules(), owned)
+    assert report2.failed, "upstream bytes must FAIL verify against our registry"
+    assert any("owned" in r.note for r in report2.failed)
+
+
+def test_owned_assets_flagged_in_compare(tmp_path):
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    os.makedirs(src / "static" / "img")
+    (src / "static" / "img" / "banner.png").write_bytes(b"HERMES-BANNER-BYTES")
+    owned = OwnedAssets(_owned_registry(tmp_path))
+    brand_tree(str(src), str(dst), BrandingRules(), owned)
+    diff = compare_trees(str(src), str(dst), BrandingRules(), owned)
+    owned_entries = [e for e in diff.entries if e.action == "owned"]
+    assert len(owned_entries) == 1
+    assert owned_entries[0].mapped_path == "static/img/banner.png"
+
+
+def test_update_manager_threads_owned_into_all_stages(tmp_path):
+    hermes = _hermes_repo(tmp_path)
+    src = os.path.join(str(tmp_path), "hermes-agent")
+    img_dir = os.path.join(src, "static", "img")
+    os.makedirs(img_dir)
+    with open(os.path.join(img_dir, "banner.png"), "wb") as fh:
+        fh.write(b"HERMES-BANNER-BYTES")
+    subprocess.run(["git", "-C", src, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", src, "commit", "-q", "-m", "add banner"], check=True)
+
+    owned = OwnedAssets(_owned_registry(tmp_path))
+    updates_dir = str(tmp_path / "Updates-Commits")
+    res = UpdateManager(updates_dir, hermes_url=hermes, owned=owned).run()
+    assert res.gate
+    snap_banner = os.path.join(res.dir, "static", "img", "banner.png")
+    assert os.path.isfile(snap_banner)
+    assert open(snap_banner, "rb").read() == b"OUR-BANNER-BYTES"
+    assert res.brand.owned == 1

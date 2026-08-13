@@ -61,9 +61,38 @@ def test_locked_paths():
     assert not is_locked_path("docs/guide.md")
 
 
+def test_dotenv_templates_are_brandable():
+    """Real .env secret files stay locked, but templates/direnv configs brand."""
+    assert is_locked_path(".env")
+    assert is_locked_path("services/api/.env")
+    assert not is_locked_path(".env.example")
+    assert not is_locked_path("apps/desktop/.env.example")
+    assert not is_locked_path(".envrc")
+
+
+def test_docs_svg_is_brandable():
+    """Text SVGs under static/img/docs are brandable; binaries stay locked."""
+    assert not is_locked_path("website/static/img/docs/cli-layout.svg")
+    assert not is_locked_path("website/static/img/docs/session-recap.svg")
+    assert is_locked_path("website/static/img/logo.png")
+
+
 def test_case_sensitivity_embedded_word():
     """CamelCase tokens must not corrupt words where the token is a substring."""
     rules = BrandingRules()
     out = rules.transform_text("HermesAnalytics is hermes-analytics")
     assert "hermes" not in out.lower()
     assert "nastech" in out.lower()
+
+
+def test_girl_mascot_renames_to_bantu():
+    """nous-girl.jpg must brand to nastech-bantu.jpg — the nous->nastech
+    prefix survives, only the girl->bantu mascot word is swapped."""
+    rules = BrandingRules()
+    assert rules.transform_path("apps/desktop/public/nous-girl.jpg") == \
+        "apps/desktop/public/nastech-bantu.jpg"
+    assert rules.transform_path("apps/bootstrap-installer/public/nous-girl.jpg") == \
+        "apps/bootstrap-installer/public/nastech-bantu.jpg"
+    out = rules.transform_text("the nous-girl mascot")
+    assert "nastech-bantu" in out
+    assert "nous-girl" not in out

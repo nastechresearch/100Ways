@@ -107,6 +107,12 @@ class Achievements:
     def list_all(self) -> list[tuple[str, Achievement, bool]]:
         return [(k, v, k in self._data["unlocked"]) for k, v in ACHIEVEMENTS.items()]
 
+    def trophies(self) -> list[Achievement]:
+        """The unlocked achievements, in catalog order, as a trophy shelf.
+        A trophy is an achievement that has been earned - the README and the
+        dashboard both render this shelf."""
+        return [meta for _k, meta, unlocked in self.list_all() if unlocked]
+
     def apply_event(self, event: str) -> list[str]:
         """Map a pipeline event to achievement unlocks; returns new names."""
         unlocked = []

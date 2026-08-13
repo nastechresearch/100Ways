@@ -48,6 +48,11 @@ def _rule(match: str, replace: str, anchored: bool = False) -> TokenRule:
 # The canonical learned set.  Order matters: longest compounds first.
 DEFAULT_TOKENS: list[TokenRule] = [
     # -- nous family: compounds before short forms -------------------------
+    # Girl mascot file keeps Hermes' structure — hermes ships nous-girl.jpg,
+    # so nastech ships nastech-<mascot-name>.jpg.  Only the word "girl" is
+    # swapped for the mascot's name ("bantu"); the nous->nastech prefix is
+    # preserved.  This compound must win before the generic 'nous' token.
+    _rule("nous-girl", "nastech-bantu"),
     _rule("nousresearch", "nastechresearch"),
     _rule("NousResearch", "NastechResearch"),
     _rule("NOUSRESEARCH", "NASTECHRESEARCH"),
@@ -151,15 +156,16 @@ def tokens_from_overrides(path: str | None) -> list[TokenRule]:
 # ---------------------------------------------------------------------------
 
 LOCKED_PATH_SUBSTRINGS = (
-    "static/img/",
     "public/hermes-frames/",
     "public/nastech-frames/",
-    ".npmrc",
     "package-lock.json",
     "uv.lock",
     "poetry.lock",
-    ".env",
 )
+
+# Exact basenames that must NOT be auto-branded even though they are text.
+# Real secret files (.env) and package-manager rc files are real data.
+LOCKED_FILENAMES = (".env", ".npmrc")
 
 LOCKED_EXTENSIONS = (
     ".png",
@@ -199,6 +205,8 @@ def is_locked_path(path: str) -> bool:
     """True when a path must NOT be auto-branded (content or rename)."""
     lowered = path.lower()
     if lowered.endswith(LOCKED_EXTENSIONS):
+        return True
+    if path.rsplit("/", 1)[-1] in LOCKED_FILENAMES:
         return True
     for sub in LOCKED_PATH_SUBSTRINGS:
         if sub in path:

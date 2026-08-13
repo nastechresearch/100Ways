@@ -31,6 +31,7 @@ import time
 import zipfile
 from dataclasses import dataclass, field
 
+from .assets import OwnedAssets
 from .rules import BrandingRules, is_immutable_path, is_locked_path
 from .scanner import classify_path, is_text
 from .verify import FileResult, VerifyReport
@@ -156,6 +157,7 @@ class BrandResult:
     rewritten: int = 0
     locked_copied: int = 0
     binary_copied: int = 0
+    owned: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -169,14 +171,16 @@ def _walk_files(root: str) -> list[str]:
     return sorted(out)
 
 
-def brand_tree(src: str, dst: str, rules: BrandingRules | None = None) -> BrandResult:
+def brand_tree(src: str, dst: str, rules: BrandingRules | None = None,
+               owned: OwnedAssets | None = None) -> BrandResult:
     """Copy ``src`` into ``dst`` branding every path and text file.
 
     Rules: paths (folders AND file names) are mapped through
     ``rules.transform_path``; text files are rewritten through
     ``rules.transform_text``; binary and locked files are copied
-    byte-for-byte (rename only).  Mirrors the birth-commit semantics so the
-    verifier can prove the result.
+    byte-for-byte (rename only).  Files whose mapped path appears in the
+    ``owned`` registry are replaced by OUR asset instead of upstream's.
+    Mirrors the birth-commit semantics so the verifier can prove the result.
     """
     rules = rules or BrandingRules()
     result = BrandResult()
@@ -196,6 +200,12 @@ def brand_tree(src: str, dst: str, rules: BrandingRules | None = None) -> BrandR
         src_path = os.path.join(src, rel)
         dst_path = os.path.join(dst, mapped)
         os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+        owned_bytes = owned.asset_bytes(mapped) if owned else None
+        if owned_bytes is not None:
+            with open(dst_path, "wb") as fh:
+                fh.write(owned_bytes)
+            result.owned += 1
+            continue
         try:
             with open(src_path, "rb") as fh:
                 data = fh.read()
@@ -260,7 +270,7 @@ def scan_tree(root: str) -> ScanReport:
 class DiffEntry:
     path: str
     mapped_path: str
-    action: str  # renamed | rewritten | identical | locked | missing
+    action: str  # renamed | rewritten | identical | locked | missing | owned
     added_lines: int = 0
     deleted_lines: int = 0
 
@@ -273,11 +283,11 @@ class DiffReport:
         return [e for e in self.entries if e.action == action]
 
     def summary(self) -> str:
-        counts = {a: len(self.actions(a)) for a in ("renamed", "rewritten", "identical", "locked", "missing")}
+        counts = {a: len(self.actions(a)) for a in ("renamed", "rewritten", "identical", "locked", "missing", "owned")}
         return (
             f"{counts['renamed']} renamed, {counts['rewritten']} rewritten, "
             f"{counts['identical']} identical, {counts['locked']} locked, "
-            f"{counts['missing']} missing"
+            f"{counts['missing']} missing, {counts['owned']} owned"
         )
 
 
@@ -288,7 +298,8 @@ def _line_delta(a: str, b: str) -> tuple[int, int]:
     return added, deleted
 
 
-def compare_trees(src: str, dst: str, rules: BrandingRules | None = None) -> DiffReport:
+def compare_trees(src: str, dst: str, rules: BrandingRules | None = None,
+                  owned: OwnedAssets | None = None) -> DiffReport:
     """Diff the branded tree against the upstream source, file by file."""
     rules = rules or BrandingRules()
     report = DiffReport()
@@ -297,6 +308,9 @@ def compare_trees(src: str, dst: str, rules: BrandingRules | None = None) -> Dif
             report.entries.append(DiffEntry(rel, rel, "locked"))
             continue
         mapped = rules.transform_path(rel)
+        if owned and owned.has(mapped):
+            report.entries.append(DiffEntry(rel, mapped, "owned"))
+            continue
         locked = is_locked_path(rel) or is_locked_path(mapped)
         src_path = os.path.join(src, rel)
         dst_path = os.path.join(dst, mapped)
@@ -326,9 +340,11 @@ def compare_trees(src: str, dst: str, rules: BrandingRules | None = None) -> Dif
 # Verify the branded tree against the freshly pulled Hermes tree
 # ---------------------------------------------------------------------------
 
-def verify_branded(src: str, dst: str, rules: BrandingRules | None = None) -> VerifyReport:
+def verify_branded(src: str, dst: str, rules: BrandingRules | None = None,
+                   owned: OwnedAssets | None = None) -> VerifyReport:
     """File-by-file parity: every Hermes file must exist branded and, for text,
-    byte-identical to ``rules.transform_text`` of the source."""
+    byte-identical to ``rules.transform_text`` of the source.  Files whose
+    mapped path is in the ``owned`` registry are checked against OUR asset."""
     rules = rules or BrandingRules()
     report = VerifyReport()
     for rel in _walk_files(src):
@@ -338,6 +354,20 @@ def verify_branded(src: str, dst: str, rules: BrandingRules | None = None) -> Ve
         src_path = os.path.join(src, rel)
         dst_path = os.path.join(dst, mapped)
         exists = os.path.isfile(dst_path)
+        owned_bytes = owned.asset_bytes(mapped) if owned else None
+        if owned_bytes is not None:
+            actual = open(dst_path, "rb").read() if exists else b""
+            identical = exists and actual == owned_bytes
+            res = FileResult(
+                path=rel, mapped_path=mapped, pass_=identical, locked=False,
+                note="owned asset: must match our registry (not upstream)",
+            )
+            report.results.append(res)
+            if identical:
+                report.passed += 1
+            else:
+                report.failed.append(res)
+            continue
         try:
             with open(src_path, "rb") as fh:
                 data = fh.read()
@@ -415,6 +445,7 @@ def update_report_md(result: "UpdateResult") -> str:
         f"- text-rewritten : {result.brand.rewritten}",
         f"- locked-copied  : {result.brand.locked_copied}",
         f"- binary-copied  : {result.brand.binary_copied}",
+        f"- owned assets   : {result.brand.owned} (our logo/banner/mascot override upstream)",
     ]
     if result.brand.errors:
         lines += ["- errors:", *[f"  - {e}" for e in result.brand.errors]]
@@ -530,11 +561,14 @@ class UpdateManager:
     """Run one full update: the 15 ordered pipeline stages."""
 
     def __init__(self, updates_dir: str, hermes_url: str = DEFAULT_HERMES_URL,
-                 rules: BrandingRules | None = None, threshold: float = 0.99):
+                 rules: BrandingRules | None = None, threshold: float = 0.99,
+                 owned: OwnedAssets | None = None, ai=None):
         self.updates_dir = updates_dir
         self.hermes_url = hermes_url
         self.rules = rules or BrandingRules()
         self.threshold = threshold
+        self.owned = owned
+        self.ai = ai
 
     def run(self, keep_failed: bool = True, zip_path: str = "",
             project_name: str = "nastech-agent", notify=None) -> UpdateResult:
@@ -563,12 +597,12 @@ class UpdateManager:
             shutil.rmtree(dest)
         os.makedirs(dest, exist_ok=True)
 
-        brand = stage("brand", lambda: brand_tree(src, dest, self.rules),
+        brand = stage("brand", lambda: brand_tree(src, dest, self.rules, self.owned),
                       "brand every folder, file name and text file")
         scan = stage("scan", lambda: scan_tree(dest), "classify every branded file")
-        diff = stage("compare", lambda: compare_trees(src, dest, self.rules),
+        diff = stage("compare", lambda: compare_trees(src, dest, self.rules, self.owned),
                      "diff branded tree vs upstream")
-        verify = stage("verify", lambda: verify_branded(src, dest, self.rules),
+        verify = stage("verify", lambda: verify_branded(src, dest, self.rules, self.owned),
                        "file-by-file parity gate")
 
         brand = brand or BrandResult()
@@ -615,8 +649,22 @@ class UpdateManager:
         # gate stage
         stage("gate", lambda: "PASS" if passed else "FAIL", "final gate decision")
 
-        # summary stage
-        stage("summary", lambda: result.summary(), "pipeline summary")
+        # summary stage (pipeline summary, with optional per-stage AI review)
+        def _summary() -> str:
+            base = result.summary()
+            if self.ai is None:
+                return base
+            context = (
+                f"gate={'PASS' if passed else 'FAIL'} "
+                f"brand={brand.total} owned={brand.owned} scan={scan.total} "
+                f"diff={diff.summary()} verify={verify.summary()}"
+            )
+            try:
+                review = self.ai.review_stage("summary", context)
+                return f"{base}\nAI: {review}"
+            except Exception as exc:
+                return f"{base}\nAI: review unavailable ({exc})"
+        stage("summary", _summary, "pipeline summary + optional AI review")
 
         # release stage (happens in GitHub Actions)
         if result.zip_path:

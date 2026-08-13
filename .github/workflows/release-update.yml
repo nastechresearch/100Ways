@@ -46,6 +46,7 @@ jobs:
         env:
           HUNDREDWAYS_HERMES_URL: ${{ github.event.inputs.hermes_url || 'https://github.com/NousResearch/hermes-agent.git' }}
           HUNDREDWAYS_UPDATES_DIR: Updates-Commits
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
         run: |
           100ways update \
             --updates-dir "$HUNDREDWAYS_UPDATES_DIR" \

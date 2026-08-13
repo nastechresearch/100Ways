@@ -1,0 +1,31 @@
+name: stage-readme
+
+# Stage 7: regenerate README.md from the registries (ways, achievements,
+# owned-assets) and fail if the committed copy is stale.  This guarantees
+# the "200 ways" / trophy counts never drift from the code that owns them.
+
+on:
+  workflow_call:
+
+jobs:
+  readme:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install 100ways
+        run: |
+          pip install -e .
+
+      - name: Regenerate README
+        run: |
+          100ways readme
+
+      - name: Fail if README is stale
+        run: |
+          git diff --exit-code -- README.md
+          echo "README.md is up to date."
