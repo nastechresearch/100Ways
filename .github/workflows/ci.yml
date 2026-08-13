@@ -13,6 +13,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
   schedule:
     - cron: "0 4 * * 1" # weekly Monday 04:00 UTC
 
@@ -42,12 +43,12 @@ jobs:
   update-pr:
     needs: pipeline
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
     uses: ./.github/workflows/stage-update-pr.yml
     with:
       upstream_sha: ${{ needs.pipeline.outputs.upstream_sha }}
       gate: ${{ needs.pipeline.outputs.gate }}
+    secrets: inherit
 
   readme:
     needs: update-pr
