@@ -31,19 +31,13 @@ permissions:
 
 jobs:
   update-pr:
+    if: inputs.gate == 'PASS'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: nastech-agent-update
           path: artifact
-
-      - name: Bail unless the gate passed
-        run: |
-          if [ "${{ inputs.gate }}" != "PASS" ]; then
-            echo "gate is ${{ inputs.gate }}; not opening a PR for a failed run"
-            exit 0
-          fi
 
       - name: Extract branded tree
         run: |
@@ -92,8 +86,9 @@ jobs:
           git fetch origin "$BASE"
           git checkout -B "$TEST" "origin/$BASE"
           rm -rf -- nastech-agent reports 2>/dev/null || true
-          mv tree/nastech-agent ./nastech-agent 2>/dev/null || true
-          mv reports ./reports 2>/dev/null || true
+          mv tree/nastech-agent ./nastech-agent
+          mv reports ./reports
+          rm -rf tree
           git add -A
           git -c user.name="github-actions[bot]" \
              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \

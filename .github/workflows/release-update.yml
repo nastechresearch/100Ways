@@ -110,6 +110,7 @@ jobs:
           EOF
           mv extract/nastech-agent ./nastech-agent
           mv extract/reports ./reports
+          rm -rf extract
 
           git add -A
           git -c user.name="github-actions[bot]" \
