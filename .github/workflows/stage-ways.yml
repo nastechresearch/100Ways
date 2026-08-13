@@ -22,8 +22,8 @@ jobs:
           from collections import Counter
           from hundredways.ways import build_registry
           r = build_registry()
-          by_cat = Counter(w.category for w in r.ways.values())
-          ids = list(r.ways.keys())
+          by_cat = Counter(w.category for w in r.all())
+          ids = [w.way_id for w in r.all()]
           assert len(ids) == len(set(ids)), "duplicate way ids"
           assert r.count >= 200, f"registry count {r.count} < 200"
           for cat, n in sorted(by_cat.items()):
