@@ -1,12 +1,18 @@
 name: stage-rules
 
 # Stage 4: prove the branding rules still reproduce the fork birth commit
-# (0cafd22fb from parent 03fa32c92).  Clones the public nastech-agent fork
-# with a blobless filter and runs `100ways verify` against it.  Fails if
-# any file drifts from the birth tree or the pass ratio drops < 0.99.
+# (0cafd22fb from parent 03fa32c92).  Shallow-clones the public nastech-agent
+# fork (auto-deepening if main has grown) and verifies the rules transform of
+# the parent tree against the birth tree.  This is a DRIFT MONITOR: parity
+# must stay >= 99% and the drifted-file set must never grow beyond the
+# known-drift allowlist (files the birth commit manually rewrote).
 
 on:
   workflow_call:
+
+env:
+  BIRTH_COMMIT: 0cafd22fb
+  BIRTH_PARENT: 03fa32c92
 
 jobs:
   rules:
@@ -21,10 +27,21 @@ jobs:
       - name: Install 100ways
         run: pip install -e .
 
-      - name: Blobless clone of the fork (birth commit is on main)
+      - name: Shallow clone of the fork (birth commit is ~30 deep on main)
         run: |
-          git clone --filter=blob:none --no-checkout \
+          git clone --depth=35 --no-checkout \
             https://github.com/nastechresearch/nastech-agent.git nastech-agent
+          # auto-deepen if the fork's main has grown past the window
+          for i in 1 2 3 4; do
+            if git -C nastech-agent cat-file -e "$BIRTH_PARENT" 2>/dev/null \
+              && git -C nastech-agent cat-file -e "$BIRTH_COMMIT" 2>/dev/null; then
+              break
+            fi
+            echo "deepening history ($i)"
+            git -C nastech-agent fetch --deepen=50 origin main
+          done
+          git -C nastech-agent cat-file -e "$BIRTH_PARENT" 2>/dev/null \
+            || { echo "birth parent not reachable"; exit 1; }
 
       - name: Verify rebrand parity vs birth commit
         run: |
