@@ -71,6 +71,62 @@ jobs:
           print("zip layout OK:", top)
           EOF
 
+      - name: Push branded tree to test branch + open PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          BASE="nastech-update"
+          TEST="test/update-latest"
+          SHA="${{ steps.update.outputs.sha }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if ! git show-ref --verify --quiet "refs/remotes/origin/$BASE"; then
+            git fetch origin main
+            git branch "$BASE" origin/main
+            git push origin "$BASE"
+          fi
+
+          git fetch origin "$BASE"
+          git checkout -B "$TEST" "origin/$BASE"
+          rm -rf -- nastech-agent reports 2>/dev/null || true
+
+          mkdir -p extract
+          python3 - <<'EOF'
+          import zipfile, os
+          with zipfile.ZipFile("Updates-Commits/nastech-agent-update.zip") as zf:
+              for name in zf.namelist():
+                  if name.endswith("UPDATE-REPORT.md"):
+                      os.makedirs("extract/reports", exist_ok=True)
+                      with open("extract/reports/UPDATE-REPORT.md", "wb") as fh:
+                          fh.write(zf.read(name))
+                  elif name.endswith("GATE-REPORT.md"):
+                      os.makedirs("extract/reports", exist_ok=True)
+                      with open("extract/reports/GATE-REPORT.md", "wb") as fh:
+                          fh.write(zf.read(name))
+              zf.extractall("extract")
+          EOF
+          mv extract/nastech-agent ./nastech-agent
+          mv extract/reports ./reports
+
+          git add -A
+          git -c user.name="github-actions[bot]" \
+             -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+             commit -m "chore: branded update (${SHA:0:8})" || echo "nothing to commit"
+          git push --force origin "$TEST"
+
+          PR_TITLE="Update (${SHA:0:8})"
+          BODY="Pipeline gate: PASS. Auto-generated from the 100Ways release pipeline."
+          PR_URL=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$TEST" --base "$BASE" --json url --jq '.[0].url' 2>/dev/null) || true
+          if [ -n "$PR_URL" ]; then
+            gh pr edit "$PR_URL" --title "$PR_TITLE" --body "$BODY" 2>/dev/null || true
+          else
+            gh pr create --repo "$GITHUB_REPOSITORY" --base "$BASE" --head "$TEST" \
+              --title "$PR_TITLE" --body "$BODY"
+          fi
+
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

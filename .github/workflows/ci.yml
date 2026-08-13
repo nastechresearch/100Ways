@@ -2,7 +2,7 @@ name: CI
 
 # Orchestrator.  Runs the 100Ways validation in STAGES:
 #
-#   lint    -> tests  -> ways  -> rules  -> pipeline  -> readme  -> upload
+#   lint    -> tests  -> ways  -> rules  -> pipeline  -> update-pr  -> readme  -> upload
 #
 # Each job ``needs`` the previous, so a failure stops the chain early and
 # the whole chain is re-triggered on every push / PR / schedule.  The
@@ -39,8 +39,15 @@ jobs:
     needs: rules
     uses: ./.github/workflows/stage-pipeline.yml
 
-  readme:
+  update-pr:
     needs: pipeline
+    uses: ./.github/workflows/stage-update-pr.yml
+    with:
+      upstream_sha: ${{ needs.pipeline.outputs.upstream_sha }}
+      gate: ${{ needs.pipeline.outputs.gate }}
+
+  readme:
+    needs: update-pr
     uses: ./.github/workflows/stage-readme.yml
 
   upload:

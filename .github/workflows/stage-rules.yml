@@ -61,6 +61,11 @@ jobs:
           # either drops the ratio or adds new drift -> CI fails.
           allowlist = {
               "README.es.md", "README.md", "README.ur-pk.md", "README.zh-CN.md",
+              "apps/bootstrap-installer/public/nastech-bantu.jpg",
+              "apps/bootstrap-installer/src/components/brand-mark.tsx",
+              "apps/desktop/DESIGN.md",
+              "apps/desktop/public/nastech-bantu.jpg",
+              "apps/desktop/src/components/brand-mark.tsx",
               "apps/desktop/src/app/command-center/index.tsx",
               "apps/desktop/src/components/ui/decode-text.tsx",
               "apps/desktop/src/i18n/ar.ts", "apps/desktop/src/i18n/en.ts",

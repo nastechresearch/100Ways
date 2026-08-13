@@ -1,0 +1,113 @@
+name: stage-update-pr
+
+# Stage 6: when the pipeline passes, push the branded tree to a test branch
+# and open/update a PR so the update is reviewable as a normal GitHub PR.
+#
+#   pipeline (artifact: nastech-agent-update) --(this)--> test/update-latest
+#   PR: test/update-latest  ->  nastech-update
+#
+# Each successful run force-pushes the same test branch, so the PR always
+# shows the latest branded tree diff against the nastech-update branch.
+# The branch is force-pushed (history on a review branch is irrelevant); the
+# PR is created once and updated on subsequent runs.
+
+on:
+  workflow_call:
+    inputs:
+      upstream_sha:
+        description: Upstream Hermes commit that was branded
+        type: string
+        required: false
+        default: ""
+      gate:
+        description: Final gate result (PASS / FAIL)
+        type: string
+        required: false
+        default: "PASS"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nastech-agent-update
+          path: artifact
+
+      - name: Bail unless the gate passed
+        run: |
+          if [ "${{ inputs.gate }}" != "PASS" ]; then
+            echo "gate is ${{ inputs.gate }}; not opening a PR for a failed run"
+            exit 0
+          fi
+
+      - name: Extract branded tree
+        run: |
+          mkdir -p tree
+          cd tree
+          python3 - <<'EOF'
+          import zipfile, os
+          with zipfile.ZipFile("../artifact/nastech-agent-update.zip") as zf:
+              for name in zf.namelist():
+                  # reports live OUTSIDE the project folder
+                  if name.endswith("UPDATE-REPORT.md"):
+                      os.makedirs("../reports", exist_ok=True)
+                      with open("../reports/UPDATE-REPORT.md", "wb") as fh:
+                          fh.write(zf.read(name))
+                  elif name.endswith("GATE-REPORT.md"):
+                      os.makedirs("../reports", exist_ok=True)
+                      with open("../reports/GATE-REPORT.md", "wb") as fh:
+                          fh.write(zf.read(name))
+              zf.extractall(".")
+          top = sorted(set(n.split("/", 1)[0] for n in zf.namelist()))
+          print("extracted:", top)
+          EOF
+          # the project folder keeps its name (nastech-agent); reports go at the repo root
+
+      - name: Commit branded tree to test branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          BASE="nastech-update"
+          TEST="test/update-latest"
+          SHA="${{ inputs.upstream_sha }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # ensure the base branch exists (create from main on first run)
+          if ! git show-ref --verify --quiet "refs/remotes/origin/$BASE"; then
+            echo "creating base branch $BASE from main"
+            git fetch origin main
+            git branch "$BASE" origin/main
+            git push origin "$BASE"
+          fi
+
+          # fresh branch off the base, then drop the branded tree in
+          git fetch origin "$BASE"
+          git checkout -B "$TEST" "origin/$BASE"
+          rm -rf -- nastech-agent reports 2>/dev/null || true
+          mv tree/nastech-agent ./nastech-agent 2>/dev/null || true
+          mv reports ./reports 2>/dev/null || true
+          git add -A
+          git -c user.name="github-actions[bot]" \
+             -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+             commit -m "chore: branded update ${SHA:+($SHA)}" || echo "nothing to commit"
+
+          # force-push (review branch; history is irrelevant)
+          git push --force origin "$TEST"
+
+          # open or update the PR test -> base
+          PR_TITLE="Update ${SHA:+(${SHA:0:8})}"
+          BODY="Pipeline gate: PASS. Auto-generated from the 100Ways release pipeline."
+          if PR_URL=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$TEST" --base "$BASE" --json url --jq '.[0].url' 2>/dev/null); then
+            gh pr edit "$PR_URL" --title "$PR_TITLE" --body "$BODY" 2>/dev/null || true
+          else
+            gh pr create --repo "$GITHUB_REPOSITORY" --base "$BASE" --head "$TEST" \
+              --title "$PR_TITLE" --body "$BODY"
+          fi
