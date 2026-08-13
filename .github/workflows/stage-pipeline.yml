@@ -45,6 +45,11 @@ jobs:
       - name: Install 100ways
         run: pip install -e .
 
+      - name: Shallow clone of the fork (owned-assets registry)
+        run: |
+          git clone --depth=1 \
+            https://github.com/nastechresearch/nastech-agent.git nastech-agent
+
       - name: Run 15-stage update pipeline
         id: update
         env:
@@ -53,6 +58,7 @@ jobs:
           HUNDREDWAYS_OUTPUTS: ${{ runner.temp }}/update-outputs.json
         run: |
           python3 -m hundredways.cli update \
+            --repo nastech-agent \
             --updates-dir "$HUNDREDWAYS_UPDATES_DIR" \
             --hermes-url "$HUNDREDWAYS_HERMES_URL" \
             --zip "${{ runner.temp }}/nastech-agent-update.zip" \

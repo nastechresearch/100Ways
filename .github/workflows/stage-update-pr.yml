@@ -77,7 +77,7 @@ jobs:
           # fresh branch off the base, then drop the branded tree in
           git fetch origin "$BASE"
           git checkout -B "$TEST" "origin/$BASE"
-          rm -rf -- nastech-agent reports 2>/dev/null || true
+          rm -rf -- nastech-agent reports artifact 2>/dev/null || true
           mkdir -p reports
           mv tree/nastech-agent ./nastech-agent
           mv tree/UPDATE-REPORT.md reports/UPDATE-REPORT.md
@@ -94,8 +94,9 @@ jobs:
           # open or update the PR test -> base
           PR_TITLE="Update ${SHA:+(${SHA:0:8})}"
           BODY="Pipeline gate: PASS. Auto-generated from the 100Ways release pipeline."
-          if PR_URL=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$TEST" --base "$BASE" --json url --jq '.[0].url' 2>/dev/null); then
-            gh pr edit "$PR_URL" --title "$PR_TITLE" --body "$BODY" 2>/dev/null || true
+          PR_URL=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$TEST" --base "$BASE" --json url --jq '.[0].url' 2>/dev/null) || true
+          if [ -n "$PR_URL" ]; then
+            gh pr edit "$PR_URL" --title "$PR_TITLE" --body "$BODY"
           else
             gh pr create --repo "$GITHUB_REPOSITORY" --base "$BASE" --head "$TEST" \
               --title "$PR_TITLE" --body "$BODY"

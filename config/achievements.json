@@ -1,0 +1,13 @@
+{
+  "unlocked": [
+    "first_pull",
+    "scan_1000"
+  ],
+  "counters": {
+    "pulls": 1
+  },
+  "reasons": {
+    "first_pull": "first upstream pull + report run",
+    "scan_1000": "1000+ files verified in one run"
+  }
+}
