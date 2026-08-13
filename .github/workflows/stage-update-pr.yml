@@ -6,12 +6,12 @@ name: stage-update-pr
 # a green result proves the freshly-branded Hermes tree is sound enough to
 # merge upstream.
 #
-#   pipeline (artifact: nastech-agent-update) --(this)--> nasbot/update-latest (fork)
-#   PR: nasbot/update-latest  ->  main  (nastechresearch/nastech-agent)
+#   pipeline (artifact: nastech-agent-update) --(this)--> 100WAYS (fork)
+#   PR: 100WAYS  ->  main  (nastechresearch/nastech-agent)
 #
 # NOTE: the branch must NOT be named test/update-latest — the fork already has
 # a branch literally named `test`, and git rejects test/* as a directory/file
-# conflict. Use a name whose parent ref does not exist (nasbot/update-latest).
+# conflict. Use a name whose parent ref does not exist (100WAYS).
 #
 # Cross-repo writes need a PAT (contents: write + pull-requests: write scoped
 # to nastechresearch/nastech-agent) in the NAS_TECH_AGENT_TOKEN secret.
@@ -74,7 +74,7 @@ jobs:
           set -eux
           FORK="nastechresearch/nastech-agent"
           BASE="main"
-          TEST="nasbot/update-latest"
+          TEST="100WAYS"
           SHA="${{ inputs.upstream_sha }}"
           REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${FORK}.git"
 
