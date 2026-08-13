@@ -65,6 +65,7 @@ jobs:
           GH_TOKEN: ${{ secrets.NAS_TECH_AGENT_TOKEN }}
         run: |
           set -eux
+          if [ -n "$GH_TOKEN" ]; then echo "PAT_PRESENT length=${#GH_TOKEN}"; else echo "PAT_MISSING"; fi
           FORK="nastechresearch/nastech-agent"
           BASE="main"
           TEST="nasbot/update-latest"
