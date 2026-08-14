@@ -63,3 +63,45 @@ def test_passing_weekly_report_round_trips_through_ledger(tmp_path):
     assert stored["upstream_sha"] == "abc123"
     assert stored["candidate"] == "sync/hermes-abc123"
     assert stored["gate"] == "PASS"
+
+
+def test_owned_asset_mapping_is_a_copy(tmp_path):
+    from hundredways.assets import OwnedAssets
+
+    assets = tmp_path / "config" / "owned-assets"
+    assets.mkdir(parents=True)
+    (assets / "manifest.json").write_text('{"assets/logo.png": "logo.png"}')
+    registry = OwnedAssets(root=str(assets))
+
+    mapping = registry.mapping
+    mapping["assets/logo.png"] = "changed.png"
+
+    assert registry.mapping["assets/logo.png"] == "logo.png"
+
+
+def test_reconcile_nested_lockfile_roots_repairs_branded_identity(tmp_path):
+    from hundredways.weekly_sync import audit_nested_lockfiles, reconcile_nested_lockfile_roots
+
+    package = tmp_path / "sidecar"
+    package.mkdir()
+    (package / "package.json").write_text('{"name": "@nastech-agent/sidecar"}')
+    (package / "package-lock.json").write_text(
+        '{"name": "@hermes-agent/sidecar", "packages": {"": {"name": "@hermes-agent/sidecar"}}}'
+    )
+
+    changed = reconcile_nested_lockfile_roots(str(tmp_path))
+
+    assert changed == ["sidecar/package-lock.json"]
+    assert audit_nested_lockfiles(str(tmp_path)) == []
+
+
+def test_review_only_ci_issue_does_not_block_candidate_gate():
+    from hundredways.ci_policy import WorkflowPolicyIssue
+    from hundredways.weekly_sync import WeeklyFullSyncReport
+
+    report = WeeklyFullSyncReport("sha", "", 0, 0, 0, 0, freshness_ok=True)
+    report.ci_issues = [WorkflowPolicyIssue("secret-inheritance", "workflow.yml", "review", "review")]
+
+    assert report.gate_passes is True
+    assert report.review_required is True
+    assert report.to_dict()["gate"] == "REVIEW"

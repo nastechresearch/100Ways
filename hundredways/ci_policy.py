@@ -14,7 +14,7 @@ class WorkflowPolicyIssue:
     severity: str = "block"
 
 
-_ACTION_LINE = re.compile(r"^\s*-\s*uses:\s*([^\s#]+)", re.MULTILINE)
+_ACTION_LINE = re.compile(r"^\s*(?:-\s*)?uses:\s*([^\s#]+)", re.MULTILINE)
 _FULL_SHA = re.compile(r"@[0-9a-f]{40}(?:\s|$|#)")
 
 

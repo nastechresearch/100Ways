@@ -99,10 +99,17 @@ class WeeklyFullSyncReport:
 
     @property
     def gate_passes(self) -> bool:
-        return not (self.brand_issues or self.lock_issues or self.asset_issues or self.visual_issues or self.ci_issues) and self.freshness_ok
+        visual_blocks = any(issue.severity == "block" for issue in self.visual_issues)
+        ci_blocks = any(issue.severity == "block" for issue in self.ci_issues)
+        return not (self.brand_issues or self.lock_issues or self.asset_issues or visual_blocks or ci_blocks) and self.freshness_ok
+
+    @property
+    def review_required(self) -> bool:
+        return any(issue.severity == "review" for issue in (*self.visual_issues, *self.ci_issues))
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self) | {"gate": "PASS" if self.gate_passes else "FAIL"}
+        decision = "FAIL" if not self.gate_passes else "REVIEW" if self.review_required else "PASS"
+        return asdict(self) | {"gate": decision}
 
 
 def _run(repo: str, *args: str, check: bool = True) -> str:
@@ -152,6 +159,33 @@ def save_ledger(state_dir: str, report: WeeklyFullSyncReport, candidate: str = "
 def fetch_upstream(upstream_repo: str, ref: str = "origin/main") -> str:
     _run(upstream_repo, "fetch", "origin", "--prune")
     return _run(upstream_repo, "rev-parse", ref)
+
+
+def reconcile_nested_lockfile_roots(root: str) -> list[str]:
+    """Align nested package-lock roots with adjacent branded package.json files."""
+    changed: list[str] = []
+    for package_file in Path(root).rglob("package.json"):
+        lock_file = package_file.with_name("package-lock.json")
+        if not lock_file.is_file():
+            continue
+        try:
+            package = json.loads(package_file.read_text(encoding="utf-8"))
+            lock = json.loads(lock_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        name = package.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        changed_here = lock.get("name") != name
+        lock["name"] = name
+        root_entry = lock.get("packages", {}).get("")
+        if isinstance(root_entry, dict) and root_entry.get("name") != name:
+            root_entry["name"] = name
+            changed_here = True
+        if changed_here:
+            lock_file.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
+            changed.append(str(lock_file.relative_to(root)))
+    return changed
 
 
 def audit_nested_lockfiles(root: str) -> list[AuditIssue]:
@@ -206,11 +240,12 @@ def audit_first_party_brand(root: str, rules: BrandingRules | None = None) -> li
     rules = rules or BrandingRules()
     pattern = re.compile(r"(?i)(?<![a-z0-9_-])(hermes|nous)(?![a-z0-9_-])")
     issues: list[AuditIssue] = []
+    generated_reports = {"UPDATE-REPORT.md", "GATE-REPORT.md"}
     for path in Path(root).rglob("*"):
         if not path.is_file() or ".git" in path.parts or "node_modules" in path.parts:
             continue
         rel = str(path.relative_to(root))
-        if is_immutable_path(rel):
+        if path.name in generated_reports or is_immutable_path(rel):
             continue
         try:
             text = path.read_text(encoding="utf-8")
@@ -257,6 +292,7 @@ def build_weekly_report(
         deleted_lines=deleted,
         mode=mode,
     )
+    reconcile_nested_lockfile_roots(branded_root)
     report.lock_issues = audit_nested_lockfiles(branded_root)
     report.brand_issues = audit_first_party_brand(branded_root)
     report.asset_issues = audit_owned_assets(branded_root)
@@ -285,7 +321,8 @@ def write_weekly_report(path: str, report: WeeklyFullSyncReport) -> None:
         f"- line delta: +{report.added_lines}/-{report.deleted_lines}",
         f"- full-sync capabilities: {report.capabilities}",
         f"- freshness lock: {'PASS' if report.freshness_ok else 'FAIL'}",
-        f"- gate: {'PASS' if report.gate_passes else 'FAIL'}", "",
+        f"- review required: {'YES' if report.review_required else 'NO'}",
+        f"- gate: {report.to_dict()['gate']}", "",
     ]
     for title, issues in (("Brand issues", report.brand_issues), ("Nested lock issues", report.lock_issues), ("Owned asset issues", report.asset_issues), ("Visual asset issues", report.visual_issues), ("CI policy issues", report.ci_issues)):
         lines.extend([f"## {title}", ""])
