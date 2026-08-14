@@ -53,7 +53,7 @@ jobs:
       slice_count: 4
 
   update-pr:
-    needs: forkcheck
+    needs: [forkcheck, pipeline]
     permissions:
       contents: read
     uses: ./.github/workflows/stage-update-pr.yml
