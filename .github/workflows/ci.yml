@@ -73,7 +73,7 @@ jobs:
     needs: upload
     runs-on: ubuntu-latest
     steps:
-      - run: echo "All 100Ways verification stages passed; #344 may now publish the candidate PR."
+      - run: 'echo "All 100Ways verification stages passed; #344 may now publish the candidate PR."'
 
   update-pr:
     name: "#344 — Push PR to NasTech"
