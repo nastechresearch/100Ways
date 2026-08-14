@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .assets import OwnedAssets
+from .ci_policy import WorkflowPolicyIssue, audit_workflow_security
 from .rules import BrandingRules, is_immutable_path
 from .visual_assets import VisualIssue, compare_owned_to_upstream
 
@@ -91,13 +92,14 @@ class WeeklyFullSyncReport:
     lock_issues: list[AuditIssue] = field(default_factory=list)
     asset_issues: list[AuditIssue] = field(default_factory=list)
     visual_issues: list[VisualIssue] = field(default_factory=list)
+    ci_issues: list[WorkflowPolicyIssue] = field(default_factory=list)
     freshness_ok: bool = False
     mode: str = "report"
     generated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     @property
     def gate_passes(self) -> bool:
-        return not (self.brand_issues or self.lock_issues or self.asset_issues or self.visual_issues) and self.freshness_ok
+        return not (self.brand_issues or self.lock_issues or self.asset_issues or self.visual_issues or self.ci_issues) and self.freshness_ok
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self) | {"gate": "PASS" if self.gate_passes else "FAIL"}
@@ -259,6 +261,7 @@ def build_weekly_report(
     report.brand_issues = audit_first_party_brand(branded_root)
     report.asset_issues = audit_owned_assets(branded_root)
     report.visual_issues = audit_visual_assets(branded_root, upstream_repo)
+    report.ci_issues = audit_workflow_security(branded_root)
     report.freshness_ok = fetch_upstream(upstream_repo, ref) == current
     if captured and captured != current:
         report.brand_issues.append(AuditIssue(
@@ -284,7 +287,7 @@ def write_weekly_report(path: str, report: WeeklyFullSyncReport) -> None:
         f"- freshness lock: {'PASS' if report.freshness_ok else 'FAIL'}",
         f"- gate: {'PASS' if report.gate_passes else 'FAIL'}", "",
     ]
-    for title, issues in (("Brand issues", report.brand_issues), ("Nested lock issues", report.lock_issues), ("Owned asset issues", report.asset_issues), ("Visual asset issues", report.visual_issues)):
+    for title, issues in (("Brand issues", report.brand_issues), ("Nested lock issues", report.lock_issues), ("Owned asset issues", report.asset_issues), ("Visual asset issues", report.visual_issues), ("CI policy issues", report.ci_issues)):
         lines.extend([f"## {title}", ""])
         lines.extend(["- None"] if not issues else [f"- `{i.code}` `{i.path}` — {i.detail}" for i in issues])
         lines.append("")
