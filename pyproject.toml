@@ -37,7 +37,7 @@ ai = ["httpx>=0.28,<1"]
 telegram = ["httpx>=0.28,<1"]
 dev = [
   "pytest>=8.3,<9",
-  "ruff>=0.9,<1",
+  "ruff>=0.16.2,<1",
   "build>=1.2,<2",
   "pytest-cov>=6,<7",
 ]
