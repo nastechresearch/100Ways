@@ -1264,18 +1264,15 @@ class UpdateManager:
             reconcile=reconcile, fork=forkcheck,
         )
 
-        # report stage (content written at the end so it lists ALL stages)
-        stage("report", lambda: "deferred to end of pipeline",
-              "write UPDATE-REPORT.md + GATE-REPORT.md with full stage list")
-
-        # package stage (zip built at the end so its reports list ALL stages)
-        if zip_path:
-            stage("package", lambda: "deferred to end of pipeline", f"zip -> {os.path.basename(zip_path)}")
-        else:
-            stage("package", lambda: "skipped (no --zip)", "no zip requested; skip")
-
-        # manifest stage (content written at the end so it lists ALL stages)
-        stage("manifest", lambda: "deferred to end of pipeline", "write manifest.json")
+        # These outputs depend on the complete stage list.  Reserve their
+        # positions now, then replace ``pending`` with the actual outcome
+        # after each filesystem operation completes below.
+        report_stage = StageResult("report", "pending", "write UPDATE-REPORT.md + GATE-REPORT.md")
+        stages.append(report_stage)
+        package_stage = StageResult("package", "pending", f"zip -> {os.path.basename(zip_path)}" if zip_path else "no zip requested")
+        stages.append(package_stage)
+        manifest_stage = StageResult("manifest", "pending", "write manifest.json")
+        stages.append(manifest_stage)
 
         # record stage (achievements)
         stage("record", lambda: "achievements", "record pipeline state")
@@ -1322,24 +1319,41 @@ class UpdateManager:
 
         result.stages = stages
 
-        # write manifest + reports now that ALL 18 stages are recorded
-        report_content = update_report_md(result)
-        gate_content = gate_report_md(result)
+        # Write outputs in dependency order and update each reserved stage
+        # only after its operation succeeds.  A failure is visible as ``fail``
+        # rather than the old misleading ``skipped``/``deferred`` status.
         os.makedirs(dest, exist_ok=True)
         result.report_path = os.path.join(dest, "UPDATE-REPORT.md")
         result.gate_report_path = os.path.join(dest, "GATE-REPORT.md")
-        with open(result.report_path, "w", encoding="utf-8") as fh:
-            fh.write(report_content)
-        with open(result.gate_report_path, "w", encoding="utf-8") as fh:
-            fh.write(gate_content)
+        report_content = update_report_md(result)
+        gate_content = gate_report_md(result)
+        try:
+            with open(result.report_path, "w", encoding="utf-8") as fh:
+                fh.write(report_content)
+            with open(result.gate_report_path, "w", encoding="utf-8") as fh:
+                fh.write(gate_content)
+            report_stage.status = "ok"
+        except OSError as exc:
+            report_stage.status = "fail"
+            report_stage.detail = f"report write failed: {exc}"
 
-        # build the release zip now that reports are final
-        if zip_path:
-            result.zip_path = package_zip(
-                dest, zip_path,
-                {"UPDATE-REPORT.md": report_content, "GATE-REPORT.md": gate_content},
-                project_name=project_name,
-            )
+        if zip_path and report_stage.status == "ok":
+            try:
+                result.zip_path = package_zip(
+                    dest, zip_path,
+                    {"UPDATE-REPORT.md": report_content, "GATE-REPORT.md": gate_content},
+                    project_name=project_name,
+                )
+                package_stage.status = "ok"
+            except (OSError, ValueError) as exc:
+                package_stage.status = "fail"
+                package_stage.detail = f"package failed: {exc}"
+        elif not zip_path:
+            package_stage.status = "skip"
+            package_stage.detail = "no zip requested"
+        else:
+            package_stage.status = "fail"
+            package_stage.detail = "package not attempted because report generation failed"
 
         manifest = {
             "number": number,
@@ -1387,8 +1401,14 @@ class UpdateManager:
             },
         }
         result.manifest_path = os.path.join(dest, "manifest.json")
-        with open(result.manifest_path, "w", encoding="utf-8") as fh:
-            json.dump(manifest, fh, indent=2)
+        try:
+            with open(result.manifest_path, "w", encoding="utf-8") as fh:
+                json.dump(manifest, fh, indent=2)
+            manifest_stage.status = "ok"
+        except OSError as exc:
+            manifest_stage.status = "fail"
+            manifest_stage.detail = f"manifest write failed: {exc}"
+        result.stages = stages
 
         if not passed and not keep_failed:
             shutil.rmtree(dest)

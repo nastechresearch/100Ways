@@ -23,7 +23,7 @@ status     Show repo state and rules validation.
 verify     Parity gate vs the birth commit (exit 1 on fail).
 ship       Verify parity then prepare the sync branch for shipping.
 report     Write a markdown gap report to config/reports.
-dashboard  Serve the live web dashboard (admin = Nastech@Pass or its compiled token).
+dashboard  Serve the live web dashboard (write access requires HUNDREDWAYS_ADMIN_TOKEN).
 pull       Fetch upstream + write report + record achievement.
 achievements  List achievements and unlock state.
 readme     Regenerate README.md from the ways + achievements + owned-asset registries.
@@ -52,7 +52,7 @@ from .release import release_check_table, release_summary, release_verify_incomi
 from .research import research as run_research
 from .rules import BrandingRules
 from .scanner import classify_path
-from .security import DEFAULT_ADMIN_PASS, compile_token, verify_token
+from .security import verify_token
 from .updates import DEFAULT_HERMES_URL, UpdateManager, default_updates_dir
 from .verify import _git, _git_ok, verify_rebrand
 from .watcher import Watcher, WatcherConfig
@@ -341,16 +341,13 @@ class Cli:
         print("RELEASE: code table verified, incoming codes clean")
 
     def cmd_admin(self) -> None:
-        """Show/verify the admin password and its compiled system token."""
-        passphrase = self.args.password or DEFAULT_ADMIN_PASS
-        compiled = compile_token(passphrase)
-        print(f"password    : {passphrase}")
-        print(f"compiled    : {compiled}   <- system-only token, store this")
+        """Verify an operator-provided dashboard bearer token without echoing it."""
+        configured = self.args.token or os.getenv("HUNDREDWAYS_ADMIN_TOKEN", "")
         if self.args.verify:
-            ok = verify_token(self.args.verify, self.args.token or compiled)
-            print(f"verify {self.args.verify!r} against {self.args.token or '(self)'}: "
-                  f"{'GRANTED' if ok else 'DENIED'}")
+            ok = verify_token(self.args.verify, configured)
+            print(f"verify: {'GRANTED' if ok else 'DENIED'}")
             sys.exit(0 if ok else 1)
+        print("Admin authentication uses HUNDREDWAYS_ADMIN_TOKEN; no credential is generated or displayed.")
 
     def cmd_ways(self) -> None:
         registry = build_registry()
@@ -604,7 +601,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func="cmd_release")
 
     p = sub.add_parser("admin", help="compile/verify the admin password into its system token")
-    p.add_argument("--password", default="", help="password to compile (default: Nastech@Pass)")
+    p.add_argument("--password", default="", help="deprecated; ignored (use HUNDREDWAYS_ADMIN_TOKEN)")
     p.add_argument("--token", default="", help="stored compiled token to verify against")
     p.add_argument("--verify", default="", help="a candidate to check for access")
     p.set_defaults(func="cmd_admin")

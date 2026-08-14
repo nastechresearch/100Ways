@@ -67,7 +67,17 @@ jobs:
           EOF
           # tree/ = nastech-agent/ + UPDATE-REPORT.md + GATE-REPORT.md (zip root)
 
+      # Pull requests from forks do not receive repository secrets.  The
+      # cross-repository PAT is therefore unavailable (or intentionally
+      # invalid) in this validation context.  Keep the CI stage green and
+      # reserve the write operation for trusted push, schedule, and manual
+      # runs where the secret is available.
+      - name: Skip cross-repository update for fork pull requests
+        if: github.event_name == 'pull_request'
+        run: echo "Skipping cross-repository update for fork pull request; repository secrets are unavailable."
+
       - name: Commit branded tree to fork test branch
+        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.NAS_TECH_AGENT_TOKEN }}
         run: |
