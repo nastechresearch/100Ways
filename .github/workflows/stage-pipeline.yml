@@ -37,7 +37,8 @@ jobs:
     outputs:
       update_number: ${{ steps.update.outputs.update_number }}
       upstream_sha: ${{ steps.update.outputs.upstream_sha }}
-      gate: ${{ steps.update.outputs.gate }}
+      gate: ${{ steps.weekly.outputs.hard_gate }}
+      decision: ${{ steps.weekly.outputs.decision }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
 
@@ -59,12 +60,13 @@ jobs:
           HUNDREDWAYS_HERMES_URL: ${{ inputs.hermes_url }}
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
           HUNDREDWAYS_OUTPUTS: ${{ runner.temp }}/update-outputs.json
+          HUNDREDWAYS_ZIP: ${{ runner.temp }}/nastech-agent-update.zip
         run: |
           python3 -m hundredways.cli --repo nastech-agent update \
             --updates-dir "$HUNDREDWAYS_UPDATES_DIR" \
             --hermes-url "$HUNDREDWAYS_HERMES_URL" \
             --fork-root nastech-agent \
-            --zip "${{ runner.temp }}/nastech-agent-update.zip" \
+            --zip "$HUNDREDWAYS_ZIP" \
             --project-name "${{ inputs.project_name }}" \
             --emit-outputs "$HUNDREDWAYS_OUTPUTS"
           python3 - <<'EOF'
@@ -72,9 +74,82 @@ jobs:
           with open(os.environ["HUNDREDWAYS_OUTPUTS"]) as fh:
               out = json.load(fh)
           with open(os.environ["GITHUB_OUTPUT"], "a") as gh:
-              for key in ("update_number", "upstream_sha", "gate"):
+              for key in ("update_number", "upstream_sha"):
                   gh.write(f"{key}={out.get(key, '')}\n")
           EOF
+
+      - name: Run hardened weekly decision gate
+        id: weekly
+        env:
+          HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
+          HUNDREDWAYS_STATE_DIR: ${{ runner.temp }}/100ways-state
+          HUNDREDWAYS_WEEKLY_REPORT: ${{ runner.temp }}/weekly-full-sync-report.md
+          HUNDREDWAYS_DECISION: ${{ runner.temp }}/weekly-decision.json
+        run: |
+          set -euo pipefail
+          SNAPSHOT=$(find "$HUNDREDWAYS_UPDATES_DIR" -maxdepth 1 -type d -name 'Nastech-Update#*' | sort -V | tail -1)
+          test -n "$SNAPSHOT"
+          python3 - <<'PYEOF'
+          import json
+          import os
+          from hundredways.weekly_sync import build_weekly_report, write_weekly_report
+
+          updates = os.environ["HUNDREDWAYS_UPDATES_DIR"]
+          candidates = sorted(
+              (name for name in os.listdir(updates) if name.startswith("Nastech-Update#")),
+              key=lambda value: int(value.rsplit("#", 1)[-1]),
+          )
+          snapshot = os.path.join(updates, candidates[-1])
+          report = build_weekly_report(
+              os.path.join(updates, "hermes-agent"),
+              snapshot,
+              os.environ["HUNDREDWAYS_STATE_DIR"],
+              mode="snapshot",
+          )
+          write_weekly_report(os.environ["HUNDREDWAYS_WEEKLY_REPORT"], report)
+          with open(os.environ["HUNDREDWAYS_DECISION"], "w", encoding="utf-8") as fh:
+              json.dump(report.to_dict(), fh, indent=2)
+          if not report.gate_passes:
+              raise SystemExit("hard weekly full-sync gate failed")
+          PYEOF
+          DECISION=$(jq -r '.gate' "$HUNDREDWAYS_DECISION")
+          echo "hard_gate=PASS" >> "$GITHUB_OUTPUT"
+          echo "decision=$DECISION" >> "$GITHUB_OUTPUT"
+          echo "## Hardened weekly decision" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Hard gate: **PASS**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Decision: \`$DECISION\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Repackage the exact verified tree
+        env:
+          HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
+          HUNDREDWAYS_ZIP: ${{ runner.temp }}/nastech-agent-update.zip
+        run: |
+          set -euo pipefail
+          python3 - <<'PYEOF'
+          import os
+          import zipfile
+
+          updates = os.environ["HUNDREDWAYS_UPDATES_DIR"]
+          candidates = sorted(
+              (name for name in os.listdir(updates) if name.startswith("Nastech-Update#")),
+              key=lambda value: int(value.rsplit("#", 1)[-1]),
+          )
+          snapshot = os.path.join(updates, candidates[-1])
+          reports = {"UPDATE-REPORT.md", "GATE-REPORT.md"}
+          with zipfile.ZipFile(os.environ["HUNDREDWAYS_ZIP"], "w", zipfile.ZIP_DEFLATED) as archive:
+              for current, dirs, files in os.walk(snapshot):
+                  dirs[:] = [name for name in dirs if name != ".git"]
+                  for name in files:
+                      source = os.path.join(current, name)
+                      relative = os.path.relpath(source, snapshot)
+                      if relative in reports:
+                          continue
+                      archive.write(source, os.path.join("nastech-agent", relative))
+              for report in reports:
+                  source = os.path.join(snapshot, report)
+                  if os.path.isfile(source):
+                      archive.write(source, report)
+          PYEOF
 
       - name: Upload branded zip + reports
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -84,4 +159,6 @@ jobs:
             ${{ runner.temp }}/nastech-agent-update.zip
             ${{ runner.temp }}/Updates-Commits/*/UPDATE-REPORT.md
             ${{ runner.temp }}/Updates-Commits/*/GATE-REPORT.md
+            ${{ runner.temp }}/weekly-full-sync-report.md
+            ${{ runner.temp }}/weekly-decision.json
           if-no-files-found: error
