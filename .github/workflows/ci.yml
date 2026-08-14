@@ -2,7 +2,7 @@ name: CI
 
 # Orchestrator.  Runs the 100Ways validation in STAGES:
 #
-#   lint  -> tests  -> ways  -> rules  -> pipeline  -> forkcheck  -> update-pr  -> readme  -> upload
+#   lint  -> tests  -> ways  -> rules  -> pipeline  -> forkcheck  -> readme  -> upload  -> all-checks-pass  -> #344 Push PR to NasTech
 #
 # Each job ``needs`` the previous, so a failure stops the chain early and
 # the whole chain is re-triggered on every push / PR / schedule.  The
@@ -12,8 +12,8 @@ name: CI
 # ``pipeline`` brands the upstream tree and runs the 18-stage update pipeline
 # (including the fork-consistency diff against the real nastech-agent fork).
 # ``forkcheck`` then installs the branded zip, boots `nastech`, and runs the
-# fork's own test suite — so ``update-pr`` only pushes a PR that is already
-# proven to pass the fork's CI.
+# fork's own test suite.  Publication is deliberately deferred until every
+# remaining repository verification has completed; #344 is the final action.
 
 on:
   push:
@@ -52,18 +52,8 @@ jobs:
     with:
       slice_count: 4
 
-  update-pr:
-    needs: [forkcheck, pipeline]
-    permissions:
-      contents: read
-    uses: ./.github/workflows/stage-update-pr.yml
-    with:
-      upstream_sha: ${{ needs.pipeline.outputs.upstream_sha }}
-      gate: ${{ needs.pipeline.outputs.gate }}
-    secrets: inherit
-
   readme:
-    needs: update-pr
+    needs: forkcheck
     uses: ./.github/workflows/stage-readme.yml
 
   upload:
@@ -83,4 +73,15 @@ jobs:
     needs: upload
     runs-on: ubuntu-latest
     steps:
-      - run: echo "All 100Ways CI stages passed."
+      - run: echo "All 100Ways verification stages passed; #344 may now publish the candidate PR."
+
+  update-pr:
+    name: "#344 — Push PR to NasTech"
+    needs: [pipeline, forkcheck, all-checks-pass]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/stage-update-pr.yml
+    with:
+      upstream_sha: ${{ needs.pipeline.outputs.upstream_sha }}
+      gate: ${{ needs.pipeline.outputs.gate }}
+    secrets: inherit
