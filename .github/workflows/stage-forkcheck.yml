@@ -40,9 +40,18 @@ jobs:
           mkdir -p tree
           cd tree
           python3 - <<'EOF'
-          import zipfile
+          import os, stat, zipfile
           with zipfile.ZipFile("../artifact/nastech-agent-update.zip") as zf:
               zf.extractall(".")
+              # Python's zipfile.extractall drops exec bits, so restore every
+              # file's execute bits from the stored Unix mode (scripts/run_tests.sh
+              # and the parallel runner must stay executable for the test slices).
+              for info in zf.infolist():
+                  mode = info.external_attr >> 16
+                  if mode & 0o111:
+                      path = os.path.join(*info.filename.split("/"))
+                      if os.path.isfile(path):
+                          os.chmod(path, os.stat(path).st_mode | (mode & 0o111))
               top = sorted(set(n.split("/", 1)[0] for n in zf.namelist()))
           print("extracted:", top)
           EOF
@@ -78,9 +87,15 @@ jobs:
           mkdir -p tree
           cd tree
           python3 - <<'EOF'
-          import zipfile
+          import os, stat, zipfile
           with zipfile.ZipFile("../artifact/nastech-agent-update.zip") as zf:
               zf.extractall(".")
+              for info in zf.infolist():
+                  mode = info.external_attr >> 16
+                  if mode & 0o111:
+                      path = os.path.join(*info.filename.split("/"))
+                      if os.path.isfile(path):
+                          os.chmod(path, os.stat(path).st_mode | (mode & 0o111))
           EOF
 
       - name: Install ripgrep (prebuilt binary)
@@ -148,9 +163,15 @@ jobs:
           mkdir -p tree
           cd tree
           python3 - <<'EOF'
-          import zipfile
+          import os, stat, zipfile
           with zipfile.ZipFile("../artifact/nastech-agent-update.zip") as zf:
               zf.extractall(".")
+              for info in zf.infolist():
+                  mode = info.external_attr >> 16
+                  if mode & 0o111:
+                      path = os.path.join(*info.filename.split("/"))
+                      if os.path.isfile(path):
+                          os.chmod(path, os.stat(path).st_mode | (mode & 0o111))
           EOF
 
       - name: Install uv
