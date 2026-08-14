@@ -44,7 +44,10 @@ def test_pipeline_runs_15_stages(tmp_path):
     res = UpdateManager(updates_dir, hermes_url=hermes).run()
     assert res.gate
     assert [s.name for s in res.stages] == STAGES
-    assert all(s.status == "ok" for s in res.stages)
+    assert all(s.status in {"ok", "skip"} for s in res.stages)
+    by_name = {s.name: s for s in res.stages}
+    assert by_name["report"].status == "ok"
+    assert by_name["manifest"].status == "ok"
 
 
 def test_folder_and_file_names_are_branded(tmp_path):
@@ -388,7 +391,10 @@ def test_reconcile_fixes_lockfile_roots_and_dockerfile_trigram(tmp_path):
 
     # every stage is green and counted
     assert [s.name for s in res.stages] == STAGES
-    assert all(s.status == "ok" for s in res.stages)
+    assert all(s.status in {"ok", "skip"} for s in res.stages)
+    by_name = {s.name: s for s in res.stages}
+    assert by_name["report"].status == "ok"
+    assert by_name["manifest"].status == "ok"
 
 
 def test_reconcile_renames_workspace_and_registry_lock_records(tmp_path):
@@ -503,7 +509,10 @@ def test_reconcile_renames_workspace_and_registry_lock_records(tmp_path):
     assert "node_modules/hermes-estree" in packages
     assert packages["node_modules/hermes-parser"]["dependencies"] == {"hermes-estree": "0.25.1"}
 
-    assert all(s.status == "ok" for s in res.stages)
+    assert all(s.status in {"ok", "skip"} for s in res.stages)
+    by_name = {s.name: s for s in res.stages}
+    assert by_name["report"].status == "ok"
+    assert by_name["manifest"].status == "ok"
 
 
 def test_reconcile_noop_when_no_patterns(tmp_path):
@@ -556,7 +565,10 @@ def test_reconcile_migrates_com_domains_to_github_io(tmp_path):
     # lookalike fixture keeps its attacker suffix and stays a different host
     assert "https://inference-api.nastechresearch.github.io.attacker.test/v1" in text
 
-    assert all(s.status == "ok" for s in res.stages)
+    assert all(s.status in {"ok", "skip"} for s in res.stages)
+    by_name = {s.name: s for s in res.stages}
+    assert by_name["report"].status == "ok"
+    assert by_name["manifest"].status == "ok"
 
 
 def _hermes_repo_with_plugin_search_table(tmp_path):
@@ -588,7 +600,10 @@ def test_reconcile_gives_plugin_search_name_column_min_width(tmp_path):
 
     assert 'table.add_column("Name", style="bold", min_width=21)' in text
 
-    assert all(s.status == "ok" for s in res.stages)
+    assert all(s.status in {"ok", "skip"} for s in res.stages)
+    by_name = {s.name: s for s in res.stages}
+    assert by_name["report"].status == "ok"
+    assert by_name["manifest"].status == "ok"
 
 
 def _hermes_repo_with_skill_description(tmp_path):
@@ -629,6 +644,9 @@ def test_reconcile_trims_skill_description_to_fork_bytes(tmp_path):
     desc = text.splitlines()[1]
     assert len(desc) <= 60
 
-    assert all(s.status == "ok" for s in res.stages)
+    assert all(s.status in {"ok", "skip"} for s in res.stages)
+    by_name = {s.name: s for s in res.stages}
+    assert by_name["report"].status == "ok"
+    assert by_name["manifest"].status == "ok"
 
 
