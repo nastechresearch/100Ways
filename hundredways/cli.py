@@ -53,7 +53,8 @@ from .research import research as run_research
 from .rules import BrandingRules
 from .scanner import classify_path
 from .security import verify_token
-from .updates import DEFAULT_HERMES_URL, UpdateManager, default_updates_dir
+from .updates import DEFAULT_HERMES_URL, UpdateManager, default_updates_dir, hermes_path
+from .weekly_sync import build_weekly_report, save_ledger, write_weekly_report
 from .verify import _git, _git_ok, verify_rebrand
 from .watcher import Watcher, WatcherConfig
 from .ways import build_registry
@@ -470,6 +471,56 @@ class Cli:
             print("GATE FAILED - snapshot kept for inspection", file=sys.stderr)
             sys.exit(1)
 
+    def cmd_weekly_full_sync(self) -> None:
+        """Run or audit a complete weekly branded snapshot; never push or merge."""
+        updates_dir = self.args.updates_dir or default_updates_dir(self.repo)
+        branded_root = self.args.branded_root or self.repo
+        upstream_repo = self.args.hermes_repo or hermes_path(updates_dir)
+
+        if self.args.mode == "snapshot":
+            owned = OwnedAssets(repo=self.repo)
+            mgr = UpdateManager(
+                updates_dir,
+                hermes_url=self.args.hermes_url,
+                rules=self.rules,
+                owned=owned,
+                ai=AIEngine(),
+                fork_root=self.args.fork_root or self.repo,
+            )
+            snapshot = mgr.run(project_name=self.args.project_name)
+            if not snapshot.gate:
+                print("weekly snapshot failed the 100Ways file-parity gate", file=sys.stderr)
+                sys.exit(1)
+            branded_root = snapshot.dir
+            upstream_repo = hermes_path(updates_dir)
+
+        if not os.path.isdir(upstream_repo):
+            print(f"Hermes checkout not found: {upstream_repo}", file=sys.stderr)
+            sys.exit(2)
+        if not os.path.isdir(branded_root):
+            print(f"Branded tree not found: {branded_root}", file=sys.stderr)
+            sys.exit(2)
+
+        report = build_weekly_report(
+            upstream_repo,
+            branded_root,
+            self.args.state_dir,
+            mode=self.args.mode,
+            ref=self.args.upstream_ref,
+        )
+        report_path = self.args.report or os.path.join(self.args.state_dir, "weekly-full-sync-report.md")
+        write_weekly_report(report_path, report)
+        print(json.dumps(report.to_dict(), indent=2))
+        print(f"report: {report_path}")
+
+        if report.gate_passes and self.args.record:
+            path = save_ledger(self.args.state_dir, report)
+            print(f"ledger: {path}")
+        elif not report.gate_passes:
+            print("weekly full-sync gate failed; no ledger update or publication", file=sys.stderr)
+            if self.args.require_pass:
+                sys.exit(1)
+
     def cmd_forkcheck(self) -> None:
         """Diff the branded snapshot against the nastech-agent fork checkout."""
         from .forkcheck import fork_consistency
@@ -619,6 +670,22 @@ def build_parser() -> argparse.ArgumentParser:
                    help="write JSON {update_number, upstream_sha, gate} to this file "
                         "(CI emits these into $GITHUB_OUTPUT)")
     p.set_defaults(func="cmd_update")
+
+    p = sub.add_parser("weekly-full-sync", help="weekly complete rebrand audit or snapshot; never pushes or merges")
+    p.add_argument("--mode", choices=["report", "snapshot"], default="report",
+                   help="report audits an existing branded tree; snapshot runs the full 100Ways update first")
+    p.add_argument("--updates-dir", default="", help="Updates-Commits dir used for snapshot mode")
+    p.add_argument("--hermes-url", default=DEFAULT_HERMES_URL, help="Hermes remote or local path for snapshot mode")
+    p.add_argument("--hermes-repo", default="", help="existing Hermes checkout for report mode")
+    p.add_argument("--upstream-ref", default="origin/main", help="upstream ref to fetch and verify")
+    p.add_argument("--branded-root", default="", help="existing branded tree for report mode; default: --repo")
+    p.add_argument("--fork-root", default="", help="NasTech fork root preserved during snapshot mode")
+    p.add_argument("--project-name", default="nastech-agent", help="snapshot project name")
+    p.add_argument("--state-dir", default="", help="state directory for the upstream ledger and reports")
+    p.add_argument("--report", default="", help="output markdown report path")
+    p.add_argument("--record", action="store_true", help="record a passing report in the upstream ledger")
+    p.add_argument("--require-pass", action="store_true", help="exit nonzero when any weekly gate fails")
+    p.set_defaults(func="cmd_weekly_full_sync")
 
     p = sub.add_parser("forkcheck", help="diff the branded snapshot against the nastech-agent fork")
     p.add_argument("--branded", default="", help="branded snapshot dir (default: latest Nastech-Update#N)")
