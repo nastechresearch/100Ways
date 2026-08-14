@@ -64,7 +64,8 @@ def _dhash(path: Path) -> int | None:
     try:
         with Image.open(path) as image:
             gray = ImageOps.grayscale(image.convert("RGBA")).resize((9, 8))
-            pixels = list(gray.get_flattened_data())
+            flattened = getattr(gray, "get_flattened_data", None)
+            pixels = list(flattened() if flattened is not None else gray.getdata())
     except Exception:
         return None
     result = 0
