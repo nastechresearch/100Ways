@@ -52,7 +52,15 @@ jobs:
                       path = os.path.join(*info.filename.split("/"))
                       if os.path.isfile(path):
                           os.chmod(path, os.stat(path).st_mode | (mode & 0o111))
+              # The zip carries no .git (it is a fresh clone of the branded tree),
+              # but update-path tests (test_cmd_update, test_update_yes_flag, ...)
+              # and `nastech update` check PROJECT_ROOT/.git exists before
+              # running.  An empty .git dir satisfies the existence gate; git
+              # subprocess calls are mocked in those tests.  Mirror the fork's
+              # real git checkout so the same tests pass here.
               top = sorted(set(n.split("/", 1)[0] for n in zf.namelist()))
+              if top:
+                  os.makedirs(os.path.join(top[0], ".git"), exist_ok=True)
           print("extracted:", top)
           EOF
 
@@ -96,6 +104,9 @@ jobs:
                       path = os.path.join(*info.filename.split("/"))
                       if os.path.isfile(path):
                           os.chmod(path, os.stat(path).st_mode | (mode & 0o111))
+              top = sorted(set(n.split("/", 1)[0] for n in zf.namelist()))
+              if top:
+                  os.makedirs(os.path.join(top[0], ".git"), exist_ok=True)
           EOF
 
       - name: Install ripgrep (prebuilt binary)
@@ -172,6 +183,9 @@ jobs:
                       path = os.path.join(*info.filename.split("/"))
                       if os.path.isfile(path):
                           os.chmod(path, os.stat(path).st_mode | (mode & 0o111))
+              top = sorted(set(n.split("/", 1)[0] for n in zf.namelist()))
+              if top:
+                  os.makedirs(os.path.join(top[0], ".git"), exist_ok=True)
           EOF
 
       - name: Install uv

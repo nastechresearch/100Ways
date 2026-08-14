@@ -557,3 +557,78 @@ def test_reconcile_migrates_com_domains_to_github_io(tmp_path):
     assert "https://inference-api.nastechresearch.github.io.attacker.test/v1" in text
 
     assert all(s.status == "ok" for s in res.stages)
+
+
+def _hermes_repo_with_plugin_search_table(tmp_path):
+    """A fake hermes repo whose plugins_cmd builds a Name column without a
+    min_width — the pattern that truncates branded plugin names at 80 cols."""
+    hermes = _hermes_repo(tmp_path)
+    import pathlib
+    hermes_path = pathlib.Path(hermes)
+    (hermes_path / "hermes_cli" / "plugins_cmd.py").write_text(
+        'def cmd_search(term):\n'
+        '    table = Table(title="Community plugins")\n'
+        '    table.add_column("Name", style="bold")\n'
+        '    table.add_column("Description")\n'
+    )
+    subprocess.run(["git", "-C", hermes, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", hermes, "commit", "-q", "-m", "add plugin search table"], check=True)
+    return hermes
+
+
+def test_reconcile_gives_plugin_search_name_column_min_width(tmp_path):
+    hermes = _hermes_repo_with_plugin_search_table(tmp_path)
+    updates_dir = str(tmp_path / "Updates-Commits")
+    res = UpdateManager(updates_dir, hermes_url=hermes).run()
+    assert res.gate, f"gate FAILED: {[s for s in res.stages if s.status == 'fail']}"
+    assert "nastech_cli/plugins_cmd.py" in res.reconcile.fixed
+
+    with open(os.path.join(res.dir, "nastech_cli", "plugins_cmd.py"), encoding="utf-8") as fh:
+        text = fh.read()
+
+    assert 'table.add_column("Name", style="bold", min_width=21)' in text
+
+    assert all(s.status == "ok" for s in res.stages)
+
+
+def _hermes_repo_with_skill_description(tmp_path):
+    """A fake hermes repo whose bundled skill description is exactly 60 chars
+    — branding Hermes->Nastech pushes it to 61 and trips the fork's hardline."""
+    hermes = _hermes_repo(tmp_path)
+    import pathlib
+    hermes_path = pathlib.Path(hermes)
+    skill = hermes_path / "skills" / "autonomous-ai-agents" / "hermes-agent"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        '---\n'
+        'name: hermes-agent\n'
+        'description: "Use, configure, theme, extend, and orchestrate Hermes Agent."\n'
+        'version: 1.0.0\n'
+        '---\n'
+    )
+    subprocess.run(["git", "-C", hermes, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", hermes, "commit", "-q", "-m", "add skill"], check=True)
+    return hermes
+
+
+def test_reconcile_trims_skill_description_to_fork_bytes(tmp_path):
+    hermes = _hermes_repo_with_skill_description(tmp_path)
+    updates_dir = str(tmp_path / "Updates-Commits")
+    res = UpdateManager(updates_dir, hermes_url=hermes).run()
+    assert res.gate, f"gate FAILED: {[s for s in res.stages if s.status == 'fail']}"
+    assert "skills/autonomous-ai-agents/nastech-agent/SKILL.md" in res.reconcile.fixed
+
+    path = os.path.join(res.dir, "skills", "autonomous-ai-agents", "nastech-agent", "SKILL.md")
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+
+    assert (
+        'description: "Configure, theme, extend, and orchestrate Nastech Agent."'
+        in text
+    )
+    desc = text.splitlines()[1]
+    assert len(desc) <= 60
+
+    assert all(s.status == "ok" for s in res.stages)
+
+

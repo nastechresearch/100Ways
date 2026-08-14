@@ -96,3 +96,49 @@ def test_girl_mascot_renames_to_bantu():
     out = rules.transform_text("the nous-girl mascot")
     assert "nastech-bantu" in out
     assert "nous-girl" not in out
+
+
+def test_escape_prefixed_tokens_are_branded():
+    """A token following an escape sequence must still be branded: `\bhermes`
+    is a regex word-boundary + the token, `\xfehermes` is a hex byte + the
+    token, `\nhermes` / `\r\nhermes` are line escapes + the token.  The
+    escape's trailing letter (`b`, `e`, `n`) is not a word-adjacency blocker.
+    """
+    rules = BrandingRules()
+    cases = {
+        r"\bhermes": r"\bnastech",
+        r"\bhermes\b": r"\bnastech\b",
+        r"\nhermes": r"\nnastech",
+        r"\r\nhermes": r"\r\nnastech",
+        r"\xfehermes": r"\xfenastech",
+        r"\x7fhermes": r"\x7fnastech",
+        r"\xefhermes": r"\xefnastech",
+        r"\u00e9hermes": r"\u00e9nastech",
+        r"\u00cahermes": r"\u00canastech",
+        r"\U0001f600hermes": r"\U0001f600nastech",
+        r"\U0001f60ahermes": r"\U0001f60anastech",
+        r"launchctl\s+...\bhermes[.\-]?gateway": r"launchctl\s+...\bnastech[.\-]?gateway",
+        r"(r'\bhermes\s+update\b', 'update (restarts gateway)')":
+            r"(r'\bnastech\s+update\b', 'update (restarts gateway)')",
+    }
+    for before, after in cases.items():
+        got = rules.transform_text(before)
+        assert got == after, (before, got, after)
+
+
+def test_real_english_words_still_protected_after_escapes():
+    """The escape exception must not open a hole for real words: a lowercase
+    letter that is genuinely adjacent (not escape-prefixed) still blocks."""
+    rules = BrandingRules()
+    text = (
+        r"nhermes venous xhermes autonomous "
+        r"\nhermes_nous "
+        r"not\hermes"
+    )
+    out = rules.transform_text(text)
+    assert "nhermes" in out
+    assert "venous" in out
+    assert "xhermes" in out
+    assert "autonomous" in out
+    assert r"\nnastech_nastech" in out
+    assert r"not\nastech" in out

@@ -641,6 +641,121 @@ def _reconcile_fts5_trigram(dst: str) -> int:
     return 0
 
 
+def _reconcile_hermez_obfuscation(dst: str) -> int:
+    """Rewrite the ``Hermez`` obfuscation in the lifecycle-guard test.
+
+    Upstream's ``test_gateway_restart_loop.py`` builds a mixed-case fixture
+    at runtime: ``"Hermez Gateway Restart".lower().replace("z", "s")``
+    evaluates to ``hermes gateway restart``.  The fork's birth commit
+    removed that trick and hardcoded ``"nAsTeCh GaTeWaY ReStArT"`` (mixed
+    case that the IGNORECASE regex still catches).  Token branding cannot
+    express the swap (``Hermez`` is not a token), so the branded tree still
+    ships the ``hermes``-producing expression and the fork's CI assertion
+    fails on it.  Reconcile replaces the expression with the fork's exact
+    bytes (comment alignment included) so the test evaluates the branded
+    name instead.
+    """
+    if not os.path.isdir(dst):
+        return 0
+    for rel in _walk_files(dst):
+        if os.path.basename(rel) != "test_gateway_restart_loop.py":
+            continue
+        if not rel.endswith(".py"):
+            continue
+        path = os.path.join(dst, rel)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        needle = '"Hermez Gateway Restart".lower().replace("z", "s")'
+        if needle not in text:
+            continue
+        replacement = '        "nAsTeCh GaTeWaY ReStArT",                            # case handled'
+        new_text = text.replace(
+            '        "Hermez Gateway Restart".lower().replace("z", "s"),  # case handled',
+            replacement,
+        )
+        if new_text != text:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(new_text)
+            return 1
+    return 0
+
+
+def _reconcile_plugin_search_table(dst: str) -> int:
+    """Widen the ``cmd_search`` Name column so branded names render fully.
+
+    Upstream's ``plugins_cmd.cmd_search`` builds a rich ``Table`` whose
+    Name column is sized by content.  At the fork CI's 80 columns the
+    branded ``nastech-media-studio`` (20 chars) is one character longer
+    than upstream's ``hermes-media-studio`` (19), which pushes the column
+    over the edge and rich truncates it to ``nastech-media-stud…`` — so
+    the fork's ``test_plugin_index_search.py`` assertion that the full
+    name appears in the search output fails on the branded tree while
+    passing upstream.  Give the Name column a ``min_width`` so branded
+    names render exactly as upstream's do.
+    """
+    if not os.path.isdir(dst):
+        return 0
+    for rel in _walk_files(dst):
+        if rel not in ("nastech_cli/plugins_cmd.py", "hermes_cli/plugins_cmd.py"):
+            continue
+        path = os.path.join(dst, rel)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        needle = 'table.add_column("Name", style="bold")'
+        if needle not in text:
+            continue
+        new_text = text.replace(
+            needle,
+            'table.add_column("Name", style="bold", min_width=21)',
+        )
+        if new_text != text:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(new_text)
+            return 1
+    return 0
+
+
+def _reconcile_skill_description_hardline(dst: str) -> int:
+    """Trim the bundled ``nastech-agent`` skill description to the fork's.
+
+    Upstream's description (``"Use, configure, theme, extend, and
+    orchestrate Hermes Agent."``) is exactly 60 characters — the fork's
+    authoring-standards hardline.  Token branding of ``Hermes`` ->
+    ``Nastech`` adds one character, pushing the branded description to 61
+    and failing the fork's ``test_authoring_standards.py``
+    ``test_description_hardline``.  The fork trimmed the leading ``Use, ``
+    to keep its own copy at 56; reconcile applies the same trim so the
+    branded tree matches the fork's bytes.
+    """
+    if not os.path.isdir(dst):
+        return 0
+    rel = "skills/autonomous-ai-agents/nastech-agent/SKILL.md"
+    path = os.path.join(dst, rel)
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return 0
+    needle = 'description: "Use, configure, theme, extend, and orchestrate Nastech Agent."'
+    if needle not in text:
+        return 0
+    new_text = text.replace(
+        needle,
+        'description: "Configure, theme, extend, and orchestrate Nastech Agent."',
+    )
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(new_text)
+    return 1
+
+
 def reconcile_tree(dst: str) -> ReconcileResult:
     """Apply known post-brand fixes to the branded tree in place.
 
@@ -660,6 +775,15 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_fts5_trigram(dst):
         result.total += 1
         result.fixed.append("Dockerfile")
+    if _reconcile_hermez_obfuscation(dst):
+        result.total += 1
+        result.fixed.append("tests/nastech_cli/test_gateway_restart_loop.py")
+    if _reconcile_plugin_search_table(dst):
+        result.total += 1
+        result.fixed.append("nastech_cli/plugins_cmd.py")
+    if _reconcile_skill_description_hardline(dst):
+        result.total += 1
+        result.fixed.append("skills/autonomous-ai-agents/nastech-agent/SKILL.md")
     for rel in _reconcile_domains(dst):
         result.total += 1
         result.fixed.append(rel)

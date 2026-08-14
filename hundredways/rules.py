@@ -32,12 +32,23 @@ class TokenRule:
     anchored: bool = False
 
 
-# A regex for "not adjacent to a letter" boundary.
-_LOWER_BEFORE = r"(?<![a-z])"
+# A regex for "not adjacent to a letter" boundary.  The BEFORE guards must
+# not treat the trailing letter of an escape sequence (`\n`, `\b`, `\xfe`,
+# `\u00NN`, `\U0000NNNN`) as a word-adjacent letter: `\bhermes` is a regex
+# word-boundary + the token, and `\xfehermes` is a hex byte + the token, not
+# the token embedded inside an English word.  So a letter only counts as an
+# adjacency blocker when it is NOT itself escape-prefixed.
+_ESCAPE_LETTER = (
+    r"(?<!\\)"               # not `\n`/`\b`/`\r`/... (single-char escapes)
+    r"(?<!\\x[0-9a-fA-F])"   # not `\xNN` hex-escape tail (e.g. `\xfe`)
+    r"(?<!\\u[0-9a-fA-F]{3})"  # not `\uNNNN`
+    r"(?<!\\U[0-9a-fA-F]{7})"  # not `\UNNNNNNNN`
+)
+_LOWER_BEFORE = r"(?<!" + _ESCAPE_LETTER + r"[a-z])"
 _LOWER_AFTER = r"(?![a-z])"
-_UPPER_BEFORE = r"(?<![A-Z])"
+_UPPER_BEFORE = r"(?<!" + _ESCAPE_LETTER + r"[A-Z])"
 _UPPER_AFTER = r"(?![A-Z])"
-_ANY_BEFORE = r"(?<![A-Za-z])"
+_ANY_BEFORE = r"(?<!" + _ESCAPE_LETTER + r"[A-Za-z])"
 _ANY_AFTER = r"(?![A-Za-z])"
 
 
