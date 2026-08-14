@@ -300,10 +300,11 @@ def build_weekly_report(
     report.ci_issues = audit_workflow_security(branded_root)
     report.freshness_ok = fetch_upstream(upstream_repo, ref) == current
     if captured and captured != current:
-        report.brand_issues.append(AuditIssue(
-            "snapshot-stale",
+        report.ci_issues.append(WorkflowPolicyIssue(
+            "upstream-advanced",
             "manifest.json",
-            f"snapshot captured {captured}; current upstream is {current}",
+            f"snapshot captured {captured}; a newer upstream head {current} is available for the next sync",
+            "review",
         ))
     return report
 

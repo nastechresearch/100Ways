@@ -105,3 +105,20 @@ def test_review_only_ci_issue_does_not_block_candidate_gate():
     assert report.gate_passes is True
     assert report.review_required is True
     assert report.to_dict()["gate"] == "REVIEW"
+
+
+def test_upstream_advance_is_review_evidence_not_a_hard_failure():
+    from hundredways.ci_policy import WorkflowPolicyIssue
+    from hundredways.weekly_sync import WeeklyFullSyncReport
+
+    report = WeeklyFullSyncReport("captured", "", 0, 0, 0, 0, freshness_ok=True)
+    report.ci_issues = [WorkflowPolicyIssue(
+        "upstream-advanced",
+        "manifest.json",
+        "a newer upstream head is available for the next sync",
+        "review",
+    )]
+
+    assert report.gate_passes is True
+    assert report.review_required is True
+    assert report.to_dict()["gate"] == "REVIEW"
