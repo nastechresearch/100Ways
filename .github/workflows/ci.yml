@@ -2,12 +2,18 @@ name: CI
 
 # Orchestrator.  Runs the 100Ways validation in STAGES:
 #
-#   lint    -> tests  -> ways  -> rules  -> pipeline  -> update-pr  -> readme  -> upload
+#   lint  -> tests  -> ways  -> rules  -> pipeline  -> forkcheck  -> update-pr  -> readme  -> upload
 #
 # Each job ``needs`` the previous, so a failure stops the chain early and
 # the whole chain is re-triggered on every push / PR / schedule.  The
 # release workflow (release-update.yml) reuses the same stage workflows and
 # adds the GitHub release step on top.
+#
+# ``pipeline`` brands the upstream tree and runs the 18-stage update pipeline
+# (including the fork-consistency diff against the real nastech-agent fork).
+# ``forkcheck`` then installs the branded zip, boots `nastech`, and runs the
+# fork's own test suite — so ``update-pr`` only pushes a PR that is already
+# proven to pass the fork's CI.
 
 on:
   push:
@@ -40,8 +46,14 @@ jobs:
     needs: rules
     uses: ./.github/workflows/stage-pipeline.yml
 
-  update-pr:
+  forkcheck:
     needs: pipeline
+    uses: ./.github/workflows/stage-forkcheck.yml
+    with:
+      slice_count: 4
+
+  update-pr:
+    needs: forkcheck
     permissions:
       contents: read
     uses: ./.github/workflows/stage-update-pr.yml

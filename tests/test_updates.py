@@ -130,11 +130,13 @@ def test_cli_emit_outputs_writes_github_outputs(tmp_path):
     hermes = _hermes_repo(tmp_path)
     updates_dir = str(tmp_path / "Updates-Commits")
     out_path = str(tmp_path / "outputs.json")
+    repo = tmp_path / "fork"  # empty checkout: owned-assets + forkcheck no-op
+    repo.mkdir()
     env = dict(os.environ)
     env.pop("OLLAMA_API_KEY", None)
     env.pop("SYNCBRIDGE_AI_MODEL", None)
     subprocess.run(
-        [sys.executable, "-m", "hundredways.cli", "update",
+        [sys.executable, "-m", "hundredways.cli", "--repo", str(repo), "update",
          "--updates-dir", updates_dir,
          "--hermes-url", hermes,
          "--zip", str(tmp_path / "release.zip"),
@@ -389,9 +391,169 @@ def test_reconcile_fixes_lockfile_roots_and_dockerfile_trigram(tmp_path):
     assert all(s.status == "ok" for s in res.stages)
 
 
+def test_reconcile_renames_workspace_and_registry_lock_records(tmp_path):
+    """package-lock.json workspace/symlink/registry records follow branding.
+
+    The lock is a LOCKED file (byte-copied from upstream), so branding
+    leaves workspace names like ``@hermes/shared``, symlink keys like
+    ``node_modules/hermes-tui`` and the republished ``@nous-research/ui``
+    record intact - and npm ci then fails with "Missing ... from lock file"
+    for every renamed workspace.  Reconcile must rename all of them by exact
+    match while leaving real registry packages (``hermes-parser``,
+    ``hermes-estree``) untouched.
+    """
+    hermes = _hermes_repo(tmp_path)
+    import pathlib
+    hermes_path = pathlib.Path(hermes)
+
+    def _mkdir(p):
+        (hermes_path / p).mkdir(parents=True, exist_ok=True)
+
+    workspaces = [
+        ("apps/bootstrap-installer", "package.json", '{"name": "@hermes/bootstrap-installer", "version": "0.0.1"}'),
+        ("apps/desktop", "package.json", '{"name": "hermes", "version": "0.17.0"}'),
+        ("apps/shared", "package.json", '{"name": "@hermes/shared", "version": "0.0.0"}'),
+        ("tests-js", "package.json", '{"name": "@hermes/root-tests", "version": "0.0.1"}'),
+        ("ui-tui", "package.json", '{"name": "hermes-tui", "version": "0.0.1"}'),
+        ("ui-tui/packages/hermes-ink", "package.json", '{"name": "@hermes/ink", "version": "0.0.1"}'),
+        ("web", "package.json", '{"name": "web", "version": "0.0.0"}'),
+    ]
+    for dirpath, fname, content in workspaces:
+        _mkdir(dirpath)
+        (hermes_path / dirpath / fname).write_text(content)
+
+    (hermes_path / "package.json").write_text(
+        '{"name": "hermes-agent", "version": "1.0.0", "workspaces": ['
+        '"apps/*", "ui-tui", "ui-tui/packages/*", "web", "tests-js"]}'
+    )
+    lock = {
+        "name": "hermes-agent",
+        "version": "1.0.0",
+        "lockfileVersion": 3,
+        "packages": {
+            "": {"name": "hermes-agent", "version": "1.0.0", "workspaces": ["apps/*", "ui-tui", "ui-tui/packages/*", "web", "tests-js"]},
+            "apps/bootstrap-installer": {"name": "@hermes/bootstrap-installer", "version": "0.0.1", "dependencies": {"@nous-research/ui": "0.18.2"}},
+            "apps/desktop": {"name": "hermes", "version": "0.17.0", "dependencies": {"@hermes/shared": "file:../shared", "@nous-research/ui": "0.18.2"}},
+            "apps/shared": {"name": "@hermes/shared", "version": "0.0.0"},
+            "tests-js": {"name": "@hermes/root-tests", "version": "0.0.1"},
+            "ui-tui": {"name": "hermes-tui", "version": "0.0.1", "dependencies": {"@hermes/ink": "file:./packages/hermes-ink", "@hermes/shared": "file:../apps/shared"}},
+            "ui-tui/packages/hermes-ink": {"name": "@hermes/ink", "version": "0.0.1"},
+            "web": {"name": "web", "version": "0.0.0", "dependencies": {"@hermes/shared": "file:../apps/shared", "@nous-research/ui": "0.18.2"}},
+            "node_modules/@hermes/bootstrap-installer": {"resolved": "apps/bootstrap-installer", "link": True},
+            "node_modules/@hermes/ink": {"resolved": "ui-tui/packages/hermes-ink", "link": True},
+            "node_modules/@hermes/root-tests": {"resolved": "tests-js", "link": True},
+            "node_modules/@hermes/shared": {"resolved": "apps/shared", "link": True},
+            "node_modules/hermes": {"resolved": "apps/desktop", "link": True},
+            "node_modules/hermes-tui": {"resolved": "ui-tui", "link": True},
+            "node_modules/@nous-research/ui": {"version": "0.18.2", "resolved": "https://registry.npmjs.org/@nous-research/ui/-/ui-0.18.2.tgz", "integrity": "sha512-OLDUPSTREAM=="},
+            "node_modules/hermes-parser": {"version": "0.25.1", "resolved": "https://registry.npmjs.org/hermes-parser/-/hermes-parser-0.25.1.tgz", "integrity": "sha512-REALHERMES==A", "dependencies": {"hermes-estree": "0.25.1"}},
+            "node_modules/hermes-estree": {"version": "0.25.1", "resolved": "https://registry.npmjs.org/hermes-estree/-/hermes-estree-0.25.1.tgz", "integrity": "sha512-REALESTREE==B"},
+        },
+    }
+    (hermes_path / "package-lock.json").write_text(json.dumps(lock, indent=2))
+
+    subprocess.run(["git", "-C", hermes, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", hermes, "commit", "-q", "-m", "add npm workspaces"], check=True)
+
+    updates_dir = str(tmp_path / "Updates-Commits")
+    res = UpdateManager(updates_dir, hermes_url=hermes).run()
+    assert res.gate, f"gate FAILED: {[s for s in res.stages if s.status == 'fail']}"
+    assert "package-lock.json" in res.reconcile.fixed
+
+    with open(os.path.join(res.dir, "package-lock.json"), encoding="utf-8") as fh:
+        plock = json.load(fh)
+    packages = plock["packages"]
+    assert plock["name"] == "nastech-agent"
+    assert packages[""]["name"] == "nastech-agent"
+
+    # workspace records renamed by exact match
+    assert packages["apps/bootstrap-installer"]["name"] == "@nastech/bootstrap-installer"
+    assert packages["apps/desktop"]["name"] == "nastech"
+    assert packages["apps/shared"]["name"] == "@nastech/shared"
+    assert packages["tests-js"]["name"] == "@nastech/root-tests"
+    assert packages["ui-tui"]["name"] == "nastech-tui"
+    assert packages["ui-tui/packages/nastech-ink"]["name"] == "@nastech/ink"
+    assert "ui-tui/packages/hermes-ink" not in packages
+
+    # symlink keys renamed, resolved paths followed
+    assert "node_modules/@nastech/bootstrap-installer" in packages
+    assert "node_modules/@nastech/ink" in packages
+    assert "node_modules/@nastech/root-tests" in packages
+    assert "node_modules/@nastech/shared" in packages
+    assert "node_modules/nastech" in packages
+    assert "node_modules/nastech-tui" in packages
+    assert packages["node_modules/@nastech/ink"]["resolved"] == "ui-tui/packages/nastech-ink"
+
+    # dependency references renamed, including file: paths to the renamed dir
+    desktop = packages["apps/desktop"]["dependencies"]
+    assert desktop == {"@nastech/shared": "file:../shared", "@nastech-research/ui": "0.18.2"}
+    tui = packages["ui-tui"]["dependencies"]
+    assert tui == {"@nastech/ink": "file:./packages/nastech-ink", "@nastech/shared": "file:../apps/shared"}
+
+    # registry record republished by the fork: key + tarball + integrity
+    ui = packages.get("node_modules/@nastech-research/ui")
+    assert ui is not None
+    assert "node_modules/@nous-research/ui" not in packages
+    assert ui["version"] == "0.18.2"
+    assert ui["resolved"] == "https://registry.npmjs.org/@nastech-research/ui/-/ui-0.18.2.tgz"
+    assert ui["integrity"].startswith("sha512-P7H8")
+
+    # real registry packages are never touched
+    assert "node_modules/hermes-parser" in packages
+    assert "node_modules/hermes-estree" in packages
+    assert packages["node_modules/hermes-parser"]["dependencies"] == {"hermes-estree": "0.25.1"}
+
+    assert all(s.status == "ok" for s in res.stages)
+
+
 def test_reconcile_noop_when_no_patterns(tmp_path):
     hermes = _hermes_repo(tmp_path)
     updates_dir = str(tmp_path / "Updates-Commits")
     res = UpdateManager(updates_dir, hermes_url=hermes).run()
     assert res.gate
     assert res.reconcile.fixed == []
+
+
+def _hermes_repo_with_domains(tmp_path):
+    """A fake hermes repo carrying .com domains that must migrate to github.io."""
+    hermes = _hermes_repo(tmp_path)
+    import pathlib
+    hermes_path = pathlib.Path(hermes)
+    (hermes_path / "README.md").write_text(
+        "# Hermes Agent\n"
+        "Powered by Nous Research.\n"
+        "Docs: https://hermes-agent.nousresearch.com/docs\n"
+        "Portal: https://portal.nousresearch.com\n"
+        "Inference: https://inference-api.nousresearch.com/v1\n"
+        "Email: hermes@nousresearch.com\n"
+        "Lookalike: https://inference-api.nousresearch.com.attacker.test/v1\n"
+    )
+    subprocess.run(["git", "-C", hermes, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", hermes, "commit", "-q", "-m", "add domains"], check=True)
+    return hermes
+
+
+def test_reconcile_migrates_com_domains_to_github_io(tmp_path):
+    hermes = _hermes_repo_with_domains(tmp_path)
+    updates_dir = str(tmp_path / "Updates-Commits")
+    res = UpdateManager(updates_dir, hermes_url=hermes).run()
+    assert res.gate, f"gate FAILED: {[s for s in res.stages if s.status == 'fail']}"
+    assert "README.md" in res.reconcile.fixed
+
+    with open(os.path.join(res.dir, "README.md"), encoding="utf-8") as fh:
+        text = fh.read()
+
+    assert "nastechresearch.com" not in text
+    assert "NastechResearch.com" not in text
+
+    # docs compound (org/repo path style, not a subdomain)
+    assert "https://nastechresearch.github.io/nastech-agent/docs" in text
+    # subdomain forms keep their prefix on github.io
+    assert "https://portal.nastechresearch.github.io" in text
+    assert "https://inference-api.nastechresearch.github.io/v1" in text
+    # email address follows the same migration
+    assert "nastech@nastechresearch.github.io" in text
+    # lookalike fixture keeps its attacker suffix and stays a different host
+    assert "https://inference-api.nastechresearch.github.io.attacker.test/v1" in text
+
+    assert all(s.status == "ok" for s in res.stages)

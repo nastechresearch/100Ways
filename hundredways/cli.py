@@ -9,6 +9,7 @@ Commands
 --------
 ways       Browse the 200 ways: list, show, pick a strategy per category.
 update     Pull real Hermes, brand the whole tree, verify, save Nastech-Update#N.
+forkcheck  Diff a snapshot against the nastech-agent fork (byte-identity + brand-clean).
 check      One-shot: fetch upstream, report new commits + gaps.
 watch      Live loop: poll upstream every --interval seconds.
 plan       List upstream commits since our last port.
@@ -428,8 +429,14 @@ class Cli:
             print(f"owned-assets registry: {owned.count} target paths in {owned.root}")
         else:
             print("owned-assets registry: none found (expected at config/owned-assets/)")
+        fork_root = self.args.fork_root or self.repo
+        if fork_root and os.path.isdir(fork_root):
+            print(f"fork-root: {fork_root} (fork-consistency check enabled)")
+        else:
+            print(f"fork-root: {fork_root or 'none'} — fork-consistency check will be skipped")
         mgr = UpdateManager(updates_dir, hermes_url=self.args.hermes_url,
-                            rules=self.rules, owned=owned, ai=AIEngine())
+                            rules=self.rules, owned=owned, ai=AIEngine(),
+                            fork_root=fork_root)
         zip_path = self.args.zip or ""
         if zip_path and zip_path.endswith(os.sep):
             zip_path = ""
@@ -465,6 +472,43 @@ class Cli:
         if not result.gate:
             print("GATE FAILED - snapshot kept for inspection", file=sys.stderr)
             sys.exit(1)
+
+    def cmd_forkcheck(self) -> None:
+        """Diff the branded snapshot against the nastech-agent fork checkout."""
+        from .forkcheck import fork_consistency
+        from .updates import _complete_update_dirs, hermes_path, update_path
+
+        updates_dir = self.args.updates_dir or default_updates_dir(self.repo)
+        branded = self.args.branded
+        if not branded:
+            complete = _complete_update_dirs(updates_dir)
+            if not complete:
+                print("no completed update snapshot found — pass --branded", file=sys.stderr)
+                sys.exit(1)
+            branded = update_path(updates_dir, max(int(c[len("Nastech-Update#"):]) for c in complete))
+            if not os.path.isdir(branded):
+                print(f"no branded snapshot at {branded} — pass --branded", file=sys.stderr)
+                sys.exit(1)
+        if not os.path.isdir(self.repo):
+            print(f"fork checkout not found: {self.repo} (pass --repo)", file=sys.stderr)
+            sys.exit(1)
+        src = hermes_path(updates_dir)
+        print(f"fork:     {self.repo}")
+        print(f"branded:  {branded}")
+        print(f"upstream: {src}")
+        report = fork_consistency(self.repo, branded, src, self.rules)
+        print(report.summary())
+        if report.features_fork:
+            print(f"features: fork {report.features_fork} -> branded {report.features_branded}")
+        for e in report.entries:
+            for v in e.violations:
+                print(f"  [VIOLATION] {v.path}:{v.line}  {v.snippet}")
+            if e.status in ("missing", "local_only"):
+                print(f"  [{e.status.upper()}] {e.path}")
+        if not report.gate_passes():
+            print("FORKCHECK FAILED — snapshot diverges from the fork", file=sys.stderr)
+            sys.exit(1)
+        print("forkcheck: PASS")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -571,10 +615,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--zip", default="", help="also build the release zip at this path (project folder + 2 md reports)")
     p.add_argument("--project-name", default="nastech-agent", help="name of the project folder inside the zip")
     p.add_argument("--state-dir", default="", help="state dir (default: repo-sibling 100ways-state)")
+    p.add_argument("--fork-root", default="",
+                   help="nastech-agent fork checkout to diff against (default: --repo); "
+                        "enables the preserve + forkcheck stages")
     p.add_argument("--emit-outputs", default="",
                    help="write JSON {update_number, upstream_sha, gate} to this file "
                         "(CI emits these into $GITHUB_OUTPUT)")
     p.set_defaults(func="cmd_update")
+
+    p = sub.add_parser("forkcheck", help="diff the branded snapshot against the nastech-agent fork")
+    p.add_argument("--branded", default="", help="branded snapshot dir (default: latest Nastech-Update#N)")
+    p.add_argument("--updates-dir", default="", help="Updates-Commits dir (default: sibling of the repo)")
+    p.add_argument("--hermes-url", default=DEFAULT_HERMES_URL, help="Hermes remote or local path")
+    p.set_defaults(func="cmd_forkcheck")
 
     return parser
 

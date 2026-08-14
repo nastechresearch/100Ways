@@ -53,16 +53,15 @@ DEFAULT_TOKENS: list[TokenRule] = [
     # swapped for the mascot's name ("bantu"); the nous->nastech prefix is
     # preserved.  This compound must win before the generic 'nous' token.
     _rule("nous-girl", "nastech-bantu"),
-    # -- domain family: the fork lives on GitHub Pages, so every upstream
-    #    .com URL must resolve to github.io (nastechresearch.com is NOT
-    #    registered — a .com rewrite would 404 in the deployed tree).  These
-    #    compounds MUST precede the bare nousresearch / hermes-agent tokens,
-    #    otherwise the alternation matches the prefix first and the domain
-    #    never gets its .io suffix.  The docs compound becomes the Pages
-    #    project URL (org/repo style), not a subdomain.
-    _rule("hermes-agent.nousresearch.com", "nastechresearch.github.io/nastech-agent"),
-    _rule("NousResearch.com", "NastechResearch.github.io"),
-    _rule("nousresearch.com", "nastechresearch.github.io"),
+    # The .com compounds MUST precede the bare nousresearch / hermes-agent
+    # tokens, otherwise the alternation matches the prefix first and the
+    # domain rule never fires.  (They keep the upstream .com spelling here
+    # because this token set is validated against the fork BIRTH commit,
+    # which used nastechresearch.com; the github.io migration is a
+    # fork-local correction applied by the reconcile stage, not a token.)
+    _rule("hermes-agent.nousresearch.com", "nastech-agent.nastechresearch.com"),
+    _rule("NousResearch.com", "NastechResearch.com"),
+    _rule("nousresearch.com", "nastechresearch.com"),
     _rule("nousresearch", "nastechresearch"),
     _rule("NousResearch", "NastechResearch"),
     _rule("NOUSRESEARCH", "NASTECHRESEARCH"),

@@ -1,8 +1,11 @@
 name: stage-pipeline
 
-# Stage 5: run the full 15-stage update pipeline against the real Hermes
+# Stage 5: run the full 18-stage update pipeline against the real Hermes
 # repo, gate it, and upload the branded zip + reports as an artifact.
 # Keeps the immutable data files (contributors/emails) verbatim.
+# Passes --fork-root nastech-agent (the shallow fork clone) so the preserve
+# stage carries fork-local files into the snapshot and the forkcheck stage
+# proves the tree is byte-faithful to the fork before anything ships.
 
 on:
   workflow_call:
@@ -50,7 +53,7 @@ jobs:
           git clone --depth=1 \
             https://github.com/nastechresearch/nastech-agent.git nastech-agent
 
-      - name: Run 15-stage update pipeline
+      - name: Run 18-stage update pipeline
         id: update
         env:
           HUNDREDWAYS_HERMES_URL: ${{ inputs.hermes_url }}
@@ -60,6 +63,7 @@ jobs:
           python3 -m hundredways.cli --repo nastech-agent update \
             --updates-dir "$HUNDREDWAYS_UPDATES_DIR" \
             --hermes-url "$HUNDREDWAYS_HERMES_URL" \
+            --fork-root nastech-agent \
             --zip "${{ runner.temp }}/nastech-agent-update.zip" \
             --project-name "${{ inputs.project_name }}" \
             --emit-outputs "$HUNDREDWAYS_OUTPUTS"

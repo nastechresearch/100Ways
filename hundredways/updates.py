@@ -1,6 +1,6 @@
 """Ordered update pipeline: pull real Hermes, brand the whole tree, snapshot.
 
-The ``update`` command makes the sync engine real.  It runs as **16 ordered
+The ``update`` command makes the sync engine real.  It runs as **18 ordered
 stages** so every step is named, recorded, and reported:
 
     Updates-Commits/
@@ -33,6 +33,7 @@ import zipfile
 from dataclasses import dataclass, field
 
 from .assets import OwnedAssets
+from .forkcheck import ForkCheckReport, fork_consistency, preserve_fork_files
 from .rules import BrandingRules, is_immutable_path, is_locked_path
 from .scanner import classify_path, is_text
 from .verify import FileResult, VerifyReport
@@ -41,11 +42,16 @@ DEFAULT_HERMES_URL = "https://github.com/NousResearch/hermes-agent.git"
 HERMES_DIR = "hermes-agent"
 UPDATE_PREFIX = "Nastech-Update#"
 
-# The 16 ordered pipeline stages.  `release` is where GitHub Actions uploads
-# the zip; locally it is recorded as skipped.
+# The 18 ordered pipeline stages.  `preserve` copies fork-local files (owned
+# assets, contributor emails, fork-only skills) into the snapshot so the PR
+# never deletes them; `forkcheck` diffs the snapshot against the real
+# nastech-agent fork to prove unchanged files are byte-identical (clean git
+# commits, no whole-tree churn) and added lines are brand-clean.  `release`
+# is where GitHub Actions uploads the zip; locally it is recorded as skipped.
 STAGES = [
-    "pull", "census", "plan", "brand", "reconcile", "scan", "compare", "verify",
-    "report", "package", "manifest", "record", "notify", "gate", "summary", "release",
+    "pull", "census", "plan", "brand", "reconcile", "preserve", "scan", "compare",
+    "verify", "forkcheck", "report", "package", "manifest", "record", "notify",
+    "gate", "summary", "release",
 ]
 
 
@@ -181,7 +187,15 @@ class BrandResult:
 def _walk_files(root: str) -> list[str]:
     out: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in (".git", HERMES_DIR) and not d.startswith(UPDATE_PREFIX)]
+        # Only prune the checkout/updates dirs sitting directly under ``root``
+        # (an os.walk TOPDOWN prune by bare name would also swallow the real
+        # upstream directory ``skills/autonomous-ai-agents/hermes-agent/``).
+        if os.path.abspath(dirpath) == os.path.abspath(root):
+            dirnames[:] = [d for d in dirnames
+                           if d not in (".git", HERMES_DIR)
+                           and not d.startswith(UPDATE_PREFIX)]
+        else:
+            dirnames[:] = [d for d in dirnames if d != ".git"]
         for fn in filenames:
             rel = os.path.relpath(os.path.join(dirpath, fn), root)
             out.append(rel)
@@ -203,24 +217,25 @@ def brand_tree(src: str, dst: str, rules: BrandingRules | None = None,
     result = BrandResult()
     for rel in _walk_files(src):
         result.total += 1
+        src_path = os.path.join(src, rel)
         if is_immutable_path(rel):
             # real data: copy byte-for-byte, name untouched
-            src_path = os.path.join(src, rel)
             dst_path = os.path.join(dst, rel)
             os.makedirs(os.path.dirname(dst_path), exist_ok=True)
             shutil.copyfile(src_path, dst_path)
+            _restore_mode(src_path, dst_path)
             result.locked_copied += 1
             continue
         mapped = rules.transform_path(rel)
         if mapped != rel:
             result.renamed += 1
-        src_path = os.path.join(src, rel)
         dst_path = os.path.join(dst, mapped)
         os.makedirs(os.path.dirname(dst_path), exist_ok=True)
         owned_bytes = owned.asset_bytes(mapped) if owned else None
         if owned_bytes is not None:
             with open(dst_path, "wb") as fh:
                 fh.write(owned_bytes)
+            _restore_mode(src_path, dst_path)
             result.owned += 1
             continue
         try:
@@ -242,7 +257,24 @@ def brand_tree(src: str, dst: str, rules: BrandingRules | None = None,
             result.binary_copied += 1
             with open(dst_path, "wb") as fh:
                 fh.write(data)
+        _restore_mode(src_path, dst_path)
     return result
+
+
+def _restore_mode(src_path: str, dst_path: str) -> None:
+    """Carry the source executable bit onto the branded copy.
+
+    ``brand_tree`` writes rewritten/locked/binary files with plain ``open()``
+    (default 0o644), and ``shutil.copyfile`` copies content only — so scripts
+    like ``hermes``/``nastech`` and the docker entrypoints would lose their
+    exec bit in the zip, making the boot smoke test fail.  Preserve the source
+    mode explicitly.
+    """
+    try:
+        st = os.stat(src_path)
+        os.chmod(dst_path, st.st_mode)
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -303,44 +335,184 @@ def _root_package_name(dst: str, manifest: str, lockfile: str) -> str | None:
 
 
 def _reconcile_uv_lock(dst: str, name: str) -> int:
-    """Rename the root editable package record in ``uv.lock``.
+    """Rename the root editable package record in ``uv.lock`` AND move it to
+    its sorted position.
 
-    The root record is the ``[[package]]`` block whose source is
-    ``{ editable = "." }``.  Leave every dependency record untouched.
+    Two problems: (1) the root record still names the upstream package, and
+    (2) ``uv.lock`` blocks are canonically sorted by ``(name, version)`` -
+    renaming ``hermes-agent`` to ``nastech-agent`` in place leaves the block
+    mid-alphabet at the wrong index, so ``uv lock --check`` reports the
+    lockfile as out of sync even though every dependency is unchanged.
+    Leave every dependency record untouched; just rename + re-sort.
     """
     path = os.path.join(dst, "uv.lock")
     if not os.path.isfile(path):
         return 0
-    with open(path, encoding="utf-8") as fh:
-        lines = fh.readlines()
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return 0
+    lines = text.splitlines(keepends=True)
+    first_pkg = next((i for i, l in enumerate(lines) if l.startswith("[[package]]")), None)
+    if first_pkg is None:
+        return 0
+    # split into header + package blocks (each from [[package]] to the next)
+    idxs = [i for i, l in enumerate(lines) if l.startswith("[[package]]")]
+    idxs.append(len(lines))
+    header = "".join(lines[:first_pkg])
+    blocks = ["".join(lines[a:b]) for a, b in zip(idxs, idxs[1:])]
+
+    # locate + rename the root editable record (block header name AND any
+    # self-references to the root inside its own [package.optional-dependencies]
+    # section, e.g. `{ name = "hermes-agent", extras = ["all"] }`).
     root_idx = None
-    for i, line in enumerate(lines):
-        if line.strip() == '[[package]]':
-            # a root record is followed by `source = { editable = "." }`
-            j = i + 1
-            while j < len(lines) and not lines[j].strip().startswith("["):
-                if 'editable = "."' in lines[j]:
-                    root_idx = i
-                    break
-                j += 1
-            if root_idx is not None:
-                break
+    for i, block in enumerate(blocks):
+        src = re.search(r"^source = \{(.+)\}", block, re.M)
+        if src and "editable" in src.group(1):
+            root_idx = i
+            break
     if root_idx is None:
         return 0
-    for k in range(root_idx + 1, len(lines)):
-        stripped = lines[k].strip()
-        if stripped.startswith("name = "):
-            lines[k] = f'name = "{name}"\n'
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.writelines(lines)
-            return 1
-        if stripped.startswith("["):
-            break
+    root = blocks[root_idx]
+    root = re.sub(r'^name = "[^"]+"', f'name = "{name}"', root, count=1, flags=re.M)
+    root = re.sub(r'"hermes-agent"', f'"{name}"', root)
+    blocks[root_idx] = root
+
+    # canonical uv order is (name, version); re-sort all blocks by that key
+    def _key(block: str) -> tuple[str, str, int]:
+        m = re.search(r'^name = "([^"]+)"', block, re.M)
+        v = re.search(r'^version = "([^"]+)"', block, re.M)
+        return (m.group(1) if m else "", v.group(1) if v else "", 0)
+
+    ordered = sorted(blocks, key=_key)
+    if "".join(ordered) != text:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(header + "".join(ordered))
+        return 1
     return 0
 
 
+# Exact package-name renames for package-lock.json.  Token branding renames
+# the ``name`` fields in every workspace ``package.json`` (and the dependency
+# references pointing at them), but package-lock.json is a LOCKED file so it
+# is still byte-copied from upstream.  Reconcile renames the lock's workspace
+# records to match.  These are EXACT-name matches (never substring), so real
+# registry packages whose names merely contain "hermes" (``hermes-parser``,
+# ``hermes-estree``) are never touched.
+_NPM_NAME_RENAMES: dict[str, str] = {
+    "hermes-agent": "nastech-agent",
+    "@hermes/bootstrap-installer": "@nastech/bootstrap-installer",
+    "hermes": "nastech",
+    "@hermes/ink": "@nastech/ink",
+    "@hermes/root-tests": "@nastech/root-tests",
+    "@hermes/shared": "@nastech/shared",
+    "hermes-tui": "nastech-tui",
+    "@nous-research/ui": "@nastech-research/ui",
+}
+
+# Exact package-lock.json ``packages`` key renames: the workspace directory
+# that branding renamed (``ui-tui/packages/hermes-ink``) and the node_modules
+# symlink/registry records that resolve to renamed packages.  Workspace dirs
+# that were NOT renamed (``apps/desktop``, ``apps/shared``, ...) have no
+# entry here - their paths stay byte-identical.
+_NPM_KEY_RENAMES: dict[str, str] = {
+    "node_modules/@hermes/bootstrap-installer": "node_modules/@nastech/bootstrap-installer",
+    "node_modules/@hermes/ink": "node_modules/@nastech/ink",
+    "node_modules/@hermes/root-tests": "node_modules/@nastech/root-tests",
+    "node_modules/@hermes/shared": "node_modules/@nastech/shared",
+    "node_modules/hermes": "node_modules/nastech",
+    "node_modules/hermes-tui": "node_modules/nastech-tui",
+    "node_modules/@nous-research/ui": "node_modules/@nastech-research/ui",
+    "ui-tui/packages/hermes-ink": "ui-tui/packages/nastech-ink",
+}
+
+# ``@nous-research/ui`` is republished by the fork as
+# ``@nastech-research/ui``, and its tarball is NOT byte-identical to
+# upstream's (fork-published integrity differs from the upstream package).
+# The lock record must therefore point at the fork's tarball AND carry the
+# fork-published integrity for the pinned version, or ``npm ci`` fails the
+# integrity check.  Values are the npm ``dist.integrity`` for each published
+# version; add new fork-published versions here.
+_NASTECH_UI_INTEGRITY: dict[str, str] = {
+    "0.18.2": "sha512-P7H8RzRNGvAvqomtdaGF6J5uUVFWSx8/GrqJk4Cu7yN9DhcAp01FM+QgEFjx6sm3XI4g7FX8EiJdjuCTFAlIpw==",
+    "0.18.3": "sha512-Nk+Key+Ql3i9LqTYHvGqm/JK0kzOxIUkJAY2yJDH4B5ivuBgaXqoc1o552CEu54G2YNL0Ge+3FdmKe2E+LyHsQ==",
+    "0.18.4": "sha512-LStiibgKBGJGrnKZ4qaNNDup5jl/+MfhIaZDlcE3slugtuMmFt2C6urxajZ1Yv65JAx7VXpYscbzrGSDsis+Og==",
+}
+
+
+def _reconcile_lock_record(rec: dict) -> bool:
+    """Rename one package-lock record's name, deps and resolved target.
+
+    Returns True if anything changed.  Mutates ``rec`` in place.  Raises
+    ValueError when a pinned ``@nous-research/ui`` version has no known
+    fork-published integrity, so the pipeline fails loudly instead of
+    shipping a lock that ``npm ci`` will reject.
+    """
+    changed = False
+    if isinstance(rec.get("name"), str) and rec["name"] in _NPM_NAME_RENAMES:
+        rec["name"] = _NPM_NAME_RENAMES[rec["name"]]
+        changed = True
+
+    for field in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
+        deps = rec.get(field)
+        if not isinstance(deps, dict):
+            continue
+        new_deps: dict[str, object] = {}
+        dirty = False
+        for dep, spec in deps.items():
+            new_dep = _NPM_NAME_RENAMES.get(dep, dep)
+            new_spec = spec
+            if isinstance(spec, str) and spec.startswith("file:") and "/packages/hermes-ink" in spec:
+                new_spec = spec.replace("/packages/hermes-ink", "/packages/nastech-ink")
+            if new_dep != dep or new_spec != spec:
+                dirty = True
+            new_deps[new_dep] = new_spec
+        if dirty:
+            rec[field] = new_deps
+            changed = True
+
+    resolved = rec.get("resolved")
+    if isinstance(resolved, str):
+        if "registry.npmjs.org/@nous-research/ui" in resolved:
+            version = str(rec.get("version", ""))
+            integrity = _NASTECH_UI_INTEGRITY.get(version)
+            if integrity is None:
+                raise ValueError(
+                    f"no fork-published integrity for @nastech-research/ui@{version}; "
+                    f"add it to _NASTECH_UI_INTEGRITY in updates.py"
+                )
+            rec["resolved"] = f"https://registry.npmjs.org/@nastech-research/ui/-/ui-{version}.tgz"
+            rec["integrity"] = integrity
+            changed = True
+        elif not resolved.startswith(("http:", "https:", "file:", "git", "github:")):
+            new_resolved = _NPM_KEY_RENAMES.get(resolved, resolved)
+            if new_resolved != resolved:
+                rec["resolved"] = new_resolved
+                changed = True
+    return changed
+
+
 def _reconcile_package_lock(dst: str, name: str) -> int:
-    """Rename the root package record in ``package-lock.json``."""
+    """Rename every workspace/registry record in ``package-lock.json``.
+
+    Token branding renames the ``name`` fields in every workspace
+    ``package.json`` (and the dependency references pointing at them), but
+    package-lock.json is a LOCKED file so it is still byte-copied from
+    upstream.  npm then cannot resolve the branded workspaces: ``npm ci``
+    reports ``Missing: <branded>@<version> from lock file`` for every renamed
+    package.  This rewrites the lock's ``packages`` records:
+
+    * workspace record ``name`` fields,
+    * node_modules symlink/registry record keys + their ``resolved`` paths,
+    * dependency keys / ``file:`` values inside workspace records,
+    * the ``@nous-research/ui`` registry record (renamed to
+      ``@nastech-research/ui`` with the fork-published tarball + integrity).
+
+    Every rename is an EXACT name/path match, so real registry packages whose
+    names merely contain "hermes" (``hermes-parser``, ``hermes-estree``) are
+    never touched.
+    """
     path = os.path.join(dst, "package-lock.json")
     if not os.path.isfile(path):
         return 0
@@ -351,11 +523,80 @@ def _reconcile_package_lock(dst: str, name: str) -> int:
         return 0
     if not isinstance(data, dict):
         return 0
-    data["name"] = name
+
+    changed = False
+    if data.get("name") != name:
+        data["name"] = name
+        changed = True
+
+    packages = data.get("packages")
+    if isinstance(packages, dict):
+        renamed: dict[str, object] = {}
+        for key, rec in packages.items():
+            renamed[_NPM_KEY_RENAMES.get(key, key)] = rec
+        for rec in renamed.values():
+            if isinstance(rec, dict) and _reconcile_lock_record(rec):
+                changed = True
+        if list(renamed) != list(packages):
+            changed = True
+        packages.clear()
+        packages.update(renamed)
+
+    if not changed:
+        return 0
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2)
         fh.write("\n")
     return 1
+
+
+# Fork-local domain corrections.  The token rules must reproduce the fork's
+# BIRTH commit (which the `rules` gate enforces at >=99%), and the birth
+# commit used nastechresearch.com URLs.  But nastechresearch.com is NOT
+# registered - the fork lives on GitHub Pages - so every .com domain is a
+# 404 in the deployed tree.  Reconcile migrates them to github.io after
+# branding.  Order matters: the docs compound (org/repo path style) must be
+# rewritten BEFORE the bare-domain form, otherwise the `.com` in the middle
+# of the compound would already be gone when the compound rule runs.
+_DOMAIN_FIXES: list[tuple[str, str]] = [
+    ("nastech-agent.nastechresearch.com", "nastechresearch.github.io/nastech-agent"),
+    ("nastechresearch.com", "nastechresearch.github.io"),
+    ("NastechResearch.com", "NastechResearch.github.io"),
+    ("NASTECHRESEARCH.COM", "NASTECHRESEARCH.GITHUB.IO"),
+]
+
+
+def _reconcile_domains(dst: str) -> list[str]:
+    """Rewrite every branded .com domain to github.io across text files.
+
+    Returns the list of paths that changed so the parity gate can verify
+    against the reconciled bytes.  Skips locked/binary files (the brand
+    stage already treated them as opaque).  A file whose content contains
+    no fork domain is left untouched.
+    """
+    fixed: list[str] = []
+    for rel in _walk_files(dst):
+        path = os.path.join(dst, rel)
+        if is_locked_path(rel) or is_immutable_path(rel):
+            continue
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            continue
+        if not is_text(data):
+            continue
+        text = data.decode("utf-8")
+        if "nastechresearch.com" not in text and "NastechResearch.com" not in text \
+                and "NASTECHRESEARCH.COM" not in text:
+            continue
+        for needle, replacement in _DOMAIN_FIXES:
+            if needle in text:
+                text = text.replace(needle, replacement)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        fixed.append(rel)
+    return fixed
 
 
 def _reconcile_fts5_trigram(dst: str) -> int:
@@ -419,6 +660,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_fts5_trigram(dst):
         result.total += 1
         result.fixed.append("Dockerfile")
+    for rel in _reconcile_domains(dst):
+        result.total += 1
+        result.fixed.append(rel)
     result.fixed.sort()
     return result
 
@@ -673,6 +917,19 @@ def update_report_md(result: "UpdateResult") -> str:
     lines += ["", "## Diff", "", result.diff.summary(), ""]
     for e in result.diff.actions("missing"):
         lines.append(f"- MISSING {e.path} -> {e.mapped_path}")
+    if result.fork.entries:
+        lines += ["", "## Fork check (vs nastech-agent)", "",
+                  f"- {result.fork.summary()}", ""]
+        for e in result.fork.entries:
+            if e.status in ("missing", "local_only"):
+                lines.append(f"- **{e.status.upper()}** {e.path}")
+            for v in e.violations:
+                lines.append(f"- VIOLATION {v.path}:{v.line} `{v.snippet}`")
+        if result.fork.features_fork:
+            lines.append(
+                f"- features: fork {result.fork.features_fork} -> branded "
+                f"{result.fork.features_branded}"
+            )
     lines += ["", "Auto-generated by 100Ways."]
     return "\n".join(lines) + "\n"
 
@@ -702,8 +959,19 @@ def gate_report_md(result: "UpdateResult") -> str:
         "",
         f"{result.verify.locked} locked/binary assets present.",
         "",
-        "Auto-generated by 100Ways.",
     ]
+    if result.fork.entries:
+        lines += [
+            "## Fork consistency (vs nastech-agent)",
+            "",
+            f"{result.fork.summary()}",
+            "",
+            "- identical files must stay byte-identical so the PR shows clean new commits",
+            "- updated files are the real upstream delta; added lines must be brand-clean",
+            f"- preserved fork-local files: {len(result.fork.preserved)}",
+            "",
+        ]
+    lines += ["Auto-generated by 100Ways."]
     return "\n".join(lines) + "\n"
 
 
@@ -767,6 +1035,7 @@ class UpdateResult:
     report_path: str = ""
     gate_report_path: str = ""
     reconcile: ReconcileResult = field(default_factory=ReconcileResult)
+    fork: ForkCheckReport = field(default_factory=ForkCheckReport)
 
     def summary(self) -> str:
         return (
@@ -777,17 +1046,18 @@ class UpdateResult:
 
 
 class UpdateManager:
-    """Run one full update: the 16 ordered pipeline stages."""
+    """Run one full update: the 18 ordered pipeline stages."""
 
     def __init__(self, updates_dir: str, hermes_url: str = DEFAULT_HERMES_URL,
                  rules: BrandingRules | None = None, threshold: float = 0.99,
-                 owned: OwnedAssets | None = None, ai=None):
+                 owned: OwnedAssets | None = None, ai=None, fork_root: str = ""):
         self.updates_dir = updates_dir
         self.hermes_url = hermes_url
         self.rules = rules or BrandingRules()
         self.threshold = threshold
         self.owned = owned
         self.ai = ai
+        self.fork_root = fork_root
 
     def run(self, keep_failed: bool = True, zip_path: str = "",
             project_name: str = "nastech-agent", notify=None) -> UpdateResult:
@@ -834,23 +1104,40 @@ class UpdateManager:
                             reconciled_map[rel] = fh.read()
                     except OSError:
                         pass
+
+        def _preserve() -> list[str]:
+            return preserve_fork_files(self.fork_root, dest, src, self.rules)
+        preserve = stage("preserve", _preserve,
+                         "carry fork-local files (owned assets, emails, fork-only skills) into the snapshot")
+        preserved_files = preserve or []
+
         scan = stage("scan", lambda: scan_tree(dest), "classify every branded file")
         diff = stage("compare", lambda: compare_trees(src, dest, self.rules, self.owned, reconciled_map),
                      "diff branded tree vs upstream")
         verify = stage("verify", lambda: verify_branded(src, dest, self.rules, self.owned, reconciled_map),
                        "file-by-file parity gate")
 
+        def _forkcheck() -> ForkCheckReport:
+            if not self.fork_root:
+                return ForkCheckReport()
+            return fork_consistency(self.fork_root, dest, src, self.rules)
+        forkcheck = stage("forkcheck", _forkcheck,
+                          "diff snapshot vs nastech-agent fork (identical/updated/added/missing)")
+
         brand = brand or BrandResult()
         reconcile = reconcile or ReconcileResult()
         scan = scan or ScanReport()
         diff = diff or DiffReport()
         verify = verify or VerifyReport()
-        passed = gate_passes(verify, self.threshold) and not any(s.status == "fail" for s in stages)
+        forkcheck = forkcheck or ForkCheckReport()
+        fork_ok = (not self.fork_root) or forkcheck.gate_passes()
+        passed = gate_passes(verify, self.threshold) and fork_ok \
+            and not any(s.status == "fail" for s in stages)
 
         result = UpdateResult(
             number=number, dir=dest, upstream_sha=upstream_sha or "", hermes_url=self.hermes_url,
             brand=brand, scan=scan, diff=diff, verify=verify, gate=passed, stages=stages,
-            reconcile=reconcile,
+            reconcile=reconcile, fork=forkcheck,
         )
 
         # report stage (content written at the end so it lists ALL stages)
@@ -911,7 +1198,7 @@ class UpdateManager:
 
         result.stages = stages
 
-        # write manifest + reports now that ALL 16 stages are recorded
+        # write manifest + reports now that ALL 18 stages are recorded
         report_content = update_report_md(result)
         gate_content = gate_report_md(result)
         os.makedirs(dest, exist_ok=True)
@@ -964,6 +1251,15 @@ class UpdateManager:
                 "by_category": scan.by_category,
                 "by_format": scan.by_format,
                 "unknown_binary": scan.unknown_binary,
+            },
+            "fork": {
+                "statuses": forkcheck.statuses,
+                "violations": forkcheck.violation_count,
+                "preserved": len(forkcheck.preserved),
+                "features_fork": forkcheck.features_fork,
+                "features_branded": forkcheck.features_branded,
+                "added_lines": sum(e.added_lines for e in forkcheck.entries),
+                "deleted_lines": sum(e.deleted_lines for e in forkcheck.entries),
             },
         }
         result.manifest_path = os.path.join(dest, "manifest.json")
