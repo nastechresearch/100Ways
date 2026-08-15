@@ -127,8 +127,9 @@ class WeeklyFullSyncReport:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        decision = "FAIL" if not self.gate_passes else "REVIEW" if self.review_required else "PASS"
-        return asdict(self) | {"gate": decision}
+        """Serialize a binary authorization gate plus non-blocking review evidence."""
+        decision = "PASS" if self.gate_passes else "FAIL"
+        return asdict(self) | {"gate": decision, "review_required": self.review_required}
 
 
 def _run(repo: str, *args: str, check: bool = True) -> str:

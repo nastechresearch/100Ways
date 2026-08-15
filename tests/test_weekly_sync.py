@@ -160,7 +160,8 @@ def test_review_only_ci_issue_does_not_block_candidate_gate():
 
     assert report.gate_passes is True
     assert report.review_required is True
-    assert report.to_dict()["gate"] == "REVIEW"
+    assert report.to_dict()["gate"] == "PASS"
+    assert report.to_dict()["review_required"] is True
 
 
 def test_skill_firewall_review_does_not_block_but_unallowlisted_skill_does():
@@ -236,4 +237,5 @@ def test_upstream_advance_is_review_evidence_not_a_hard_failure():
 
     assert report.gate_passes is True
     assert report.review_required is True
-    assert report.to_dict()["gate"] == "REVIEW"
+    assert report.to_dict()["gate"] == "PASS"
+    assert report.to_dict()["review_required"] is True
