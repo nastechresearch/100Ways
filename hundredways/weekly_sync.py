@@ -96,6 +96,7 @@ class WeeklyFullSyncReport:
     visual_issues: list[VisualIssue] = field(default_factory=list)
     ci_issues: list[WorkflowPolicyIssue] = field(default_factory=list)
     security_issues: list[AuditIssue] = field(default_factory=list)
+    inherited_security_issues: list[AuditIssue] = field(default_factory=list)
     freshness_ok: bool = False
     mode: str = "report"
     generated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
@@ -108,7 +109,9 @@ class WeeklyFullSyncReport:
 
     @property
     def review_required(self) -> bool:
-        return any(issue.severity == "review" for issue in (*self.visual_issues, *self.ci_issues))
+        return bool(self.inherited_security_issues) or any(
+            issue.severity == "review" for issue in (*self.visual_issues, *self.ci_issues)
+        )
 
     def to_dict(self) -> dict[str, Any]:
         decision = "FAIL" if not self.gate_passes else "REVIEW" if self.review_required else "PASS"
@@ -374,6 +377,35 @@ def audit_snapshot_safety(root: str) -> list[AuditIssue]:
     return issues
 
 
+def _security_issue_key(issue: AuditIssue, rules: BrandingRules | None = None) -> tuple[str, str]:
+    """Return a comparable identity for a scan finding across branded trees."""
+    path = rules.transform_path(issue.path) if rules else issue.path
+    return issue.code, path
+
+
+def partition_inherited_security_issues(
+    candidate_issues: Iterable[AuditIssue],
+    upstream_issues: Iterable[AuditIssue],
+    rules: BrandingRules | None = None,
+) -> tuple[list[AuditIssue], list[AuditIssue]]:
+    """Split candidate findings into new blocks and source-inherited review evidence.
+
+    A scan signal remains visible whenever it is present in the direct source,
+    but it does not prevent a clean branded candidate from being reviewed. Any
+    new signal introduced by branding, the asset pack, or fork preservation
+    remains a hard block.
+    """
+    source_keys = {_security_issue_key(issue, rules) for issue in upstream_issues}
+    blocking: list[AuditIssue] = []
+    inherited: list[AuditIssue] = []
+    for issue in candidate_issues:
+        if _security_issue_key(issue) in source_keys:
+            inherited.append(issue)
+        else:
+            blocking.append(issue)
+    return blocking, inherited
+
+
 def _snapshot_upstream_sha(branded_root: str) -> str:
     """Read the exact Hermes SHA captured in a 100Ways snapshot, if present."""
     path = Path(branded_root) / "manifest.json"
@@ -417,7 +449,13 @@ def build_weekly_report(
     report.asset_issues = audit_owned_assets(branded_root)
     report.visual_issues = audit_visual_assets(branded_root, upstream_repo)
     report.ci_issues = audit_workflow_security(branded_root)
-    report.security_issues = audit_snapshot_safety(branded_root)
+    candidate_security = audit_snapshot_safety(branded_root)
+    upstream_security = audit_snapshot_safety(upstream_repo)
+    report.security_issues, report.inherited_security_issues = partition_inherited_security_issues(
+        candidate_security,
+        upstream_security,
+        BrandingRules(),
+    )
     report.freshness_ok = fetch_upstream(upstream_repo, ref) == current
     if captured and captured != current:
         report.ci_issues.append(WorkflowPolicyIssue(
@@ -445,7 +483,15 @@ def write_weekly_report(path: str, report: WeeklyFullSyncReport) -> None:
         f"- review required: {'YES' if report.review_required else 'NO'}",
         f"- gate: {report.to_dict()['gate']}", "",
     ]
-    for title, issues in (("Brand issues", report.brand_issues), ("Nested lock issues", report.lock_issues), ("Owned asset issues", report.asset_issues), ("Visual asset issues", report.visual_issues), ("CI policy issues", report.ci_issues), ("Security and snapshot issues", report.security_issues)):
+    for title, issues in (
+        ("Brand issues", report.brand_issues),
+        ("Nested lock issues", report.lock_issues),
+        ("Owned asset issues", report.asset_issues),
+        ("Visual asset issues", report.visual_issues),
+        ("CI policy issues", report.ci_issues),
+        ("Security and snapshot issues", report.security_issues),
+        ("Inherited upstream security evidence (review required)", report.inherited_security_issues),
+    ):
         lines.extend([f"## {title}", ""])
         lines.extend(["- None"] if not issues else [f"- `{i.code}` `{i.path}` — {i.detail}" for i in issues])
         lines.append("")

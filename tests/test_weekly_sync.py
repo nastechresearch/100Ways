@@ -155,6 +155,31 @@ def test_snapshot_safety_blocks_credentials_old_dependencies_bad_modes_and_empty
     assert {"credential-signal", "dependency-vulnerability-pattern", "script-not-executable", "unexpected-empty-file"} <= codes
 
 
+def test_inherited_security_findings_require_review_but_new_findings_block():
+    from hundredways.weekly_sync import (
+        AuditIssue,
+        WeeklyFullSyncReport,
+        partition_inherited_security_issues,
+    )
+    from hundredways.rules import BrandingRules
+
+    candidate = [
+        AuditIssue("credential-signal", "nastech_cli/example.py", "source fixture"),
+        AuditIssue("credential-signal", "new/unsafe.py", "new candidate signal"),
+    ]
+    upstream = [AuditIssue("credential-signal", "hermes_cli/example.py", "source fixture")]
+
+    blocking, inherited = partition_inherited_security_issues(candidate, upstream, BrandingRules())
+    report = WeeklyFullSyncReport("sha", "", 0, 0, 0, 0, freshness_ok=True)
+    report.security_issues = blocking
+    report.inherited_security_issues = inherited
+
+    assert [issue.path for issue in blocking] == ["new/unsafe.py"]
+    assert [issue.path for issue in inherited] == ["nastech_cli/example.py"]
+    assert report.gate_passes is False
+    assert report.review_required is True
+
+
 def test_upstream_advance_is_review_evidence_not_a_hard_failure():
     from hundredways.ci_policy import WorkflowPolicyIssue
     from hundredways.weekly_sync import WeeklyFullSyncReport
