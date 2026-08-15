@@ -21,7 +21,7 @@ on:
   pull_request:
   workflow_dispatch:
   schedule:
-    - cron: "7,37 * * *" # commit stream every 30 minutes; sync is commit-threshold driven
+    - cron: "*/30 * * * *" # commit stream every 30 minutes; sync is commit-threshold driven
 
 permissions:
   contents: read
