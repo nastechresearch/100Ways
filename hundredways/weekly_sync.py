@@ -260,6 +260,27 @@ def audit_first_party_brand(root: str, rules: BrandingRules | None = None) -> li
     return issues
 
 
+def audit_brand_symbols(root: str) -> list[AuditIssue]:
+    """Block inherited medical-symbol glyphs after the NasTech text transformation."""
+    issues: list[AuditIssue] = []
+    generated_reports = {"UPDATE-REPORT.md", "GATE-REPORT.md", "manifest.json"}
+    for path in Path(root).rglob("*"):
+        if not path.is_file() or ".git" in path.parts or "node_modules" in path.parts:
+            continue
+        rel = str(path.relative_to(root))
+        if path.name in generated_reports or is_immutable_path(rel):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for glyph in ("⚕", "☤"):
+            if glyph in text:
+                issues.append(AuditIssue("inherited-brand-symbol", rel, f"contains source glyph {glyph!r}; expected '𓄃'"))
+                break
+    return issues
+
+
 def audit_fts5_trigram_fixtures(root: str) -> list[AuditIssue]:
     """Block branded FTS5 fixtures whose query is not a trigram of their value.
 
@@ -391,6 +412,7 @@ def build_weekly_report(
     reconcile_nested_lockfile_roots(branded_root)
     report.lock_issues = audit_nested_lockfiles(branded_root)
     report.brand_issues = audit_first_party_brand(branded_root)
+    report.brand_issues.extend(audit_brand_symbols(branded_root))
     report.brand_issues.extend(audit_fts5_trigram_fixtures(branded_root))
     report.asset_issues = audit_owned_assets(branded_root)
     report.visual_issues = audit_visual_assets(branded_root, upstream_repo)

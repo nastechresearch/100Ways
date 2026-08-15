@@ -4,6 +4,7 @@ from pathlib import Path
 from hundredways.weekly_sync import (
     FULL_SYNC_CAPABILITIES,
     WeeklyFullSyncReport,
+    audit_brand_symbols,
     audit_first_party_brand,
     audit_fts5_trigram_fixtures,
     audit_nested_lockfiles,
@@ -45,6 +46,17 @@ def test_brand_audit_flags_first_party_brand_and_allows_vendor_package(tmp_path)
     assert len(issues) == 1
     assert issues[0].path == "readme.md"
     assert issues[0].code == "first-party-brand"
+
+
+def test_brand_symbol_audit_blocks_any_unreplaced_source_glyph(tmp_path):
+    root = Path(tmp_path)
+    (root / "ui.txt").write_text("⚕ Nastech")
+
+    issues = audit_brand_symbols(str(root))
+
+    assert len(issues) == 1
+    assert issues[0].code == "inherited-brand-symbol"
+    assert "𓄃" in issues[0].detail
 
 
 def test_fts5_fixture_audit_blocks_stale_branded_query_token(tmp_path):
