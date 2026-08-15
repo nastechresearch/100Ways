@@ -15,7 +15,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Sequence
 
-
 DEFAULT_THRESHOLD = 50
 
 
@@ -33,6 +32,41 @@ class CommitStreamDecision:
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
+
+
+TELEGRAM_SAFETY_FOOTER = (
+    "Safety boundary: 100Ways may only create or update a review PR after every "
+    "gate passes; it never merges, tags, releases, or deploys."
+)
+
+
+def format_telegram_status(decision: CommitStreamDecision) -> str:
+    """Return a concise, deterministic Telegram status with safe next action."""
+    status_line = {
+        "current": "Current — no new upstream commits require a sync.",
+        "warming": "Warming — verification is held until the commit threshold is reached.",
+        "awaiting-review": "Candidate awaiting review — no new sync is started.",
+        "threshold-reached": "Threshold reached — the full verification chain is starting.",
+    }.get(decision.status, f"State: {decision.status}.")
+    if decision.status == "threshold-reached":
+        action_line = (
+            "Next action: run all gates; #344 may create or update the review PR only on PASS."
+        )
+    elif decision.status == "warming":
+        remaining = max(0, decision.threshold - decision.pending_commits)
+        action_line = f"Next action: hold full sync; {remaining} more commit(s) needed."
+    else:
+        action_line = "Next action: monitor only; no candidate publication is authorized."
+    return "\n".join(
+        (
+            "NasTech commit stream",
+            status_line,
+            f"Progress: {decision.pending_commits}/{decision.threshold} pending upstream commits.",
+            f"Baseline: {decision.baseline_sha[:12]} | Upstream: {decision.upstream_sha[:12]}",
+            action_line,
+            TELEGRAM_SAFETY_FOOTER,
+        )
+    )
 
 
 def _git(repo: Path, *args: str, check: bool = True) -> str:
@@ -91,7 +125,7 @@ def inspect_commit_stream(
     subjects = _git(
         upstream,
         "log",
-        f"--format=%h %s",
+        "--format=%h %s",
         f"-n{subject_limit}",
         f"{baseline}..{upstream_sha}",
     ).splitlines()
@@ -120,7 +154,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Inspect upstream commit backlog for NasTech sync")
     parser.add_argument("--upstream-repo", required=True)
     parser.add_argument("--nastech-repo", required=True)
-    parser.add_argument("--candidate-repo", help="Optional open-candidate checkout used as the effective baseline")
+    parser.add_argument(
+        "--candidate-repo", help="Optional open-candidate checkout used as the effective baseline"
+    )
     parser.add_argument("--threshold", type=int, default=DEFAULT_THRESHOLD)
     parser.add_argument("--output", required=True, help="Path to JSON decision output")
     return parser

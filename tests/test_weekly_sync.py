@@ -5,6 +5,7 @@ from hundredways.weekly_sync import (
     FULL_SYNC_CAPABILITIES,
     WeeklyFullSyncReport,
     audit_brand_symbols,
+    audit_branding_fixed_point,
     audit_first_party_brand,
     audit_fts5_trigram_fixtures,
     audit_nested_lockfiles,
@@ -15,8 +16,8 @@ from hundredways.weekly_sync import (
 
 
 def test_weekly_full_sync_has_hardened_capability_contract():
-    assert len(FULL_SYNC_CAPABILITIES) == 78
-    assert len(set(FULL_SYNC_CAPABILITIES)) == 78
+    assert len(FULL_SYNC_CAPABILITIES) == 80
+    assert len(set(FULL_SYNC_CAPABILITIES)) == 80
 
 
 def test_nested_lock_audit_detects_a_stale_workspace_name(tmp_path):
@@ -46,6 +47,30 @@ def test_brand_audit_flags_first_party_brand_and_allows_vendor_package(tmp_path)
     assert len(issues) == 1
     assert issues[0].path == "readme.md"
     assert issues[0].code == "first-party-brand"
+
+
+def test_brand_fixed_point_audit_blocks_transformable_text_and_paths(tmp_path):
+    root = Path(tmp_path)
+    (root / "hermes-notes.md").write_text("Launch Hermes with ⚕ support.\n")
+    immutable = root / "contributors" / "emails" / "hermes@example.com"
+    immutable.parent.mkdir(parents=True)
+    immutable.write_text("Hermes is a real contributor record.\n")
+
+    issues = audit_branding_fixed_point(str(root))
+
+    assert {issue.code for issue in issues} == {"brand-path-not-fixed-point"}
+    assert issues[0].path == "hermes-notes.md"
+
+
+def test_brand_fixed_point_audit_blocks_transformable_text(tmp_path):
+    root = Path(tmp_path)
+    (root / "notes.md").write_text("Launch Hermes with 𓄃 support.\n")
+
+    issues = audit_branding_fixed_point(str(root))
+
+    assert [(issue.code, issue.path) for issue in issues] == [
+        ("brand-text-not-fixed-point", "notes.md")
+    ]
 
 
 def test_brand_symbol_audit_blocks_any_unreplaced_source_glyph(tmp_path):
@@ -136,6 +161,23 @@ def test_review_only_ci_issue_does_not_block_candidate_gate():
     assert report.gate_passes is True
     assert report.review_required is True
     assert report.to_dict()["gate"] == "REVIEW"
+
+
+def test_skill_firewall_review_does_not_block_but_unallowlisted_skill_does():
+    from hundredways.skill_policy import SkillPolicyIssue
+
+    report = WeeklyFullSyncReport("sha", "", 0, 0, 0, 0, freshness_ok=True)
+    report.skill_issues = [
+        SkillPolicyIssue("skill-dangerous-instruction", "skills/example/SKILL.md", "review", "review")
+    ]
+
+    assert report.gate_passes is True
+    assert report.review_required is True
+
+    report.skill_issues.append(
+        SkillPolicyIssue("skill-root-not-allowlisted", "unreviewed/SKILL.md", "block")
+    )
+    assert report.gate_passes is False
 
 
 def test_snapshot_safety_blocks_credentials_old_dependencies_bad_modes_and_empty_files(tmp_path):

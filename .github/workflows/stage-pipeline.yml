@@ -30,6 +30,10 @@ on:
       gate:
         description: Final gate result (PASS / FAIL)
         value: ${{ jobs.pipeline.outputs.gate }}
+    secrets:
+      OLLAMA_API_KEY:
+        description: Optional Ollama Cloud key for advisory text reviews
+        required: false
 
 jobs:
   pipeline:
@@ -72,6 +76,10 @@ jobs:
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
           HUNDREDWAYS_OUTPUTS: ${{ runner.temp }}/update-outputs.json
           HUNDREDWAYS_ZIP: ${{ runner.temp }}/nastech-agent-update.zip
+          HUNDREDWAYS_AI_PROVIDER: ollama-cloud
+          HUNDREDWAYS_AI_BASE_URL: https://ollama.com/v1
+          HUNDREDWAYS_AI_MODEL: gemma4:31b-cloud
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
         run: |
           python3 -m hundredways.cli --repo nastech-agent update \
             --updates-dir "$HUNDREDWAYS_UPDATES_DIR" \
@@ -223,6 +231,36 @@ jobs:
                   archive.write(summary, "SYNC-SUMMARY.md")
           PYEOF
 
+      - name: Write tamper-evident gate decision receipt
+        env:
+          HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
+          HUNDREDWAYS_DECISION: ${{ runner.temp }}/weekly-decision.json
+          HUNDREDWAYS_ZIP: ${{ runner.temp }}/nastech-agent-update.zip
+          HUNDREDWAYS_GATE_RECEIPT: ${{ runner.temp }}/gate_receipt.json
+        run: |
+          set -euo pipefail
+          python3 - <<'PYEOF'
+          import json
+          import os
+          from hundredways.receipts import write_gate_decision_receipt
+
+          updates = os.environ["HUNDREDWAYS_UPDATES_DIR"]
+          snapshot_name = sorted(
+              (name for name in os.listdir(updates) if name.startswith("Nastech-Update#")),
+              key=lambda value: int(value.rsplit("#", 1)[-1]),
+          )[-1]
+          with open(os.environ["HUNDREDWAYS_DECISION"], encoding="utf-8") as handle:
+              decision = json.load(handle)
+          if decision.get("gate") != "PASS":
+              raise SystemExit("cannot authorize an artifact without a PASS gate")
+          write_gate_decision_receipt(
+              os.environ["HUNDREDWAYS_GATE_RECEIPT"],
+              decision,
+              candidate_root=os.path.join(updates, snapshot_name),
+              artifact_path=os.environ["HUNDREDWAYS_ZIP"],
+          )
+          PYEOF
+
       - name: Upload branded zip + reports
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -234,5 +272,6 @@ jobs:
             ${{ runner.temp }}/weekly-full-sync-report.md
             ${{ runner.temp }}/weekly-decision.json
             ${{ runner.temp }}/publication-readiness.json
+            ${{ runner.temp }}/gate_receipt.json
             ${{ runner.temp }}/SYNC-SUMMARY.md
           if-no-files-found: error

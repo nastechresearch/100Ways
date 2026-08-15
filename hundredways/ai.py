@@ -1,90 +1,108 @@
-"""AI module: LLM-powered diff summaries and port review.
+"""Ollama Cloud-assisted diff summaries and port reviews.
 
-Wraps an LLM (OpenAI-compatible chat completions) to:
-
-  * summarize what a Hermes commit actually changes in plain language;
-  * review a ported diff for correctness and branding compliance;
-  * classify whether a commit is "safe to port" vs "needs human eyes";
-  * review any of the 15 pipeline stages by name (stage-aware AI).
-
-The module is optional: when no API key / provider is configured, the CLI
-falls back to deterministic summaries built from commit metadata.
-
-Providers: OpenAI by default, or ``ollama-cloud`` (Ollama Cloud's
-OpenAI-compatible ``https://ollama.com/v1`` endpoint).  Ollama Cloud's
-default model is ``gemma4:31b-cloud`` — set ``SYNCBRIDGE_AI_MODEL`` to
-switch (e.g. ``deepseek-v4:cloud``).  The ollama-cloud key comes from
-``OLLAMA_API_KEY``.
+AI is an optional, advisory feature. The production system permits only the
+Ollama Cloud OpenAI-compatible endpoint; an absent key always falls back to
+fully deterministic evidence summaries.  AI input is treated as untrusted
+repository data, bounded, and redacted before it can leave the runner.
 """
 
 from __future__ import annotations
 
-import json
 import os
+import re
 from dataclasses import dataclass, field
 
 from .analyzer import GapReport
 from .updates import STAGES
 from .verify import VerifyReport
 
+# Ollama Cloud's OpenAI-compatible endpoint and approved default model.
+OLLAMA_CLOUD_BASE_URL = "https://ollama.com/v1"
+OLLAMA_CLOUD_DEFAULT_MODEL = "gemma4:31b-cloud"
+OLLAMA_CLOUD_PROVIDER = "ollama-cloud"
+_MAX_AI_CONTEXT_CHARS = 4_000
+_SECRET_PATTERNS = (
+    re.compile(r"\bghp_[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\b(?:sk|ollama|tg)_[A-Za-z0-9_-]{16,}\b", re.IGNORECASE),
+    re.compile(r"\b\d{8,12}:[A-Za-z0-9_-]{20,}\b"),
+)
+
 
 @dataclass
 class AIConfig:
-    base_url: str = "https://api.openai.com/v1"
+    base_url: str = OLLAMA_CLOUD_BASE_URL
     api_key: str = ""
-    model: str = "gpt-4o-mini"
-    provider: str = "openai"
+    model: str = OLLAMA_CLOUD_DEFAULT_MODEL
+    provider: str = OLLAMA_CLOUD_PROVIDER
     timeout: int = 60
-    # Per-stage model overrides: {"<stage>": "<model>"}.  A stage without an
-    # override uses ``model``.  Lets each of the 15 pipeline stages pick a
-    # cheaper/faster model while the main model stays frontier.
+    # Per-stage model overrides intentionally remain provider-local.
     stage_models: dict[str, str] = field(default_factory=dict)
 
 
-# Ollama Cloud's OpenAI-compatible endpoint + default model.  gemma4:31b-cloud
-# is a 31B open model; the id follows Ollama-style ``gemma4:<size>-cloud``
-# naming (see agent/model_metadata.py "gemma4": 256000).
-OLLAMA_CLOUD_BASE_URL = "https://ollama.com/v1"
-OLLAMA_CLOUD_DEFAULT_MODEL = "gemma4:31b-cloud"
+def _first_env(*names: str) -> str:
+    """Return the first non-empty environment setting in priority order."""
+    for name in names:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def validate_provider(cfg: AIConfig) -> None:
+    """Reject every provider or endpoint other than canonical Ollama Cloud."""
+    provider = cfg.provider.strip().lower().replace("_", "-")
+    base_url = cfg.base_url.rstrip("/")
+    if provider not in {"ollama", OLLAMA_CLOUD_PROVIDER}:
+        raise ValueError("100Ways AI is locked to the ollama-cloud provider")
+    if base_url != OLLAMA_CLOUD_BASE_URL:
+        raise ValueError("100Ways AI must use the Ollama Cloud endpoint https://ollama.com/v1")
+
+
+def sanitize_ai_context(value: str, *, limit: int = _MAX_AI_CONTEXT_CHARS) -> str:
+    """Redact credential-shaped strings and bound untrusted repository evidence."""
+    sanitized = value
+    for pattern in _SECRET_PATTERNS:
+        sanitized = pattern.sub("[REDACTED]", sanitized)
+    return sanitized[:limit]
 
 
 def ai_config_from_env() -> AIConfig:
-    """Build AIConfig from env, with an ollama-cloud shortcut.
+    """Build the only permitted provider config, retaining legacy aliases briefly.
 
-    ``SYNCBRIDGE_AI_PROVIDER=ollama-cloud`` (or leaving ``SYNCBRIDGE_AI_BASE_URL``
-    pointing at ollama.com) switches to Ollama Cloud and reads
-    ``OLLAMA_API_KEY``.  ``SYNCBRIDGE_AI_MODEL`` always wins for the model.
+    ``HUNDREDWAYS_AI_*`` takes precedence. ``SYNCBRIDGE_AI_*`` is read only as
+    a compatibility alias and cannot be used to select another provider.
     """
-    provider = os.getenv("SYNCBRIDGE_AI_PROVIDER", "").strip().lower() or "openai"
-    base_url = os.getenv("SYNCBRIDGE_AI_BASE_URL", "")
-    api_key = os.getenv("SYNCBRIDGE_AI_API_KEY", "")
-    model = os.getenv("SYNCBRIDGE_AI_MODEL", "")
-
-    if provider in {"ollama", "ollama-cloud", "ollama_cloud"} or "ollama.com" in base_url:
-        if not base_url:
-            base_url = OLLAMA_CLOUD_BASE_URL
-        if not api_key:
-            api_key = os.getenv("OLLAMA_API_KEY", "")
-        if not model:
-            model = OLLAMA_CLOUD_DEFAULT_MODEL
-        provider = "ollama-cloud"
-
-    if not model:
-        model = "gpt-4o-mini"
-    if not base_url:
-        base_url = "https://api.openai.com/v1"
-
-    return AIConfig(
+    provider = (
+        _first_env("HUNDREDWAYS_AI_PROVIDER", "SYNCBRIDGE_AI_PROVIDER")
+        or OLLAMA_CLOUD_PROVIDER
+    )
+    base_url = (
+        _first_env("HUNDREDWAYS_AI_BASE_URL", "SYNCBRIDGE_AI_BASE_URL")
+        or OLLAMA_CLOUD_BASE_URL
+    )
+    api_key = _first_env(
+        "HUNDREDWAYS_AI_API_KEY", "SYNCBRIDGE_AI_API_KEY", "OLLAMA_API_KEY"
+    )
+    model = (
+        _first_env("HUNDREDWAYS_AI_MODEL", "SYNCBRIDGE_AI_MODEL")
+        or OLLAMA_CLOUD_DEFAULT_MODEL
+    )
+    cfg = AIConfig(
         base_url=base_url,
         api_key=api_key,
         model=model,
         provider=provider,
     )
+    validate_provider(cfg)
+    cfg.provider = OLLAMA_CLOUD_PROVIDER
+    return cfg
 
 
 class AIEngine:
     def __init__(self, cfg: AIConfig | None = None):
         self.cfg = cfg or ai_config_from_env()
+        validate_provider(self.cfg)
 
     @property
     def available(self) -> bool:
@@ -96,23 +114,33 @@ class AIEngine:
         return self.cfg.stage_models.get(stage, self.cfg.model)
 
     def _chat(self, system: str, user: str, model: str | None = None) -> str:
+        """Request plain text only; Ollama Cloud structured output is unsupported."""
         import httpx
 
+        validate_provider(self.cfg)
         resp = httpx.post(
             f"{self.cfg.base_url}/chat/completions",
             headers={"Authorization": f"Bearer {self.cfg.api_key}"},
             json={
                 "model": model or self.cfg.model,
                 "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
+                    {"role": "system", "content": sanitize_ai_context(system)},
+                    {"role": "user", "content": sanitize_ai_context(user)},
                 ],
                 "temperature": 0.2,
             },
             timeout=self.cfg.timeout,
         )
         resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
+        try:
+            content = resp.json()["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "Ollama Cloud response did not contain a plain-text completion"
+            ) from exc
+        if not isinstance(content, str):
+            raise ValueError("Ollama Cloud completion must be plain text")
+        return content.strip()
 
     # -- public API ----------------------------------------------------------
 
@@ -128,7 +156,8 @@ class AIEngine:
         try:
             return self._chat(system, user)
         except Exception as exc:
-            return self._fallback_commit_summary(sha, subject, diff_preview) + f" [AI unavailable: {exc}]"
+            fallback = self._fallback_commit_summary(sha, subject, diff_preview)
+            return f"{fallback} [AI unavailable: {exc}]"
 
     def review_gap(self, report: GapReport, repo: str) -> str:
         if not self.available:
@@ -200,8 +229,13 @@ class AIEngine:
 
     @staticmethod
     def _fallback_commit_summary(sha: str, subject: str, diff_preview: str) -> str:
-        add = sum(1 for ln in diff_preview.splitlines() if ln.startswith("+") and not ln.startswith("+++"))
-        rem = sum(1 for ln in diff_preview.splitlines() if ln.startswith("-") and not ln.startswith("---"))
+        lines = diff_preview.splitlines()
+        add = sum(
+            1 for line in lines if line.startswith("+") and not line.startswith("+++")
+        )
+        rem = sum(
+            1 for line in lines if line.startswith("-") and not line.startswith("---")
+        )
         return f"{sha[:8]} {subject} — approx +{add}/-{rem} lines."
 
     @staticmethod

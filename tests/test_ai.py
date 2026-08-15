@@ -1,55 +1,71 @@
-"""Tests for the AI module: ollama-cloud provider resolution, per-stage
-models, and the 15 stage-aware reviews."""
-
-import os
+"""Tests for the Ollama Cloud-only AI configuration and deterministic reviews."""
 
 import pytest
 
 from hundredways.ai import (
-    AIConfig,
-    AIEngine,
     OLLAMA_CLOUD_BASE_URL,
     OLLAMA_CLOUD_DEFAULT_MODEL,
+    OLLAMA_CLOUD_PROVIDER,
+    AIConfig,
+    AIEngine,
     ai_config_from_env,
+    sanitize_ai_context,
+    validate_provider,
 )
 from hundredways.updates import STAGES
 
+# -- env-driven configuration -------------------------------------------------
 
-# -- env-driven config -------------------------------------------------------
 
-def test_ai_config_defaults_to_openai():
+def test_ai_config_defaults_to_ollama_cloud():
     cfg = AIConfig()
-    assert cfg.provider == "openai"
-    assert cfg.base_url == "https://api.openai.com/v1"
-    assert cfg.model == "gpt-4o-mini"
-
-
-def test_ai_config_from_env_provider_ollama_cloud(monkeypatch):
-    monkeypatch.setenv("SYNCBRIDGE_AI_PROVIDER", "ollama-cloud")
-    monkeypatch.delenv("SYNCBRIDGE_AI_MODEL", raising=False)
-    monkeypatch.delenv("SYNCBRIDGE_AI_BASE_URL", raising=False)
-    monkeypatch.setenv("OLLAMA_API_KEY", "sk-ollama")
-    cfg = ai_config_from_env()
-    assert cfg.provider == "ollama-cloud"
+    assert cfg.provider == OLLAMA_CLOUD_PROVIDER
     assert cfg.base_url == OLLAMA_CLOUD_BASE_URL
     assert cfg.model == OLLAMA_CLOUD_DEFAULT_MODEL
+
+
+def test_ai_config_from_env_uses_hundredways_names(monkeypatch):
+    monkeypatch.setenv("HUNDREDWAYS_AI_PROVIDER", "ollama-cloud")
+    monkeypatch.setenv("HUNDREDWAYS_AI_MODEL", "deepseek-v4:cloud")
+    monkeypatch.setenv("HUNDREDWAYS_AI_API_KEY", "sk-ollama")
+
+    cfg = ai_config_from_env()
+
+    assert cfg.provider == OLLAMA_CLOUD_PROVIDER
+    assert cfg.base_url == OLLAMA_CLOUD_BASE_URL
+    assert cfg.model == "deepseek-v4:cloud"
     assert cfg.api_key == "sk-ollama"
 
 
-def test_ai_config_from_env_ollama_com_base_url_shortcut(monkeypatch):
-    monkeypatch.delenv("SYNCBRIDGE_AI_PROVIDER", raising=False)
-    monkeypatch.setenv("SYNCBRIDGE_AI_BASE_URL", "https://ollama.com/v1")
-    monkeypatch.delenv("SYNCBRIDGE_AI_MODEL", raising=False)
+def test_ai_config_from_env_supports_legacy_aliases(monkeypatch):
+    monkeypatch.setenv("SYNCBRIDGE_AI_PROVIDER", "ollama")
+    monkeypatch.setenv("SYNCBRIDGE_AI_MODEL", "legacy-cloud-model")
+    monkeypatch.setenv("OLLAMA_API_KEY", "sk-ollama")
+
     cfg = ai_config_from_env()
-    assert cfg.provider == "ollama-cloud"
-    assert cfg.model == OLLAMA_CLOUD_DEFAULT_MODEL
+
+    assert cfg.provider == OLLAMA_CLOUD_PROVIDER
+    assert cfg.model == "legacy-cloud-model"
+    assert cfg.api_key == "sk-ollama"
 
 
-def test_ai_config_from_env_model_override_wins(monkeypatch):
-    monkeypatch.setenv("SYNCBRIDGE_AI_PROVIDER", "ollama-cloud")
-    monkeypatch.setenv("SYNCBRIDGE_AI_MODEL", "deepseek-v4:cloud")
-    cfg = ai_config_from_env()
-    assert cfg.model == "deepseek-v4:cloud"
+def test_ai_config_from_env_rejects_other_provider(monkeypatch):
+    monkeypatch.setenv("HUNDREDWAYS_AI_PROVIDER", "openai")
+
+    with pytest.raises(ValueError, match="ollama-cloud"):
+        ai_config_from_env()
+
+
+def test_ai_config_from_env_rejects_noncanonical_endpoint(monkeypatch):
+    monkeypatch.setenv("HUNDREDWAYS_AI_BASE_URL", "https://other.example/v1")
+
+    with pytest.raises(ValueError, match="Ollama Cloud endpoint"):
+        ai_config_from_env()
+
+
+def test_validate_provider_rejects_unsafe_direct_configuration():
+    with pytest.raises(ValueError, match="ollama-cloud"):
+        validate_provider(AIConfig(provider="openai"))
 
 
 def test_ollama_cloud_default_model_is_gemma4_31b():
@@ -57,7 +73,18 @@ def test_ollama_cloud_default_model_is_gemma4_31b():
     assert OLLAMA_CLOUD_BASE_URL == "https://ollama.com/v1"
 
 
-# -- per-stage models --------------------------------------------------------
+def test_sanitize_ai_context_redacts_credentials_and_bounds_data():
+    text = "token ghp_0123456789abcdefghijklmnopqrstuv bot 123456789:abcdefghijklmnopqrstuv"
+    redacted = sanitize_ai_context(text, limit=80)
+
+    assert "ghp_" not in redacted
+    assert "123456789:" not in redacted
+    assert redacted.count("[REDACTED]") == 2
+    assert len(sanitize_ai_context("x" * 90, limit=80)) == 80
+
+
+# -- per-stage models ---------------------------------------------------------
+
 
 def test_model_for_stage_uses_override_then_default():
     cfg = AIConfig(model="main-model", stage_models={"gate": "cheap-model"})
@@ -72,11 +99,10 @@ def test_model_for_stage_no_override_map():
     assert engine.model_for_stage("verify") == "m"
 
 
-# -- stage-aware review ------------------------------------------------------
+# -- stage-aware review -------------------------------------------------------
+
 
 def test_stages_ordered_and_unique():
-    # Invariant, not a snapshot: the pipeline must open with the real hermes
-    # pull, end with the release, and never repeat a stage name.
     assert STAGES[0] == "pull"
     assert STAGES[-1] == "release"
     assert len(set(STAGES)) == len(STAGES)

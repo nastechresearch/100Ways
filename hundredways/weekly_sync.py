@@ -18,7 +18,8 @@ from typing import Any, Iterable
 
 from .assets import OwnedAssets
 from .ci_policy import WorkflowPolicyIssue, audit_workflow_security
-from .rules import BrandingRules, is_immutable_path
+from .rules import BrandingRules, is_immutable_path, is_locked_path
+from .skill_policy import SkillPolicyIssue, audit_skill_firewall
 from .visual_assets import VisualIssue, compare_owned_to_upstream
 
 
@@ -61,7 +62,8 @@ HARDENED_CI_CAPABILITIES: tuple[str, ...] = (
     "binary-identity-digest", "canonical-pixel-digest", "perceptual-similarity-shortlist",
     "geometry-and-alpha-comparison", "svg-and-icon-inventory", "credential-signal-inspection",
     "asset-approval-ledger", "visual-review-queue", "stale-sha-retry-policy",
-    "immutable-decision-record", "dependency-vulnerability-pattern-audit",
+    "brand-fixed-point-audit", "skill-firewall-audit", "immutable-decision-record",
+    "dependency-vulnerability-pattern-audit",
     "secret-and-credential-pattern-audit", "mit-license-compliance-audit",
     "executable-permission-audit", "unexpected-empty-file-audit",
 )
@@ -95,6 +97,7 @@ class WeeklyFullSyncReport:
     asset_issues: list[AuditIssue] = field(default_factory=list)
     visual_issues: list[VisualIssue] = field(default_factory=list)
     ci_issues: list[WorkflowPolicyIssue] = field(default_factory=list)
+    skill_issues: list[SkillPolicyIssue] = field(default_factory=list)
     security_issues: list[AuditIssue] = field(default_factory=list)
     inherited_security_issues: list[AuditIssue] = field(default_factory=list)
     freshness_ok: bool = False
@@ -105,12 +108,22 @@ class WeeklyFullSyncReport:
     def gate_passes(self) -> bool:
         visual_blocks = any(issue.severity == "block" for issue in self.visual_issues)
         ci_blocks = any(issue.severity == "block" for issue in self.ci_issues)
-        return not (self.brand_issues or self.lock_issues or self.asset_issues or self.security_issues or visual_blocks or ci_blocks) and self.freshness_ok
+        skill_blocks = any(issue.severity == "block" for issue in self.skill_issues)
+        return not (
+            self.brand_issues
+            or self.lock_issues
+            or self.asset_issues
+            or self.security_issues
+            or visual_blocks
+            or ci_blocks
+            or skill_blocks
+        ) and self.freshness_ok
 
     @property
     def review_required(self) -> bool:
         return bool(self.inherited_security_issues) or any(
-            issue.severity == "review" for issue in (*self.visual_issues, *self.ci_issues)
+            issue.severity == "review"
+            for issue in (*self.visual_issues, *self.ci_issues, *self.skill_issues)
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -260,6 +273,50 @@ def audit_first_party_brand(root: str, rules: BrandingRules | None = None) -> li
         for number, line in enumerate(text.splitlines(), start=1):
             if pattern.search(line) and not _is_allowed(line, rel):
                 issues.append(AuditIssue("first-party-brand", rel, f"line {number}: {line.strip()[:180]}"))
+    return issues
+
+
+def audit_branding_fixed_point(
+    root: str, rules: BrandingRules | None = None
+) -> list[AuditIssue]:
+    """Require eligible branded text and paths to be a transform fixed point.
+
+    This deliberately ignores immutable records, package locks, and binary
+    assets because those are governed by separate preservation and lock gates.
+    Any remaining file or path that would change under the canonical rules is
+    deterministic evidence that the candidate was not fully branded.
+    """
+    rules = rules or BrandingRules()
+    issues: list[AuditIssue] = []
+    generated = {"UPDATE-REPORT.md", "GATE-REPORT.md", "manifest.json"}
+    for path in Path(root).rglob("*"):
+        if not path.is_file() or ".git" in path.parts or "node_modules" in path.parts:
+            continue
+        rel = str(path.relative_to(root))
+        if path.name in generated or is_immutable_path(rel) or is_locked_path(rel):
+            continue
+        transformed_path = rules.transform_path(rel)
+        if transformed_path != rel:
+            issues.append(
+                AuditIssue(
+                    "brand-path-not-fixed-point",
+                    rel,
+                    f"canonical path transform would produce {transformed_path!r}",
+                )
+            )
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if rules.transform_text(text) != text:
+            issues.append(
+                AuditIssue(
+                    "brand-text-not-fixed-point",
+                    rel,
+                    "canonical text transform would still change this file",
+                )
+            )
     return issues
 
 
@@ -444,11 +501,13 @@ def build_weekly_report(
     reconcile_nested_lockfile_roots(branded_root)
     report.lock_issues = audit_nested_lockfiles(branded_root)
     report.brand_issues = audit_first_party_brand(branded_root)
+    report.brand_issues.extend(audit_branding_fixed_point(branded_root))
     report.brand_issues.extend(audit_brand_symbols(branded_root))
     report.brand_issues.extend(audit_fts5_trigram_fixtures(branded_root))
     report.asset_issues = audit_owned_assets(branded_root)
     report.visual_issues = audit_visual_assets(branded_root, upstream_repo)
     report.ci_issues = audit_workflow_security(branded_root)
+    report.skill_issues = audit_skill_firewall(branded_root)
     candidate_security = audit_snapshot_safety(branded_root)
     upstream_security = audit_snapshot_safety(upstream_repo)
     report.security_issues, report.inherited_security_issues = partition_inherited_security_issues(
@@ -489,6 +548,7 @@ def write_weekly_report(path: str, report: WeeklyFullSyncReport) -> None:
         ("Owned asset issues", report.asset_issues),
         ("Visual asset issues", report.visual_issues),
         ("CI policy issues", report.ci_issues),
+        ("Skill firewall issues", report.skill_issues),
         ("Security and snapshot issues", report.security_issues),
         ("Inherited upstream security evidence (review required)", report.inherited_security_issues),
     ):
