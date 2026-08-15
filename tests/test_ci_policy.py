@@ -81,3 +81,16 @@ def test_repository_workflows_have_no_blocking_publication_policy_violations():
     ]
 
     assert blocking == []
+
+
+def test_ci_policy_snapshot_mode_does_not_apply_engine_publication_denials(tmp_path):
+    workflows = Path(tmp_path) / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "inherited.yml").write_text(
+        "jobs:\n  legacy:\n    steps:\n"
+        "      - run: |\n"
+        "          gh release create v1 artifact.zip\n"
+        "          gh pr create --title source-maintenance\n"
+    )
+
+    assert audit_workflow_security(str(tmp_path), enforce_publication_policy=False) == []

@@ -288,7 +288,12 @@ def audit_branding_fixed_point(
     """
     rules = rules or BrandingRules()
     issues: list[AuditIssue] = []
-    generated = {"UPDATE-REPORT.md", "GATE-REPORT.md", "manifest.json"}
+    generated = {
+        "UPDATE-REPORT.md",
+        "GATE-REPORT.md",
+        "SYNC-SUMMARY.md",
+        "manifest.json",
+    }
     for path in Path(root).rglob("*"):
         if not path.is_file() or ".git" in path.parts or "node_modules" in path.parts:
             continue
@@ -506,7 +511,9 @@ def build_weekly_report(
     report.brand_issues.extend(audit_fts5_trigram_fixtures(branded_root))
     report.asset_issues = audit_owned_assets(branded_root)
     report.visual_issues = audit_visual_assets(branded_root, upstream_repo)
-    report.ci_issues = audit_workflow_security(branded_root)
+    report.ci_issues = audit_workflow_security(
+        branded_root, enforce_publication_policy=False
+    )
     report.skill_issues = audit_skill_firewall(branded_root)
     candidate_security = audit_snapshot_safety(branded_root)
     upstream_security = audit_snapshot_safety(upstream_repo)

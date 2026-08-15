@@ -61,12 +61,15 @@ _PUBLISH_COMMAND = re.compile(
 )
 
 
-def audit_workflow_security(root: str) -> list[WorkflowPolicyIssue]:
-    """Check static workflow security and PR-only publication controls.
+def audit_workflow_security(
+    root: str, *, enforce_publication_policy: bool = True
+) -> list[WorkflowPolicyIssue]:
+    """Check static workflow security and, for 100Ways, PR-only publication.
 
-    The check is deliberately fail-closed for release, tag, deployment, issue,
-    and autonomous-dispatch commands. Candidate publication is permitted only
-    in the dedicated final ``#344`` reusable workflow.
+    The engine's own workflows are fail-closed for release, tag, deployment,
+    issue, dispatch, self-approval, and unauthorized publication commands.
+    Candidate snapshots retain their inherited workflow inventory as review
+    evidence; their source workflows are not executable by this engine.
     """
     base = Path(root)
     workflow_dir = base / ".github" / "workflows"
@@ -113,18 +116,19 @@ def audit_workflow_security(root: str) -> list[WorkflowPolicyIssue]:
                     )
                 )
 
-        for code, pattern, detail in _FORBIDDEN_WORKFLOW_ACTIONS:
-            if pattern.search(text):
-                issues.append(WorkflowPolicyIssue(code, rel, detail))
+        if enforce_publication_policy:
+            for code, pattern, detail in _FORBIDDEN_WORKFLOW_ACTIONS:
+                if pattern.search(text):
+                    issues.append(WorkflowPolicyIssue(code, rel, detail))
 
-        if workflow.name != _PUBLICATION_WORKFLOW and _PUBLISH_COMMAND.search(text):
-            issues.append(
-                WorkflowPolicyIssue(
-                    "unauthorized-publication-path",
-                    rel,
-                    "candidate PR creation and push are reserved for "
-                    f"{_PUBLICATION_WORKFLOW} (#344)",
+            if workflow.name != _PUBLICATION_WORKFLOW and _PUBLISH_COMMAND.search(text):
+                issues.append(
+                    WorkflowPolicyIssue(
+                        "unauthorized-publication-path",
+                        rel,
+                        "candidate PR creation and push are reserved for "
+                        f"{_PUBLICATION_WORKFLOW} (#344)",
+                    )
                 )
-            )
 
     return issues
