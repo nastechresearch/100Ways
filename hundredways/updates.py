@@ -599,7 +599,7 @@ def _reconcile_domains(dst: str) -> list[str]:
     return fixed
 
 
-def _reconcile_fts5_trigram(dst: str) -> int:
+def _reconcile_fts5_trigram(dst: str) -> list[str]:
     """Fix the SQLite FTS5 trigram self-test the fork's CI runs.
 
     Upstream's Dockerfile verifies FTS5 trigram indexing against its OWN
@@ -609,36 +609,38 @@ def _reconcile_fts5_trigram(dst: str) -> int:
     branded name), so the check always fails.  Recompute the literal as a
     trigram of the branded name actually inserted.
     """
-    for path in (os.path.join(dst, "Dockerfile"), os.path.join(dst, "Dockerfile.runtime")):
-        if not os.path.isfile(path):
-            continue
-        try:
-            with open(path, encoding="utf-8") as fh:
-                text = fh.read()
-        except OSError:
-            continue
-        inserted = set(re.findall(r"INSERT INTO docs VALUES \('([^']+)'\)", text))
-        if not inserted:
-            continue
-        changed = False
-        for word in inserted:
-            trigrams = {word[i:i + 3] for i in range(len(word) - 2)}
-            if not trigrams:
+    fixed: list[str] = []
+    for root, dirs, files in os.walk(dst):
+        dirs[:] = [name for name in dirs if name not in {".git", "node_modules", "dist", "build"}]
+        for name in files:
+            path = os.path.join(root, name)
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    text = fh.read()
+            except (OSError, UnicodeDecodeError):
                 continue
-            replacement = sorted(trigrams)[0]
-            new_text = re.sub(
-                r"MATCH '([^']{3})'",
-                lambda m: f"MATCH '{replacement}'" if m.group(1) not in trigrams else m.group(0),
-                text,
-            )
-            if new_text != text:
-                text = new_text
-                changed = True
-        if changed:
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write(text)
-            return 1
-    return 0
+            inserted = set(re.findall(r"INSERT INTO docs VALUES \('([^']+)'\)", text))
+            if not inserted or "fts5" not in text.lower():
+                continue
+            changed = False
+            for word in inserted:
+                trigrams = {word[i:i + 3] for i in range(len(word) - 2)}
+                if not trigrams:
+                    continue
+                replacement = sorted(trigrams)[0]
+                new_text = re.sub(
+                    r"MATCH '([^']{3})'",
+                    lambda m: f"MATCH '{replacement}'" if m.group(1) not in trigrams else m.group(0),
+                    text,
+                )
+                if new_text != text:
+                    text = new_text
+                    changed = True
+            if changed:
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+                fixed.append(os.path.relpath(path, dst))
+    return fixed
 
 
 def _reconcile_hermez_obfuscation(dst: str) -> int:
@@ -874,9 +876,10 @@ def reconcile_tree(dst: str) -> ReconcileResult:
         if _reconcile_package_lock(dst, name):
             result.total += 1
             result.fixed.append("package-lock.json")
-    if _reconcile_fts5_trigram(dst):
-        result.total += 1
-        result.fixed.append("Dockerfile")
+    fts5_fixed = _reconcile_fts5_trigram(dst)
+    if fts5_fixed:
+        result.total += len(fts5_fixed)
+        result.fixed.extend(fts5_fixed)
     if _reconcile_hermez_obfuscation(dst):
         result.total += 1
         result.fixed.append("tests/nastech_cli/test_gateway_restart_loop.py")
