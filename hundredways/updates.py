@@ -1370,6 +1370,13 @@ class UpdateManager:
                         pass
 
         def _preserve() -> list[str]:
+            # Keep the engine-owned registry inside the snapshot before fork
+            # preservation.  This makes the visual pack reviewable in the
+            # published candidate and lets preserve_fork_files protect it from
+            # an older registry in the fork checkout.
+            if self.owned and self.owned.count and os.path.isdir(self.owned.root):
+                registry_dest = os.path.join(dest, "config", "owned-assets")
+                shutil.copytree(self.owned.root, registry_dest, dirs_exist_ok=True)
             return preserve_fork_files(self.fork_root, dest, src, self.rules)
         preserve = stage("preserve", _preserve,
                          "carry fork-local files (owned assets, emails, fork-only skills) into the snapshot")

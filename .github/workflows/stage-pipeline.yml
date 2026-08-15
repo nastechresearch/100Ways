@@ -77,6 +77,7 @@ jobs:
             --updates-dir "$HUNDREDWAYS_UPDATES_DIR" \
             --hermes-url "$HUNDREDWAYS_HERMES_URL" \
             --fork-root nastech-agent \
+            --owned-assets-root "$GITHUB_WORKSPACE/config/owned-assets" \
             --zip "$HUNDREDWAYS_ZIP" \
             --project-name "${{ inputs.project_name }}" \
             --emit-outputs "$HUNDREDWAYS_OUTPUTS"

@@ -154,6 +154,26 @@ def test_preserve_fork_files_copies_fork_local_content(tmp_path):
     assert (tmp_path / "branded" / "local.md").read_text() == "fork\n"
 
 
+def test_preserve_fork_files_keeps_existing_engine_owned_registry(tmp_path):
+    rules = BrandingRules()
+    upstream = _tree(tmp_path / "upstream", {})
+    fork = _tree(tmp_path / "fork", {
+        "config/owned-assets/manifest.json": '{"assets/logo.png": "fork-logo.png"}\n',
+        "config/owned-assets/fork-logo.png": "fork asset\n",
+    })
+    branded = _tree(tmp_path / "branded", {
+        "config/owned-assets/manifest.json": '{"assets/logo.png": "engine-logo.png"}\n',
+        "config/owned-assets/engine-logo.png": "engine asset\n",
+    })
+
+    preserved = preserve_fork_files(str(fork), str(branded), str(upstream), rules)
+
+    assert preserved == []
+    manifest = tmp_path / "branded" / "config/owned-assets/manifest.json"
+    assert manifest.read_text() == '{"assets/logo.png": "engine-logo.png"}\n'
+    assert not (tmp_path / "branded" / "config/owned-assets/fork-logo.png").exists()
+
+
 def test_pipeline_includes_preserve_and_forkcheck_stages(tmp_path):
     hermes = _hermes_repo(tmp_path)
     # the fork: already branded (the nastech fork), plus a fork-local file

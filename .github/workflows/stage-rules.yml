@@ -56,7 +56,7 @@ jobs:
           # independently so this intentional brand evolution does not mask
           # unrelated drift; the current rule is separately unit- and
           # full-snapshot-tested, then enforced by the weekly symbol audit.
-          historical_tokens = [token for token in DEFAULT_TOKENS if token.match not in {"⚕", "☤"}]
+          historical_tokens = [token for token in DEFAULT_TOKENS if token.match != "⚕"]
           report = verify_rebrand(repo, BIRTH_PARENT, BIRTH_COMMIT, BrandingRules(tokens=historical_tokens))
           print(report.summary())
           assert BrandingRules().transform_text("⚕☤") == "𓄃𓄃"
