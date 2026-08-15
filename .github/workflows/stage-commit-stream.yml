@@ -1,0 +1,128 @@
+name: stage-commit-stream
+
+on:
+  workflow_call:
+    inputs:
+      threshold:
+        description: Number of pending upstream commits required to start a full sync
+        required: false
+        type: number
+        default: 50
+      notify:
+        description: Whether this invocation should emit a Telegram status update
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      TELEGRAM_BOT_TOKEN:
+        required: false
+      TELEGRAM_CHAT_ID:
+        required: false
+    outputs:
+      trigger_sync:
+        description: Whether the pending-commit threshold has been reached
+        value: ${{ jobs.monitor.outputs.trigger_sync }}
+      pending_commits:
+        description: Number of upstream commits since the merged NasTech baseline
+        value: ${{ jobs.monitor.outputs.pending_commits }}
+      baseline_sha:
+        description: Upstream SHA recorded in merged NasTech state
+        value: ${{ jobs.monitor.outputs.baseline_sha }}
+      upstream_sha:
+        description: Current upstream HEAD SHA
+        value: ${{ jobs.monitor.outputs.upstream_sha }}
+      status:
+        description: current, warming, or threshold-reached
+        value: ${{ jobs.monitor.outputs.status }}
+
+permissions:
+  contents: read
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    outputs:
+      trigger_sync: ${{ steps.decision.outputs.trigger_sync }}
+      pending_commits: ${{ steps.decision.outputs.pending_commits }}
+      baseline_sha: ${{ steps.decision.outputs.baseline_sha }}
+      upstream_sha: ${{ steps.decision.outputs.upstream_sha }}
+      status: ${{ steps.decision.outputs.status }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install 100Ways
+        run: pip install -e .
+
+      - name: Fetch merged NasTech baseline, open candidate, and upstream history
+        run: |
+          git clone --depth=1 https://github.com/nastechresearch/nastech-agent.git nastech-agent
+          git clone --depth=1 --branch 100WAYS https://github.com/nastechresearch/nastech-agent.git nastech-candidate || true
+          git clone https://github.com/NousResearch/hermes-agent.git upstream-agent
+
+      - name: Compare commit stream
+        id: decision
+        env:
+          THRESHOLD: ${{ inputs.threshold }}
+          DECISION: ${{ runner.temp }}/commit-stream.json
+        run: |
+          set -euo pipefail
+          CANDIDATE_ARGS=()
+          if test -f nastech-candidate/manifest.json; then
+            CANDIDATE_ARGS=(--candidate-repo nastech-candidate)
+          fi
+          python3 -m hundredways.commit_stream \
+            --upstream-repo upstream-agent \
+            --nastech-repo nastech-agent \
+            "${CANDIDATE_ARGS[@]}" \
+            --threshold "$THRESHOLD" \
+            --output "$DECISION"
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open(os.environ["DECISION"], encoding="utf-8") as fh:
+              decision = json.load(fh)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              for key in ("trigger_sync", "pending_commits", "baseline_sha", "merged_baseline_sha", "candidate_baseline_sha", "upstream_sha", "status"):
+                  value = str(decision[key]).lower() if isinstance(decision[key], bool) else str(decision[key])
+                  out.write(f"{key}={value}\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("## Commit stream\n")
+              summary.write(f"- Merged baseline: `{decision['merged_baseline_sha']}`\n")
+              if decision['candidate_baseline_sha']:
+                  summary.write(f"- Open candidate baseline: `{decision['candidate_baseline_sha']}`\n")
+              summary.write(f"- Effective baseline: `{decision['baseline_sha']}`\n")
+              summary.write(f"- Upstream head: `{decision['upstream_sha']}`\n")
+              summary.write(f"- Pending commits: **{decision['pending_commits']} / {decision['threshold']}**\n")
+              summary.write(f"- State: **{decision['status']}**\n")
+              summary.write(f"- Full sync enabled: **{decision['trigger_sync']}**\n")
+          PY
+
+      - name: Send Telegram commit-stream status
+        if: ${{ inputs.notify && secrets.TELEGRAM_BOT_TOKEN != '' && secrets.TELEGRAM_CHAT_ID != '' }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          STATUS: ${{ steps.decision.outputs.status }}
+          PENDING: ${{ steps.decision.outputs.pending_commits }}
+          THRESHOLD: ${{ inputs.threshold }}
+          BASELINE: ${{ steps.decision.outputs.baseline_sha }}
+          UPSTREAM: ${{ steps.decision.outputs.upstream_sha }}
+          TRIGGER: ${{ steps.decision.outputs.trigger_sync }}
+        run: |
+          set -euo pipefail
+          TEXT="NasTech commit stream: ${STATUS}. Pending upstream commits: ${PENDING}/${THRESHOLD}. Baseline: ${BASELINE}. Upstream: ${UPSTREAM}. Full sync enabled: ${TRIGGER}."
+          curl --fail-with-body --retry 3 --retry-delay 2 --silent --show-error \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${TEXT}" \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
+
+      - name: Record unavailable Telegram delivery
+        if: ${{ inputs.notify && (secrets.TELEGRAM_BOT_TOKEN == '' || secrets.TELEGRAM_CHAT_ID == '') }}
+        run: |
+          echo "::warning::Telegram credentials are not configured; commit stream status was not delivered."
+          echo "- Telegram delivery: **not configured**" >> "$GITHUB_STEP_SUMMARY"
