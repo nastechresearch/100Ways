@@ -59,9 +59,15 @@ jobs:
           mkdir -p tree
           cd tree
           python3 - <<'EOF'
+          import os
           import zipfile
           with zipfile.ZipFile("../artifact/nastech-agent-update.zip") as zf:
               zf.extractall(".")
+              for info in zf.infolist():
+                  mode = (info.external_attr >> 16) & 0o777
+                  path = os.path.abspath(info.filename)
+                  if mode and os.path.isfile(path):
+                      os.chmod(path, mode)
               top = sorted(set(n.split("/", 1)[0] for n in zf.namelist()))
           print("extracted:", top)
           EOF
