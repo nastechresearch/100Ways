@@ -152,6 +152,17 @@ jobs:
         run: |
           uv sync --locked --python 3.11 --extra all --extra dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra hindsight --extra parallel-web
 
+      - name: Prompt-resume compatibility gate
+        if: matrix.slice.index == 1
+        working-directory: tree/nastech-agent
+        run: |
+          source .venv/bin/activate
+          pytest -q tests/agent/test_plugin_prompt_sections.py
+        env:
+          OPENROUTER_API_KEY: ""
+          OPENAI_API_KEY: ""
+          NASTECH_API_KEY: ""
+
       - name: Run tests (slice ${{ matrix.slice.index }}/${{ inputs.slice_count }})
         working-directory: tree/nastech-agent
         run: |

@@ -113,6 +113,7 @@ jobs:
           BASELINE: ${{ steps.decision.outputs.baseline_sha }}
           UPSTREAM: ${{ steps.decision.outputs.upstream_sha }}
           TRIGGER: ${{ steps.decision.outputs.trigger_sync }}
+          DECISION: ${{ runner.temp }}/commit-stream.json
         run: |
           set -euo pipefail
           if test -z "${TELEGRAM_BOT_TOKEN}" || test -z "${TELEGRAM_CHAT_ID}"; then
@@ -120,7 +121,16 @@ jobs:
             echo "- Telegram delivery: **not configured**" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          TEXT="NasTech commit stream: ${STATUS}. Pending upstream commits: ${PENDING}/${THRESHOLD}. Baseline: ${BASELINE}. Upstream: ${UPSTREAM}. Full sync enabled: ${TRIGGER}."
+          TEXT=$(python3 - <<'PY'
+          import json
+          import os
+          from hundredways.commit_stream import CommitStreamDecision, format_telegram_status
+
+          with open(os.environ["DECISION"], encoding="utf-8") as handle:
+              decision = CommitStreamDecision(**json.load(handle))
+          print(format_telegram_status(decision))
+          PY
+          )
           curl --fail-with-body --retry 3 --retry-delay 2 --silent --show-error \
             --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
             --data-urlencode "text=${TEXT}" \

@@ -33,7 +33,9 @@ jobs:
     with:
       threshold: 50
       notify: ${{ github.event_name == 'schedule' }}
-    secrets: inherit
+    secrets:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
   lint:
     needs: commit-stream
@@ -55,6 +57,8 @@ jobs:
   pipeline:
     needs: rules
     uses: ./.github/workflows/stage-pipeline.yml
+    secrets:
+      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
 
   forkcheck:
     needs: pipeline
@@ -94,4 +98,5 @@ jobs:
     with:
       upstream_sha: ${{ needs.pipeline.outputs.upstream_sha }}
       gate: ${{ needs.pipeline.outputs.gate }}
-    secrets: inherit
+    secrets:
+      NAS_TECH_AGENT_TOKEN: ${{ secrets.NAS_TECH_AGENT_TOKEN }}

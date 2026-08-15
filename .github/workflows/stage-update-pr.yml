@@ -31,6 +31,10 @@ on:
         type: string
         required: false
         default: "PASS"
+    secrets:
+      NAS_TECH_AGENT_TOKEN:
+        description: Cross-repository PR token, scoped only to nastech-agent
+        required: false
 
 permissions:
   contents: read
@@ -82,6 +86,27 @@ jobs:
         if: github.event_name == 'pull_request'
         run: echo "Skipping cross-repository update for fork pull request; repository secrets are unavailable."
 
+      - name: Verify gate receipt and write #344 authorization
+        if: github.event_name != 'pull_request'
+        env:
+          UPSTREAM_SHA: ${{ inputs.upstream_sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PYEOF'
+          import os
+          from hundredways.receipts import write_publication_authorization_receipt
+
+          write_publication_authorization_receipt(
+              "tree/PUBLICATION-AUTHORIZATION-RECEIPT.json",
+              gate_receipt_path="artifact/gate_receipt.json",
+              artifact_path="artifact/nastech-agent-update.zip",
+              upstream_sha=os.environ["UPSTREAM_SHA"],
+              candidate_branch="100WAYS",
+              target_repository="nastechresearch/nastech-agent",
+              target_base="main",
+          )
+          PYEOF
+
       - name: Commit branded tree to fork test branch
         if: github.event_name != 'pull_request'
         env:
@@ -115,6 +140,7 @@ jobs:
           mv tree/UPDATE-REPORT.md reports/UPDATE-REPORT.md
           mv tree/GATE-REPORT.md reports/GATE-REPORT.md
           mv tree/SYNC-SUMMARY.md reports/SYNC-SUMMARY.md
+          mv tree/PUBLICATION-AUTHORIZATION-RECEIPT.json reports/PUBLICATION-AUTHORIZATION-RECEIPT.json
           rm -rf tree artifact
 
           # force-add beats the nastech-*/* gitignore pattern; -A captures
