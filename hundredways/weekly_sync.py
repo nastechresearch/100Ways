@@ -61,7 +61,9 @@ HARDENED_CI_CAPABILITIES: tuple[str, ...] = (
     "binary-identity-digest", "canonical-pixel-digest", "perceptual-similarity-shortlist",
     "geometry-and-alpha-comparison", "svg-and-icon-inventory", "credential-signal-inspection",
     "asset-approval-ledger", "visual-review-queue", "stale-sha-retry-policy",
-    "immutable-decision-record",
+    "immutable-decision-record", "dependency-vulnerability-pattern-audit",
+    "secret-and-credential-pattern-audit", "mit-license-compliance-audit",
+    "executable-permission-audit", "unexpected-empty-file-audit",
 )
 
 FULL_SYNC_CAPABILITIES = BASE_SYNC_CAPABILITIES + HARDENED_CI_CAPABILITIES
@@ -93,6 +95,7 @@ class WeeklyFullSyncReport:
     asset_issues: list[AuditIssue] = field(default_factory=list)
     visual_issues: list[VisualIssue] = field(default_factory=list)
     ci_issues: list[WorkflowPolicyIssue] = field(default_factory=list)
+    security_issues: list[AuditIssue] = field(default_factory=list)
     freshness_ok: bool = False
     mode: str = "report"
     generated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
@@ -101,7 +104,7 @@ class WeeklyFullSyncReport:
     def gate_passes(self) -> bool:
         visual_blocks = any(issue.severity == "block" for issue in self.visual_issues)
         ci_blocks = any(issue.severity == "block" for issue in self.ci_issues)
-        return not (self.brand_issues or self.lock_issues or self.asset_issues or visual_blocks or ci_blocks) and self.freshness_ok
+        return not (self.brand_issues or self.lock_issues or self.asset_issues or self.security_issues or visual_blocks or ci_blocks) and self.freshness_ok
 
     @property
     def review_required(self) -> bool:
@@ -240,7 +243,7 @@ def audit_first_party_brand(root: str, rules: BrandingRules | None = None) -> li
     rules = rules or BrandingRules()
     pattern = re.compile(r"(?i)(?<![a-z0-9_-])(hermes|nous)(?![a-z0-9_-])")
     issues: list[AuditIssue] = []
-    generated_reports = {"UPDATE-REPORT.md", "GATE-REPORT.md"}
+    generated_reports = {"UPDATE-REPORT.md", "GATE-REPORT.md", "manifest.json"}
     for path in Path(root).rglob("*"):
         if not path.is_file() or ".git" in path.parts or "node_modules" in path.parts:
             continue
@@ -291,6 +294,65 @@ def audit_fts5_trigram_fixtures(root: str) -> list[AuditIssue]:
     return issues
 
 
+_SECRET_PATTERNS = (
+    re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\b\d{8,10}:[A-Za-z0-9_-]{30,}\b"),
+)
+
+# Conservative lower bounds for package versions with broadly documented fixes.
+_MIN_SAFE_DEPENDENCIES = {"minimist": (1, 2, 6), "tar": (6, 2, 1), "urllib3": (2, 2, 2)}
+
+
+def _version_tuple(value: str) -> tuple[int, ...] | None:
+    numbers = re.findall(r"\d+", value)
+    return tuple(int(item) for item in numbers[:3]) if numbers else None
+
+
+def audit_snapshot_safety(root: str) -> list[AuditIssue]:
+    """Check for credentials, MIT compliance, unsafe dependency pins, modes and empty source files."""
+    issues: list[AuditIssue] = []
+    base = Path(root)
+    license_path = base / "LICENSE"
+    if not license_path.is_file() or not license_path.read_text(encoding="utf-8", errors="ignore").startswith("MIT License"):
+        issues.append(AuditIssue("license-mit", "LICENSE", "repository license must retain the MIT License text"))
+    allowed_empty = {".gitkeep", ".keep", "__init__.py"}
+    ignored_suffixes = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".woff2", ".pdf", ".zip"}
+    for path in base.rglob("*"):
+        if not path.is_file() or ".git" in path.parts or "node_modules" in path.parts:
+            continue
+        rel = str(path.relative_to(base))
+        if path.suffix.lower() not in ignored_suffixes and path.stat().st_size == 0 and path.name not in allowed_empty:
+            issues.append(AuditIssue("unexpected-empty-file", rel, "empty file may indicate incomplete source transformation"))
+        if path.suffix == ".sh" and not os.access(path, os.X_OK):
+            issues.append(AuditIssue("script-not-executable", rel, "shell scripts must have an executable bit"))
+        if path.suffix.lower() in ignored_suffixes:
+            continue
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if any(pattern.search(content) for pattern in _SECRET_PATTERNS):
+            issues.append(AuditIssue("credential-signal", rel, "credential-like value detected"))
+    dependency_files = list(base.rglob("package-lock.json")) + list(base.rglob("uv.lock"))
+    for package_file in dependency_files:
+        if "node_modules" in package_file.parts:
+            continue
+        try:
+            content = package_file.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for dependency, floor in _MIN_SAFE_DEPENDENCIES.items():
+            if package_file.name == "uv.lock":
+                match = re.search(rf'name = "{re.escape(dependency)}".*?version = "([0-9][0-9.]+)"', content, re.DOTALL)
+            else:
+                match = re.search(rf'node_modules/{re.escape(dependency)}"\s*:\s*\{{.*?"version"\s*:\s*"([0-9][0-9.]+)"', content, re.DOTALL)
+            if match and (version := _version_tuple(match.group(1))) and version < floor:
+                issues.append(AuditIssue("dependency-vulnerability-pattern", str(package_file.relative_to(base)), f"{dependency} {match.group(1)} is below the minimum safe version {'.'.join(map(str, floor))}"))
+    return issues
+
+
 def _snapshot_upstream_sha(branded_root: str) -> str:
     """Read the exact Hermes SHA captured in a 100Ways snapshot, if present."""
     path = Path(branded_root) / "manifest.json"
@@ -333,6 +395,7 @@ def build_weekly_report(
     report.asset_issues = audit_owned_assets(branded_root)
     report.visual_issues = audit_visual_assets(branded_root, upstream_repo)
     report.ci_issues = audit_workflow_security(branded_root)
+    report.security_issues = audit_snapshot_safety(branded_root)
     report.freshness_ok = fetch_upstream(upstream_repo, ref) == current
     if captured and captured != current:
         report.ci_issues.append(WorkflowPolicyIssue(
@@ -360,7 +423,7 @@ def write_weekly_report(path: str, report: WeeklyFullSyncReport) -> None:
         f"- review required: {'YES' if report.review_required else 'NO'}",
         f"- gate: {report.to_dict()['gate']}", "",
     ]
-    for title, issues in (("Brand issues", report.brand_issues), ("Nested lock issues", report.lock_issues), ("Owned asset issues", report.asset_issues), ("Visual asset issues", report.visual_issues), ("CI policy issues", report.ci_issues)):
+    for title, issues in (("Brand issues", report.brand_issues), ("Nested lock issues", report.lock_issues), ("Owned asset issues", report.asset_issues), ("Visual asset issues", report.visual_issues), ("CI policy issues", report.ci_issues), ("Security and snapshot issues", report.security_issues)):
         lines.extend([f"## {title}", ""])
         lines.extend(["- None"] if not issues else [f"- `{i.code}` `{i.path}` — {i.detail}" for i in issues])
         lines.append("")

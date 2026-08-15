@@ -1,6 +1,6 @@
 name: stage-pipeline
 
-# Stage 5: run the full 18-stage update pipeline against the real Hermes
+# Stage 5: run the full 19-stage update pipeline against the direct source
 # repo, gate it, and upload the branded zip + reports as an artifact.
 # Keeps the immutable data files (contributors/emails) verbatim.
 # Passes --fork-root nastech-agent (the shallow fork clone) so the preserve
@@ -54,7 +54,18 @@ jobs:
           git clone --depth=1 \
             https://github.com/nastechresearch/nastech-agent.git nastech-agent
 
-      - name: Run 18-stage update pipeline
+      - name: Capture direct upstream source evidence
+        id: direct-source
+        env:
+          HUNDREDWAYS_HERMES_URL: ${{ inputs.hermes_url }}
+        run: |
+          set -euo pipefail
+          DIRECT_SHA=$(git ls-remote "$HUNDREDWAYS_HERMES_URL" HEAD | awk 'NR == 1 {print $1}')
+          test -n "$DIRECT_SHA"
+          echo "sha=$DIRECT_SHA" >> "$GITHUB_OUTPUT"
+          echo "- Direct upstream SHA: \`$DIRECT_SHA\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run 19-stage update pipeline
         id: update
         env:
           HUNDREDWAYS_HERMES_URL: ${{ inputs.hermes_url }}
@@ -119,6 +130,63 @@ jobs:
           echo "- Hard gate: **PASS**" >> "$GITHUB_STEP_SUMMARY"
           echo "- Decision: \`$DECISION\`" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Run source-provenance and publication-readiness scans
+        id: readiness
+        env:
+          HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
+          EXPECTED_UPSTREAM_SHA: ${{ steps.direct-source.outputs.sha }}
+          HUNDREDWAYS_READINESS: ${{ runner.temp }}/publication-readiness.json
+        run: |
+          set -euo pipefail
+          SNAPSHOT=$(find "$HUNDREDWAYS_UPDATES_DIR" -maxdepth 1 -type d -name 'Nastech-Update#*' | sort -V | tail -1)
+          python3 -m hundredways.prepublish \
+            --snapshot "$SNAPSHOT" \
+            --upstream "$HUNDREDWAYS_UPDATES_DIR/hermes-agent" \
+            --expected-upstream-sha "$EXPECTED_UPSTREAM_SHA" \
+            --output "$HUNDREDWAYS_READINESS"
+          echo "readiness=PASS" >> "$GITHUB_OUTPUT"
+          echo "- Publication readiness: **PASS**" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Write professional update summary
+        env:
+          HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
+          HUNDREDWAYS_SUMMARY: ${{ runner.temp }}/SYNC-SUMMARY.md
+          EXPECTED_UPSTREAM_SHA: ${{ steps.direct-source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PYEOF'
+          import json
+          import os
+          from hundredways.sync_summary import write_sync_summary
+
+          updates = os.environ["HUNDREDWAYS_UPDATES_DIR"]
+          snapshot_name = sorted((name for name in os.listdir(updates) if name.startswith("Nastech-Update#")), key=lambda value: int(value.rsplit("#", 1)[-1]))[-1]
+          snapshot = os.path.join(updates, snapshot_name)
+          with open(os.path.join(snapshot, "manifest.json"), encoding="utf-8") as fh:
+              manifest = json.load(fh)
+          try:
+              with open("nastech-agent/manifest.json", encoding="utf-8") as fh:
+                  baseline = json.load(fh).get("upstream_sha", "")
+          except (OSError, ValueError):
+              baseline = ""
+          verification = (
+              ("Direct source provenance", "Passed"),
+              ("Brand and asset integrity", "Passed"),
+              ("Dependency, security, and publication-readiness scans", "Passed"),
+              ("Full verification and fork-consistency checks", "Passed"),
+          )
+          write_sync_summary(
+              os.environ["HUNDREDWAYS_SUMMARY"],
+              upstream_repo=os.path.join(updates, "hermes-agent"),
+              baseline_sha=baseline,
+              upstream_sha=manifest["upstream_sha"],
+              files_changed=sum(int(manifest.get("diff", {}).get(key, 0)) for key in ("renamed", "rewritten", "missing")),
+              changed_areas=manifest.get("changed_areas", {}),
+              verification=verification,
+              commit_subjects=manifest.get("commit_subjects", ()),
+          )
+          PYEOF
+
       - name: Repackage the exact verified tree
         env:
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
@@ -149,6 +217,9 @@ jobs:
                   source = os.path.join(snapshot, report)
                   if os.path.isfile(source):
                       archive.write(source, report)
+              summary = os.path.join(os.path.dirname(updates), "SYNC-SUMMARY.md")
+              if os.path.isfile(summary):
+                  archive.write(summary, "SYNC-SUMMARY.md")
           PYEOF
 
       - name: Upload branded zip + reports
@@ -161,4 +232,6 @@ jobs:
             ${{ runner.temp }}/Updates-Commits/*/GATE-REPORT.md
             ${{ runner.temp }}/weekly-full-sync-report.md
             ${{ runner.temp }}/weekly-decision.json
+            ${{ runner.temp }}/publication-readiness.json
+            ${{ runner.temp }}/SYNC-SUMMARY.md
           if-no-files-found: error

@@ -170,6 +170,12 @@ def test_manifest_records_pipeline(tmp_path):
     assert manifest["gate"] is True
     assert manifest["stages"] == STAGES
     assert manifest["verify"]["passed"] > 0
+    assert manifest["source_provenance"]["acquisition"] == "fresh-direct-clone"
+    assert manifest["source_provenance"]["remote_url"] == str(hermes)
+    assert manifest["source_provenance"]["fetched_at"].endswith("+00:00")
+    assert isinstance(manifest["commit_subjects"], list)
+    assert isinstance(manifest["changed_areas"], dict)
+    assert manifest["reconciliation_actions"] == []
 
 
 def test_compare_trees_reports_missing(tmp_path):

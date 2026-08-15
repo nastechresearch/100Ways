@@ -1,6 +1,6 @@
 """Ordered update pipeline: pull real Hermes, brand the whole tree, snapshot.
 
-The ``update`` command makes the sync engine real.  It runs as **18 ordered
+The ``update`` command makes the sync engine real.  It runs as **19 ordered
 stages** so every step is named, recorded, and reported:
 
     Updates-Commits/
@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import difflib
 import json
+from datetime import datetime, timezone
 import os
 import re
 import shutil
@@ -42,14 +43,14 @@ DEFAULT_HERMES_URL = "https://github.com/NousResearch/hermes-agent.git"
 HERMES_DIR = "hermes-agent"
 UPDATE_PREFIX = "Nastech-Update#"
 
-# The 18 ordered pipeline stages.  `preserve` copies fork-local files (owned
+# The 19 ordered pipeline stages.  `preserve` copies fork-local files (owned
 # assets, contributor emails, fork-only skills) into the snapshot so the PR
 # never deletes them; `forkcheck` diffs the snapshot against the real
 # nastech-agent fork to prove unchanged files are byte-identical (clean git
 # commits, no whole-tree churn) and added lines are brand-clean.  `release`
 # is where GitHub Actions uploads the zip; locally it is recorded as skipped.
 STAGES = [
-    "pull", "census", "plan", "brand", "reconcile", "preserve", "scan", "compare",
+    "pull", "source-evidence", "census", "plan", "brand", "reconcile", "preserve", "scan", "compare",
     "verify", "forkcheck", "report", "package", "manifest", "record", "notify",
     "gate", "summary", "release",
 ]
@@ -113,38 +114,52 @@ def _run_ok(cmd: list[str], what: str) -> str:
 
 
 def pull_hermes(updates_dir: str, hermes_url: str = DEFAULT_HERMES_URL) -> str:
-    """Clone or update the real Hermes checkout under Updates-Commits/.
+    """Acquire a new clone directly from the configured upstream remote.
 
-    Returns the resolved upstream HEAD sha.  ``hermes_url`` may be an https
-    remote, an ssh URL, or a local path / ``file://`` URL.
+    The prior checkout is deliberately discarded.  This prohibits a local git
+    cache from becoming an input to a synchronization decision, while keeping
+    local-path remotes available for deterministic tests.
     """
     os.makedirs(updates_dir, exist_ok=True)
     dest = hermes_path(updates_dir)
-    url = hermes_url
-    if "://" not in url:
-        url = os.path.abspath(url)
-    if os.path.isdir(os.path.join(dest, ".git")):
-        _run_ok(["git", "-C", dest, "fetch", "--all", "--prune"], "hermes fetch")
-        # Ask the remote which branch it points at; a fresh clone sets
-        # origin/HEAD, but an existing checkout (or a shallow/local source)
-        # may not.  Without this, reset --hard origin/HEAD is a hard error.
+    url = hermes_url if "://" in hermes_url else os.path.abspath(hermes_url)
+    if os.path.exists(dest):
+        shutil.rmtree(dest)
+    _run_ok(["git", "clone", "--no-local", url, dest], "fresh direct upstream clone")
+    return _run_ok(["git", "-C", dest, "rev-parse", "HEAD"], "upstream head")
+
+
+def previous_upstream_sha(updates_dir: str, before_number: int) -> str:
+    """Return the most recent recorded source revision, if any."""
+    for number in range(before_number - 1, 0, -1):
+        manifest_path = os.path.join(update_path(updates_dir, number), "manifest.json")
         try:
-            _run_ok(["git", "-C", dest, "remote", "set-head", "origin", "-a"], "hermes set-head")
-        except RuntimeError:
-            pass
-        ref = "origin/HEAD"
-        try:
-            _run_ok(["git", "-C", dest, "rev-parse", "--verify", ref], "hermes head resolve")
-        except RuntimeError:
-            ref = "origin/main"
-        try:
-            _run_ok(["git", "-C", dest, "rev-parse", "--verify", ref], "hermes head resolve")
-        except RuntimeError:
-            ref = "FETCH_HEAD"
-        _run_ok(["git", "-C", dest, "reset", "--hard", ref], "hermes reset")
-    else:
-        _run_ok(["git", "clone", url, dest], "hermes clone")
-    return _run_ok(["git", "-C", dest, "rev-parse", "HEAD"], "hermes head")
+            with open(manifest_path, encoding="utf-8") as fh:
+                value = json.load(fh).get("upstream_sha", "")
+            if value:
+                return value
+        except (OSError, ValueError):
+            continue
+    return ""
+
+
+def upstream_change_evidence(repo: str, baseline: str, head: str) -> tuple[list[str], dict[str, int]]:
+    """Collect reviewable commit subjects and top-level changed-area counts."""
+    revision_range = f"{baseline}..{head}" if baseline else "-n 1"
+    if baseline:
+        ancestry = subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", baseline, head], capture_output=True)
+        if ancestry.returncode:
+            revision_range = "-n 1"
+    subject_args = ["git", "-C", repo, "log", "--format=%s"] + revision_range.split()
+    subjects = [line for line in _run_ok(subject_args, "upstream subject scan").splitlines() if line]
+    path_args = ["git", "-C", repo, "show", "--format=", "--name-only"] + revision_range.split()
+    areas: dict[str, int] = {}
+    for path in _run_ok(path_args, "upstream changed-area scan").splitlines():
+        if not path:
+            continue
+        area = path.split("/", 1)[0]
+        areas[area] = areas.get(area, 0) + 1
+    return subjects, dict(sorted(areas.items()))
 
 
 # ---------------------------------------------------------------------------
@@ -1317,9 +1332,17 @@ class UpdateManager:
         number = next_update_number(self.updates_dir)
         dest = update_path(self.updates_dir, number)
 
+        fetched_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         upstream_sha = stage("pull", lambda: pull_hermes(self.updates_dir, self.hermes_url),
-                             "clone/fetch real Hermes")
+                             "fresh direct clone from configured upstream")
         src = hermes_path(self.updates_dir)
+        baseline_sha = previous_upstream_sha(self.updates_dir, number)
+        evidence = stage(
+            "source-evidence",
+            lambda: upstream_change_evidence(src, baseline_sha, upstream_sha or ""),
+            "record commit subjects and changed areas from the fresh source",
+        )
+        commit_subjects, changed_areas = evidence or ([], {})
         census = stage("census", lambda: census_tree(src), "count upstream files before touching anything")
         stage("plan", lambda: number, f"next snapshot = {UPDATE_PREFIX}{number}")
 
@@ -1477,6 +1500,15 @@ class UpdateManager:
             "dir": os.path.basename(dest),
             "upstream_sha": result.upstream_sha,
             "hermes_url": self.hermes_url,
+            "source_provenance": {
+                "remote_url": self.hermes_url,
+                "fetched_at": fetched_at,
+                "acquisition": "fresh-direct-clone",
+                "baseline_sha": baseline_sha,
+            },
+            "commit_subjects": commit_subjects,
+            "changed_areas": changed_areas,
+            "reconciliation_actions": reconcile.fixed,
             "gate": passed,
             "stages": [s.name for s in stages],
             "verify": {

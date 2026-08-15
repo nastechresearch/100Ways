@@ -7,14 +7,15 @@ from hundredways.weekly_sync import (
     audit_first_party_brand,
     audit_fts5_trigram_fixtures,
     audit_nested_lockfiles,
+    audit_snapshot_safety,
     load_ledger,
     save_ledger,
 )
 
 
 def test_weekly_full_sync_has_hardened_capability_contract():
-    assert len(FULL_SYNC_CAPABILITIES) == 73
-    assert len(set(FULL_SYNC_CAPABILITIES)) == 73
+    assert len(FULL_SYNC_CAPABILITIES) == 78
+    assert len(set(FULL_SYNC_CAPABILITIES)) == 78
 
 
 def test_nested_lock_audit_detects_a_stale_workspace_name(tmp_path):
@@ -123,6 +124,23 @@ def test_review_only_ci_issue_does_not_block_candidate_gate():
     assert report.gate_passes is True
     assert report.review_required is True
     assert report.to_dict()["gate"] == "REVIEW"
+
+
+def test_snapshot_safety_blocks_credentials_old_dependencies_bad_modes_and_empty_files(tmp_path):
+    root = Path(tmp_path)
+    (root / "LICENSE").write_text("MIT License\n")
+    shell = root / "scripts" / "run.sh"
+    shell.parent.mkdir()
+    shell.write_text("#!/bin/sh\n")
+    (root / "empty.py").write_text("")
+    (root / "settings.py").write_text("token = 'ghp_abcdefghijklmnopqrstuvwxyz1234567890'\n")
+    (root / "package-lock.json").write_text(
+        '{"packages": {"node_modules/minimist": {"version": "1.2.5"}}}'
+    )
+
+    codes = {issue.code for issue in audit_snapshot_safety(str(root))}
+
+    assert {"credential-signal", "dependency-vulnerability-pattern", "script-not-executable", "unexpected-empty-file"} <= codes
 
 
 def test_upstream_advance_is_review_evidence_not_a_hard_failure():
