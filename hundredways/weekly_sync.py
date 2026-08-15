@@ -37,7 +37,7 @@ BASE_SYNC_CAPABILITIES: tuple[str, ...] = (
     # Branding and assets (17-24)
     "case-preserving-token-map", "path-renaming", "text-rewriting",
     "owned-asset-overlay", "asset-byte-integrity", "immutable-data-protection",
-    "first-party-brand-audit", "third-party-name-allowlist",
+    "first-party-brand-audit", "brand-fixture-consistency-audit", "third-party-name-allowlist",
     # Package and dependency integrity (25-32)
     "root-uv-lock-reconciliation", "root-npm-lock-reconciliation",
     "nested-npm-lock-audit", "workspace-name-consistency", "dependency-name-allowlist",
@@ -257,6 +257,40 @@ def audit_first_party_brand(root: str, rules: BrandingRules | None = None) -> li
     return issues
 
 
+def audit_fts5_trigram_fixtures(root: str) -> list[AuditIssue]:
+    """Block branded FTS5 fixtures whose query is not a trigram of their value.
+
+    Branding can change an inserted fixture value while leaving an abbreviated
+    assertion literal intact.  These tests then fail only in a container run;
+    treat that mismatch as a hard brand-integrity error before publication.
+    """
+    issues: list[AuditIssue] = []
+    insert_re = re.compile(r"INSERT INTO docs VALUES \('([^']+)'\)")
+    match_re = re.compile(r"MATCH '([^']{3})'")
+    for path in Path(root).rglob("*"):
+        if not path.is_file() or ".git" in path.parts or "node_modules" in path.parts:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if "fts5" not in text.lower():
+            continue
+        inserted = set(insert_re.findall(text))
+        if not inserted:
+            continue
+        valid = {word[index:index + 3] for word in inserted for index in range(len(word) - 2)}
+        for token in match_re.findall(text):
+            if token not in valid:
+                rel = str(path.relative_to(root))
+                issues.append(AuditIssue(
+                    "fts5-trigram-fixture",
+                    rel,
+                    f"MATCH '{token}' is not a trigram of the branded fixture value(s): {sorted(inserted)}",
+                ))
+    return issues
+
+
 def _snapshot_upstream_sha(branded_root: str) -> str:
     """Read the exact Hermes SHA captured in a 100Ways snapshot, if present."""
     path = Path(branded_root) / "manifest.json"
@@ -295,6 +329,7 @@ def build_weekly_report(
     reconcile_nested_lockfile_roots(branded_root)
     report.lock_issues = audit_nested_lockfiles(branded_root)
     report.brand_issues = audit_first_party_brand(branded_root)
+    report.brand_issues.extend(audit_fts5_trigram_fixtures(branded_root))
     report.asset_issues = audit_owned_assets(branded_root)
     report.visual_issues = audit_visual_assets(branded_root, upstream_repo)
     report.ci_issues = audit_workflow_security(branded_root)

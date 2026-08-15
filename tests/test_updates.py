@@ -360,6 +360,13 @@ def _hermes_repo_with_reconcile_patterns(tmp_path):
         '    db.execute(\\"INSERT INTO docs VALUES (\'hermes\')\\"); \\\n'
         '    sys.exit(\'SQLite FTS5 trigram self-test failed\') if db.execute(\\"SELECT count(*) FROM docs WHERE docs MATCH \'erm\'\\").fetchone()[0] != 1 else None"\n'
     )
+    runtime = hermes_path / "tests" / "docker" / "test_sqlite_runtime.py"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text(
+        "db.execute(\\\"CREATE VIRTUAL TABLE docs USING fts5(content, tokenize='trigram')\\\")\n"
+        "db.execute(\\\"INSERT INTO docs VALUES ('hermes')\\\")\n"
+        "assert db.execute(\\\"SELECT count(*) FROM docs WHERE docs MATCH 'erm'\\\").fetchone()[0] == 1\n"
+    )
     subprocess.run(["git", "-C", hermes, "add", "-A"], check=True)
     subprocess.run(["git", "-C", hermes, "commit", "-q", "-m", "add reconcile patterns"], check=True)
     return hermes
@@ -370,7 +377,12 @@ def test_reconcile_fixes_lockfile_roots_and_dockerfile_trigram(tmp_path):
     updates_dir = str(tmp_path / "Updates-Commits")
     res = UpdateManager(updates_dir, hermes_url=hermes).run()
     assert res.gate, f"gate FAILED: {[s for s in res.stages if s.status == 'fail']}"
-    assert set(res.reconcile.fixed) == {"Dockerfile", "package-lock.json", "uv.lock"}
+    assert set(res.reconcile.fixed) == {
+        "Dockerfile",
+        "package-lock.json",
+        "tests/docker/test_sqlite_runtime.py",
+        "uv.lock",
+    }
 
     root_record = [l.strip() for l in open(os.path.join(res.dir, "uv.lock"), encoding="utf-8")
                    if l.strip().startswith("name =")]
@@ -389,6 +401,10 @@ def test_reconcile_fixes_lockfile_roots_and_dockerfile_trigram(tmp_path):
     import re
     match = re.search(r"MATCH '([^']{3})'", dockerfile)
     assert match and match.group(1) in trigrams, dockerfile
+    runtime = open(os.path.join(res.dir, "tests", "docker", "test_sqlite_runtime.py"), encoding="utf-8").read()
+    runtime_match = re.search(r"MATCH '([^']{3})'", runtime)
+    assert runtime_match and runtime_match.group(1) in trigrams, runtime
+    assert "MATCH 'erm'" not in runtime
 
     # every stage is green and counted
     assert [s.name for s in res.stages] == STAGES
