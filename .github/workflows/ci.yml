@@ -4,10 +4,10 @@ name: CI
 #
 #   lint  -> tests  -> ways  -> rules  -> pipeline  -> forkcheck  -> readme  -> upload  -> all-checks-pass  -> #344 Push PR to NasTech
 #
-# Each job ``needs`` the previous, so a failure stops the chain early and
-# the whole chain is re-triggered on every push / PR / schedule.  The
-# release workflow (release-update.yml) reuses the same stage workflows and
-# adds the GitHub release step on top.
+# On a schedule, the commit stream runs first.  It compares the upstream
+# history with the merged NasTech baseline and enables the full chain only at
+# the configured commit threshold.  Pull-request and manual validation remain
+# complete so changes to 100Ways are always tested before review.
 #
 # ``pipeline`` brands the upstream tree and runs the 18-stage update pipeline
 # (including the fork-consistency diff against the real nastech-agent fork).
@@ -21,13 +21,23 @@ on:
   pull_request:
   workflow_dispatch:
   schedule:
-    - cron: "0 4 * * 1" # weekly Monday 04:00 UTC
+    - cron: "*/30 * * * *" # commit stream every 30 minutes; sync is commit-threshold driven
 
 permissions:
   contents: read
 
 jobs:
+  commit-stream:
+    name: Commit stream monitor
+    uses: ./.github/workflows/stage-commit-stream.yml
+    with:
+      threshold: 50
+      notify: ${{ github.event_name == 'schedule' }}
+    secrets: inherit
+
   lint:
+    needs: commit-stream
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || needs.commit-stream.outputs.trigger_sync == 'true' }}
     uses: ./.github/workflows/stage-lint.yml
 
   tests:

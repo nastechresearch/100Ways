@@ -1,0 +1,145 @@
+"""Commit-threshold monitor for the NasTech full-sync publisher.
+
+The monitor compares the exact upstream SHA recorded in the checked-out
+NasTech main branch's ``manifest.json`` with the current upstream head.  It
+never publishes anything itself.  It produces deterministic evidence for the
+workflow to notify operators below the threshold and to enable the complete
+100Ways verification chain once the threshold is reached.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Sequence
+
+
+DEFAULT_THRESHOLD = 50
+
+
+@dataclass(frozen=True)
+class CommitStreamDecision:
+    baseline_sha: str
+    merged_baseline_sha: str
+    candidate_baseline_sha: str
+    upstream_sha: str
+    pending_commits: int
+    threshold: int
+    status: str
+    trigger_sync: bool
+    subjects: list[str]
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+def _git(repo: Path, *args: str, check: bool = True) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True,
+        text=True,
+    )
+    if check and completed.returncode:
+        raise RuntimeError(completed.stderr.strip() or completed.stdout.strip())
+    return completed.stdout.strip()
+
+
+def load_baseline_sha(nastech_repo: str | Path) -> str:
+    """Return the upstream SHA recorded by the last merged NasTech snapshot."""
+    manifest = Path(nastech_repo) / "manifest.json"
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f"cannot read merged NasTech manifest: {manifest}") from error
+    baseline = data.get("upstream_sha")
+    if not isinstance(baseline, str) or len(baseline) < 12:
+        raise RuntimeError("merged NasTech manifest has no valid upstream_sha")
+    return baseline
+
+
+def inspect_commit_stream(
+    upstream_repo: str | Path,
+    nastech_repo: str | Path,
+    *,
+    candidate_repo: str | Path | None = None,
+    threshold: int = DEFAULT_THRESHOLD,
+    subject_limit: int = 10,
+) -> CommitStreamDecision:
+    """Compare merged NasTech state with upstream and make no side effects."""
+    if threshold < 1:
+        raise ValueError("threshold must be at least 1")
+    upstream = Path(upstream_repo)
+    merged_baseline = load_baseline_sha(nastech_repo)
+    candidate_baseline = ""
+    if candidate_repo is not None and (Path(candidate_repo) / "manifest.json").is_file():
+        candidate_baseline = load_baseline_sha(candidate_repo)
+    baseline = candidate_baseline or merged_baseline
+    upstream_sha = _git(upstream, "rev-parse", "HEAD")
+    ancestry = subprocess.run(
+        ["git", "-C", str(upstream), "merge-base", "--is-ancestor", baseline, upstream_sha],
+        capture_output=True,
+        text=True,
+    )
+    if ancestry.returncode != 0:
+        raise RuntimeError(
+            f"effective NasTech baseline {baseline} is not an ancestor of upstream {upstream_sha}; "
+            "manual reconciliation is required before threshold evaluation"
+        )
+    count = int(_git(upstream, "rev-list", "--count", f"{baseline}..{upstream_sha}") or "0")
+    subjects = _git(
+        upstream,
+        "log",
+        f"--format=%h %s",
+        f"-n{subject_limit}",
+        f"{baseline}..{upstream_sha}",
+    ).splitlines()
+    if count == 0 and candidate_baseline:
+        status = "awaiting-review"
+    elif count == 0:
+        status = "current"
+    elif count < threshold:
+        status = "warming"
+    else:
+        status = "threshold-reached"
+    return CommitStreamDecision(
+        baseline_sha=baseline,
+        merged_baseline_sha=merged_baseline,
+        candidate_baseline_sha=candidate_baseline,
+        upstream_sha=upstream_sha,
+        pending_commits=count,
+        threshold=threshold,
+        status=status,
+        trigger_sync=count >= threshold,
+        subjects=subjects,
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Inspect upstream commit backlog for NasTech sync")
+    parser.add_argument("--upstream-repo", required=True)
+    parser.add_argument("--nastech-repo", required=True)
+    parser.add_argument("--candidate-repo", help="Optional open-candidate checkout used as the effective baseline")
+    parser.add_argument("--threshold", type=int, default=DEFAULT_THRESHOLD)
+    parser.add_argument("--output", required=True, help="Path to JSON decision output")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    decision = inspect_commit_stream(
+        args.upstream_repo,
+        args.nastech_repo,
+        candidate_repo=args.candidate_repo,
+        threshold=args.threshold,
+    )
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(decision.to_dict(), indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(decision.to_dict(), indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

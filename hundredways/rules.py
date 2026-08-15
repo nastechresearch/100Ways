@@ -84,8 +84,9 @@ DEFAULT_TOKENS: list[TokenRule] = [
     _rule("hermes", "nastech", anchored=True),
     _rule("Hermes", "Nastech", anchored=True),
     _rule("HERMES", "NASTECH", anchored=True),
-    # -- brand symbol: the fork swaps the caduceus for the ankh-adjacent glyph
-    #    in 27 files (learned from the birth commit 0cafd22fb vs parent 03fa32c92)
+    # -- brand symbol: replace both inherited medical-symbol variants with
+    #    the user-approved NasTech glyph across UI, locales, docs, and SVGs.
+    _rule("⚕", "𓄃"),
     _rule("☤", "𓄃"),
 ]
 

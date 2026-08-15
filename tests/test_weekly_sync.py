@@ -4,17 +4,19 @@ from pathlib import Path
 from hundredways.weekly_sync import (
     FULL_SYNC_CAPABILITIES,
     WeeklyFullSyncReport,
+    audit_brand_symbols,
     audit_first_party_brand,
     audit_fts5_trigram_fixtures,
     audit_nested_lockfiles,
+    audit_snapshot_safety,
     load_ledger,
     save_ledger,
 )
 
 
 def test_weekly_full_sync_has_hardened_capability_contract():
-    assert len(FULL_SYNC_CAPABILITIES) == 73
-    assert len(set(FULL_SYNC_CAPABILITIES)) == 73
+    assert len(FULL_SYNC_CAPABILITIES) == 78
+    assert len(set(FULL_SYNC_CAPABILITIES)) == 78
 
 
 def test_nested_lock_audit_detects_a_stale_workspace_name(tmp_path):
@@ -44,6 +46,17 @@ def test_brand_audit_flags_first_party_brand_and_allows_vendor_package(tmp_path)
     assert len(issues) == 1
     assert issues[0].path == "readme.md"
     assert issues[0].code == "first-party-brand"
+
+
+def test_brand_symbol_audit_blocks_any_unreplaced_source_glyph(tmp_path):
+    root = Path(tmp_path)
+    (root / "ui.txt").write_text("⚕ Nastech")
+
+    issues = audit_brand_symbols(str(root))
+
+    assert len(issues) == 1
+    assert issues[0].code == "inherited-brand-symbol"
+    assert "𓄃" in issues[0].detail
 
 
 def test_fts5_fixture_audit_blocks_stale_branded_query_token(tmp_path):
@@ -123,6 +136,48 @@ def test_review_only_ci_issue_does_not_block_candidate_gate():
     assert report.gate_passes is True
     assert report.review_required is True
     assert report.to_dict()["gate"] == "REVIEW"
+
+
+def test_snapshot_safety_blocks_credentials_old_dependencies_bad_modes_and_empty_files(tmp_path):
+    root = Path(tmp_path)
+    (root / "LICENSE").write_text("MIT License\n")
+    shell = root / "scripts" / "run.sh"
+    shell.parent.mkdir()
+    shell.write_text("#!/bin/sh\n")
+    (root / "empty.py").write_text("")
+    (root / "settings.py").write_text("token = 'ghp_abcdefghijklmnopqrstuvwxyz1234567890'\n")
+    (root / "package-lock.json").write_text(
+        '{"packages": {"node_modules/minimist": {"version": "1.2.5"}}}'
+    )
+
+    codes = {issue.code for issue in audit_snapshot_safety(str(root))}
+
+    assert {"credential-signal", "dependency-vulnerability-pattern", "script-not-executable", "unexpected-empty-file"} <= codes
+
+
+def test_inherited_security_findings_require_review_but_new_findings_block():
+    from hundredways.weekly_sync import (
+        AuditIssue,
+        WeeklyFullSyncReport,
+        partition_inherited_security_issues,
+    )
+    from hundredways.rules import BrandingRules
+
+    candidate = [
+        AuditIssue("credential-signal", "nastech_cli/example.py", "source fixture"),
+        AuditIssue("credential-signal", "new/unsafe.py", "new candidate signal"),
+    ]
+    upstream = [AuditIssue("credential-signal", "hermes_cli/example.py", "source fixture")]
+
+    blocking, inherited = partition_inherited_security_issues(candidate, upstream, BrandingRules())
+    report = WeeklyFullSyncReport("sha", "", 0, 0, 0, 0, freshness_ok=True)
+    report.security_issues = blocking
+    report.inherited_security_issues = inherited
+
+    assert [issue.path for issue in blocking] == ["new/unsafe.py"]
+    assert [issue.path for issue in inherited] == ["nastech_cli/example.py"]
+    assert report.gate_passes is False
+    assert report.review_required is True
 
 
 def test_upstream_advance_is_review_evidence_not_a_hard_failure():

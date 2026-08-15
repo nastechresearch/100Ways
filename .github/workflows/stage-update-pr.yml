@@ -71,7 +71,7 @@ jobs:
               top = sorted(set(n.split("/", 1)[0] for n in zf.namelist()))
           print("extracted:", top)
           EOF
-          # tree/ = nastech-agent/ + UPDATE-REPORT.md + GATE-REPORT.md (zip root)
+          # tree/ = nastech-agent/ + verification reports + professional summary (zip root)
 
       # Pull requests from forks do not receive repository secrets.  The
       # cross-repository PAT is therefore unavailable (or intentionally
@@ -114,6 +114,7 @@ jobs:
           cp -a tree/nastech-agent/. .
           mv tree/UPDATE-REPORT.md reports/UPDATE-REPORT.md
           mv tree/GATE-REPORT.md reports/GATE-REPORT.md
+          mv tree/SYNC-SUMMARY.md reports/SYNC-SUMMARY.md
           rm -rf tree artifact
 
           # force-add beats the nastech-*/* gitignore pattern; -A captures
@@ -128,12 +129,12 @@ jobs:
 
           # open or update the PR test -> main on the fork
           PR_TITLE="Update ${SHA:+(${SHA:0:8})}"
-          BODY="Pipeline gate: PASS. Auto-generated from the 100Ways release pipeline. Runs the fork's full CI against the freshly-branded Hermes tree."
+          BODY_FILE="reports/SYNC-SUMMARY.md"
           PR_URL=$(gh pr list --repo "$FORK" --head "$TEST" --base "$BASE" --json url --jq '.[0].url' 2>/dev/null) || true
           if [ -n "$PR_URL" ]; then
-            gh pr edit "$PR_URL" --title "$PR_TITLE" --body "$BODY"
+            gh pr edit "$PR_URL" --title "$PR_TITLE" --body-file "$BODY_FILE"
           else
             gh pr create --repo "$FORK" --base "$BASE" --head "$TEST" \
-              --title "$PR_TITLE" --body "$BODY"
+              --title "$PR_TITLE" --body-file "$BODY_FILE"
           fi
           gh pr view "$FORK#$TEST" --json url --jq .url || true

@@ -226,12 +226,21 @@ def preserve_fork_files(fork_root: str, branded_root: str, upstream_root: str,
     rules = rules or BrandingRules()
     upstream = _walk(upstream_root)
     upstream_mapped = _upstream_mapped(upstream, rules)
+    engine_registry = os.path.isfile(
+        os.path.join(branded_root, "config", "owned-assets", "manifest.json")
+    )
     preserved: list[str] = []
     for rel in _walk(fork_root):
         if rel in upstream_mapped:
             continue  # upstream provides it
         dst = os.path.join(branded_root, rel)
         src = os.path.join(fork_root, rel)
+        # A 100Ways-owned registry is an explicit, reviewable visual identity
+        # overlay.  Preserve the fork's registry only when no engine-owned
+        # replacement already exists; otherwise a stale fork asset would
+        # overwrite the verified white NasTech asset pack.
+        if rel.startswith("config/owned-assets/") and engine_registry:
+            continue
         if os.path.abspath(dst) == os.path.abspath(src):
             continue
         os.makedirs(os.path.dirname(dst), exist_ok=True)

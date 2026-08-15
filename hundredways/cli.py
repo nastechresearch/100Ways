@@ -422,7 +422,11 @@ class Cli:
     def cmd_update(self) -> None:
         """Pull real Hermes, brand the whole tree, verify, save as Nastech-Update#N."""
         updates_dir = self.args.updates_dir or default_updates_dir(self.repo)
-        owned = OwnedAssets(repo=self.repo)
+        owned = (
+            OwnedAssets(root=self.args.owned_assets_root)
+            if self.args.owned_assets_root
+            else OwnedAssets(repo=self.repo)
+        )
         if owned.count:
             print(f"owned-assets registry: {owned.count} target paths in {owned.root}")
         else:
@@ -666,6 +670,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fork-root", default="",
                    help="nastech-agent fork checkout to diff against (default: --repo); "
                         "enables the preserve + forkcheck stages")
+    p.add_argument("--owned-assets-root", default="",
+                    help="explicit config/owned-assets directory managed by 100Ways; "
+                         "overrides the registry located in --repo")
     p.add_argument("--emit-outputs", default="",
                    help="write JSON {update_number, upstream_sha, gate} to this file "
                         "(CI emits these into $GITHUB_OUTPUT)")

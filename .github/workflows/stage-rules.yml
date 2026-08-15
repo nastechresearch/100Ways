@@ -47,12 +47,19 @@ jobs:
         run: |
           python3 - <<'EOF'
           from hundredways.cli import BIRTH_COMMIT, BIRTH_PARENT
-          from hundredways.rules import BrandingRules
+          from hundredways.rules import BrandingRules, DEFAULT_TOKENS
           from hundredways.verify import verify_rebrand
           import os
           repo = os.path.join(os.getcwd(), "nastech-agent")
-          report = verify_rebrand(repo, BIRTH_PARENT, BIRTH_COMMIT, BrandingRules())
+          # The birth snapshot predates the user-approved medical-symbol
+          # replacement (⚕ / ☤ -> 𓄃).  Compare historic name-token parity
+          # independently so this intentional brand evolution does not mask
+          # unrelated drift; the current rule is separately unit- and
+          # full-snapshot-tested, then enforced by the weekly symbol audit.
+          historical_tokens = [token for token in DEFAULT_TOKENS if token.match != "⚕"]
+          report = verify_rebrand(repo, BIRTH_PARENT, BIRTH_COMMIT, BrandingRules(tokens=historical_tokens))
           print(report.summary())
+          assert BrandingRules().transform_text("⚕☤") == "𓄃𓄃"
 
           # The fork birth commit manually rewrote a fixed set of files
           # (i18n bundles, READMEs, deleted contributor-email data).  The
