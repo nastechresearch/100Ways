@@ -1,6 +1,6 @@
-name: stage-update-pr
+name: "#344 — Push PR to NasTech"
 
-# Stage 6: when the pipeline passes, push the branded tree to a test branch
+# Final step #344: after every verification stage passes, push the branded tree to a test branch
 # in the nastech-agent FORK and open/update a PR against its main.  The fork
 # runs its own full CI (Python slices, JS checks, E2E, CodeQL) on that PR, so
 # a green result proves the freshly-branded Hermes tree is sound enough to
@@ -59,9 +59,15 @@ jobs:
           mkdir -p tree
           cd tree
           python3 - <<'EOF'
+          import os
           import zipfile
           with zipfile.ZipFile("../artifact/nastech-agent-update.zip") as zf:
               zf.extractall(".")
+              for info in zf.infolist():
+                  mode = (info.external_attr >> 16) & 0o777
+                  path = os.path.abspath(info.filename)
+                  if mode and os.path.isfile(path):
+                      os.chmod(path, mode)
               top = sorted(set(n.split("/", 1)[0] for n in zf.namelist()))
           print("extracted:", top)
           EOF

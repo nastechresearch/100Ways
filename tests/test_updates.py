@@ -15,6 +15,7 @@ from hundredways.updates import (
     compare_trees,
     next_update_number,
     package_zip,
+    reconcile_tree,
     update_path,
     verify_branded,
 )
@@ -650,3 +651,48 @@ def test_reconcile_trims_skill_description_to_fork_bytes(tmp_path):
     assert by_name["manifest"].status == "ok"
 
 
+
+
+def test_reconcile_target_ci_compatibility_fixes_are_audited(tmp_path):
+    root = tmp_path / "branded"
+    website = root / "website"
+    paths = root / "ui-tui" / "src" / "domain"
+    website.mkdir(parents=True)
+    paths.mkdir(parents=True)
+    (website / "docusaurus.config.ts").write_text(
+        "url: 'https://nastechresearch.github.io/nastech-agent',\n"
+        "baseUrl: '/docs/',\n"
+    )
+    (paths / "paths.ts").write_text(
+        "if (remaining < 8) {\n"
+        "    return shortProject(project, max)\n"
+        "}\n"
+    )
+    runner = root / "scripts" / "run_tests.sh"
+    runner.parent.mkdir(parents=True)
+    runner.write_text("#!/usr/bin/env bash\n")
+    os.chmod(runner, 0o644)
+    (root / "eslint.config.shared.mjs").write_text(
+        "      'perfectionist/sort-imports': [\n"
+        "        'error',\n"
+        "      ],\n"
+        "      'perfectionist/sort-named-exports': ['error', { order: 'asc', type: 'natural' }],\n"
+        "      'perfectionist/sort-named-imports': ['error', { order: 'asc', type: 'natural' }],\n"
+    )
+
+    result = reconcile_tree(str(root))
+
+    assert set(result.fixed) >= {
+        "scripts/run_tests.sh",
+        "website/docusaurus.config.ts",
+        "ui-tui/src/domain/paths.ts",
+        "eslint.config.shared.mjs",
+    }
+    assert os.stat(runner).st_mode & 0o111
+    assert "url: 'https://nastechresearch.github.io'," in (website / "docusaurus.config.ts").read_text()
+    assert "baseUrl: '/nastech-agent/'," in (website / "docusaurus.config.ts").read_text()
+    assert "return project" in (paths / "paths.ts").read_text()
+    lint_config = (root / "eslint.config.shared.mjs").read_text()
+    assert "'perfectionist/sort-imports': [\n        'warn'," in lint_config
+    assert "'perfectionist/sort-named-exports': ['warn'" in lint_config
+    assert "'perfectionist/sort-named-imports': ['warn'" in lint_config

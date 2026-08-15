@@ -22,7 +22,9 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
 ]
-dependencies = []
+dependencies = [
+  "pillow>=10,<12",
+]
 
 [project.urls]
 Homepage = "https://github.com/nastechresearch/100ways"
