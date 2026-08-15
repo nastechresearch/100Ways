@@ -103,7 +103,7 @@ jobs:
           PY
 
       - name: Send Telegram commit-stream status
-        if: ${{ inputs.notify && secrets.TELEGRAM_BOT_TOKEN != '' && secrets.TELEGRAM_CHAT_ID != '' }}
+        if: ${{ inputs.notify }}
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -115,14 +115,13 @@ jobs:
           TRIGGER: ${{ steps.decision.outputs.trigger_sync }}
         run: |
           set -euo pipefail
+          if test -z "${TELEGRAM_BOT_TOKEN}" || test -z "${TELEGRAM_CHAT_ID}"; then
+            echo "::warning::Telegram credentials are not configured; commit stream status was not delivered."
+            echo "- Telegram delivery: **not configured**" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           TEXT="NasTech commit stream: ${STATUS}. Pending upstream commits: ${PENDING}/${THRESHOLD}. Baseline: ${BASELINE}. Upstream: ${UPSTREAM}. Full sync enabled: ${TRIGGER}."
           curl --fail-with-body --retry 3 --retry-delay 2 --silent --show-error \
             --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
             --data-urlencode "text=${TEXT}" \
             "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
-
-      - name: Record unavailable Telegram delivery
-        if: ${{ inputs.notify && (secrets.TELEGRAM_BOT_TOKEN == '' || secrets.TELEGRAM_CHAT_ID == '') }}
-        run: |
-          echo "::warning::Telegram credentials are not configured; commit stream status was not delivered."
-          echo "- Telegram delivery: **not configured**" >> "$GITHUB_STEP_SUMMARY"
