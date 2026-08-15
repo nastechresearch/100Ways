@@ -10,6 +10,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Sequence
 
+from .rules import BrandingRules
+
 
 _SECRET_PATTERNS = (
     re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
@@ -31,6 +33,26 @@ def _git(repo: Path, *args: str) -> str:
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip())
     return result.stdout.strip()
+
+
+def _credential_signals(root: Path) -> list[ReadinessIssue]:
+    """Return credential-pattern findings from a tree, excluding binary assets."""
+    issues: list[ReadinessIssue] = []
+    ignored_suffixes = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".woff2", ".pdf"}
+    for path in root.rglob("*"):
+        if not path.is_file() or "node_modules" in path.parts or path.suffix.lower() in ignored_suffixes:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if any(pattern.search(text) for pattern in _SECRET_PATTERNS):
+            issues.append(ReadinessIssue(
+                "credential-signal",
+                str(path.relative_to(root)),
+                "credential-like value detected",
+            ))
+    return issues
 
 
 def scan_snapshot(snapshot: str | Path, upstream: str | Path, expected_upstream_sha: str) -> list[ReadinessIssue]:
@@ -55,15 +77,17 @@ def scan_snapshot(snapshot: str | Path, upstream: str | Path, expected_upstream_
         issues.append(ReadinessIssue("test-runner-mode", "scripts/run_tests.sh", "test runner must exist and be executable"))
     if (snapshot_path / ".git").exists():
         issues.append(ReadinessIssue("snapshot-git", ".git", "snapshot must not contain repository metadata"))
-    for path in snapshot_path.rglob("*"):
-        if not path.is_file() or "node_modules" in path.parts or path.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".ico", ".woff2", ".pdf"}:
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        if any(pattern.search(text) for pattern in _SECRET_PATTERNS):
-            issues.append(ReadinessIssue("credential-signal", str(path.relative_to(snapshot_path)), "credential-like value detected"))
+    # Keep inherited source fixtures visible in the weekly report, but do not
+    # let them block candidate publication.  Any credential-like value added by
+    # branding, the engine-owned asset registry, or fork preservation remains a
+    # prepublication failure.
+    rules = BrandingRules()
+    source_credential_paths = {
+        rules.transform_path(issue.path) for issue in _credential_signals(upstream_path)
+    }
+    for issue in _credential_signals(snapshot_path):
+        if issue.path not in source_credential_paths:
+            issues.append(issue)
     return issues
 
 
