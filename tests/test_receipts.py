@@ -15,6 +15,12 @@ from hundredways.receipts import (
 from hundredways.weekly_sync import WeeklyFullSyncReport
 
 
+def _candidate_archive(path) -> None:
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("nastech-agent/manifest.json", "{}")
+        archive.writestr("nastech-agent/README.md", "verified tree")
+
+
 def _passing_report() -> WeeklyFullSyncReport:
     return WeeklyFullSyncReport(
         upstream_sha="a" * 40,
@@ -35,8 +41,7 @@ def test_gate_receipt_binds_pass_decision_source_and_artifact(tmp_path):
         json.dumps({"source_provenance": {"acquisition": "fresh-direct-clone"}})
     )
     artifact = tmp_path / "candidate.zip"
-    with zipfile.ZipFile(artifact, "w") as archive:
-        archive.writestr("nastech-agent/README.md", "verified tree")
+    _candidate_archive(artifact)
 
     receipt = build_gate_decision_receipt(
         _passing_report(), candidate_root=candidate, artifact_path=artifact
@@ -56,7 +61,7 @@ def test_publication_receipt_requires_pass_gate_and_is_pr_only(tmp_path):
     candidate.mkdir()
     (candidate / "manifest.json").write_text("{}")
     artifact = tmp_path / "candidate.zip"
-    artifact.write_bytes(b"candidate")
+    _candidate_archive(artifact)
     gate_path = write_gate_decision_receipt(
         tmp_path / "gate_receipt.json",
         _passing_report(),
@@ -87,7 +92,7 @@ def test_publication_receipt_rejects_tampered_gate_evidence(tmp_path):
     candidate.mkdir()
     (candidate / "manifest.json").write_text("{}")
     artifact = tmp_path / "candidate.zip"
-    artifact.write_bytes(b"verified")
+    _candidate_archive(artifact)
     gate_path = write_gate_decision_receipt(
         tmp_path / "gate_receipt.json",
         _passing_report(),
@@ -114,7 +119,7 @@ def test_publication_receipt_rejects_tampered_artifact(tmp_path):
     candidate.mkdir()
     (candidate / "manifest.json").write_text("{}")
     artifact = tmp_path / "candidate.zip"
-    artifact.write_bytes(b"verified")
+    _candidate_archive(artifact)
     gate_path = write_gate_decision_receipt(
         tmp_path / "gate_receipt.json",
         _passing_report(),
@@ -131,6 +136,19 @@ def test_publication_receipt_rejects_tampered_artifact(tmp_path):
             candidate_branch="100WAYS",
             target_repository="nastechresearch/nastech-agent",
             target_base="main",
+        )
+
+
+def test_gate_receipt_rejects_invalid_archive(tmp_path):
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / "manifest.json").write_text("{}")
+    artifact = tmp_path / "candidate.zip"
+    artifact.write_bytes(b"not-a-zip")
+
+    with pytest.raises(ValueError, match="integrity"):
+        build_gate_decision_receipt(
+            _passing_report(), candidate_root=candidate, artifact_path=artifact
         )
 
 

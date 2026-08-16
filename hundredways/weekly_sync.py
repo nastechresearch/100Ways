@@ -66,6 +66,17 @@ HARDENED_CI_CAPABILITIES: tuple[str, ...] = (
     "dependency-vulnerability-pattern-audit",
     "secret-and-credential-pattern-audit", "mit-license-compliance-audit",
     "executable-permission-audit", "unexpected-empty-file-audit",
+    # Source, archive, receipt, and manual-release integrity (81-100)
+    "canonical-direct-source-remote-audit", "source-acquisition-provenance-audit",
+    "source-fetch-timestamp-audit", "manifest-upstream-sha-binding",
+    "candidate-tree-symlink-audit", "candidate-tree-special-file-audit",
+    "candidate-tree-case-collision-audit", "candidate-tree-control-path-audit",
+    "candidate-tree-unsafe-mode-audit", "deterministic-candidate-tree-digest",
+    "archive-path-traversal-audit", "archive-root-inventory-audit",
+    "archive-manifest-presence-audit", "archive-symlink-audit",
+    "archive-unsafe-mode-audit", "archive-compression-ratio-audit",
+    "receipt-tree-digest-binding", "upstream-release-tag-source-binding",
+    "nastech-release-tag-collision-audit", "manual-release-only-authorization",
 )
 
 FULL_SYNC_CAPABILITIES = BASE_SYNC_CAPABILITIES + HARDENED_CI_CAPABILITIES
