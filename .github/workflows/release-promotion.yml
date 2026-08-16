@@ -1,0 +1,104 @@
+name: NasTech Release Promotion
+
+# This workflow is intentionally manual.  100Ways synchronization and #344
+# cannot invoke it.  A protected environment plus a typed confirmation is
+# required before any matching NasTech tag or GitHub Release is created.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Exact Hermes release tag to mirror, for example v2026.8.13
+        required: true
+        type: string
+      upstream_tag_sha:
+        description: Peeled exact Hermes tag target SHA recorded by release-parity evidence
+        required: true
+        type: string
+      nastech_merge_sha:
+        description: Verified branded NasTech main merge SHA
+        required: true
+        type: string
+      gate_receipt_sha256:
+        description: SHA-256 of the 100Ways PASS gate receipt
+        required: true
+        type: string
+      confirmation:
+        description: Type PUBLISH followed by the exact release tag, for example PUBLISH v2026.8.13
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    if: ${{ inputs.confirmation == format('PUBLISH {0}', inputs.release_tag) }}
+    runs-on: ubuntu-latest
+    environment: nastech-release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Verify exact source and merged branded target
+        env:
+          GH_TOKEN: ${{ secrets.NAS_TECH_RELEASE_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          UPSTREAM_TAG_SHA: ${{ inputs.upstream_tag_sha }}
+          NASTECH_MERGE_SHA: ${{ inputs.nastech_merge_sha }}
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN"
+          test "$RELEASE_TAG" = "$(printf '%s' "$RELEASE_TAG" | grep -E '^v20[0-9]{2}\.[0-9]{1,2}\.[0-9]{1,2}(\.[0-9]+)?$')"
+          test "$UPSTREAM_TAG_SHA" = "$(printf '%s' "$UPSTREAM_TAG_SHA" | grep -E '^[0-9a-f]{40}$')"
+          test "$NASTECH_MERGE_SHA" = "$(printf '%s' "$NASTECH_MERGE_SHA" | grep -E '^[0-9a-f]{40}$')"
+          ACTUAL_UPSTREAM_SHA=$(git ls-remote --tags https://github.com/NousResearch/hermes-agent.git "refs/tags/${RELEASE_TAG}^{}" | awk 'NR == 1 {print $1}')
+          test "$ACTUAL_UPSTREAM_SHA" = "$UPSTREAM_TAG_SHA"
+          ACTUAL_NASTECH_MAIN=$(git ls-remote https://github.com/nastechresearch/nastech-agent.git HEAD | awk 'NR == 1 {print $1}')
+          test "$ACTUAL_NASTECH_MAIN" = "$NASTECH_MERGE_SHA"
+          git clone --depth=1 https://x-access-token:${GH_TOKEN}@github.com/nastechresearch/nastech-agent.git nastech-agent
+          test "$(git -C nastech-agent rev-parse HEAD)" = "$NASTECH_MERGE_SHA"
+          test "$(git -C nastech-agent show HEAD:manifest.json | jq -r .upstream_sha)" = "$UPSTREAM_TAG_SHA"
+          if git ls-remote --exit-code --tags https://github.com/nastechresearch/nastech-agent.git "refs/tags/${RELEASE_TAG}"; then
+            echo "NasTech tag ${RELEASE_TAG} already exists; refusing to overwrite it." >&2
+            exit 1
+          fi
+
+      - name: Create matching branded NasTech tag and release
+        env:
+          GH_TOKEN: ${{ secrets.NAS_TECH_RELEASE_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          UPSTREAM_TAG_SHA: ${{ inputs.upstream_tag_sha }}
+          NASTECH_MERGE_SHA: ${{ inputs.nastech_merge_sha }}
+          GATE_RECEIPT_SHA256: ${{ inputs.gate_receipt_sha256 }}
+        run: |
+          set -euo pipefail
+          cd nastech-agent
+          git config user.name "Nastech Release Approver"
+          git config user.email "releases@nastechresearch.invalid"
+          git tag -a "$RELEASE_TAG" "$NASTECH_MERGE_SHA" -m "Nastech Agent ${RELEASE_TAG} — verified branded release; Powered by NousResearch"
+          git push origin "refs/tags/${RELEASE_TAG}"
+          cat > /tmp/release-notes.md <<EOF
+          ## Nastech Agent ${RELEASE_TAG}
+
+          This is a verified NasTech-branded release built from the exact Hermes release tag \
+          [${RELEASE_TAG}](https://github.com/NousResearch/hermes-agent/releases/tag/${RELEASE_TAG}).
+
+          ### Verification evidence
+
+          - Hermes tag target: \`${UPSTREAM_TAG_SHA}\`
+          - Branded NasTech merge: \`${NASTECH_MERGE_SHA}\`
+          - 100Ways PASS gate receipt SHA-256: \`${GATE_RECEIPT_SHA256}\`
+
+          ### Attribution
+
+          Powered by NousResearch. This NasTech Agent release incorporates the capabilities \
+          covered by Hermes Agent ${RELEASE_TAG}, verified and branded through 100Ways.
+
+          No merge, tag, release, or deployment was performed automatically by the synchronization monitor.
+          EOF
+          gh release create "$RELEASE_TAG" --repo nastechresearch/nastech-agent \
+            --title "Nastech Agent ${RELEASE_TAG}" --notes-file /tmp/release-notes.md --target "$NASTECH_MERGE_SHA"

@@ -1,0 +1,42 @@
+name: NasTech Release Deployment
+
+# Deployment is intentionally separate from release promotion.  It may be run
+# only by a human after a matching branded NasTech release already exists.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing branded NasTech release tag to deploy
+        required: true
+        type: string
+      confirmation:
+        description: Type PUBLISH followed by the exact release tag, for example PUBLISH v2026.8.13
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-docs:
+    if: ${{ inputs.confirmation == format('PUBLISH {0}', inputs.release_tag) }}
+    runs-on: ubuntu-latest
+    environment: nastech-deployment
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Verify branded release and request documentation deployment
+        env:
+          GH_TOKEN: ${{ secrets.NAS_TECH_RELEASE_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN"
+          test "$RELEASE_TAG" = "$(printf '%s' "$RELEASE_TAG" | grep -E '^v20[0-9]{2}\.[0-9]{1,2}\.[0-9]{1,2}(\.[0-9]+)?$')"
+          gh release view "$RELEASE_TAG" --repo nastechresearch/nastech-agent --json tagName,targetCommitish,url > /tmp/release.json
+          test "$(jq -r .tagName /tmp/release.json)" = "$RELEASE_TAG"
+          gh workflow run deploy-site.yml --repo nastechresearch/nastech-agent --ref main
+          echo "Requested separately approved NasTech documentation deployment for ${RELEASE_TAG}."
+          echo "No container or application deployment is implied by this workflow."

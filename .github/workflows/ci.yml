@@ -37,9 +37,19 @@ jobs:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
-  lint:
+  release-parity:
+    name: Hermes release-parity monitor
     needs: commit-stream
-    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || needs.commit-stream.outputs.trigger_sync == 'true' }}
+    uses: ./.github/workflows/stage-release-parity.yml
+    with:
+      notify: ${{ github.event_name == 'schedule' }}
+    secrets:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+  lint:
+    needs: [commit-stream, release-parity]
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || needs.commit-stream.outputs.trigger_sync == 'true' || needs.release-parity.outputs.release_pending == 'true' }}
     uses: ./.github/workflows/stage-lint.yml
 
   tests:
@@ -55,8 +65,10 @@ jobs:
     uses: ./.github/workflows/stage-rules.yml
 
   pipeline:
-    needs: rules
+    needs: [rules, release-parity]
     uses: ./.github/workflows/stage-pipeline.yml
+    with:
+      hermes_ref: ${{ needs.release-parity.outputs.release_pending == 'true' && needs.release-parity.outputs.latest_tag || '' }}
     secrets:
       OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
 

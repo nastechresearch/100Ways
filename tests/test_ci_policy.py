@@ -94,3 +94,32 @@ def test_ci_policy_snapshot_mode_does_not_apply_engine_publication_denials(tmp_p
     )
 
     assert audit_workflow_security(str(tmp_path), enforce_publication_policy=False) == []
+
+
+def test_ci_policy_allows_only_guarded_manual_publication_workflows(tmp_path):
+    workflows = Path(tmp_path) / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "release-promotion.yml").write_text(
+        "on:\n  workflow_dispatch:\n"
+        "inputs:\n  confirmation:\n    description: Type PUBLISH v2026.8.13\n"
+        "jobs:\n  publish:\n    steps:\n"
+        "      - run: |\n"
+        "          git push origin refs/tags/v2026.8.13\n"
+        "          gh release create v2026.8.13\n"
+    )
+
+    assert audit_workflow_security(str(tmp_path)) == []
+
+
+def test_ci_policy_rejects_unguarded_manual_publication_workflow(tmp_path):
+    workflows = Path(tmp_path) / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "release-deploy.yml").write_text(
+        "on:\n  push:\n    branches: [main]\n"
+        "jobs:\n  publish:\n    steps:\n"
+        "      - run: gh workflow run deploy-site.yml\n"
+    )
+
+    codes = {issue.code for issue in audit_workflow_security(str(tmp_path))}
+
+    assert codes == {"unguarded-manual-publication"}

@@ -113,7 +113,9 @@ def _run_ok(cmd: list[str], what: str) -> str:
     return proc.stdout.strip()
 
 
-def pull_hermes(updates_dir: str, hermes_url: str = DEFAULT_HERMES_URL) -> str:
+def pull_hermes(
+    updates_dir: str, hermes_url: str = DEFAULT_HERMES_URL, upstream_ref: str = ""
+) -> str:
     """Acquire a new clone directly from the configured upstream remote.
 
     The prior checkout is deliberately discarded.  This prohibits a local git
@@ -126,6 +128,14 @@ def pull_hermes(updates_dir: str, hermes_url: str = DEFAULT_HERMES_URL) -> str:
     if os.path.exists(dest):
         shutil.rmtree(dest)
     _run_ok(["git", "clone", "--no-local", url, dest], "fresh direct upstream clone")
+    if upstream_ref:
+        if not re.fullmatch(r"v20\d{2}\.\d{1,2}\.\d{1,2}(?:\.\d+)?", upstream_ref):
+            raise ValueError("release-parity source ref must be an exact calendar release tag")
+        target = _run_ok(
+            ["git", "-C", dest, "rev-parse", f"refs/tags/{upstream_ref}^{{}}"],
+            "exact upstream release tag",
+        )
+        _run_ok(["git", "-C", dest, "checkout", "--detach", target], "exact upstream release checkout")
     return _run_ok(["git", "-C", dest, "rev-parse", "HEAD"], "upstream head")
 
 
@@ -1306,7 +1316,8 @@ class UpdateManager:
 
     def __init__(self, updates_dir: str, hermes_url: str = DEFAULT_HERMES_URL,
                  rules: BrandingRules | None = None, threshold: float = 0.99,
-                 owned: OwnedAssets | None = None, ai=None, fork_root: str = ""):
+                 owned: OwnedAssets | None = None, ai=None, fork_root: str = "",
+                 upstream_ref: str = ""):
         self.updates_dir = updates_dir
         self.hermes_url = hermes_url
         self.rules = rules or BrandingRules()
@@ -1314,6 +1325,7 @@ class UpdateManager:
         self.owned = owned
         self.ai = ai
         self.fork_root = fork_root
+        self.upstream_ref = upstream_ref
 
     def run(self, keep_failed: bool = True, zip_path: str = "",
             project_name: str = "nastech-agent", notify=None) -> UpdateResult:
@@ -1333,7 +1345,8 @@ class UpdateManager:
         dest = update_path(self.updates_dir, number)
 
         fetched_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-        upstream_sha = stage("pull", lambda: pull_hermes(self.updates_dir, self.hermes_url),
+        upstream_sha = stage(
+            "pull", lambda: pull_hermes(self.updates_dir, self.hermes_url, self.upstream_ref),
                              "fresh direct clone from configured upstream")
         src = hermes_path(self.updates_dir)
         baseline_sha = previous_upstream_sha(self.updates_dir, number)
@@ -1512,6 +1525,7 @@ class UpdateManager:
                 "fetched_at": fetched_at,
                 "acquisition": "fresh-direct-clone",
                 "baseline_sha": baseline_sha,
+                "requested_ref": self.upstream_ref,
             },
             "commit_subjects": commit_subjects,
             "changed_areas": changed_areas,

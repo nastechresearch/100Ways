@@ -1,0 +1,120 @@
+name: stage-release-parity
+
+on:
+  workflow_call:
+    inputs:
+      notify:
+        description: Whether the scheduled invocation should send a Telegram release-parity status
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      TELEGRAM_BOT_TOKEN:
+        required: false
+      TELEGRAM_CHAT_ID:
+        required: false
+    outputs:
+      pending_count:
+        description: Hermes releases without matching NasTech branded release tags
+        value: ${{ jobs.inspect.outputs.pending_count }}
+      latest_tag:
+        description: Latest exact Hermes release tag pending NasTech branding
+        value: ${{ jobs.inspect.outputs.latest_tag }}
+      latest_sha:
+        description: Exact Hermes tag target SHA for the pending branded release cycle
+        value: ${{ jobs.inspect.outputs.latest_sha }}
+      release_pending:
+        description: Whether a Hermes release requires a NasTech release-parity cycle
+        value: ${{ jobs.inspect.outputs.release_pending }}
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    outputs:
+      pending_count: ${{ steps.report.outputs.pending_count }}
+      latest_tag: ${{ steps.report.outputs.latest_tag }}
+      latest_sha: ${{ steps.report.outputs.latest_sha }}
+      release_pending: ${{ steps.report.outputs.release_pending }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install 100Ways
+        run: pip install -e .
+
+      - name: Fetch direct release and tag evidence
+        env:
+          RELEASES: ${{ runner.temp }}/hermes-releases.json
+          HERMES_TAGS: ${{ runner.temp }}/hermes-tags.txt
+          NASTECH_TAGS: ${{ runner.temp }}/nastech-tags.txt
+        run: |
+          set -euo pipefail
+          gh api "repos/NousResearch/hermes-agent/releases?per_page=100" > "$RELEASES"
+          git ls-remote --tags https://github.com/NousResearch/hermes-agent.git > "$HERMES_TAGS"
+          git ls-remote --tags https://github.com/nastechresearch/nastech-agent.git > "$NASTECH_TAGS"
+
+      - name: Build release-parity backlog evidence
+        id: report
+        env:
+          RELEASES: ${{ runner.temp }}/hermes-releases.json
+          HERMES_TAGS: ${{ runner.temp }}/hermes-tags.txt
+          NASTECH_TAGS: ${{ runner.temp }}/nastech-tags.txt
+          REPORT: ${{ runner.temp }}/release-parity.json
+        run: |
+          set -euo pipefail
+          python3 -m hundredways.release_parity \
+            --hermes-releases "$RELEASES" \
+            --hermes-tag-refs "$HERMES_TAGS" \
+            --nastech-tag-refs "$NASTECH_TAGS" \
+            --output "$REPORT"
+          echo "pending_count=$(jq -r '.pending_count' "$REPORT")" >> "$GITHUB_OUTPUT"
+          echo "latest_tag=$(jq -r '.latest_pending_tag' "$REPORT")" >> "$GITHUB_OUTPUT"
+          echo "latest_sha=$(jq -r '.latest_pending_sha' "$REPORT")" >> "$GITHUB_OUTPUT"
+          if test "$(jq -r '.pending_count' "$REPORT")" -gt 0; then
+            echo "release_pending=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "release_pending=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "## Hermes release parity" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Pending NasTech branded releases: **$(jq -r '.pending_count' "$REPORT")**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Latest pending Hermes tag: \`$(jq -r '.latest_pending_tag' "$REPORT")\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Automatic actions: **none**; exact-tag source verification and human approval are required." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Send Telegram release-parity status
+        if: ${{ inputs.notify }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          REPORT: ${{ runner.temp }}/release-parity.json
+        run: |
+          set -euo pipefail
+          if test -z "$TELEGRAM_BOT_TOKEN" || test -z "$TELEGRAM_CHAT_ID"; then
+            echo "::warning::Telegram credentials are not configured; release-parity status was not delivered."
+            exit 0
+          fi
+          PENDING=$(jq -r '.pending_count' "$REPORT")
+          TAG=$(jq -r '.latest_pending_tag' "$REPORT")
+          SHA=$(jq -r '.latest_pending_sha' "$REPORT")
+          if test "$PENDING" -gt 0; then
+            TEXT="NasTech release parity: ${PENDING} pending Hermes release(s). Latest: ${TAG} (${SHA:0:12}). Next action: exact-tag verification and human-reviewed NasTech release cycle; no tag, release, or deployment is automatic."
+          else
+            TEXT="NasTech release parity: current. Every tracked Hermes release has a matching NasTech tag. No automatic tag, release, or deployment is authorized."
+          fi
+          TEXT="${TEXT}
+Safety boundary: 100Ways may only create or update a review PR after every gate passes; it never merges, tags, releases, or deploys."
+          curl --fail-with-body --retry 3 --retry-delay 2 --silent --show-error \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${TEXT}" \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-parity-evidence
+          path: ${{ runner.temp }}/release-parity.json
+          retention-days: 30
