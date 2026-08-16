@@ -3,19 +3,18 @@ the nastech-agent fork (no feature loss, no whole-tree churn, no brand
 violations on newly-added upstream lines), and fork-local files must be
 preserved into the snapshot so the pushed PR never deletes them."""
 
+import json
 import os
 import stat
 import subprocess
-import sys
-
-import pytest
 
 from hundredways.forkcheck import (
     ForkCheckReport,
+    _walk,
     fork_consistency,
     preserve_fork_files,
     scan_brand_violations,
-    _walk,
+    source_tree_delta,
 )
 from hundredways.rules import BrandingRules
 from hundredways.updates import STAGES, UpdateManager, brand_tree
@@ -152,6 +151,84 @@ def test_preserve_fork_files_copies_fork_local_content(tmp_path):
     assert "local.md" in preserved
     assert "nastech_cli/main.py" not in preserved  # upstream provides it
     assert (tmp_path / "branded" / "local.md").read_text() == "fork\n"
+
+
+def test_source_tree_delta_records_added_modified_deleted_and_renamed_paths(tmp_path):
+    rules = BrandingRules()
+    hermes = _hermes_repo(tmp_path)
+    root = str(hermes)
+    (tmp_path / "hermes-agent" / "obsolete.ts").write_text("old\n")
+    (tmp_path / "hermes-agent" / "changed.txt").write_text("before\n")
+    subprocess.run(["git", "-C", root, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", root, "commit", "-q", "-m", "add delta fixtures"], check=True)
+    baseline = subprocess.run(
+        ["git", "-C", root, "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    os.remove(tmp_path / "hermes-agent" / "obsolete.ts")
+    (tmp_path / "hermes-agent" / "changed.txt").write_text("after\n")
+    (tmp_path / "hermes-agent" / "added.ts").write_text("new\n")
+    subprocess.run(
+        ["git", "-C", root, "mv", "hermes_cli/hermes_runner.py", "hermes_cli/runner_v2.py"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", root, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", root, "commit", "-q", "-m", "all tree delta kinds"], check=True)
+    head = subprocess.run(
+        ["git", "-C", root, "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    report = source_tree_delta(root, baseline, head, rules)
+
+    assert report.complete
+    assert report.counts == {"added": 1, "modified": 1, "deleted": 1, "renamed": 1}
+    assert "obsolete.ts" in report.obsolete_mapped
+    assert "nastech_cli/nastech_runner.py" in report.obsolete_mapped
+
+
+def test_preserve_and_forkcheck_reject_stale_upstream_file_after_deletion(tmp_path):
+    rules = BrandingRules()
+    upstream = _tree(tmp_path / "upstream", {})
+    fork = _tree(tmp_path / "fork", {"apps/desktop/src/app/skills/hub.tsx": "legacy\n"})
+    branded = _tree(tmp_path / "branded", {})
+    obsolete = {"apps/desktop/src/app/skills/hub.tsx"}
+
+    preserved = preserve_fork_files(
+        str(fork), str(branded), str(upstream), rules, obsolete_upstream_paths=obsolete
+    )
+    report = fork_consistency(
+        str(fork), str(branded), str(upstream), rules, obsolete_upstream_paths=obsolete
+    )
+
+    assert preserved == []
+    assert report.entries[0].status == "upstream_deleted"
+    assert report.gate_passes()
+
+    _tree(branded, {"apps/desktop/src/app/skills/hub.tsx": "legacy\n"})
+    retained = fork_consistency(
+        str(fork), str(branded), str(upstream), rules, obsolete_upstream_paths=obsolete
+    )
+    assert retained.entries[0].status == "stale_upstream"
+    assert not retained.gate_passes()
+
+
+def test_preserve_keeps_explicitly_owned_asset_after_upstream_deletion(tmp_path):
+    rules = BrandingRules()
+    upstream = _tree(tmp_path / "upstream", {})
+    fork = _tree(tmp_path / "fork", {"assets/logo.png": "nastech asset\n"})
+    branded = _tree(tmp_path / "branded", {})
+
+    preserved = preserve_fork_files(
+        str(fork),
+        str(branded),
+        str(upstream),
+        rules,
+        obsolete_upstream_paths={"assets/logo.png"},
+        owned_paths={"assets/logo.png"},
+    )
+
+    assert preserved == ["assets/logo.png"]
+    assert (tmp_path / "branded" / "assets" / "logo.png").read_text() == "nastech asset\n"
 
 
 def test_preserve_fork_files_keeps_existing_engine_owned_registry(tmp_path):
@@ -314,3 +391,43 @@ def test_hermes_agent_subdirectory_is_not_pruned(tmp_path):
     files = _walk_files(str(tree))
     assert "skills/autonomous-ai-agents/hermes-agent/SKILL.md" in files
     assert "other.txt" in files
+
+
+def test_pipeline_records_and_removes_known_upstream_deletion(tmp_path):
+    hermes = _hermes_repo(tmp_path)
+    obsolete = os.path.join(hermes, "apps", "desktop", "src", "app", "skills", "hub.tsx")
+    os.makedirs(os.path.dirname(obsolete), exist_ok=True)
+    with open(obsolete, "w", encoding="utf-8") as handle:
+        handle.write("legacy hub\n")
+    subprocess.run(["git", "-C", hermes, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", hermes, "commit", "-q", "-m", "add legacy hub"], check=True)
+
+    updates_dir = str(tmp_path / "Updates-Commits")
+    first = UpdateManager(updates_dir, hermes_url=hermes).run()
+    assert first.gate
+
+    fork = _tree(
+        tmp_path / "fork",
+        {"apps/desktop/src/app/skills/hub.tsx": "legacy hub\n"},
+    )
+    os.remove(obsolete)
+    subprocess.run(["git", "-C", hermes, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", hermes, "commit", "-q", "-m", "remove legacy hub"], check=True)
+
+    second = UpdateManager(updates_dir, hermes_url=hermes, fork_root=str(fork)).run()
+    delta = second.source_delta
+
+    assert second.gate
+    assert delta.complete
+    assert delta.counts["deleted"] == 1
+    assert "apps/desktop/src/app/skills/hub.tsx" in delta.obsolete_mapped
+    candidate_hub = os.path.join(
+        second.dir, "apps", "desktop", "src", "app", "skills", "hub.tsx"
+    )
+    assert not os.path.exists(candidate_hub)
+    statuses = {entry.path: entry.status for entry in second.fork.entries}
+    assert statuses["apps/desktop/src/app/skills/hub.tsx"] == "upstream_deleted"
+    with open(second.manifest_path, encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    assert manifest["source_delta"]["complete"] is True
+    assert manifest["source_delta"]["counts"]["deleted"] == 1

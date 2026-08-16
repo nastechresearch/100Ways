@@ -156,6 +156,74 @@ jobs:
           echo "readiness=PASS" >> "$GITHUB_OUTPUT"
           echo "- Publication readiness: **PASS**" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Verify final branded candidate against exact Hermes source
+        id: final-conformance
+        env:
+          HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
+          HUNDREDWAYS_CONFORMANCE: ${{ runner.temp }}/candidate-conformance.json
+        run: |
+          set -euo pipefail
+          SNAPSHOT=$(find "$HUNDREDWAYS_UPDATES_DIR" -maxdepth 1 -type d -name 'Nastech-Update#*' | sort -V | tail -1)
+          python3 -m hundredways.conformance \
+            --source "$HUNDREDWAYS_UPDATES_DIR/hermes-agent" \
+            --candidate "$SNAPSHOT" \
+            --owned-assets-root "$GITHUB_WORKSPACE/config/owned-assets" \
+            --output "$HUNDREDWAYS_CONFORMANCE"
+          echo "conformance=PASS" >> "$GITHUB_OUTPUT"
+          echo "- Final branded-tree conformance: **PASS**" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run final branded candidate test suite
+        id: candidate-tests
+        env:
+          HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
+          HUNDREDWAYS_CANDIDATE_TESTS: ${{ runner.temp }}/candidate-tests.json
+        run: |
+          set -euo pipefail
+          SNAPSHOT=$(find "$HUNDREDWAYS_UPDATES_DIR" -maxdepth 1 -type d -name 'Nastech-Update#*' | sort -V | tail -1)
+          TEST_TREE="$RUNNER_TEMP/nastech-agent-candidate-test"
+          rm -rf "$TEST_TREE"
+          cp -a "$SNAPSHOT" "$TEST_TREE"
+          test -x "$TEST_TREE/scripts/run_tests.sh"
+          (
+            cd "$TEST_TREE"
+            ./scripts/run_tests.sh
+          )
+          python3 - <<'PYEOF'
+          import json
+          import os
+          from hundredways.integrity import tree_digest
+
+          updates = os.environ["HUNDREDWAYS_UPDATES_DIR"]
+          candidates = sorted(
+              (name for name in os.listdir(updates) if name.startswith("Nastech-Update#")),
+              key=lambda value: int(value.rsplit("#", 1)[-1]),
+          )
+          snapshot = os.path.join(updates, candidates[-1])
+          evidence = {
+              "gate": "PASS",
+              "runner": "scripts/run_tests.sh",
+              "candidate_tree_sha256": tree_digest(snapshot),
+          }
+          with open(os.environ["HUNDREDWAYS_CANDIDATE_TESTS"], "w", encoding="utf-8") as handle:
+              json.dump(evidence, handle, indent=2)
+          PYEOF
+          echo "candidate_tests=PASS" >> "$GITHUB_OUTPUT"
+          echo "- Final branded-candidate tests: **PASS**" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Re-attest candidate after tests
+        env:
+          HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
+          HUNDREDWAYS_POST_TEST_CONFORMANCE: ${{ runner.temp }}/candidate-post-test-conformance.json
+        run: |
+          set -euo pipefail
+          SNAPSHOT=$(find "$HUNDREDWAYS_UPDATES_DIR" -maxdepth 1 -type d -name 'Nastech-Update#*' | sort -V | tail -1)
+          python3 -m hundredways.conformance \
+            --source "$HUNDREDWAYS_UPDATES_DIR/hermes-agent" \
+            --candidate "$SNAPSHOT" \
+            --owned-assets-root "$GITHUB_WORKSPACE/config/owned-assets" \
+            --output "$HUNDREDWAYS_POST_TEST_CONFORMANCE"
+          echo "- Post-test candidate conformance: **PASS**" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Write professional update summary
         env:
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
@@ -272,6 +340,9 @@ jobs:
             ${{ runner.temp }}/weekly-full-sync-report.md
             ${{ runner.temp }}/weekly-decision.json
             ${{ runner.temp }}/publication-readiness.json
+            ${{ runner.temp }}/candidate-conformance.json
+            ${{ runner.temp }}/candidate-tests.json
+            ${{ runner.temp }}/candidate-post-test-conformance.json
             ${{ runner.temp }}/gate_receipt.json
             ${{ runner.temp }}/SYNC-SUMMARY.md
           if-no-files-found: error

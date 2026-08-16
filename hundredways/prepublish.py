@@ -13,7 +13,6 @@ from typing import Sequence
 from .integrity import audit_candidate_tree, audit_manifest_provenance, tree_digest
 from .rules import BrandingRules
 
-
 _SECRET_PATTERNS = (
     re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
@@ -36,12 +35,78 @@ def _git(repo: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def _source_delta_issues(snapshot: Path, manifest: dict) -> list[ReadinessIssue]:
+    """Reject source paths that upstream retired but the candidate still retains."""
+    delta = manifest.get("source_delta")
+    provenance = manifest.get("source_provenance")
+    baseline_sha = (
+        provenance.get("baseline_sha", "") if isinstance(provenance, dict) else ""
+    )
+    if not isinstance(delta, dict):
+        if baseline_sha:
+            return [
+                ReadinessIssue(
+                    "source-delta",
+                    "manifest.json",
+                    "baseline exists but direct upstream tree-delta evidence is missing",
+                )
+            ]
+        return []
+    if baseline_sha and delta.get("complete") is not True:
+        return [
+            ReadinessIssue(
+                "source-delta",
+                "manifest.json",
+                "baseline exists but direct upstream tree-delta evidence is incomplete",
+            )
+        ]
+    owned_paths = {
+        value for value in delta.get("owned_paths", []) if isinstance(value, str)
+    }
+    changes = delta.get("changes", [])
+    if not isinstance(changes, list):
+        return [
+            ReadinessIssue("source-delta", "manifest.json", "changes must be a list")
+        ]
+    issues: list[ReadinessIssue] = []
+    for change in changes:
+        if (
+            not isinstance(change, dict)
+            or change.get("status") not in {"deleted", "renamed"}
+        ):
+            continue
+        retired = change.get("old_mapped")
+        if (
+            not isinstance(retired, str)
+            or not retired
+            or Path(retired).is_absolute()
+            or ".." in Path(retired).parts
+        ):
+            issues.append(
+                ReadinessIssue("source-delta", "manifest.json", "retired path is invalid")
+            )
+            continue
+        if retired not in owned_paths and (snapshot / retired).is_file():
+            issues.append(
+                ReadinessIssue(
+                    "stale-upstream-path",
+                    retired,
+                    "candidate retains a path retired by direct Hermes source evidence",
+                )
+            )
+    return issues
+
+
 def _credential_signals(root: Path) -> list[ReadinessIssue]:
     """Return credential-pattern findings from a tree, excluding binary assets."""
     issues: list[ReadinessIssue] = []
     ignored_suffixes = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".woff2", ".pdf"}
     for path in root.rglob("*"):
-        if not path.is_file() or "node_modules" in path.parts or path.suffix.lower() in ignored_suffixes:
+        if (
+            not path.is_file()
+            or "node_modules" in path.parts
+            or path.suffix.lower() in ignored_suffixes
+        ):
             continue
         try:
             text = path.read_text(encoding="utf-8")
@@ -56,7 +121,11 @@ def _credential_signals(root: Path) -> list[ReadinessIssue]:
     return issues
 
 
-def scan_snapshot(snapshot: str | Path, upstream: str | Path, expected_upstream_sha: str) -> list[ReadinessIssue]:
+def scan_snapshot(
+    snapshot: str | Path,
+    upstream: str | Path,
+    expected_upstream_sha: str,
+) -> list[ReadinessIssue]:
     snapshot_path = Path(snapshot)
     upstream_path = Path(upstream)
     issues: list[ReadinessIssue] = []
@@ -73,15 +142,36 @@ def scan_snapshot(snapshot: str | Path, upstream: str | Path, expected_upstream_
         )
     )
     if expected_upstream_sha and actual_sha != expected_upstream_sha:
-        issues.append(ReadinessIssue("freshness", ".git", "upstream changed during the synchronization run; retry against the latest direct source"))
+        issues.append(
+            ReadinessIssue(
+                "freshness",
+                ".git",
+                "upstream changed during the synchronization run; retry against "
+                "the latest direct source",
+            )
+        )
+    issues.extend(_source_delta_issues(snapshot_path, manifest))
     license_path = snapshot_path / "LICENSE"
-    if not license_path.is_file() or not license_path.read_text(encoding="utf-8", errors="ignore").startswith("MIT License"):
-        issues.append(ReadinessIssue("license", "LICENSE", "MIT license text is missing or changed"))
+    license_ok = license_path.is_file() and license_path.read_text(
+        encoding="utf-8", errors="ignore"
+    ).startswith("MIT License")
+    if not license_ok:
+        issues.append(
+            ReadinessIssue("license", "LICENSE", "MIT license text is missing or changed")
+        )
     runner = snapshot_path / "scripts" / "run_tests.sh"
     if not runner.is_file() or not os.access(runner, os.X_OK):
-        issues.append(ReadinessIssue("test-runner-mode", "scripts/run_tests.sh", "test runner must exist and be executable"))
+        issues.append(
+            ReadinessIssue(
+                "test-runner-mode",
+                "scripts/run_tests.sh",
+                "test runner must exist and be executable",
+            )
+        )
     if (snapshot_path / ".git").exists():
-        issues.append(ReadinessIssue("snapshot-git", ".git", "snapshot must not contain repository metadata"))
+        issues.append(
+            ReadinessIssue("snapshot-git", ".git", "snapshot must not contain repository metadata")
+        )
     issues.extend(
         ReadinessIssue(issue.code, issue.path, issue.detail)
         for issue in audit_candidate_tree(snapshot_path)

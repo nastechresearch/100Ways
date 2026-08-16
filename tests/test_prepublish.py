@@ -83,3 +83,62 @@ def test_scan_snapshot_blocks_new_candidate_credential_signal(tmp_path):
     issues = scan_snapshot(snapshot, upstream, sha)
 
     assert [(issue.code, issue.path) for issue in issues] == [("credential-signal", "new.py")]
+
+
+def test_scan_snapshot_blocks_retained_upstream_deleted_path(tmp_path):
+    upstream = Path(_git_repo(tmp_path / "upstream"))
+    (upstream / "clean.py").write_text("value = 'clean'\n")
+    subprocess.run(["git", "-C", str(upstream), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(upstream), "commit", "-q", "-m", "clean"], check=True)
+    sha = subprocess.check_output(["git", "-C", str(upstream), "rev-parse", "HEAD"], text=True).strip()
+
+    snapshot = tmp_path / "snapshot"
+    _snapshot(snapshot, sha)
+    manifest_path = snapshot / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["source_provenance"]["baseline_sha"] = "a" * 40
+    manifest["source_delta"] = {
+        "complete": True,
+        "owned_paths": [],
+        "changes": [
+            {
+                "status": "deleted",
+                "old_mapped": "apps/desktop/src/app/skills/hub.tsx",
+            }
+        ],
+    }
+    manifest_path.write_text(json.dumps(manifest))
+    stale = snapshot / "apps" / "desktop" / "src" / "app" / "skills" / "hub.tsx"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("legacy\n")
+
+    issues = scan_snapshot(snapshot, upstream, sha)
+
+    assert [(issue.code, issue.path) for issue in issues] == [
+        ("stale-upstream-path", "apps/desktop/src/app/skills/hub.tsx")
+    ]
+
+
+def test_scan_snapshot_allows_explicitly_owned_path_after_upstream_deletion(tmp_path):
+    upstream = Path(_git_repo(tmp_path / "upstream"))
+    (upstream / "clean.py").write_text("value = 'clean'\n")
+    subprocess.run(["git", "-C", str(upstream), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(upstream), "commit", "-q", "-m", "clean"], check=True)
+    sha = subprocess.check_output(["git", "-C", str(upstream), "rev-parse", "HEAD"], text=True).strip()
+
+    snapshot = tmp_path / "snapshot"
+    _snapshot(snapshot, sha)
+    manifest_path = snapshot / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["source_provenance"]["baseline_sha"] = "a" * 40
+    manifest["source_delta"] = {
+        "complete": True,
+        "owned_paths": ["website/static/img/logo.png"],
+        "changes": [{"status": "deleted", "old_mapped": "website/static/img/logo.png"}],
+    }
+    manifest_path.write_text(json.dumps(manifest))
+    owned = snapshot / "website" / "static" / "img" / "logo.png"
+    owned.parent.mkdir(parents=True)
+    owned.write_text("nastech-owned\n")
+
+    assert scan_snapshot(snapshot, upstream, sha) == []
