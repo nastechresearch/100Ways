@@ -9,10 +9,12 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .integrity import audit_candidate_archive, audit_candidate_tree, tree_digest
-from .weekly_sync import WeeklyFullSyncReport
+
+if TYPE_CHECKING:
+    from .weekly_sync import WeeklyFullSyncReport
 
 GATE_RECEIPT_SCHEMA = "100ways.gate-decision-receipt/v1"
 PUBLICATION_RECEIPT_SCHEMA = "100ways.publication-authorization-receipt/v1"
@@ -67,8 +69,10 @@ def _source_provenance(candidate_root: Path) -> dict[str, Any]:
 
 
 def _decision_payload(report: WeeklyFullSyncReport | dict[str, Any]) -> dict[str, Any]:
-    if isinstance(report, WeeklyFullSyncReport):
-        return report.to_dict()
+    if not isinstance(report, dict) and hasattr(report, "to_dict"):
+        serialized = report.to_dict()
+        if isinstance(serialized, dict) and isinstance(serialized.get("gate"), str):
+            return serialized
     if isinstance(report, dict) and isinstance(report.get("gate"), str):
         return report
     raise ValueError("gate receipt requires a serialized decision with a gate result")
