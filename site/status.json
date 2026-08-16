@@ -1,0 +1,28 @@
+{
+  "schema": "100ways.public-status.v1",
+  "generatedAt": "not-yet-verified",
+  "state": "WARMING",
+  "stateDetail": "Awaiting the next verified 100Ways monitor run.",
+  "pending": 0,
+  "threshold": 50,
+  "remaining": 50,
+  "verified": "Not yet recorded",
+  "runUrl": "https://github.com/nastechresearch/100Ways/actions",
+  "upstreamSha": "—",
+  "baselineSha": "—",
+  "candidateSha": "—",
+  "syncState": "ON HOLD",
+  "gates": [
+    ["Direct Hermes fetch", "WAITING"],
+    ["Source delta audit", "WAITING"],
+    ["Branding and owned assets", "WAITING"],
+    ["Final tree conformance", "WAITING"],
+    ["Candidate test suite", "WAITING"],
+    ["#344 review PR", "HUMAN REVIEW"]
+  ],
+  "history": [
+    {"title": "Public status initialized", "detail": "The next verified Actions run will replace this placeholder."}
+  ],
+  "privacy": "Public sanitized evidence only; no secrets, tokens, chat IDs, or raw private logs.",
+  "publication": "Review PR only. No automatic merge, tag, release, or deployment."
+}

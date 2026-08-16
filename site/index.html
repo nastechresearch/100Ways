@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#050607">
+  <meta name="description" content="100Ways verified Hermes to NasTech synchronization status and documentation.">
+  <title>100Ways / NasTech Sync</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <a class="brand" href="#overview" aria-label="100Ways home">
+        <span class="brand-mark">𓄃</span>
+        <span><strong>100Ways</strong><small>NasTech synchronization control</small></span>
+      </a>
+      <nav class="nav" aria-label="Primary navigation">
+        <a class="active" href="#overview">Overview</a>
+        <a href="#gates">Gates</a>
+        <a href="#history">History</a>
+        <a href="#docs">Docs</a>
+      </nav>
+      <span id="live-badge" class="badge neutral">Loading status</span>
+    </header>
+
+    <main>
+      <section id="overview" class="hero">
+        <div>
+          <p class="eyebrow">VERIFIED UPDATE INTELLIGENCE</p>
+          <h1>From Hermes upstream<br><span>to a trusted NasTech PR.</span></h1>
+          <p class="lede">A read-only public view of the source delta, branded candidate, verification gates, and human approval boundaries.</p>
+          <div class="hero-actions"><a class="button primary" href="#gates">View verification gates</a><a class="button ghost" href="https://github.com/nastechresearch/100Ways/actions" rel="noreferrer">Open Actions</a></div>
+        </div>
+        <div class="hero-orbit" aria-hidden="true"><span>𓄃</span><i></i><i></i><i></i></div>
+      </section>
+
+      <section class="status-strip" aria-label="Current state">
+        <div><span class="label">CURRENT STATE</span><strong id="state">—</strong><small id="state-detail">Waiting for the latest verified run.</small></div>
+        <div><span class="label">PENDING COMMITS</span><strong id="pending">—</strong><small id="remaining">—</small></div>
+        <div><span class="label">LAST VERIFIED</span><strong id="verified">—</strong><small id="run-link">—</small></div>
+      </section>
+
+      <section class="section-grid" aria-label="Source comparison">
+        <article class="card source-card"><div class="card-head"><div><p class="eyebrow">DIRECT SOURCE</p><h2>Repository refs</h2></div><span class="dot green"></span></div><div class="ref-row"><span>Hermes head</span><code id="upstream-sha">—</code></div><div class="ref-row"><span>NasTech main base</span><code id="baseline-sha">—</code></div><div class="ref-row"><span>Open candidate</span><code id="candidate-sha">—</code></div></article>
+        <article class="card progress-card"><div class="card-head"><div><p class="eyebrow">COMMIT THRESHOLD</p><h2>Sync readiness</h2></div><span id="sync-state" class="tag neutral">—</span></div><div class="progress"><span id="progress-bar"></span></div><div class="progress-meta"><strong id="progress-value">—</strong><span id="progress-copy">—</span></div><p class="muted">The threshold measures what merged NasTech main is missing. An open candidate cannot hide upstream backlog.</p></article>
+      </section>
+
+      <section id="gates" class="section"><div class="section-title"><div><p class="eyebrow">FAIL-CLOSED VERIFICATION</p><h2>Gate matrix</h2></div><span class="section-note">#344 is PR-only</span></div><div id="gates-grid" class="gates-grid"></div></section>
+
+      <section id="history" class="section"><div class="section-title"><div><p class="eyebrow">AUDIT TRAIL</p><h2>Recent activity</h2></div><span id="history-count" class="section-note">—</span></div><div id="history-list" class="timeline"></div></section>
+
+      <section id="docs" class="docs-section"><div><p class="eyebrow">PUBLIC DOCUMENTATION</p><h2>Designed to be transparent without exposing secrets.</h2><p class="muted">100Ways publishes verified summaries only. Telegram remains the operational notification channel; this site never authorizes a merge, tag, release, or deployment.</p></div><div class="docs-grid"><a class="doc-card" href="https://github.com/nastechresearch/100Ways/blob/main/README.md"><span>01</span><strong>System contract</strong><small>100 safeguards and stage order</small></a><a class="doc-card" href="https://github.com/nastechresearch/100Ways/actions"><span>02</span><strong>Action evidence</strong><small>Run logs and gate outcomes</small></a><a class="doc-card" href="https://github.com/nastechresearch/100Ways/blob/main/LICENSE"><span>03</span><strong>MIT license</strong><small>Open-source legal basis</small></a></div></section>
+    </main>
+
+    <footer><span>100Ways / NasTech Research</span><span>Powered by NousResearch upstream data · Human approval remains required</span></footer>
+  </div>
+  <script src="./app.js" defer></script>
+</body>
+</html>
