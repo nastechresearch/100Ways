@@ -109,7 +109,9 @@ def inspect_commit_stream(
     candidate_baseline = ""
     if candidate_repo is not None and (Path(candidate_repo) / "manifest.json").is_file():
         candidate_baseline = load_baseline_sha(candidate_repo)
-    baseline = candidate_baseline or merged_baseline
+    # Thresholds measure what NasTech main is missing.  An open candidate is
+    # audit context only; it must never hide a 50+ commit backlog from main.
+    baseline = merged_baseline
     upstream_sha = _git(upstream, "rev-parse", "HEAD")
     ancestry = subprocess.run(
         ["git", "-C", str(upstream), "merge-base", "--is-ancestor", baseline, upstream_sha],
@@ -155,7 +157,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--upstream-repo", required=True)
     parser.add_argument("--nastech-repo", required=True)
     parser.add_argument(
-        "--candidate-repo", help="Optional open-candidate checkout used as the effective baseline"
+        "--candidate-repo", help="Optional open-candidate checkout recorded for audit context"
     )
     parser.add_argument("--threshold", type=int, default=DEFAULT_THRESHOLD)
     parser.add_argument("--output", required=True, help="Path to JSON decision output")
