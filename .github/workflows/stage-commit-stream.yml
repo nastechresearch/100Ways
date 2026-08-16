@@ -18,6 +18,8 @@ on:
         required: false
       TELEGRAM_CHAT_ID:
         required: false
+      OLLAMA_API_KEY:
+        required: false
     outputs:
       trigger_sync:
         description: Whether the pending-commit threshold has been reached
@@ -102,11 +104,45 @@ jobs:
               summary.write(f"- Full sync enabled: **{decision['trigger_sync']}**\n")
           PY
 
+      - name: Restore Telegram interaction memory
+        if: ${{ inputs.notify }}
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: telegram-state
+          key: telegram-state-${{ github.repository }}-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            telegram-state-${{ github.repository }}-${{ github.ref_name }}-
+
+      - name: Initialize Telegram memory directory
+        if: ${{ inputs.notify }}
+        run: mkdir -p telegram-state
+
+      - name: Build Telegram context
+        if: ${{ inputs.notify }}
+        env:
+          DECISION: ${{ runner.temp }}/commit-stream.json
+          CONTEXT: ${{ runner.temp }}/telegram-context.json
+        run: |
+          python3 - <<'PY'
+          import json, os
+          with open(os.environ["DECISION"], encoding="utf-8") as fh:
+              decision = json.load(fh)
+          context = {
+              "verified": "Actions run " + os.environ.get("GITHUB_RUN_ID", "unknown"),
+              "runUrl": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+              "gates": [["Commit stream", decision.get("status", "recorded").upper()]],
+              "history": [{"title": "Commit stream monitor completed", "detail": f"{decision['pending_commits']}/{decision['threshold']} pending upstream commits."}],
+          }
+          with open(os.environ["CONTEXT"], "w", encoding="utf-8") as fh:
+              json.dump(context, fh)
+          PY
+
       - name: Send Telegram commit-stream status
         if: ${{ inputs.notify }}
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
           STATUS: ${{ steps.decision.outputs.status }}
           PENDING: ${{ steps.decision.outputs.pending_commits }}
           THRESHOLD: ${{ inputs.threshold }}
@@ -121,18 +157,39 @@ jobs:
             echo "- Telegram delivery: **not configured**" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          TEXT=$(python3 - <<'PY'
-          import json
-          import os
+          python3 - <<'PY'
+          import json, os
           from hundredways.commit_stream import CommitStreamDecision, format_telegram_status
-          from hundredways.operation_safety import bound_telegram_text
-
+          from hundredways.telegram_agent import reply_keyboard, send_message
           with open(os.environ["DECISION"], encoding="utf-8") as handle:
               decision = CommitStreamDecision(**json.load(handle))
-          print(bound_telegram_text(format_telegram_status(decision)))
-          PY
+          send_message(
+              os.environ["TELEGRAM_BOT_TOKEN"],
+              os.environ["TELEGRAM_CHAT_ID"],
+              format_telegram_status(decision),
+              keyboard=True,
           )
-          curl --fail-with-body --retry 3 --retry-delay 2 --silent --show-error \
-            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-            --data-urlencode "text=${TEXT}" \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
+          PY
+
+      - name: Answer Telegram questions during this monitor window
+        if: ${{ inputs.notify && github.event_name == 'schedule' }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+          DECISION: ${{ runner.temp }}/commit-stream.json
+          CONTEXT: ${{ runner.temp }}/telegram-context.json
+        run: |
+          set -euo pipefail
+          python3 -m hundredways.telegram_agent \
+            --decision "$DECISION" \
+            --context "$CONTEXT" \
+            --state telegram-state/interaction.json \
+            --seconds 900
+
+      - name: Save Telegram interaction memory
+        if: ${{ inputs.notify && always() }}
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: telegram-state
+          key: telegram-state-${{ github.repository }}-${{ github.ref_name }}-${{ github.run_id }}

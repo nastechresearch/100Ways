@@ -36,6 +36,7 @@ jobs:
     secrets:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
 
   lint:
     needs: commit-stream
