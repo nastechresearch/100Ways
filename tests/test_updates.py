@@ -13,6 +13,7 @@ from hundredways.updates import (
     UpdateManager,
     brand_tree,
     compare_trees,
+    fork_manifest_upstream_sha,
     next_update_number,
     package_zip,
     reconcile_tree,
@@ -37,6 +38,31 @@ def _hermes_repo(tmp_path):
     subprocess.run(["git", "-C", str(hermes), "add", "-A"], check=True)
     subprocess.run(["git", "-C", str(hermes), "commit", "-q", "-m", "fake hermes"], check=True)
     return str(hermes)
+
+
+def test_fork_manifest_upstream_sha_enables_ephemeral_ci_delta_baseline(tmp_path):
+    hermes = _hermes_repo(tmp_path)
+    baseline = subprocess.check_output(
+        ["git", "-C", hermes, "rev-parse", "HEAD"], text=True
+    ).strip()
+    fork = tmp_path / "nastech-agent"
+    fork.mkdir()
+    (fork / "manifest.json").write_text(json.dumps({"upstream_sha": baseline}))
+    (tmp_path / "hermes-agent" / "added.py").write_text("value = 'new'\n")
+    subprocess.run(["git", "-C", hermes, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", hermes, "commit", "-q", "-m", "add source file"], check=True)
+
+    result = UpdateManager(
+        str(tmp_path / "Updates-Commits"),
+        hermes_url=hermes,
+        fork_root=str(fork),
+    ).run()
+
+    assert fork_manifest_upstream_sha(str(fork)) == baseline
+    assert result.gate
+    assert result.source_delta.complete
+    assert result.source_delta.baseline_sha == baseline
+    assert result.source_delta.counts["added"] == 1
 
 
 def test_pipeline_runs_15_stages(tmp_path):

@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import difflib
 import json
-from datetime import datetime, timezone
 import os
 import re
 import shutil
@@ -32,9 +31,16 @@ import subprocess
 import time
 import zipfile
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from .assets import OwnedAssets
-from .forkcheck import ForkCheckReport, fork_consistency, preserve_fork_files
+from .forkcheck import (
+    ForkCheckReport,
+    SourceDeltaReport,
+    fork_consistency,
+    preserve_fork_files,
+    source_tree_delta,
+)
 from .rules import BrandingRules, is_immutable_path, is_locked_path
 from .scanner import classify_path, is_text
 from .verify import FileResult, VerifyReport
@@ -129,6 +135,19 @@ def pull_hermes(updates_dir: str, hermes_url: str = DEFAULT_HERMES_URL) -> str:
     return _run_ok(["git", "-C", dest, "rev-parse", "HEAD"], "upstream head")
 
 
+def fork_manifest_upstream_sha(fork_root: str) -> str:
+    """Read the last verified Hermes SHA recorded in the current NasTech fork."""
+    if not fork_root:
+        return ""
+    manifest_path = os.path.join(fork_root, "manifest.json")
+    try:
+        with open(manifest_path, encoding="utf-8") as handle:
+            value = json.load(handle).get("upstream_sha", "")
+    except (OSError, ValueError):
+        return ""
+    return value if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value) else ""
+
+
 def previous_upstream_sha(updates_dir: str, before_number: int) -> str:
     """Return the most recent recorded source revision, if any."""
     for number in range(before_number - 1, 0, -1):
@@ -141,6 +160,38 @@ def previous_upstream_sha(updates_dir: str, before_number: int) -> str:
         except (OSError, ValueError):
             continue
     return ""
+
+
+def apply_owned_assets(dst: str, owned: OwnedAssets | None = None) -> list[str]:
+    """Materialize every declared NasTech-owned target, even after upstream deletion.
+
+    Brand-time replacement protects owned assets when upstream still carries a
+    counterpart.  This second pass protects the same asset when upstream has
+    removed that counterpart: our explicit registry remains authoritative.
+    """
+    if owned is None:
+        return []
+    materialized: list[str] = []
+    for target in sorted(owned.mapping):
+        source = owned.asset_path(target)
+        if source is None:
+            raise ValueError(f"owned asset registry entry is unavailable: {target}")
+        destination = os.path.join(dst, target)
+        if os.path.isfile(destination):
+            try:
+                with (
+                    open(source, "rb") as source_handle,
+                    open(destination, "rb") as destination_handle,
+                ):
+                    if source_handle.read() == destination_handle.read():
+                        continue
+            except OSError:
+                pass
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        shutil.copyfile(source, destination)
+        _restore_mode(source, destination)
+        materialized.append(target)
+    return materialized
 
 
 def upstream_change_evidence(repo: str, baseline: str, head: str) -> tuple[list[str], dict[str, int]]:
@@ -1167,6 +1218,19 @@ def update_report_md(result: "UpdateResult") -> str:
     if result.reconcile.fixed:
         lines += ["", "## Reconcile", "",
                   f"- fixed : {result.reconcile.summary()}", ""]
+    lines += [
+        "",
+        "## Direct upstream tree delta",
+        "",
+        f"- {result.source_delta.summary()}",
+    ]
+    for change in result.source_delta.changes:
+        if change.status == "renamed":
+            lines.append(f"- RENAMED `{change.old_path}` -> `{change.new_path}`")
+        elif change.status == "deleted":
+            lines.append(f"- DELETED `{change.old_path}`")
+        else:
+            lines.append(f"- {change.status.upper()} `{change.new_path}`")
     lines += ["", "## Scan", "", f"{result.scan.summary()}", ""]
     if result.scan.unknown_binary:
         lines += ["Unknown binaries:", *[f"- {p}" for p in result.scan.unknown_binary[:20]]]
@@ -1292,6 +1356,9 @@ class UpdateResult:
     gate_report_path: str = ""
     reconcile: ReconcileResult = field(default_factory=ReconcileResult)
     fork: ForkCheckReport = field(default_factory=ForkCheckReport)
+    source_delta: SourceDeltaReport = field(
+        default_factory=lambda: SourceDeltaReport("", "")
+    )
 
     def summary(self) -> str:
         return (
@@ -1336,22 +1403,38 @@ class UpdateManager:
         upstream_sha = stage("pull", lambda: pull_hermes(self.updates_dir, self.hermes_url),
                              "fresh direct clone from configured upstream")
         src = hermes_path(self.updates_dir)
-        baseline_sha = previous_upstream_sha(self.updates_dir, number)
+        baseline_sha = previous_upstream_sha(
+            self.updates_dir, number
+        ) or fork_manifest_upstream_sha(self.fork_root)
         evidence = stage(
             "source-evidence",
-            lambda: upstream_change_evidence(src, baseline_sha, upstream_sha or ""),
-            "record commit subjects and changed areas from the fresh source",
+            lambda: (
+                upstream_change_evidence(src, baseline_sha, upstream_sha or ""),
+                source_tree_delta(src, baseline_sha, upstream_sha or "", self.rules),
+            ),
+            "record direct upstream added/modified/deleted/renamed source evidence",
         )
-        commit_subjects, changed_areas = evidence or ([], {})
-        census = stage("census", lambda: census_tree(src), "count upstream files before touching anything")
+        (commit_subjects, changed_areas), source_delta = evidence or (
+            ([], {}),
+            SourceDeltaReport(baseline_sha, upstream_sha or ""),
+        )
+        stage("census", lambda: census_tree(src), "count upstream files before touching anything")
         stage("plan", lambda: number, f"next snapshot = {UPDATE_PREFIX}{number}")
 
         if os.path.isdir(dest):
             shutil.rmtree(dest)
         os.makedirs(dest, exist_ok=True)
 
-        brand = stage("brand", lambda: brand_tree(src, dest, self.rules, self.owned),
-                      "brand every folder, file name and text file")
+        def _brand() -> BrandResult:
+            result = brand_tree(src, dest, self.rules, self.owned)
+            result.owned += len(apply_owned_assets(dest, self.owned))
+            return result
+
+        brand = stage(
+            "brand",
+            _brand,
+            "brand source and materialize NasTech-owned assets after source deletion",
+        )
 
         def _reconcile() -> ReconcileResult:
             result = reconcile_tree(dest)
@@ -1377,21 +1460,44 @@ class UpdateManager:
             if self.owned and self.owned.count and os.path.isdir(self.owned.root):
                 registry_dest = os.path.join(dest, "config", "owned-assets")
                 shutil.copytree(self.owned.root, registry_dest, dirs_exist_ok=True)
-            return preserve_fork_files(self.fork_root, dest, src, self.rules)
-        preserve = stage("preserve", _preserve,
-                         "carry fork-local files (owned assets, emails, fork-only skills) into the snapshot")
-        preserved_files = preserve or []
+            return preserve_fork_files(
+                self.fork_root,
+                dest,
+                src,
+                self.rules,
+                obsolete_upstream_paths=source_delta.obsolete_mapped,
+                owned_paths=set(self.owned.mapping) if self.owned else set(),
+                allow_unclassified_fork_files=bool(baseline_sha),
+            )
+        stage(
+            "preserve",
+            _preserve,
+            "carry explicit fork-owned files while rejecting retired upstream paths",
+        )
 
         scan = stage("scan", lambda: scan_tree(dest), "classify every branded file")
-        diff = stage("compare", lambda: compare_trees(src, dest, self.rules, self.owned, reconciled_map),
-                     "diff branded tree vs upstream")
-        verify = stage("verify", lambda: verify_branded(src, dest, self.rules, self.owned, reconciled_map),
-                       "file-by-file parity gate")
+        diff = stage(
+            "compare",
+            lambda: compare_trees(src, dest, self.rules, self.owned, reconciled_map),
+            "diff branded tree vs upstream",
+        )
+        verify = stage(
+            "verify",
+            lambda: verify_branded(src, dest, self.rules, self.owned, reconciled_map),
+            "file-by-file parity gate",
+        )
 
         def _forkcheck() -> ForkCheckReport:
             if not self.fork_root:
                 return ForkCheckReport()
-            return fork_consistency(self.fork_root, dest, src, self.rules)
+            return fork_consistency(
+                self.fork_root,
+                dest,
+                src,
+                self.rules,
+                obsolete_upstream_paths=source_delta.obsolete_mapped,
+                owned_paths=set(self.owned.mapping) if self.owned else set(),
+            )
         forkcheck = stage("forkcheck", _forkcheck,
                           "diff snapshot vs nastech-agent fork (identical/updated/added/missing)")
 
@@ -1402,13 +1508,14 @@ class UpdateManager:
         verify = verify or VerifyReport()
         forkcheck = forkcheck or ForkCheckReport()
         fork_ok = (not self.fork_root) or forkcheck.gate_passes()
-        passed = gate_passes(verify, self.threshold) and fork_ok \
+        source_delta_ok = not baseline_sha or source_delta.complete
+        passed = gate_passes(verify, self.threshold) and fork_ok and source_delta_ok \
             and not any(s.status == "fail" for s in stages)
 
         result = UpdateResult(
             number=number, dir=dest, upstream_sha=upstream_sha or "", hermes_url=self.hermes_url,
             brand=brand, scan=scan, diff=diff, verify=verify, gate=passed, stages=stages,
-            reconcile=reconcile, fork=forkcheck,
+            reconcile=reconcile, fork=forkcheck, source_delta=source_delta,
         )
 
         # These outputs depend on the complete stage list.  Reserve their
@@ -1515,6 +1622,22 @@ class UpdateManager:
             },
             "commit_subjects": commit_subjects,
             "changed_areas": changed_areas,
+            "source_delta": {
+                "baseline_sha": source_delta.baseline_sha,
+                "complete": source_delta.complete,
+                "counts": source_delta.counts,
+                "owned_paths": sorted(self.owned.mapping) if self.owned else [],
+                "changes": [
+                    {
+                        "status": change.status,
+                        "old_path": change.old_path,
+                        "new_path": change.new_path,
+                        "old_mapped": change.old_mapped,
+                        "new_mapped": change.new_mapped,
+                    }
+                    for change in source_delta.changes
+                ],
+            },
             "reconciliation_actions": reconcile.fixed,
             "gate": passed,
             "stages": [s.name for s in stages],
@@ -1550,6 +1673,7 @@ class UpdateManager:
                 "statuses": forkcheck.statuses,
                 "violations": forkcheck.violation_count,
                 "preserved": len(forkcheck.preserved),
+                "preserved_paths": forkcheck.preserved,
                 "features_fork": forkcheck.features_fork,
                 "features_branded": forkcheck.features_branded,
                 "added_lines": sum(e.added_lines for e in forkcheck.entries),
