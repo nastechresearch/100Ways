@@ -101,8 +101,8 @@ def test_commit_stream_rejects_missing_baseline(tmp_path):
         load_baseline_sha(target)
 
 
-def test_commit_stream_uses_open_candidate_as_effective_baseline(tmp_path):
-    upstream, target, _ = _repos(tmp_path)
+def test_commit_stream_reports_open_candidate_without_using_it_as_baseline(tmp_path):
+    upstream, target, merged_baseline = _repos(tmp_path)
     candidate = tmp_path / "candidate"
     candidate.mkdir()
     candidate_sha = _commit(upstream, "candidate snapshot", "candidate\n")
@@ -113,8 +113,29 @@ def test_commit_stream_uses_open_candidate_as_effective_baseline(tmp_path):
 
     decision = inspect_commit_stream(upstream, target, candidate_repo=candidate, threshold=5)
 
-    assert decision.baseline_sha == candidate_sha
+    assert decision.baseline_sha == merged_baseline
     assert decision.candidate_baseline_sha == candidate_sha
-    assert decision.status == "awaiting-review"
-    assert decision.pending_commits == 0
+    assert decision.status == "warming"
+    assert decision.pending_commits == 1
     assert decision.trigger_sync is False
+
+
+def test_open_candidate_cannot_hide_main_backlog_at_threshold(tmp_path):
+    upstream, target, merged_baseline = _repos(tmp_path)
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    candidate_sha = _commit(upstream, "candidate snapshot", "candidate\n")
+    (candidate / "manifest.json").write_text(
+        json.dumps({"upstream_sha": candidate_sha}),
+        encoding="utf-8",
+    )
+    for index in range(5):
+        _commit(upstream, f"post-candidate change {index}", f"post-{index}\n")
+
+    decision = inspect_commit_stream(upstream, target, candidate_repo=candidate, threshold=5)
+
+    assert decision.baseline_sha == merged_baseline
+    assert decision.candidate_baseline_sha == candidate_sha
+    assert decision.pending_commits == 6
+    assert decision.status == "threshold-reached"
+    assert decision.trigger_sync is True
