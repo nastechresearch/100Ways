@@ -41,32 +41,57 @@ TELEGRAM_SAFETY_FOOTER = (
 
 
 def format_telegram_status(decision: CommitStreamDecision) -> str:
-    """Return a concise, deterministic Telegram status with safe next action."""
-    status_line = {
-        "current": "Current — no new upstream commits require a sync.",
-        "warming": "Warming — verification is held until the commit threshold is reached.",
-        "awaiting-review": "Candidate awaiting review — no new sync is started.",
-        "threshold-reached": "Threshold reached — the full verification chain is starting.",
-    }.get(decision.status, f"State: {decision.status}.")
+    """Return a readable, deterministic Telegram status card."""
+    labels = {
+        "current": ("Current", "No new upstream commits require a sync."),
+        "warming": ("Warming", "Full verification is held until the threshold is reached."),
+        "awaiting-review": ("Awaiting review", "An open candidate exists; no new sync is started."),
+        "threshold-reached": (
+            "Threshold reached",
+            "The full verification chain is authorized to start.",
+        ),
+    }
+    state, explanation = labels.get(decision.status, (decision.status.upper(), "State recorded."))
+    remaining = max(0, decision.threshold - decision.pending_commits)
     if decision.status == "threshold-reached":
-        action_line = (
-            "Next action: run all gates; #344 may create or update the review PR only on PASS."
-        )
+        next_action = "Run every gate; #344 may create or update the review PR only after PASS."
     elif decision.status == "warming":
-        remaining = max(0, decision.threshold - decision.pending_commits)
-        action_line = f"Next action: hold full sync; {remaining} more commit(s) needed."
+        next_action = f"hold full sync; {remaining} more commit(s) needed before automatic start."
+    elif decision.status == "awaiting-review":
+        next_action = "Review the existing NasTech candidate; publication is not authorized here."
     else:
-        action_line = "Next action: monitor only; no candidate publication is authorized."
-    return "\n".join(
+        next_action = "Continue monitoring; no candidate publication is authorized."
+    lines = [
+        "NASTECH / 100WAYS",
+        "COMMIT STREAM STATUS",
+        "────────────────────",
+        f"STATE     {state}",
+        explanation,
+        "",
+        "SOURCE",
+        f"Hermes head        {decision.upstream_sha[:12]}",
+        f"NasTech main base  {decision.merged_baseline_sha[:12]}",
+    ]
+    if decision.candidate_baseline_sha:
+        lines.append(f"Open candidate      {decision.candidate_baseline_sha[:12]}")
+    lines.extend(
         (
-            "NasTech commit stream",
-            status_line,
-            f"Progress: {decision.pending_commits}/{decision.threshold} pending upstream commits.",
-            f"Baseline: {decision.baseline_sha[:12]} | Upstream: {decision.upstream_sha[:12]}",
-            action_line,
+            "",
+            "PROGRESS",
+            f"Pending upstream   {decision.pending_commits}/{decision.threshold}",
+            f"Remaining          {remaining}",
+            f"Full sync          {'ENABLED' if decision.trigger_sync else 'ON HOLD'}",
+            "",
+            "NEXT ACTION",
+            next_action,
+            "",
+            "SAFETY",
+            "PR creation/update only after every gate passes.",
+            "No automatic merge, tag, release, or deployment.",
             TELEGRAM_SAFETY_FOOTER,
         )
     )
+    return "\n".join(lines)
 
 
 def _git(repo: Path, *args: str, check: bool = True) -> str:
