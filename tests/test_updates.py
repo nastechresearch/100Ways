@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import zipfile
+from pathlib import Path
 
 from hundredways.assets import OwnedAssets
 from hundredways.updates import (
@@ -15,12 +16,28 @@ from hundredways.updates import (
     compare_trees,
     next_update_number,
     package_zip,
+    pull_hermes,
     reconcile_tree,
     update_path,
     verify_branded,
 )
 from hundredways.rules import BrandingRules
 from tests.conftest import git, git_repo
+
+
+def test_pull_hermes_checks_out_exact_release_tag(tmp_path):
+    hermes = Path(_hermes_repo(tmp_path))
+    tagged_sha = subprocess.check_output(
+        ["git", "-C", str(hermes), "rev-parse", "HEAD"], text=True
+    ).strip()
+    subprocess.run(["git", "-C", str(hermes), "tag", "v2026.8.13"], check=True)
+    (hermes / "after-release.txt").write_text("new main content\n")
+    subprocess.run(["git", "-C", str(hermes), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(hermes), "commit", "-q", "-m", "after release"], check=True)
+
+    resolved = pull_hermes(str(tmp_path / "updates"), str(hermes), "v2026.8.13")
+
+    assert resolved == tagged_sha
 
 
 def _hermes_repo(tmp_path):

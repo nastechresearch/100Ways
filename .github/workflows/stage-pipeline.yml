@@ -20,6 +20,11 @@ on:
         type: string
         required: false
         default: "nastech-agent"
+      hermes_ref:
+        description: Optional exact Hermes calendar release tag for a release-parity snapshot
+        type: string
+        required: false
+        default: ""
     outputs:
       update_number:
         description: Sequential Nastech-Update#N assigned by the pipeline
@@ -62,9 +67,14 @@ jobs:
         id: direct-source
         env:
           HUNDREDWAYS_HERMES_URL: ${{ inputs.hermes_url }}
+          HUNDREDWAYS_HERMES_REF: ${{ inputs.hermes_ref }}
         run: |
           set -euo pipefail
-          DIRECT_SHA=$(git ls-remote "$HUNDREDWAYS_HERMES_URL" HEAD | awk 'NR == 1 {print $1}')
+          if test -n "$HUNDREDWAYS_HERMES_REF"; then
+            DIRECT_SHA=$(git ls-remote "$HUNDREDWAYS_HERMES_URL" "refs/tags/${HUNDREDWAYS_HERMES_REF}^{}" | awk 'NR == 1 {print $1}')
+          else
+            DIRECT_SHA=$(git ls-remote "$HUNDREDWAYS_HERMES_URL" HEAD | awk 'NR == 1 {print $1}')
+          fi
           test -n "$DIRECT_SHA"
           echo "sha=$DIRECT_SHA" >> "$GITHUB_OUTPUT"
           echo "- Direct upstream SHA: \`$DIRECT_SHA\`" >> "$GITHUB_STEP_SUMMARY"
@@ -73,6 +83,7 @@ jobs:
         id: update
         env:
           HUNDREDWAYS_HERMES_URL: ${{ inputs.hermes_url }}
+          HUNDREDWAYS_HERMES_REF: ${{ inputs.hermes_ref }}
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
           HUNDREDWAYS_OUTPUTS: ${{ runner.temp }}/update-outputs.json
           HUNDREDWAYS_ZIP: ${{ runner.temp }}/nastech-agent-update.zip
@@ -84,6 +95,7 @@ jobs:
           python3 -m hundredways.cli --repo nastech-agent update \
             --updates-dir "$HUNDREDWAYS_UPDATES_DIR" \
             --hermes-url "$HUNDREDWAYS_HERMES_URL" \
+            --hermes-ref "$HUNDREDWAYS_HERMES_REF" \
             --fork-root nastech-agent \
             --owned-assets-root "$GITHUB_WORKSPACE/config/owned-assets" \
             --zip "$HUNDREDWAYS_ZIP" \

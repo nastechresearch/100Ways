@@ -18,6 +18,7 @@ class WorkflowPolicyIssue:
 _ACTION_LINE = re.compile(r"^\s*(?:-\s*)?uses:\s*([^\s#]+)", re.MULTILINE)
 _FULL_SHA = re.compile(r"@[0-9a-f]{40}(?:\s|$|#)")
 _PUBLICATION_WORKFLOW = "stage-update-pr.yml"
+_MANUAL_PUBLICATION_WORKFLOWS = {"release-promotion.yml", "release-deploy.yml"}
 
 # The system is deliberately PR-only. These expressions cover GitHub CLI and
 # common deployment actions without attempting to interpret arbitrary shell.
@@ -117,18 +118,35 @@ def audit_workflow_security(
                 )
 
         if enforce_publication_policy:
-            for code, pattern, detail in _FORBIDDEN_WORKFLOW_ACTIONS:
-                if pattern.search(text):
-                    issues.append(WorkflowPolicyIssue(code, rel, detail))
-
-            if workflow.name != _PUBLICATION_WORKFLOW and _PUBLISH_COMMAND.search(text):
-                issues.append(
-                    WorkflowPolicyIssue(
-                        "unauthorized-publication-path",
-                        rel,
-                        "candidate PR creation and push are reserved for "
-                        f"{_PUBLICATION_WORKFLOW} (#344)",
-                    )
+            is_manual_publication = workflow.name in _MANUAL_PUBLICATION_WORKFLOWS
+            if is_manual_publication:
+                has_manual_trigger = re.search(r"(?m)^\s*workflow_dispatch\s*:", text)
+                has_forbidden_trigger = re.search(
+                    r"(?m)^\s*(?:push|pull_request|schedule)\s*:", text
                 )
+                has_confirmation = "confirmation" in text and "PUBLISH" in text
+                if not has_manual_trigger or has_forbidden_trigger or not has_confirmation:
+                    issues.append(
+                        WorkflowPolicyIssue(
+                            "unguarded-manual-publication",
+                            rel,
+                            "manual publication workflows require workflow_dispatch only "
+                            "and a typed PUBLISH confirmation",
+                        )
+                    )
+            else:
+                for code, pattern, detail in _FORBIDDEN_WORKFLOW_ACTIONS:
+                    if pattern.search(text):
+                        issues.append(WorkflowPolicyIssue(code, rel, detail))
+
+                if workflow.name != _PUBLICATION_WORKFLOW and _PUBLISH_COMMAND.search(text):
+                    issues.append(
+                        WorkflowPolicyIssue(
+                            "unauthorized-publication-path",
+                            rel,
+                            "candidate PR creation and push are reserved for "
+                            f"{_PUBLICATION_WORKFLOW} (#344)",
+                        )
+                    )
 
     return issues
