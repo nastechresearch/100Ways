@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .integrity import audit_candidate_archive, audit_candidate_tree, tree_digest
 from .weekly_sync import WeeklyFullSyncReport
 
 GATE_RECEIPT_SCHEMA = "100ways.gate-decision-receipt/v1"
@@ -87,6 +88,14 @@ def build_gate_decision_receipt(
     if not artifact.is_file():
         raise ValueError(f"candidate artifact does not exist: {artifact}")
 
+    candidate_issues = audit_candidate_tree(root)
+    archive_issues = audit_candidate_archive(artifact)
+    if candidate_issues or archive_issues:
+        details = ", ".join(
+            f"{issue.code}:{issue.path}" for issue in (*candidate_issues, *archive_issues)
+        )
+        raise ValueError(f"candidate integrity checks failed: {details}")
+
     decision = _decision_payload(report)
     gate = decision["gate"]
     payload: dict[str, Any] = {
@@ -95,8 +104,8 @@ def build_gate_decision_receipt(
         "decision": decision["gate"],
         "hard_gate_inputs": decision,
         "hard_gate_output": {
-            "gate_passes": gate != "FAIL",
-            "review_required": gate == "REVIEW",
+            "gate_passes": gate == "PASS",
+            "review_required": bool(decision.get("review_required", False)),
             "publication_allowed": gate == "PASS",
         },
         "source": {
@@ -109,6 +118,7 @@ def build_gate_decision_receipt(
             "filename": artifact.name,
             "bytes": artifact.stat().st_size,
             "sha256": sha256_file(artifact),
+            "candidate_tree_sha256": tree_digest(root),
         },
         "tools": {
             "python": sys.version.split()[0],
