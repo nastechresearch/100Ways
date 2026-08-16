@@ -135,6 +135,19 @@ def pull_hermes(updates_dir: str, hermes_url: str = DEFAULT_HERMES_URL) -> str:
     return _run_ok(["git", "-C", dest, "rev-parse", "HEAD"], "upstream head")
 
 
+def fork_manifest_upstream_sha(fork_root: str) -> str:
+    """Read the last verified Hermes SHA recorded in the current NasTech fork."""
+    if not fork_root:
+        return ""
+    manifest_path = os.path.join(fork_root, "manifest.json")
+    try:
+        with open(manifest_path, encoding="utf-8") as handle:
+            value = json.load(handle).get("upstream_sha", "")
+    except (OSError, ValueError):
+        return ""
+    return value if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value) else ""
+
+
 def previous_upstream_sha(updates_dir: str, before_number: int) -> str:
     """Return the most recent recorded source revision, if any."""
     for number in range(before_number - 1, 0, -1):
@@ -1390,7 +1403,9 @@ class UpdateManager:
         upstream_sha = stage("pull", lambda: pull_hermes(self.updates_dir, self.hermes_url),
                              "fresh direct clone from configured upstream")
         src = hermes_path(self.updates_dir)
-        baseline_sha = previous_upstream_sha(self.updates_dir, number)
+        baseline_sha = previous_upstream_sha(
+            self.updates_dir, number
+        ) or fork_manifest_upstream_sha(self.fork_root)
         evidence = stage(
             "source-evidence",
             lambda: (
