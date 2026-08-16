@@ -125,10 +125,11 @@ jobs:
           import json
           import os
           from hundredways.commit_stream import CommitStreamDecision, format_telegram_status
+          from hundredways.operation_safety import bound_telegram_text
 
           with open(os.environ["DECISION"], encoding="utf-8") as handle:
               decision = CommitStreamDecision(**json.load(handle))
-          print(format_telegram_status(decision))
+          print(bound_telegram_text(format_telegram_status(decision)))
           PY
           )
           curl --fail-with-body --retry 3 --retry-delay 2 --silent --show-error \

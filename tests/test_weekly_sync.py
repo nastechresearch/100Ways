@@ -16,8 +16,8 @@ from hundredways.weekly_sync import (
 
 
 def test_weekly_full_sync_has_hardened_capability_contract():
-    assert len(FULL_SYNC_CAPABILITIES) == 80
-    assert len(set(FULL_SYNC_CAPABILITIES)) == 80
+    assert len(FULL_SYNC_CAPABILITIES) == 100
+    assert len(set(FULL_SYNC_CAPABILITIES)) == 100
 
 
 def test_nested_lock_audit_detects_a_stale_workspace_name(tmp_path):

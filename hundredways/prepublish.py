@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Sequence
 
+from .integrity import audit_candidate_tree, audit_manifest_provenance, tree_digest
 from .rules import BrandingRules
 
 
@@ -65,8 +66,12 @@ def scan_snapshot(snapshot: str | Path, upstream: str | Path, expected_upstream_
     except (OSError, ValueError) as exc:
         return [ReadinessIssue("manifest", "manifest.json", f"cannot read manifest: {exc}")]
     actual_sha = _git(upstream_path, "rev-parse", "HEAD")
-    if manifest.get("upstream_sha") != actual_sha:
-        issues.append(ReadinessIssue("source-sha", "manifest.json", "snapshot source SHA does not match freshly fetched upstream HEAD"))
+    issues.extend(
+        ReadinessIssue(issue.code, issue.path, issue.detail)
+        for issue in audit_manifest_provenance(
+            manifest_path, expected_upstream_sha=actual_sha
+        )
+    )
     if expected_upstream_sha and actual_sha != expected_upstream_sha:
         issues.append(ReadinessIssue("freshness", ".git", "upstream changed during the synchronization run; retry against the latest direct source"))
     license_path = snapshot_path / "LICENSE"
@@ -77,6 +82,10 @@ def scan_snapshot(snapshot: str | Path, upstream: str | Path, expected_upstream_
         issues.append(ReadinessIssue("test-runner-mode", "scripts/run_tests.sh", "test runner must exist and be executable"))
     if (snapshot_path / ".git").exists():
         issues.append(ReadinessIssue("snapshot-git", ".git", "snapshot must not contain repository metadata"))
+    issues.extend(
+        ReadinessIssue(issue.code, issue.path, issue.detail)
+        for issue in audit_candidate_tree(snapshot_path)
+    )
     # Keep inherited source fixtures visible in the weekly report, but do not
     # let them block candidate publication.  Any credential-like value added by
     # branding, the engine-owned asset registry, or fork preservation remains a
@@ -99,7 +108,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
     issues = scan_snapshot(args.snapshot, args.upstream, args.expected_upstream_sha)
-    body = {"gate": "PASS" if not issues else "FAIL", "issues": [asdict(issue) for issue in issues]}
+    body = {
+        "gate": "PASS" if not issues else "FAIL",
+        "issues": [asdict(issue) for issue in issues],
+        "candidate_tree_sha256": tree_digest(args.snapshot),
+    }
     Path(args.output).write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(body, indent=2))
     return 0 if not issues else 1
