@@ -104,6 +104,7 @@ jobs:
           python3 -m hundredways.cli --repo nastech-agent update \
             --updates-dir "$HUNDREDWAYS_UPDATES_DIR" \
             --hermes-url "$HUNDREDWAYS_HERMES_URL" \
+            --expected-upstream-sha "${{ steps.direct-source.outputs.sha }}" \
             --fork-root nastech-agent \
             --owned-assets-root "$GITHUB_WORKSPACE/config/owned-assets" \
             --zip "$HUNDREDWAYS_ZIP" \
@@ -125,6 +126,7 @@ jobs:
           HUNDREDWAYS_STATE_DIR: ${{ runner.temp }}/100ways-state
           HUNDREDWAYS_WEEKLY_REPORT: ${{ runner.temp }}/weekly-full-sync-report.md
           HUNDREDWAYS_DECISION: ${{ runner.temp }}/weekly-decision.json
+          EXPECTED_UPSTREAM_SHA: ${{ steps.direct-source.outputs.sha }}
         run: |
           set -euo pipefail
           SNAPSHOT=$(find "$HUNDREDWAYS_UPDATES_DIR" -maxdepth 1 -type d -name 'Nastech-Update#*' | sort -V | tail -1)
@@ -145,6 +147,7 @@ jobs:
               snapshot,
               os.environ["HUNDREDWAYS_STATE_DIR"],
               mode="snapshot",
+              expected_upstream_sha=os.environ["EXPECTED_UPSTREAM_SHA"],
           )
           write_weekly_report(os.environ["HUNDREDWAYS_WEEKLY_REPORT"], report)
           with open(os.environ["HUNDREDWAYS_DECISION"], "w", encoding="utf-8") as fh:

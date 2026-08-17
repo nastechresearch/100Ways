@@ -498,10 +498,14 @@ def build_weekly_report(
     *,
     mode: str = "report",
     ref: str = "origin/main",
+    expected_upstream_sha: str = "",
 ) -> WeeklyFullSyncReport:
     """Build a deterministic full-sync report without publishing any repository change."""
     before = load_ledger(state_dir).get("upstream_sha", "")
-    current = fetch_upstream(upstream_repo, ref)
+    current = expected_upstream_sha or fetch_upstream(upstream_repo, ref)
+    resolved = _run(upstream_repo, "rev-parse", current)
+    if resolved != current:
+        raise RuntimeError(f"pinned upstream commit could not be resolved: {current}")
     files, added, deleted = _git_changed_numstat(upstream_repo, before, current)
     commits = int(_run(upstream_repo, "rev-list", "--count", f"{before}..{current}") or 0) if before else 0
     captured = _snapshot_upstream_sha(branded_root)
@@ -534,12 +538,20 @@ def build_weekly_report(
         upstream_security,
         BrandingRules(),
     )
-    report.freshness_ok = fetch_upstream(upstream_repo, ref) == current
+    report.freshness_ok = not captured or captured == current
     if captured and captured != current:
+        report.ci_issues.append(WorkflowPolicyIssue(
+            "source-sha-mismatch",
+            "manifest.json",
+            f"snapshot captured {captured}; expected pinned source {current}",
+            "block",
+        ))
+    latest = fetch_upstream(upstream_repo, ref)
+    if latest != current:
         report.ci_issues.append(WorkflowPolicyIssue(
             "upstream-advanced",
             "manifest.json",
-            f"snapshot captured {captured}; a newer upstream head {current} is available for the next sync",
+            f"candidate is pinned to {current}; a newer upstream head {latest} is available for the next sync",
             "review",
         ))
     return report
