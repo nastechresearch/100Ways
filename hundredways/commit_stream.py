@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Sequence
 
-DEFAULT_THRESHOLD = 50
+DEFAULT_THRESHOLD = 100
 
 
 @dataclass(frozen=True)

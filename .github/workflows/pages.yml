@@ -4,8 +4,9 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-  schedule:
-    - cron: "*/30 * * * *"
+  # No schedule — Pages only rebuilds on a push to main or an
+  # explicit workflow_dispatch.  Avoids burning CI minutes every
+  # 30 minutes when nothing has changed.
 
 permissions:
   contents: read

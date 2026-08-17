@@ -4,27 +4,28 @@ How to run, monitor, and recover 100Ways in production.
 
 ## Triggering a sync
 
-### Scheduled (default)
+### Event-driven (the only way)
 
-The cron at `*/30 * * * *` runs `ci.yml` every 30 minutes. When the
-pending-commit threshold is reached the full candidate pipeline runs
-automatically.
-
-To change the threshold, edit `.github/workflows/ci.yml` (the
-`commit-stream` job passes `threshold: ${{ inputs.threshold_override ||
-50 }}`).
-
-### Manual
-
-Go to **Actions → CI → Run workflow**. Inputs:
+100Ways no longer runs on a schedule. The operator triggers a sync manually
+via **Actions → CI → Run workflow**. Inputs:
 
 | input | type | default | purpose |
 |---|---|---|---|
-| `run_full_validation` | bool | false | Run the 19-stage candidate pipeline even without meeting the threshold |
+| `run_full_validation` | bool | false | Run the 19-stage candidate pipeline |
 | `publish_candidate_pr` | bool | false | Permit #344 to open/update a review PR after every gate passes |
 | `acknowledge_inherited_case_collisions` | bool | false | Acknowledge that the candidate carries inherited source-path collisions |
 | `bootstrap` | bool | false | Accept the first large upstream jump with `review_required=True` |
-| `threshold_override` | int | 0 (=50) | Lower the commit-stream threshold for one run |
+| `threshold_override` | int | 0 (=100) | Lower the commit-stream threshold for one run |
+
+The default commit-stream threshold is 100 upstream commits. A sync will
+not start until the upstream has at least 100 commits since the last
+merged NasTech baseline.
+
+### Why no schedule
+
+100Ways has 1 operator and 0 production users. A scheduled cron burns CI
+minutes every 30 minutes for no benefit. Event-driven means a sync only
+happens when you want one.
 
 ## Reading the Telegram alerts
 
@@ -119,4 +120,4 @@ responds with formatted strings. There is no persistent database.
 
 - **Pages** run logs: Actions → 100Ways Pages
 - **Main CI** run logs: Actions → CI
-- **Weekly sync** plan: Actions → weekly-sync → weekly-full-sync-report artifact
+- **Plan-only** when triggered on `workflow_dispatch` without `run_full_validation`

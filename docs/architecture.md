@@ -125,8 +125,8 @@ forces human acknowledgement of the resulting PR. After the bootstrap
 is merged, the ledger is initialized and strict mode resumes
 automatically.
 
-Bootstrap is opt-in only. The schedule path stays at threshold=50 and
-will never auto-bootstrap.
+Bootstrap is opt-in only. The default threshold is 100 commits and
+the project is event-driven (no scheduled cron).
 
 ## Where the code lives
 
