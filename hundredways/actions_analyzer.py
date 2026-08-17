@@ -124,7 +124,21 @@ def analyze_failure(log: str, *, step: str = "unknown") -> FailureReport:
     lowered = clean.lower()
     findings: list[FailureFinding] = []
 
-    if "http 429" in lowered or "error: rpc failed" in lowered and "429" in lowered:
+    if "not an ancestor of upstream" in lowered:
+        findings.append(
+            FailureFinding(
+                category="source_history",
+                severity="warning",
+                title="Direct source ancestry evidence is incomplete",
+                evidence=_first_line(clean, ("not an ancestor of upstream",)),
+                recommendation=(
+                    "Fetch complete upstream history from the direct source and rerun; "
+                    "publication remains disabled until ancestry and every gate pass."
+                ),
+                retryable=True,
+            )
+        )
+    elif "http 429" in lowered or "error: rpc failed" in lowered and "429" in lowered:
         findings.append(
             FailureFinding(
                 category="upstream_rate_limit",

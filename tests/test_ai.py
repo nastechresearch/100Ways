@@ -12,6 +12,7 @@ from hundredways.ai import (
     sanitize_ai_context,
     validate_provider,
 )
+from hundredways.actions_analyzer import analyze_failure
 from hundredways.updates import STAGES
 
 # -- env-driven configuration -------------------------------------------------
@@ -81,6 +82,19 @@ def test_sanitize_ai_context_redacts_credentials_and_bounds_data():
     assert "123456789:" not in redacted
     assert redacted.count("[REDACTED]") == 2
     assert len(sanitize_ai_context("x" * 90, limit=80)) == 80
+
+
+def test_failure_advice_falls_back_without_authorization_or_credentials():
+    report = analyze_failure(
+        "effective NasTech baseline abc is not an ancestor of upstream def; "
+        "manual reconciliation is required before threshold evaluation"
+    )
+    advice = AIEngine(AIConfig(api_key="")).advise_failure(report, "token=ghp_0123456789abcdefghijklmnopqrstuv")
+
+    assert "source_history" in advice
+    assert "complete upstream history" in advice
+    assert "publication remains disabled" in advice
+    assert "ghp_" not in advice
 
 
 # -- per-stage models ---------------------------------------------------------

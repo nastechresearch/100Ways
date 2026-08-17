@@ -178,6 +178,7 @@ jobs:
             python3 scripts/analyze_actions_failure.py \
               --decision "$HUNDREDWAYS_DECISION" \
               --step "Run hardened weekly decision gate" \
+              --ai-advice \
               --output "$HUNDREDWAYS_ANALYSIS" | tee -a "$GITHUB_STEP_SUMMARY"
             echo 'The weekly gate failed; publication remains fail-closed.' >> "$GITHUB_STEP_SUMMARY"
           else

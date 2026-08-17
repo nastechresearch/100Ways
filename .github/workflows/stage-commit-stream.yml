@@ -81,7 +81,7 @@ jobs:
             --nastech-repo nastech-agent \
             "${CANDIDATE_ARGS[@]}" \
             --threshold "$THRESHOLD" \
-            --output "$DECISION"
+            --output "$DECISION" 2>&1 | tee "$RUNNER_TEMP/commit-stream.log"
           python3 - <<'PY'
           import json
           import os
@@ -101,8 +101,25 @@ jobs:
               summary.write(f"- Upstream head: `{decision['upstream_sha']}`\n")
               summary.write(f"- Pending commits: **{decision['pending_commits']} / {decision['threshold']}**\n")
               summary.write(f"- State: **{decision['status']}**\n")
+              summary.write(f"- History recovery used: **{decision['history_recovered']}**\n")
               summary.write(f"- Full sync enabled: **{decision['trigger_sync']}**\n")
           PY
+
+      - name: Analyze commit-stream failure
+        if: ${{ always() && steps.decision.outcome == 'failure' }}
+        continue-on-error: true
+        env:
+          HUNDREDWAYS_ANALYSIS: ${{ runner.temp }}/commit-stream-analysis.json
+        run: |
+          set -euo pipefail
+          if test -f "$RUNNER_TEMP/commit-stream.log"; then
+            python3 scripts/analyze_actions_failure.py \
+              --log "$RUNNER_TEMP/commit-stream.log" \
+              --step "Compare commit stream" \
+              --ai-advice \
+              --output "$HUNDREDWAYS_ANALYSIS" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          echo 'Commit-stream failure remains fail-closed; no candidate publication is authorized.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Restore Telegram interaction memory
         if: ${{ inputs.notify }}

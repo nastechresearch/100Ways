@@ -21,6 +21,18 @@ def test_credentials_are_redacted_before_reporting():
     assert secret not in report.to_dict()["findings"][0]["evidence"]
 
 
+def test_incomplete_source_history_is_retryable_but_remains_fail_closed():
+    report = analyze_failure(
+        "effective NasTech baseline abc is not an ancestor of upstream def; "
+        "manual reconciliation is required before threshold evaluation"
+    )
+    finding = report.findings[0]
+    assert finding.category == "source_history"
+    assert finding.retryable is True
+    assert report.safe_to_retry is False
+    assert "complete upstream history" in finding.recommendation
+
+
 def test_permission_failure_is_not_retryable():
     report = analyze_failure("Resource not accessible by integration (HTTP 403)")
     finding = report.findings[0]

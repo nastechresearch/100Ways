@@ -12,6 +12,7 @@ import os
 import re
 from dataclasses import dataclass, field
 
+from .actions_analyzer import FailureReport
 from .analyzer import GapReport
 from .updates import STAGES
 from .verify import VerifyReport
@@ -221,7 +222,44 @@ class AIEngine:
         except Exception as exc:
             return self._fallback_stage_review(stage, context) + f" [AI unavailable: {exc}]"
 
+    def advise_failure(self, report: FailureReport, evidence: str) -> str:
+        """Return redacted, advisory-only remediation guidance for a failed gate.
+
+        This method cannot retry a workflow, alter source state, publish a PR, or
+        relax a gate.  Deterministic workflow logic remains the sole authority.
+        """
+        fallback = self._fallback_failure_advice(report)
+        if not self.available:
+            return fallback
+        findings = "\n".join(
+            f"- {item.category}: {item.title}; safe action: {item.recommendation}"
+            for item in report.findings[:5]
+        )
+        try:
+            return self._chat(
+                "You are the advisory-only 100Ways failure reviewer. Use only the "
+                "redacted evidence supplied. State the likely cause and the smallest "
+                "safe next diagnostic or repair action. Never authorize or instruct a "
+                "gate bypass, cached-source substitution, merge, tag, release, "
+                "deployment, credential change, or publication. End by stating that "
+                "deterministic verification remains required.",
+                f"Findings:\n{findings}\n\nRedacted evidence:\n{sanitize_ai_context(evidence)}",
+                model=self.model_for_stage("gate"),
+            )
+        except Exception as exc:
+            return f"{fallback} [AI unavailable: {exc}]"
+
     # -- deterministic fallbacks --------------------------------------------
+
+    @staticmethod
+    def _fallback_failure_advice(report: FailureReport) -> str:
+        finding = report.findings[0]
+        return (
+            f"Failure advisory ({finding.category}): {finding.title}. "
+            f"Safe next action: {finding.recommendation} "
+            "No retry, publication, merge, tag, release, or deployment is authorized; "
+            "publication remains disabled until deterministic verification passes."
+        )
 
     @staticmethod
     def _fallback_stage_review(stage: str, context: str) -> str:

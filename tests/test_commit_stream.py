@@ -56,6 +56,26 @@ def test_commit_stream_warms_without_trigger_below_threshold(tmp_path):
     assert len(decision.subjects) == 3
 
 
+def test_commit_stream_recovers_shallow_upstream_history_before_counting(tmp_path):
+    upstream, target, baseline = _repos(tmp_path)
+    for index in range(3):
+        _commit(upstream, f"change {index}", f"change-{index}\n")
+
+    shallow_upstream = tmp_path / "shallow-upstream"
+    subprocess.run(
+        ["git", "clone", "--depth=1", f"file://{upstream}", str(shallow_upstream)],
+        check=True,
+    )
+
+    decision = inspect_commit_stream(shallow_upstream, target, threshold=3)
+
+    assert decision.baseline_sha == baseline
+    assert decision.history_recovered is True
+    assert decision.pending_commits == 3
+    assert decision.trigger_sync is True
+    assert _git(shallow_upstream, "rev-parse", "--is-shallow-repository") == "false"
+
+
 def test_commit_stream_triggers_only_at_threshold(tmp_path):
     upstream, target, _ = _repos(tmp_path)
     for index in range(5):
