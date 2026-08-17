@@ -159,3 +159,59 @@ def test_open_candidate_cannot_hide_main_backlog_at_threshold(tmp_path):
     assert decision.pending_commits == 6
     assert decision.status == "threshold-reached"
     assert decision.trigger_sync is True
+
+
+def test_recover_complete_history_retries_with_backoff(tmp_path, monkeypatch):
+    """When ``git fetch --unshallow`` fails the function must retry with
+    bounded exponential backoff and raise after max_attempts."""
+
+    from hundredways.commit_stream import _recover_complete_history
+
+    calls: list[int] = []
+
+    class FakeCompleted:
+        def __init__(self, returncode: int) -> None:
+            self.returncode = returncode
+            self.stdout = ""
+            self.stderr = "fatal: HTTP 429"
+
+    def fake_run(cmd, **kwargs):
+        calls.append(1)
+        return FakeCompleted(returncode=1)
+
+    sleeps: list[float] = []
+    monkeypatch.setattr("hundredways.commit_stream.subprocess.run", fake_run)
+    monkeypatch.setattr("hundredways.commit_stream.time.sleep", lambda s: sleeps.append(s))
+
+    with pytest.raises(RuntimeError, match="after 3 attempts"):
+        _recover_complete_history(tmp_path, max_attempts=3)
+
+    assert len(calls) == 3
+    # Backoff: 10s, then 40s (10 * 2^2), no sleep after the final attempt.
+    assert sleeps == [10.0, 40.0]
+
+
+def test_recover_complete_history_returns_early_on_success(tmp_path, monkeypatch):
+    """A successful first attempt must not sleep and must not retry."""
+    from hundredways.commit_stream import _recover_complete_history
+
+    calls: list[int] = []
+
+    class FakeCompleted:
+        def __init__(self, returncode: int) -> None:
+            self.returncode = returncode
+            self.stdout = ""
+            self.stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        calls.append(1)
+        return FakeCompleted(returncode=0)
+
+    sleeps: list[float] = []
+    monkeypatch.setattr("hundredways.commit_stream.subprocess.run", fake_run)
+    monkeypatch.setattr("hundredways.commit_stream.time.sleep", lambda s: sleeps.append(s))
+
+    _recover_complete_history(tmp_path, max_attempts=3)
+
+    assert len(calls) == 1
+    assert sleeps == []
