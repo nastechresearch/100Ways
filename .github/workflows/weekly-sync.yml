@@ -1,11 +1,8 @@
 name: weekly-sync
 
-# Weekly full-sync cron. Runs Sunday 03:00 UTC and uses the same 19-stage
-# pipeline as the main CI path. Differs from ci.yml in two ways:
-#   * always runs (no commit-threshold gate)
-#   * never publishes a PR (#344 lives in ci.yml)
-# The output is a sanitized weekly report uploaded as an artifact and a
-# Telegram notification if TELEGRAM_BOT_TOKEN is configured.
+# Weekly full-sync cron. Runs Sunday 03:00 UTC and emits a plan-only
+# weekly report.  Never publishes a PR (#344 lives in ci.yml).  The
+# report is uploaded as an artifact and (optionally) sent to Telegram.
 
 on:
   schedule:
@@ -40,29 +37,24 @@ jobs:
       - name: Install 100Ways
         run: pip install -e .
 
-      - name: Install ripgrep for the search prerequisite
+      - name: Clone upstream Hermes (full history) and the NasTech fork (shallow)
         run: |
           set -euo pipefail
-          RG_VERSION=15.1.0
-          RG_SHA256=1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599
-          RG_TARBALL=ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl.tar.gz
-          curl -sSfL --retry 3 --retry-delay 5 -o "$RG_TARBALL" \
-            "https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/${RG_TARBALL}"
-          echo "${RG_SHA256}  ${RG_TARBALL}" | sha256sum -c -
-          tar -xzf "$RG_TARBALL"
-          sudo mv "ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl/rg" /usr/local/bin/rg
-          rm -rf "$RG_TARBALL" "ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl"
-
-      - name: Shallow clone of the fork (owned-assets registry)
-        run: |
+          # The weekly gate needs upstream history to compute diffs; clone
+          # Hermes with full history.  The shallow NasTech fork clone is the
+          # branded_root for the audit (treated as the candidate tree).
+          git clone https://github.com/NousResearch/hermes-agent.git hermes-agent
           git clone --depth=1 \
             https://github.com/nastechresearch/nastech-agent.git nastech-agent
+
+      - name: Initialize state directory
+        run: mkdir -p "${{ runner.temp }}/100ways-state"
 
       - name: Capture direct upstream SHA
         id: direct-source
         run: |
           set -euo pipefail
-          DIRECT_SHA=$(git ls-remote https://github.com/NousResearch/hermes-agent.git HEAD | awk 'NR == 1 {print $1}')
+          DIRECT_SHA=$(git -C hermes-agent rev-parse HEAD)
           test -n "$DIRECT_SHA"
           echo "sha=$DIRECT_SHA" >> "$GITHUB_OUTPUT"
 
@@ -74,19 +66,14 @@ jobs:
           EXPECTED_UPSTREAM_SHA: ${{ steps.direct-source.outputs.sha }}
         run: |
           set -euo pipefail
-          # The weekly cron never runs the 19-stage pipeline (that lives in
-          # ci.yml); it only audits the current upstream HEAD against the
-          # last ledger entry and writes a plan-only report.
           python3 - <<'PYEOF'
           import json
           import os
           from hundredways.weekly_sync import build_weekly_report, write_weekly_report
 
-          # Use a synthetic branded_root = nastech-agent's shallow clone.
-          # This is a PLAN-ONLY report; it does not modify nastech-agent.
           report = build_weekly_report(
-              "nastech-agent",
-              "nastech-agent",
+              "hermes-agent",       # upstream_repo: full Hermes clone
+              "nastech-agent",      # branded_root: shallow NasTech fork clone
               os.environ["HUNDREDWAYS_STATE_DIR"],
               mode="plan",
               expected_upstream_sha=os.environ["EXPECTED_UPSTREAM_SHA"],
