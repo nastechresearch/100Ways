@@ -91,3 +91,41 @@ def test_final_conformance_allows_declared_fork_owned_path(tmp_path):
     report = verify_final_candidate(source, candidate, allowed_extra_paths=[local_path])
 
     assert report.passed
+
+
+def test_final_conformance_allows_exact_inherited_immutable_case_collision(tmp_path):
+    source = _tree(
+        tmp_path / "source",
+        {
+            "contributors/emails/agent@Agents-Mac-mini.local": "first\n",
+            "contributors/emails/agent@agents-Mac-mini.local": "second\n",
+        },
+    )
+    candidate = tmp_path / "candidate"
+    brand_tree(str(source), str(candidate), BrandingRules())
+
+    report = verify_final_candidate(source, candidate)
+
+    assert report.passed
+    assert report.issues == ()
+
+
+def test_final_conformance_blocks_changed_inherited_case_collision(tmp_path):
+    source = _tree(
+        tmp_path / "source",
+        {
+            "contributors/emails/agent@Agents-Mac-mini.local": "first\n",
+            "contributors/emails/agent@agents-Mac-mini.local": "second\n",
+        },
+    )
+    candidate = tmp_path / "candidate"
+    brand_tree(str(source), str(candidate), BrandingRules())
+    (candidate / "contributors" / "emails" / "agent@Agents-Mac-mini.local").write_text(
+        "changed\n",
+        encoding="utf-8",
+    )
+
+    report = verify_final_candidate(source, candidate)
+
+    assert not report.passed
+    assert {issue.code for issue in report.issues} == {"candidate-case-collision"}
