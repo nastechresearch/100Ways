@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 from hundredways.prepublish import scan_snapshot, scan_snapshot_details
+from hundredways.integrity import canonical_source_fingerprint
 
 
 def _git_repo(path: Path) -> str:
@@ -20,7 +21,7 @@ def _snapshot(path: Path, sha: str) -> None:
         json.dumps({
             "upstream_sha": sha,
             "source_provenance": {
-                "remote_url": "https://github.com/NousResearch/hermes-agent.git",
+                "remote_fingerprint": canonical_source_fingerprint(),
                 "fetched_at": "2026-08-16T00:00:00+00:00",
                 "acquisition": "fresh-direct-clone",
             },

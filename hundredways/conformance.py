@@ -18,6 +18,7 @@ from typing import Iterable, Sequence
 from .assets import OwnedAssets
 from .integrity import audit_candidate_tree, tree_digest
 from .prepublish import inherited_case_collision_evidence
+from .reference_audit import audit_references
 from .rules import BrandingRules
 from .updates import apply_owned_assets, brand_tree, reconcile_tree, verify_branded
 
@@ -134,6 +135,16 @@ def verify_final_candidate(
                 "unexpected-candidate-path",
                 path,
                 "candidate path is absent from the exact branded source tree",
+            )
+        )
+    for finding in audit_references(candidate_path):
+        location = f"{finding.path}:{finding.line}" if finding.line else finding.path
+        issues.append(
+            ConformanceIssue(
+                "upstream-brand-reference",
+                location,
+                f"{finding.token}: {finding.detail}; only the two approved dependency groups "
+                "may retain Hermes/Nous references",
             )
         )
     allowed_collisions, _ = inherited_case_collision_evidence(

@@ -128,4 +128,7 @@ def test_final_conformance_blocks_changed_inherited_case_collision(tmp_path):
     report = verify_final_candidate(source, candidate)
 
     assert not report.passed
-    assert {issue.code for issue in report.issues} == {"candidate-case-collision"}
+    assert {issue.code for issue in report.issues} == {
+        "candidate-case-collision",
+        "source-parity",
+    }

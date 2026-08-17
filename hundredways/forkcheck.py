@@ -29,7 +29,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 
-from .rules import BrandingRules, is_immutable_path, is_locked_path
+from .rules import BrandingRules, is_locked_path
 from .scanner import is_text
 
 
@@ -202,8 +202,6 @@ def scan_brand_violations(root: str, rules: BrandingRules | None = None,
     for rel in _walk(root):
         if is_locked_path(rel):
             continue
-        if skip_immutable and is_immutable_path(rel):
-            continue
         data = _read(os.path.join(root, rel))
         if not is_text(data):
             continue
@@ -331,7 +329,7 @@ def _upstream_mapped(upstream: list[str], rules: BrandingRules) -> set[str]:
     """
     mapped: set[str] = set()
     for p in upstream:
-        mapped.add(p if is_immutable_path(p) else rules.transform_path(p))
+        mapped.add(rules.transform_path(p))
     return mapped
 
 
@@ -369,7 +367,6 @@ def preserve_fork_files(
         explicitly_owned = (
             rel in owned_paths
             or rel.startswith("config/owned-assets/")
-            or is_immutable_path(rel)
         )
         if rel in obsolete_upstream_paths and not explicitly_owned:
             continue  # direct source evidence proves this is stale upstream code
@@ -431,7 +428,6 @@ def fork_consistency(
         explicitly_owned = (
             rel in owned_paths
             or rel.startswith("config/owned-assets/")
-            or is_immutable_path(rel)
         )
         if rel in obsolete_upstream_paths and not explicitly_owned:
             entry.status = "stale_upstream" if rel in branded_files else "upstream_deleted"
@@ -466,7 +462,6 @@ def fork_consistency(
         explicitly_owned = (
             rel in owned_paths
             or rel.startswith("config/owned-assets/")
-            or is_immutable_path(rel)
         )
         if rel in obsolete_upstream_paths and not explicitly_owned:
             report.entries.append(ForkEntry(path=rel, status="stale_upstream"))
@@ -475,7 +470,7 @@ def fork_consistency(
             # brand-new upstream file: every line must be brand-clean
             data = _read(os.path.join(branded_root, rel))
             entry = ForkEntry(path=rel, status="added")
-            if is_text(data) and not is_locked_path(rel) and not is_immutable_path(rel):
+            if is_text(data) and not is_locked_path(rel):
                 text = data.decode("utf-8", "replace")
                 for line_no in _brand_violations(text, rules):
                     entry.violations.append(
