@@ -1,5 +1,8 @@
 import json
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from hundredways.weekly_sync import (
     FULL_SYNC_CAPABILITIES,
@@ -10,6 +13,7 @@ from hundredways.weekly_sync import (
     audit_fts5_trigram_fixtures,
     audit_nested_lockfiles,
     audit_snapshot_safety,
+    build_weekly_report,
     load_ledger,
     save_ledger,
 )
@@ -326,3 +330,149 @@ def test_pinned_weekly_report_blocks_a_candidate_from_the_wrong_source_commit(tm
         "source-sha-mismatch",
         "upstream-advanced",
     }
+
+
+def _init_repo(path: Path) -> None:
+    """Create a bare git repo with a known history.
+
+    Adds ``origin`` pointing at itself so the ``fetch_upstream`` calls inside
+    ``build_weekly_report`` can succeed in tests without a network.
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", "--bare", str(path / "bare")], check=True)
+    subprocess.run(["git", "-C", str(path), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.name", "100Ways"], check=True)
+    subprocess.run(
+        ["git", "-C", str(path), "config", "user.email", "100ways@example.invalid"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(path), "checkout", "-q", "-b", "main"], check=True)
+    subprocess.run(
+        ["git", "-C", str(path), "remote", "add", "origin", str(path / "bare")],
+        check=True,
+    )
+
+
+def _commit(path: Path, message: str, content: str = "x") -> str:
+    file_path = path / f"f-{message.replace(' ', '-')}.txt"
+    file_path.write_text(content, encoding="utf-8")
+    subprocess.run(["git", "-C", str(path), "add", str(file_path)], check=True)
+    subprocess.run(["git", "-C", str(path), "commit", "-q", "-m", message], check=True)
+    subprocess.run(["git", "-C", str(path), "push", "-q", "origin", "main"], check=True)
+    return subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+def test_bootstrap_passes_when_ledger_is_empty(tmp_path):
+    """First-run bootstrap: empty ledger, fresh snapshot, gate must pass
+    with review_required=True so the operator knows the first sync absorbed
+    a large jump."""
+    upstream = tmp_path / "upstream"
+    branded = tmp_path / "branded"
+    state = tmp_path / "state"
+    _init_repo(upstream)
+    for i in range(5):
+        _commit(upstream, f"upstream commit {i}", f"upstream-{i}")
+
+    # Snapshot has no manifest.json yet — the ledger is empty too.
+    branded.mkdir()
+
+    sha = subprocess.run(
+        ["git", "-C", str(upstream), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+    report = build_weekly_report(
+        str(upstream), str(branded), str(state),
+        expected_upstream_sha=sha,
+        bootstrap=True,
+    )
+
+    assert report.freshness_ok is True
+    assert report.gate_passes is True
+    assert report.review_required is True
+    codes = [issue.code for issue in report.ci_issues]
+    assert "bootstrap-sync" in codes
+
+
+def test_bootstrap_rejects_silent_after_first_run(tmp_path):
+    """After the ledger is initialized, bootstrap=False on the next run
+    must still fail closed if the captured snapshot is stale."""
+    upstream = tmp_path / "upstream"
+    branded = tmp_path / "branded"
+    state = tmp_path / "state"
+    _init_repo(upstream)
+    old_sha = _commit(upstream, "old")
+    new_sha = _commit(upstream, "new")
+
+    branded.mkdir()
+    (branded / "manifest.json").write_text(
+        json.dumps({"upstream_sha": old_sha}), encoding="utf-8"
+    )
+    save_ledger(str(state), WeeklyFullSyncReport(
+        upstream_sha=old_sha, previous_sha="", commits=0, files_changed=0,
+        added_lines=0, deleted_lines=0,
+    ))
+
+    report = build_weekly_report(
+        str(upstream), str(branded), str(state),
+        expected_upstream_sha=new_sha,
+        bootstrap=False,
+    )
+
+    assert report.freshness_ok is False
+    assert report.gate_passes is False
+    codes = [issue.code for issue in report.ci_issues]
+    assert "source-sha-mismatch" in codes
+
+
+def test_bootstrap_accepts_one_jump_then_strict(tmp_path):
+    """Bootstrap mode absorbs the first jump; the same call without bootstrap
+    on a fresh ledger would fail.  Pinning the new SHA proves the next
+    non-bootstrap run can succeed."""
+    upstream = tmp_path / "upstream"
+    branded = tmp_path / "branded"
+    state = tmp_path / "state"
+    _init_repo(upstream)
+    old_sha = _commit(upstream, "old")
+    new_sha = _commit(upstream, "new")
+
+    branded.mkdir()
+    (branded / "manifest.json").write_text(
+        json.dumps({"upstream_sha": old_sha}), encoding="utf-8"
+    )
+
+    # Bootstrap run — should pass with review_required.
+    bootstrap_report = build_weekly_report(
+        str(upstream), str(branded), str(state),
+        expected_upstream_sha=new_sha,
+        bootstrap=True,
+    )
+    assert bootstrap_report.freshness_ok is True
+    assert bootstrap_report.gate_passes is True
+    assert bootstrap_report.review_required is True
+
+    # Simulate the bootstrap being merged: the snapshot now records the new
+    # upstream SHA and the ledger is initialised.
+    (branded / "manifest.json").write_text(
+        json.dumps({"upstream_sha": new_sha}), encoding="utf-8"
+    )
+    save_ledger(str(state), bootstrap_report)
+
+    # Strict follow-up run with the same SHA — should pass clean.
+    # Note: ``review_required`` can still be True if a newer upstream head
+    # exists (the audit emits an ``upstream-advanced`` review note when the
+    # runner's view of HEAD is newer than the pinned SHA).  What matters is
+    # the *gate* passes — the bootstrap absorption is no longer the cause.
+    followup_report = build_weekly_report(
+        str(upstream), str(branded), str(state),
+        expected_upstream_sha=new_sha,
+        bootstrap=False,
+    )
+    assert followup_report.freshness_ok is True
+    assert followup_report.gate_passes is True
+    codes = [issue.code for issue in followup_report.ci_issues]
+    assert "bootstrap-sync" not in codes
+    assert "source-sha-bootstrap-jump" not in codes

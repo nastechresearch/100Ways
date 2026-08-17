@@ -36,6 +36,16 @@ on:
         required: false
         type: boolean
         default: false
+      bootstrap:
+        description: Accept the first large upstream jump with review_required (bootstrap mode)
+        required: false
+        type: boolean
+        default: false
+      threshold_override:
+        description: Override the commit-stream threshold (default 50)
+        required: false
+        type: number
+        default: 0
   schedule:
     - cron: "*/30 * * * *" # commit stream every 30 minutes; sync is commit-threshold driven
 
@@ -47,8 +57,8 @@ jobs:
     name: Commit stream monitor
     uses: ./.github/workflows/stage-commit-stream.yml
     with:
-      threshold: 50
-      notify: ${{ github.event_name == 'schedule' }}
+      threshold: ${{ inputs.threshold_override || 50 }}
+      notify: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     secrets:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -77,6 +87,8 @@ jobs:
     # scheduled threshold opens or an operator explicitly requests manual validation.
     if: ${{ (github.event_name == 'schedule' && needs.commit-stream.outputs.trigger_sync == 'true') || (github.event_name == 'workflow_dispatch' && inputs.run_full_validation) }}
     uses: ./.github/workflows/stage-pipeline.yml
+    with:
+      bootstrap: ${{ inputs.bootstrap || false }}
     secrets:
       OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
 
@@ -114,7 +126,9 @@ jobs:
     needs: [pipeline, forkcheck, all-checks-pass]
     # Review-only inherited collisions never auto-publish. A manual operator must
     # both request publication and acknowledge the exact collision evidence.
-    if: ${{ (github.event_name == 'schedule' && needs.commit-stream.outputs.trigger_sync == 'true' && needs.pipeline.outputs.review_required != 'true') || (github.event_name == 'workflow_dispatch' && inputs.publish_candidate_pr && (needs.pipeline.outputs.review_required != 'true' || inputs.acknowledge_inherited_case_collisions)) }}
+    # Bootstrap mode also gates the PR behind an explicit publish_candidate_pr
+    # input so the human reviews the result before any branch is touched.
+    if: ${{ (github.event_name == 'schedule' && needs.commit-stream.outputs.trigger_sync == 'true' && needs.pipeline.outputs.review_required != 'true') || (github.event_name == 'workflow_dispatch' && inputs.publish_candidate_pr && (needs.pipeline.outputs.review_required != 'true' || (inputs.acknowledge_inherited_case_collisions && inputs.bootstrap))) }}
     permissions:
       contents: read
     uses: ./.github/workflows/stage-update-pr.yml

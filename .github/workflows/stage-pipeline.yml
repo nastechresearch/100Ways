@@ -20,6 +20,11 @@ on:
         type: string
         required: false
         default: "nastech-agent"
+      bootstrap:
+        description: Accept the first large upstream jump with review_required
+        type: boolean
+        required: false
+        default: false
     outputs:
       update_number:
         description: Sequential Nastech-Update#N assigned by the pipeline
@@ -152,6 +157,7 @@ jobs:
               os.environ["HUNDREDWAYS_STATE_DIR"],
               mode="snapshot",
               expected_upstream_sha=os.environ["EXPECTED_UPSTREAM_SHA"],
+              bootstrap=${{ inputs.bootstrap || 'false' }},
           )
           write_weekly_report(os.environ["HUNDREDWAYS_WEEKLY_REPORT"], report)
           with open(os.environ["HUNDREDWAYS_DECISION"], "w", encoding="utf-8") as fh:
