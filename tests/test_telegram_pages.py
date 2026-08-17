@@ -72,5 +72,6 @@ def test_pages_and_telegram_workflows_are_wired():
     assert "actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9" in pages
     assert "actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128" in pages
     assert "python3 -m hundredways.telegram_agent" in stream
-    assert "actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae" in stream
+    assert "actions/cache/restore@1bd1e32a3bdc45362d1e726936510720a7c30a57" in stream
+    assert "actions/cache/save@1bd1e32a3bdc45362d1e726936510720a7c30a57" in stream
     assert "OLLAMA_API_KEY" in stream
