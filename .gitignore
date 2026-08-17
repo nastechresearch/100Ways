@@ -8,3 +8,9 @@ build/
 dist/
 .env
 *.log
+
+# Generated Pages payload — rebuilt on every workflow run.
+site/status.json
+
+# Local planning / scratch.
+PLAN.md

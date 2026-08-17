@@ -158,8 +158,16 @@ def inspect_commit_stream(
     candidate_repo: str | Path | None = None,
     threshold: int = DEFAULT_THRESHOLD,
     subject_limit: int = 10,
+    pages: bool = False,
 ) -> CommitStreamDecision:
-    """Compare merged NasTech state with upstream and make no side effects."""
+    """Compare merged NasTech state with upstream and make no side effects.
+
+    When ``pages`` is true the function returns a shallow-safe decision that
+    NEVER triggers ``git fetch --unshallow``.  This is the variant used by
+    the GitHub Pages status surface, where rate-limit exposure is the worst
+    possible failure mode.  The full pipeline (``pages=False``) keeps the
+    ancestor proof because it actually needs to brand the upstream tree.
+    """
     if threshold < 1:
         raise ValueError("threshold must be at least 1")
     upstream = Path(upstream_repo)
@@ -172,11 +180,29 @@ def inspect_commit_stream(
     baseline = merged_baseline
     upstream_sha = _git(upstream, "rev-parse", "HEAD")
     history_recovered = False
-    if not _is_ancestor(upstream, baseline, upstream_sha) and _is_shallow_repository(upstream):
+    if pages:
+        # Pages path: trust the upstream HEAD reported by the shallow clone;
+        # never call ``_recover_complete_history`` because the resulting
+        # ``git fetch --unshallow`` is what triggers HTTP 429 storms against
+        # github.com from CI runners.
+        if not _is_ancestor(upstream, baseline, upstream_sha):
+            return CommitStreamDecision(
+                baseline_sha=baseline,
+                merged_baseline_sha=merged_baseline,
+                candidate_baseline_sha=candidate_baseline,
+                upstream_sha=upstream_sha,
+                pending_commits=0,
+                threshold=threshold,
+                status="awaiting-review",
+                trigger_sync=False,
+                subjects=[],
+                history_recovered=False,
+            )
+    elif not _is_ancestor(upstream, baseline, upstream_sha) and _is_shallow_repository(upstream):
         _recover_complete_history(upstream)
         history_recovered = True
         upstream_sha = _git(upstream, "rev-parse", "HEAD")
-    if not _is_ancestor(upstream, baseline, upstream_sha):
+    if not pages and not _is_ancestor(upstream, baseline, upstream_sha):
         raise RuntimeError(
             f"effective NasTech baseline {baseline} is not an ancestor of upstream {upstream_sha}; "
             "manual reconciliation is required before threshold evaluation"
@@ -220,6 +246,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--threshold", type=int, default=DEFAULT_THRESHOLD)
     parser.add_argument("--output", required=True, help="Path to JSON decision output")
+    parser.add_argument(
+        "--pages",
+        action="store_true",
+        help=(
+            "Shallow-safe variant for the GitHub Pages status surface. Skips the "
+            "complete-history fetch that triggers HTTP 429 storms from CI runners."
+        ),
+    )
     return parser
 
 
@@ -230,6 +264,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.nastech_repo,
         candidate_repo=args.candidate_repo,
         threshold=args.threshold,
+        pages=args.pages,
     )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
