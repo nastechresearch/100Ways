@@ -19,7 +19,11 @@ jobs:
       - name: Install 100ways + pytest
         run: |
           pip install -e .
-          pip install "pytest>=7,<9"
+          # Install dev extras so pytest has its plugin deps (pygments,
+          # anyio, etc.).  PR #33 had a transient test-suite failure that
+          # traced to a missing transitive dep when only "pytest" was
+          # installed; this matches what PR #35 uses.
+          pip install ".[dev]"
 
       - name: Run test suite
         run: |
