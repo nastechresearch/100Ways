@@ -59,8 +59,22 @@ from .verify import _git, _git_ok, verify_rebrand
 from .watcher import Watcher, WatcherConfig
 from .ways import build_registry
 
-DEFAULT_REPO = os.environ.get("HUNDREDWAYS_REPO", os.environ.get("SYNCBRIDGE_REPO", "/home/nascode/Documents/A1/nastech-agent"))
-DEFAULT_HERMES = os.environ.get("HUNDREDWAYS_HERMES", "/home/nascode/Documents/A1/hermes-agent")
+# XDG default: prefer $XDG_DATA_HOME/100ways/<name>, fall back to ~/.local/share.
+# Backwards-compatible: HUNDREDWAYS_REPO / SYNCBRIDGE_REPO env vars still win.
+def _xdg_default(name: str) -> str:
+    base = os.environ.get("XDG_DATA_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "share"
+    )
+    return os.path.join(base, "100ways", name)
+
+
+DEFAULT_REPO = os.environ.get(
+    "HUNDREDWAYS_REPO",
+    os.environ.get("SYNCBRIDGE_REPO", _xdg_default("nastech-agent")),
+)
+DEFAULT_HERMES = os.environ.get(
+    "HUNDREDWAYS_HERMES", _xdg_default("hermes-agent")
+)
 BIRTH_COMMIT = "0cafd22fb"
 BIRTH_PARENT = "03fa32c92"
 DEFAULT_UPSTREAM = "upstream/main"
