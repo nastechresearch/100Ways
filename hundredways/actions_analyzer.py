@@ -11,8 +11,19 @@ from __future__ import annotations
 import re
 from dataclasses import asdict, dataclass
 
+# Maximum number of 429-style rate-limit signals we accept before declaring
+# the run a rate-limit storm and refusing further retry.  Anything beyond
+# this is treated as an unrecoverable failure — retrying into a 429 just
+# makes it worse and burns the CI budget.
+RATE_LIMIT_BUDGET = 3
+
 _SECRET_PATTERNS = (
     re.compile(r"gh[pousr]_[A-Za-z0-9_\-]{20,}"),
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(r"gho_[A-Za-z0-9_]{20,}"),
+    re.compile(r"ghs_[A-Za-z0-9_]{20,}"),
+    re.compile(r"ghr_[A-Za-z0-9_]{20,}"),
+    re.compile(r"glpat-[A-Za-z0-9_\-]{20,}"),
     re.compile(r"(?:bot|token|secret|password|api[_-]?key)\s*[:=]\s*[^\s,;]+", re.I),
     re.compile(r"https://[^\s/@]+:[^\s/@]+@", re.I),
 )
@@ -138,7 +149,7 @@ def analyze_failure(log: str, *, step: str = "unknown") -> FailureReport:
                 retryable=True,
             )
         )
-    elif "http 429" in lowered or "error: rpc failed" in lowered and "429" in lowered:
+    elif ("http 429" in lowered or "error: rpc failed" in lowered) and "429" in lowered:
         findings.append(
             FailureFinding(
                 category="upstream_rate_limit",
@@ -224,3 +235,27 @@ def _first_line(text: str, needles: tuple[str, ...]) -> str:
 def _evidence(text: str, needle: str) -> str:
     lines = [line.strip() for line in text.splitlines() if needle.lower() in line.lower()]
     return (lines[0] if lines else _first_line(text, ()))[:300]
+
+
+def count_rate_limit_signals(text: str) -> int:
+    """Return the number of distinct 429-style rate-limit signals in ``text``.
+
+    The count is intentionally conservative — only ``HTTP 429``, ``error 429``,
+    and ``429 Too Many Requests`` substrings are matched, and case-insensitively.
+    Used to detect a rate-limit storm before the budget is exceeded.
+    """
+    lowered = text.lower()
+    return sum(
+        lowered.count(needle)
+        for needle in ("http 429", "error 429", "429 too many requests")
+    )
+
+
+def rate_limit_budget_exceeded(text: str, *, budget: int = RATE_LIMIT_BUDGET) -> bool:
+    """Return True when ``text`` carries more rate-limit signals than ``budget``.
+
+    Callers that decide to retry a failed fetch should consult this first.
+    Once the budget is blown the right action is to back off until the next
+    scheduled window, not to retry immediately.
+    """
+    return count_rate_limit_signals(text) > budget

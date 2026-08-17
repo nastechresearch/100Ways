@@ -19,7 +19,10 @@ jobs:
       - name: Install 100ways + pytest
         run: |
           pip install -e .
-          pip install "pytest>=7,<9"
+          # Install dev extras so pytest has its plugin deps (pygments,
+          # anyio, iniconfig, etc.).  Bare "pytest" install was missing
+          # transitive deps on some CI runners.
+          pip install ".[dev]"
 
       - name: Run test suite
         run: |

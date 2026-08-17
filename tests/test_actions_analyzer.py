@@ -45,3 +45,38 @@ def test_unknown_failure_requires_manual_review():
     finding = report.findings[0]
     assert finding.category == "unknown"
     assert finding.retryable is False
+
+
+def test_rate_limit_budget_counts_http_429_in_log():
+    from hundredways.actions_analyzer import count_rate_limit_signals
+
+    log = (
+        "Cloning into '/tmp/hermes-agent'...\n"
+        "error: RPC failed; HTTP 429 curl 22 The requested URL returned error: 429\n"
+        "fatal: expected flush after ref listing\n"
+        "error: RPC failed; HTTP 429 curl 22 The requested URL returned error: 429\n"
+        "fatal: expected flush after ref listing\n"
+    )
+    assert count_rate_limit_signals(log) == 2
+
+
+def test_rate_limit_budget_exceeded_returns_true_only_above_budget():
+    from hundredways.actions_analyzer import rate_limit_budget_exceeded
+
+    log_clean = "fatal: unable to access 'https://example.com'\n"
+    log_one = "error: RPC failed; HTTP 429\n"
+    log_four = "\n".join(["error: RPC failed; HTTP 429"] * 4)
+
+    assert rate_limit_budget_exceeded(log_clean) is False
+    assert rate_limit_budget_exceeded(log_one) is False
+    assert rate_limit_budget_exceeded(log_four, budget=3) is True
+    assert rate_limit_budget_exceeded(log_one, budget=0) is True
+
+
+def test_fine_grained_github_pat_is_redacted():
+    from hundredways.actions_analyzer import redact
+
+    text = "leaked: github_pat_11ABCDEFG0_1234567890abcdefghij"
+    out = redact(text)
+    assert "github_pat_11ABCDEFG0_1234567890abcdefghij" not in out
+    assert "[REDACTED]" in out
