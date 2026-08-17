@@ -20,8 +20,14 @@ def _load(path: str | None, default: dict[str, Any]) -> dict[str, Any]:
 
 
 def build(decision: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-    threshold = int(decision.get("threshold", 50) or 50)
-    pending = int(decision.get("pending_commits", 0) or 0)
+    def _safe_int(value: Any, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    threshold = _safe_int(decision.get("threshold"), 50) or 50
+    pending = _safe_int(decision.get("pending_commits"), 0) or 0
     state = str(decision.get("status", "warming")).replace("-", " ").upper()
     gates = context.get("gates")
     if not isinstance(gates, list):

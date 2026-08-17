@@ -1,7 +1,8 @@
 name: stage-tests
 
-# Stage 2: the full pytest suite (stdlib + pytest only, no network, no
-# writes to ~/.nastech).
+# Stage 2: the full pytest suite with a coverage floor.  Stdlib + pytest
+# only, no network, no writes to ~/.nastech.  Coverage threshold matches
+# the Makefile target.
 
 on:
   workflow_call:
@@ -16,11 +17,15 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install 100ways + pytest
+      - name: Install 100ways + pytest + pytest-cov
         run: |
           pip install -e .
-          pip install "pytest>=7,<9"
+          pip install "pytest>=7,<9" "pytest-cov>=6,<7"
 
-      - name: Run test suite
+      - name: Run test suite with coverage
         run: |
-          python3 -m pytest tests/ -q
+          python3 -m pytest tests/ \
+            --cov=hundredways \
+            --cov-report=term-missing \
+            --cov-fail-under=70 \
+            -q
