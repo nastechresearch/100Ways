@@ -326,3 +326,66 @@ def test_pinned_weekly_report_blocks_a_candidate_from_the_wrong_source_commit(tm
         "source-sha-mismatch",
         "upstream-advanced",
     }
+
+
+def test_audit_branding_fixed_point_preserves_contributor_email_paths(tmp_path):
+    """Reproduces the CI failure where contributor email filenames
+    like ``chenjin@hermes.local`` triggered ``brand-path-not-fixed-point``
+    findings.  These paths are *immutable data* — real contributor
+    records that must be preserved byte-for-byte, including the
+    filename, even when the filename string contains ``hermes`` or
+    ``nous``.  The audit must skip them.
+    """
+    from hundredways.weekly_sync import audit_branding_fixed_point
+
+    root = Path(tmp_path)
+    contributors = root / "contributors" / "emails"
+    contributors.mkdir(parents=True)
+
+    # Two real-looking contributor records.  Filenames include the
+    # original project's domain — these must not be flagged.
+    (contributors / "chenjin@hermes.local").write_text("real contributor", encoding="utf-8")
+    (contributors / "victor@nousresearch.com").write_text("real contributor", encoding="utf-8")
+
+    issues = audit_branding_fixed_point(str(root))
+
+    assert issues == [], (
+        "contributor email paths must be skipped by the audit; got: "
+        f"{[(i.code, i.path) for i in issues]}"
+    )
+
+
+def test_audit_branding_fixed_point_still_flags_real_brand_path_drift(tmp_path):
+    """Regression guard: the audit must still flag *non-immutable* brand
+    path drift.  A file at the repo root named ``hermes-logo.svg`` must
+    be flagged because it would transform to ``nastech-logo.svg``.
+    """
+    from hundredways.weekly_sync import audit_branding_fixed_point
+
+    root = Path(tmp_path)
+    (root / "hermes-logo.svg").write_text("<svg/>", encoding="utf-8")
+
+    issues = audit_branding_fixed_point(str(root))
+
+    codes = [i.code for i in issues]
+    assert "brand-path-not-fixed-point" in codes
+
+
+def test_audit_branding_fixed_point_skips_locked_paths(tmp_path):
+    """Regression guard: the audit must still skip package-lock files
+    and other LOCKED_PATH_SUBSTRINGS entries.
+    """
+    from hundredways.weekly_sync import audit_branding_fixed_point
+
+    root = Path(tmp_path)
+    (root / "package-lock.json").write_text(
+        json.dumps({"name": "hermes-bridge", "packages": {"": {"name": "hermes-bridge"}}}),
+        encoding="utf-8",
+    )
+
+    issues = audit_branding_fixed_point(str(root))
+
+    assert issues == [], (
+        "package-lock.json must remain skipped; got: "
+        f"{[(i.code, i.path) for i in issues]}"
+    )
