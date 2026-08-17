@@ -16,6 +16,7 @@ from .integrity import (
     sha256_file,
     tree_digest,
 )
+from .reference_audit import audit_references
 from .rules import BrandingRules, is_immutable_path
 
 _SECRET_PATTERNS = (
@@ -259,6 +260,16 @@ def scan_snapshot_details(
             allowed_case_collision_groups=allowed_collisions,
         )
     )
+    for finding in audit_references(snapshot_path):
+        location = f"{finding.path}:{finding.line}" if finding.line else finding.path
+        issues.append(
+            ReadinessIssue(
+                "upstream-brand-reference",
+                location,
+                f"{finding.token}: {finding.detail}; only the two approved dependency groups "
+                "may retain Hermes/Nous references",
+            )
+        )
     # Keep inherited source fixtures visible in the weekly report, but do not
     # let them block candidate publication.  Any credential-like value added by
     # branding, the engine-owned asset registry, or fork preservation remains a

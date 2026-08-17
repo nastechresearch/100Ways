@@ -130,6 +130,13 @@ def _parse_manifest(path: Path) -> tuple[dict[str, Any], list[IntegrityIssue]]:
     return value, []
 
 
+def canonical_source_fingerprint() -> str:
+    """Return the stable fingerprint of the canonical direct upstream remote."""
+    return hashlib.sha256(
+        f"https://{CANONICAL_UPSTREAM_HOST}{CANONICAL_UPSTREAM_PATH}".encode()
+    ).hexdigest()
+
+
 def audit_manifest_provenance(
     manifest_path: str | Path,
     *,
@@ -154,12 +161,16 @@ def audit_manifest_provenance(
         issues.append(IntegrityIssue("source-acquisition", path.name, "source must use a fresh direct clone"))
 
     remote_url = provenance.get("remote_url")
-    if not isinstance(remote_url, str):
-        issues.append(IntegrityIssue("source-remote", path.name, "source remote URL is missing"))
+    remote_fingerprint = provenance.get("remote_fingerprint")
+    if isinstance(remote_fingerprint, str):
+        if remote_fingerprint != canonical_source_fingerprint():
+            issues.append(IntegrityIssue("source-remote", path.name, "source fingerprint is not canonical"))
+    elif not isinstance(remote_url, str):
+        issues.append(IntegrityIssue("source-remote", path.name, "source remote fingerprint is missing"))
     else:
         parsed = urlparse(remote_url)
         if parsed.scheme != "https" or parsed.netloc != CANONICAL_UPSTREAM_HOST or parsed.path != CANONICAL_UPSTREAM_PATH:
-            issues.append(IntegrityIssue("source-remote", path.name, "source remote is not the canonical Hermes HTTPS URL"))
+            issues.append(IntegrityIssue("source-remote", path.name, "source remote is not the canonical direct-source URL"))
 
     fetched_at = provenance.get("fetched_at")
     try:

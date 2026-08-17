@@ -125,10 +125,14 @@ class BrandingRules:
         return match_obj.group(0)  # pragma: no cover - defensive
 
     def transform_text(self, text: str) -> str:
-        """Apply all branding tokens to free text."""
+        """Apply branding tokens while preserving the exact approved attribution."""
+        attribution = "Powered by NousResearch"
+        sentinel = "__NASTECH_APPROVED_ATTRIBUTION__"
+        protected = text.replace(attribution, sentinel)
         tokens = list(self.tokens)
         pattern = self._pattern()
-        return pattern.sub(lambda m: self._replacement(m, tokens), text)
+        branded = pattern.sub(lambda m: self._replacement(m, tokens), protected)
+        return branded.replace(sentinel, attribution)
 
     def transform_path(self, path: str) -> str:
         """Apply branding tokens to a filesystem path (each component)."""

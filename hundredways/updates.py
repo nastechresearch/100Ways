@@ -41,9 +41,10 @@ from .forkcheck import (
     preserve_fork_files,
     source_tree_delta,
 )
-from .rules import BrandingRules, is_immutable_path, is_locked_path
+from .rules import BrandingRules, is_locked_path
 from .scanner import classify_path, is_text
 from .verify import FileResult, VerifyReport
+from .integrity import canonical_source_fingerprint
 
 DEFAULT_HERMES_URL = "https://github.com/NousResearch/hermes-agent.git"
 HERMES_DIR = "hermes-agent"
@@ -298,14 +299,6 @@ def brand_tree(src: str, dst: str, rules: BrandingRules | None = None,
     for rel in _walk_files(src):
         result.total += 1
         src_path = os.path.join(src, rel)
-        if is_immutable_path(rel):
-            # real data: copy byte-for-byte, name untouched
-            dst_path = os.path.join(dst, rel)
-            os.makedirs(os.path.dirname(dst_path), exist_ok=True)
-            shutil.copyfile(src_path, dst_path)
-            _restore_mode(src_path, dst_path)
-            result.locked_copied += 1
-            continue
         mapped = rules.transform_path(rel)
         if mapped != rel:
             result.renamed += 1
@@ -662,7 +655,7 @@ def _reconcile_domains(dst: str) -> list[str]:
     fixed: list[str] = []
     for rel in _walk_files(dst):
         path = os.path.join(dst, rel)
-        if is_locked_path(rel) or is_immutable_path(rel):
+        if is_locked_path(rel):
             continue
         try:
             with open(path, "rb") as fh:
@@ -1071,9 +1064,6 @@ def compare_trees(src: str, dst: str, rules: BrandingRules | None = None,
     rules = rules or BrandingRules()
     report = DiffReport()
     for rel in _walk_files(src):
-        if is_immutable_path(rel):
-            report.entries.append(DiffEntry(rel, rel, "locked"))
-            continue
         mapped = rules.transform_path(rel)
         if owned and owned.has(mapped):
             report.entries.append(DiffEntry(rel, mapped, "owned"))
@@ -1123,8 +1113,8 @@ def verify_branded(src: str, dst: str, rules: BrandingRules | None = None,
     report = VerifyReport()
     for rel in _walk_files(src):
         report.total += 1
-        mapped = rel if is_immutable_path(rel) else rules.transform_path(rel)
-        locked = is_locked_path(rel) or is_locked_path(mapped) or is_immutable_path(rel)
+        mapped = rules.transform_path(rel)
+        locked = is_locked_path(rel) or is_locked_path(mapped)
         src_path = os.path.join(src, rel)
         dst_path = os.path.join(dst, mapped)
         exists = os.path.isfile(dst_path)
@@ -1210,7 +1200,7 @@ def update_report_md(result: "UpdateResult") -> str:
         f"# Nastech Update Report #{result.number}",
         "",
         f"- upstream sha : `{result.upstream_sha}`",
-        f"- source       : `{result.hermes_url}`",
+        "- source       : `direct-upstream`",
         f"- snapshot     : `{os.path.basename(result.dir)}`",
         f"- gate         : **{'PASS' if result.gate else 'FAIL'}**",
         "",
@@ -1650,9 +1640,9 @@ class UpdateManager:
             "number": number,
             "dir": os.path.basename(dest),
             "upstream_sha": result.upstream_sha,
-            "hermes_url": self.hermes_url,
+            "source": "direct-upstream",
             "source_provenance": {
-                "remote_url": self.hermes_url,
+                "remote_fingerprint": canonical_source_fingerprint(),
                 "fetched_at": fetched_at,
                 "acquisition": "fresh-direct-clone",
                 "baseline_sha": baseline_sha,

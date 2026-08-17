@@ -355,10 +355,8 @@ def test_preserve_fork_files_carries_executable_bit(tmp_path):
     assert os.stat(os.path.join(str(branded), "bin", "tool")).st_mode & stat.S_IXUSR
 
 
-def test_immutable_email_upstream_paths_map_verbatim(tmp_path):
-    # Contributor emails are real data: upstream's agent@hermes.dev must NOT
-    # map to agent@nastech.dev (that would wrongly classify the fork's
-    # agent@nastech.dev as upstream-provided and let it get dropped).
+def test_contributor_email_upstream_paths_are_strictly_branded(tmp_path):
+    # Strict mode maps contributor paths and contents like all product data.
     rules = BrandingRules()
     upstream = _tree(tmp_path / "upstream", {
         "contributors/emails/agent@hermes.dev": "real data\n",
@@ -369,14 +367,13 @@ def test_immutable_email_upstream_paths_map_verbatim(tmp_path):
         "README.md": "hi\n",
     })
     branded = _tree(tmp_path / "branded", {
-        "contributors/emails/agent@hermes.dev": "real data\n",
+        "contributors/emails/agent@nastech.dev": "real data\n",
         "README.md": "hi\n",
     })
     report = fork_consistency(str(fork), str(branded), str(upstream), rules)
     by_status = {e.path: e.status for e in report.entries}
-    # the fork's corrected email has NO upstream twin -> fork-local
-    assert by_status["contributors/emails/agent@nastech.dev"] == "local_only"
-    assert not report.gate_passes()
+    assert by_status["contributors/emails/agent@nastech.dev"] == "identical"
+    assert report.gate_passes()
 
 
 def test_hermes_agent_subdirectory_is_not_pruned(tmp_path):
