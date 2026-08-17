@@ -1,20 +1,5 @@
 name: CI
 
-# Orchestrator.  Runs the 100Ways validation in STAGES:
-#
-#   lint  -> tests  -> ways  -> rules  -> pipeline  -> forkcheck  -> readme  -> upload  -> all-checks-pass  -> #344 Push PR to NasTech
-#
-# On a schedule, the commit stream runs first.  It compares the upstream
-# history with the merged NasTech baseline and enables the full candidate
-# chain only at the configured commit threshold. Pull requests validate 100Ways
-# tooling but never mint an upstream candidate; manual runs retain full review.
-#
-# ``pipeline`` brands the upstream tree and runs the 18-stage update pipeline
-# (including the fork-consistency diff against the real nastech-agent fork).
-# ``forkcheck`` then installs the branded zip, boots `nastech`, and runs the
-# fork's own test suite.  Publication is deliberately deferred until every
-# remaining repository verification has completed; #344 is the final action.
-
 on:
   push:
     branches: [main]
@@ -36,11 +21,18 @@ on:
         required: false
         type: boolean
         default: false
-  # 100Ways is event-driven only. No scheduled runs — the operator
-  # triggers a sync via workflow_dispatch when they want one. This
-  # avoids background CI burn on a project with 1 operator and 0
-  # production users, and keeps the 19-stage pipeline from being
-  # triggered by transient upstream activity.
+      threshold_override:
+        description: Override the commit-stream threshold for this run (0 = use default)
+        required: false
+        type: number
+        default: 0
+  schedule:
+    - cron: "0 */2 * * *"
+
+# 100Ways runs on three trigger paths:
+#   1. workflow_dispatch (manual)     — threshold=100 (or threshold_override if set)
+#   2. schedule every 2 hours (auto)  — threshold=200 (gated: only acts when pending >= 200)
+#   3. push / pull_request            — lint + tests only (engine validation, no pipeline)
 
 permissions:
   contents: read
@@ -50,16 +42,16 @@ jobs:
     name: Commit stream monitor
     uses: ./.github/workflows/stage-commit-stream.yml
     with:
-      threshold: ${{ inputs.threshold_override || 100 }}
-      notify: ${{ github.event_name == 'workflow_dispatch' }}
+      threshold: "${{ inputs.threshold_override || (github.event_name == 'schedule' && 200) || 100 }}"
+      notify: "${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}"
     secrets:
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+      TELEGRAM_BOT_TOKEN: "${{ secrets.TELEGRAM_BOT_TOKEN }}"
+      TELEGRAM_CHAT_ID: "${{ secrets.TELEGRAM_CHAT_ID }}"
+      OLLAMA_API_KEY: "${{ secrets.OLLAMA_API_KEY }}"
 
   lint:
     needs: commit-stream
-    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || needs.commit-stream.outputs.trigger_sync == 'true' }}
+    if: "${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || needs.commit-stream.outputs.trigger_sync == 'true' }}"
     uses: ./.github/workflows/stage-lint.yml
 
   tests:
@@ -76,15 +68,12 @@ jobs:
 
   pipeline:
     needs: rules
-    # Event-driven only: pipeline runs on workflow_dispatch with
-    # run_full_validation=true.  PRs against main validate the
-    # engine but never build a candidate.
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_full_validation }}
+    if: "${{ (github.event_name == 'workflow_dispatch' && inputs.run_full_validation) || (github.event_name == 'schedule' && needs.commit-stream.outputs.trigger_sync == 'true') }}"
     uses: ./.github/workflows/stage-pipeline.yml
     with:
-      bootstrap: ${{ inputs.bootstrap || false }}
+      bootstrap: "${{ inputs.bootstrap || false }}"
     secrets:
-      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+      OLLAMA_API_KEY: "${{ secrets.OLLAMA_API_KEY }}"
 
   forkcheck:
     needs: pipeline
@@ -100,7 +89,7 @@ jobs:
     needs: readme
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: nastech-agent-update
           path: artifact
@@ -118,16 +107,13 @@ jobs:
   update-pr:
     name: "#344 — Push PR to NasTech"
     needs: [pipeline, forkcheck, all-checks-pass]
-    # Event-driven: the operator must request publication explicitly via
-    # workflow_dispatch with publish_candidate_pr=true.  Inherited
-    # collisions still require an explicit acknowledgement.
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_candidate_pr && (needs.pipeline.outputs.review_required != 'true' || inputs.acknowledge_inherited_case_collisions) }}
+    if: "${{ (github.event_name == 'workflow_dispatch' && inputs.publish_candidate_pr && (needs.pipeline.outputs.review_required != 'true' || inputs.acknowledge_inherited_case_collisions)) || (github.event_name == 'schedule' && needs.commit-stream.outputs.trigger_sync == 'true' && needs.pipeline.outputs.review_required != 'true') }}"
     permissions:
       contents: read
     uses: ./.github/workflows/stage-update-pr.yml
     with:
-      upstream_sha: ${{ needs.pipeline.outputs.upstream_sha }}
-      gate: ${{ needs.pipeline.outputs.gate }}
-      inherited_collision_acknowledged: ${{ inputs.acknowledge_inherited_case_collisions }}
+      upstream_sha: "${{ needs.pipeline.outputs.upstream_sha }}"
+      gate: "${{ needs.pipeline.outputs.gate }}"
+      inherited_collision_acknowledged: "${{ inputs.acknowledge_inherited_case_collisions }}"
     secrets:
-      NAS_TECH_AGENT_TOKEN: ${{ secrets.NAS_TECH_AGENT_TOKEN }}
+      NAS_TECH_AGENT_TOKEN: "${{ secrets.NAS_TECH_AGENT_TOKEN }}"
