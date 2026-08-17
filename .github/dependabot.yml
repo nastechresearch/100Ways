@@ -5,12 +5,13 @@ updates:
     schedule:
       interval: weekly
     versioning-strategy: increase
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
     commit-message:
       prefix: "chore(deps)"
     labels:
       - dependencies
       - python
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -21,3 +22,30 @@ updates:
     labels:
       - dependencies
       - ci
+    # Group weekly bumps into a single PR per ecosystem so we don't drown
+    # in 1-line PRs every Monday.  Major-version bumps of any cache /
+    # checkout / setup-* action still surface individually because the
+    # version manifest format can change (the actions/cache v5 -> v6
+    # migration in #187 broke the Telegram cache key).
+    groups:
+      actions-minor-and-patch:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "actions/cache*"
+          - "actions/checkout*"
+          - "actions/setup-python*"
+          - "actions/setup-node*"
+          - "astral-sh/setup-uv*"
+      actions-major-versioned:
+        patterns:
+          - "actions/cache*"
+          - "actions/checkout*"
+          - "actions/setup-python*"
+          - "actions/setup-node*"
+          - "astral-sh/setup-uv*"
+    # Pin actions/cache to v4 only — v5/v6 changed cache key semantics.
+    ignore:
+      - dependency-name: "actions/cache"
+        versions: ["5.x", "6.x"]
+      - dependency-name: "astral-sh/setup-uv"
