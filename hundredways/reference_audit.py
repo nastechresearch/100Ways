@@ -21,7 +21,18 @@ from pathlib import Path
 from typing import Iterable
 
 _REFERENCE = re.compile(r"(?i)(?<![a-z0-9])(?:hermes|nous)(?![a-z0-9])")
-_IGNORED_PARTS = {".git", "node_modules", "__pycache__", ".pytest_cache"}
+_IGNORED_PARTS = {
+    ".git",
+    "node_modules",
+    "__pycache__",
+    ".pytest_cache",
+    # Pipeline-generated changelog / audit reports.  These live inside the
+    # snapshot tree but are metadata, never candidate source code, and
+    # always contain upstream brand references by design (they describe what
+    # changed).  They must be excluded from the reference audit.
+    "UPDATE-REPORT.md",
+    "GATE-REPORT.md",
+}
 _ATTRIBUTION = "Powered by NousResearch"
 
 _ALLOWED_DEPENDENCY_REFERENCES = (
