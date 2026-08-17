@@ -18,7 +18,7 @@ from typing import Any, Iterable
 
 from .assets import OwnedAssets
 from .ci_policy import WorkflowPolicyIssue, audit_workflow_security
-from .rules import BrandingRules, is_locked_path
+from .rules import BrandingRules, is_immutable_path, is_locked_path
 from .skill_policy import SkillPolicyIssue, audit_skill_firewall
 from .visual_assets import VisualIssue, compare_owned_to_upstream
 
@@ -310,7 +310,11 @@ def audit_branding_fixed_point(
         if not path.is_file() or ".git" in path.parts or "node_modules" in path.parts:
             continue
         rel = str(path.relative_to(root))
-        if path.name in generated or is_locked_path(rel):
+        if (
+            path.name in generated
+            or is_locked_path(rel)
+            or is_immutable_path(rel)
+        ):
             continue
         transformed_path = rules.transform_path(rel)
         if transformed_path != rel:
