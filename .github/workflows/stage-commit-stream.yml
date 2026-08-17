@@ -50,9 +50,9 @@ jobs:
       upstream_sha: ${{ steps.decision.outputs.upstream_sha }}
       status: ${{ steps.decision.outputs.status }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.2.2
 
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
@@ -123,7 +123,7 @@ jobs:
 
       - name: Restore Telegram interaction memory
         if: ${{ inputs.notify }}
-        uses: actions/cache/restore@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: telegram-state
           key: telegram-state-${{ github.repository }}-${{ github.ref_name }}-${{ github.run_id }}
@@ -206,7 +206,7 @@ jobs:
 
       - name: Save Telegram interaction memory
         if: ${{ inputs.notify && always() }}
-        uses: actions/cache/save@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: telegram-state
           key: telegram-state-${{ github.repository }}-${{ github.ref_name }}-${{ github.run_id }}
