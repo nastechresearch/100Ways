@@ -36,11 +36,20 @@ on:
         required: false
         type: boolean
         default: false
-  # 100Ways is event-driven only. No scheduled runs — the operator
-  # triggers a sync via workflow_dispatch when they want one. This
-  # avoids background CI burn on a project with 1 operator and 0
-  # production users, and keeps the 19-stage pipeline from being
-  # triggered by transient upstream activity.
+      threshold_override:
+        description: Override the commit threshold (default 100). Use 200 for auto-trigger.
+        required: false
+        type: string
+        default: ""
+  schedule:
+    - cron: "0 */2 * * *"
+
+# 100Ways runs on three trigger paths:
+#   1. workflow_dispatch (manual)     — threshold=100 (or threshold_override if set)
+#   2. schedule every 2 hours (auto)  — threshold=200; only acts if pending >= 200
+#   3. push / pull_request            — engine validation only; pipeline+update-pr skipped
+# This is a GATED schedule: the commit-stream always runs, but the
+# 19-stage pipeline only fires when trigger_sync == 'true' (pending >= threshold).
 
 permissions:
   contents: read
@@ -50,8 +59,9 @@ jobs:
     name: Commit stream monitor
     uses: ./.github/workflows/stage-commit-stream.yml
     with:
-      threshold: ${{ inputs.threshold_override || 100 }}
-      notify: ${{ github.event_name == 'workflow_dispatch' }}
+      # threshold: 200 for schedule (auto-trigger at 2h), override if set, else 100
+      threshold: ${{ github.event_name == 'schedule' && '200' || (inputs.threshold_override && inputs.threshold_override != '' && inputs.threshold_override) || '100' }}
+      notify: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
     secrets:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -76,10 +86,11 @@ jobs:
 
   pipeline:
     needs: rules
-    # Event-driven only: pipeline runs on workflow_dispatch with
-    # run_full_validation=true.  PRs against main validate the
-    # engine but never build a candidate.
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_full_validation }}
+    # Two trigger paths run the full pipeline:
+    #   1. workflow_dispatch with run_full_validation=true
+    #   2. schedule every 2h + commit-stream.trigger_sync == 'true'
+    #      (i.e. pending upstream >= 200)
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.run_full_validation) || (github.event_name == 'schedule' && needs.commit-stream.outputs.trigger_sync == 'true') }}
     uses: ./.github/workflows/stage-pipeline.yml
     with:
       bootstrap: ${{ inputs.bootstrap || false }}
@@ -121,7 +132,7 @@ jobs:
     # Event-driven: the operator must request publication explicitly via
     # workflow_dispatch with publish_candidate_pr=true.  Inherited
     # collisions still require an explicit acknowledgement.
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_candidate_pr && (needs.pipeline.outputs.review_required != 'true' || inputs.acknowledge_inherited_case_collisions) }}
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish_candidate_pr && (needs.pipeline.outputs.review_required != 'true' || inputs.acknowledge_inherited_case_collisions)) || (github.event_name == 'schedule' && needs.commit-stream.outputs.trigger_sync == 'true' && needs.pipeline.outputs.gate == 'PASS' && needs.pipeline.outputs.review_required != 'true') }}
     permissions:
       contents: read
     uses: ./.github/workflows/stage-update-pr.yml
