@@ -34,9 +34,9 @@ jobs:
         run: |
           set -euo pipefail
           {
-            scripts/fetch_public_repo.sh https://github.com/nastechresearch/nastech-agent.git nastech-agent
-            scripts/fetch_public_repo.sh https://github.com/nastechresearch/nastech-agent.git nastech-candidate 100WAYS || true
-            scripts/fetch_public_repo.sh https://github.com/NousResearch/hermes-agent.git upstream-agent
+            bash scripts/fetch_public_repo.sh https://github.com/nastechresearch/nastech-agent.git nastech-agent
+            bash scripts/fetch_public_repo.sh https://github.com/nastechresearch/nastech-agent.git nastech-candidate 100WAYS || true
+            bash scripts/fetch_public_repo.sh https://github.com/NousResearch/hermes-agent.git upstream-agent
           } 2>&1 | tee "$RUNNER_TEMP/source-fetch.log"
 
       - name: Analyze source-fetch failure
