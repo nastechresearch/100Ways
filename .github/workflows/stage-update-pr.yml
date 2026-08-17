@@ -31,6 +31,11 @@ on:
         type: string
         required: false
         default: "PASS"
+      inherited_collision_acknowledged:
+        description: Explicit acknowledgement for review-only inherited case-collision evidence
+        type: boolean
+        required: false
+        default: false
     secrets:
       NAS_TECH_AGENT_TOKEN:
         description: Cross-repository PR token, scoped only to nastech-agent
@@ -90,6 +95,7 @@ jobs:
         if: github.event_name != 'pull_request'
         env:
           UPSTREAM_SHA: ${{ inputs.upstream_sha }}
+          INHERITED_COLLISION_ACKNOWLEDGED: ${{ inputs.inherited_collision_acknowledged }}
         run: |
           set -euo pipefail
           python3 - <<'PYEOF'
@@ -104,6 +110,9 @@ jobs:
               candidate_branch="100WAYS",
               target_repository="nastechresearch/nastech-agent",
               target_base="main",
+              inherited_collision_acknowledged=(
+                  os.environ["INHERITED_COLLISION_ACKNOWLEDGED"].lower() == "true"
+              ),
           )
           PYEOF
 

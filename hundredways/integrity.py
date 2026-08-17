@@ -58,25 +58,33 @@ def _valid_relative_path(relative: PurePosixPath) -> bool:
     return not relative.is_absolute() and ".." not in relative.parts and "" not in relative.parts
 
 
-def audit_candidate_tree(root: str | Path) -> list[IntegrityIssue]:
-    """Reject unsafe or ambiguous filesystem entries before packaging a candidate."""
+def _case_collision_groups(names: list[str]) -> set[frozenset[str]]:
+    grouped: dict[str, set[str]] = {}
+    for name in names:
+        grouped.setdefault(name.casefold(), set()).add(name)
+    return {frozenset(group) for group in grouped.values() if len(group) > 1}
+
+
+def audit_candidate_tree(
+    root: str | Path,
+    *,
+    allowed_case_collision_groups: set[frozenset[str]] | None = None,
+) -> list[IntegrityIssue]:
+    """Reject unsafe entries, allowing only explicitly evidenced collision groups."""
     base = Path(root)
     if not base.is_dir():
         return [IntegrityIssue("candidate-root", str(base), "candidate root is unavailable")]
 
     issues: list[IntegrityIssue] = []
-    casefolded: dict[str, str] = {}
-    for path in sorted(base.rglob("*"), key=lambda item: item.as_posix()):
-        relative = path.relative_to(base).as_posix()
-        parts = PurePosixPath(relative).parts
-        if ".git" in parts:
-            issues.append(IntegrityIssue("candidate-git-metadata", relative, "Git metadata is forbidden"))
+    allowed = allowed_case_collision_groups or set()
+    paths = sorted(base.rglob("*"), key=lambda item: item.as_posix())
+    relative_paths = [path.relative_to(base).as_posix() for path in paths]
+    for group in sorted(_case_collision_groups(relative_paths), key=lambda item: sorted(item)):
+        if group in allowed:
             continue
-        if any(any(ord(char) < 32 for char in part) for part in parts):
-            issues.append(IntegrityIssue("control-path", relative, "path contains a control character"))
-        folded = relative.casefold()
-        prior = casefolded.setdefault(folded, relative)
-        if prior != relative:
+        ordered = sorted(group)
+        prior = ordered[0]
+        for relative in ordered[1:]:
             issues.append(
                 IntegrityIssue(
                     "case-collision",
@@ -84,6 +92,14 @@ def audit_candidate_tree(root: str | Path) -> list[IntegrityIssue]:
                     f"collides with {prior!r} on case-insensitive filesystems",
                 )
             )
+    for path in paths:
+        relative = path.relative_to(base).as_posix()
+        parts = PurePosixPath(relative).parts
+        if ".git" in parts:
+            issues.append(IntegrityIssue("candidate-git-metadata", relative, "Git metadata is forbidden"))
+            continue
+        if any(any(ord(char) < 32 for char in part) for part in parts):
+            issues.append(IntegrityIssue("control-path", relative, "path contains a control character"))
         try:
             mode = path.lstat().st_mode
         except OSError as exc:
@@ -155,13 +171,18 @@ def audit_manifest_provenance(
     return issues
 
 
-def audit_candidate_archive(path: str | Path) -> list[IntegrityIssue]:
+def audit_candidate_archive(
+    path: str | Path,
+    *,
+    allowed_case_collision_groups: set[frozenset[str]] | None = None,
+) -> list[IntegrityIssue]:
     """Validate the exact archive later consumed by #344 before authorization."""
     archive_path = Path(path)
     if not archive_path.is_file():
         return [IntegrityIssue("candidate-archive", archive_path.name, "archive is unavailable")]
     issues: list[IntegrityIssue] = []
-    names: dict[str, str] = {}
+    allowed = allowed_case_collision_groups or set()
+    archive_names: list[str] = []
     expected_manifest = f"{ARCHIVE_ROOT}/manifest.json"
     try:
         with zipfile.ZipFile(archive_path) as archive:
@@ -176,10 +197,7 @@ def audit_candidate_archive(path: str | Path) -> list[IntegrityIssue]:
                 if not _valid_relative_path(candidate):
                     issues.append(IntegrityIssue("archive-path", name, "archive path is unsafe"))
                     continue
-                folded = name.casefold()
-                prior = names.setdefault(folded, name)
-                if prior != name:
-                    issues.append(IntegrityIssue("archive-case-collision", name, f"collides with {prior!r}"))
+                archive_names.append(name)
                 mode = (info.external_attr >> 16) & 0o177777
                 if stat.S_IFMT(mode) == stat.S_IFLNK:
                     issues.append(IntegrityIssue("archive-symlink", name, "archives may not contain symlinks"))
@@ -194,6 +212,13 @@ def audit_candidate_archive(path: str | Path) -> list[IntegrityIssue]:
                     issues.append(IntegrityIssue("archive-compression-ratio", name, "compression ratio exceeds safety limit"))
     except (OSError, zipfile.BadZipFile) as exc:
         return [IntegrityIssue("candidate-archive", archive_path.name, f"invalid archive: {exc}")]
-    if expected_manifest not in names.values():
+    for group in sorted(_case_collision_groups(archive_names), key=lambda item: sorted(item)):
+        if group in allowed:
+            continue
+        ordered = sorted(group)
+        prior = ordered[0]
+        for name in ordered[1:]:
+            issues.append(IntegrityIssue("archive-case-collision", name, f"collides with {prior!r}"))
+    if expected_manifest not in archive_names:
         issues.append(IntegrityIssue("archive-manifest", expected_manifest, "candidate archive lacks its manifest"))
     return issues

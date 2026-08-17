@@ -30,6 +30,9 @@ on:
       gate:
         description: Final gate result (PASS / FAIL)
         value: ${{ jobs.pipeline.outputs.gate }}
+      review_required:
+        description: Whether inherited collision evidence requires human acknowledgement
+        value: ${{ jobs.pipeline.outputs.review_required }}
     secrets:
       OLLAMA_API_KEY:
         description: Optional Ollama Cloud key for advisory text reviews
@@ -43,6 +46,7 @@ jobs:
       upstream_sha: ${{ steps.update.outputs.upstream_sha }}
       gate: ${{ steps.weekly.outputs.hard_gate }}
       decision: ${{ steps.weekly.outputs.decision }}
+      review_required: ${{ steps.readiness.outputs.review_required }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
 
@@ -186,6 +190,7 @@ jobs:
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
           EXPECTED_UPSTREAM_SHA: ${{ steps.direct-source.outputs.sha }}
           HUNDREDWAYS_READINESS: ${{ runner.temp }}/publication-readiness.json
+          HUNDREDWAYS_DECISION: ${{ runner.temp }}/weekly-decision.json
         run: |
           set -euo pipefail
           SNAPSHOT=$(find "$HUNDREDWAYS_UPDATES_DIR" -maxdepth 1 -type d -name 'Nastech-Update#*' | sort -V | tail -1)
@@ -194,8 +199,29 @@ jobs:
             --upstream "$HUNDREDWAYS_UPDATES_DIR/hermes-agent" \
             --expected-upstream-sha "$EXPECTED_UPSTREAM_SHA" \
             --output "$HUNDREDWAYS_READINESS"
+          REVIEW_REQUIRED=$(jq -r '.review_required // false' "$HUNDREDWAYS_READINESS")
+          echo "review_required=$REVIEW_REQUIRED" >> "$GITHUB_OUTPUT"
+          python3 - <<'PYEOF'
+          import json
+          import os
+
+          decision_path = os.environ["HUNDREDWAYS_DECISION"]
+          readiness_path = os.environ["HUNDREDWAYS_READINESS"]
+          with open(decision_path, encoding="utf-8") as handle:
+              decision = json.load(handle)
+          with open(readiness_path, encoding="utf-8") as handle:
+              readiness = json.load(handle)
+          decision["review_required"] = bool(readiness.get("review_required", False))
+          decision["inherited_case_collisions"] = readiness.get("inherited_case_collisions", [])
+          with open(decision_path, "w", encoding="utf-8") as handle:
+              json.dump(decision, handle, indent=2)
+          PYEOF
           echo "readiness=PASS" >> "$GITHUB_OUTPUT"
-          echo "- Publication readiness: **PASS**" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$REVIEW_REQUIRED" = "true" ]; then
+            echo "- Publication readiness: **PASS — inherited collision review required**" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- Publication readiness: **PASS**" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Verify final branded candidate against exact Hermes source
         id: final-conformance

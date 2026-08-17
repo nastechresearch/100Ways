@@ -10,8 +10,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Sequence
 
-from .integrity import audit_candidate_tree, audit_manifest_provenance, tree_digest
-from .rules import BrandingRules
+from .integrity import (
+    audit_candidate_tree,
+    audit_manifest_provenance,
+    sha256_file,
+    tree_digest,
+)
+from .rules import BrandingRules, is_immutable_path
 
 _SECRET_PATTERNS = (
     re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
@@ -97,6 +102,77 @@ def _source_delta_issues(snapshot: Path, manifest: dict) -> list[ReadinessIssue]
     return issues
 
 
+def _collision_groups(paths: list[str]) -> set[frozenset[str]]:
+    grouped: dict[str, set[str]] = {}
+    for path in paths:
+        grouped.setdefault(path.casefold(), set()).add(path)
+    return {frozenset(group) for group in grouped.values() if len(group) > 1}
+
+
+def inherited_case_collision_evidence(
+    snapshot: Path,
+    upstream: Path,
+) -> tuple[set[frozenset[str]], list[dict[str, object]]]:
+    """Return exact candidate collision groups directly inherited from Hermes.
+
+    A candidate group is permitted only when its complete mapped path set is
+    present in the direct source. Immutable source records must also remain
+    byte-identical. This is review evidence, not a portable-artifact approval.
+    """
+    rules = BrandingRules()
+    source_paths = [
+        path.relative_to(upstream).as_posix()
+        for path in upstream.rglob("*")
+        if ".git" not in path.relative_to(upstream).parts
+    ]
+    source_by_mapped: dict[str, list[str]] = {}
+    for source_path in source_paths:
+        source_by_mapped.setdefault(rules.transform_path(source_path), []).append(source_path)
+    source_groups = _collision_groups(list(source_by_mapped))
+    candidate_paths = [
+        path.relative_to(snapshot).as_posix()
+        for path in snapshot.rglob("*")
+        if ".git" not in path.relative_to(snapshot).parts
+    ]
+    allowed: set[frozenset[str]] = set()
+    evidence: list[dict[str, object]] = []
+    for group in sorted(_collision_groups(candidate_paths), key=lambda item: sorted(item)):
+        if group not in source_groups:
+            continue
+        source_members: list[str] = []
+        immutable_digests: dict[str, str] = {}
+        valid = True
+        for candidate_path in sorted(group):
+            originals = source_by_mapped.get(candidate_path, [])
+            if len(originals) != 1:
+                valid = False
+                break
+            source_path = originals[0]
+            source_members.append(source_path)
+            if is_immutable_path(source_path):
+                source_file = upstream / source_path
+                candidate_file = snapshot / candidate_path
+                if not source_file.is_file() or not candidate_file.is_file():
+                    valid = False
+                    break
+                source_digest = sha256_file(source_file)
+                if sha256_file(candidate_file) != source_digest:
+                    valid = False
+                    break
+                immutable_digests[candidate_path] = source_digest
+        if valid:
+            allowed.add(group)
+            evidence.append(
+                {
+                    "paths": sorted(group),
+                    "source_paths": source_members,
+                    "immutable_sha256": immutable_digests,
+                    "portability": "review-required-case-insensitive-collision",
+                }
+            )
+    return allowed, evidence
+
+
 def _credential_signals(root: Path) -> list[ReadinessIssue]:
     """Return credential-pattern findings from a tree, excluding binary assets."""
     issues: list[ReadinessIssue] = []
@@ -121,11 +197,11 @@ def _credential_signals(root: Path) -> list[ReadinessIssue]:
     return issues
 
 
-def scan_snapshot(
+def scan_snapshot_details(
     snapshot: str | Path,
     upstream: str | Path,
     expected_upstream_sha: str,
-) -> list[ReadinessIssue]:
+) -> tuple[list[ReadinessIssue], list[dict[str, object]]]:
     snapshot_path = Path(snapshot)
     upstream_path = Path(upstream)
     issues: list[ReadinessIssue] = []
@@ -133,7 +209,7 @@ def scan_snapshot(
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        return [ReadinessIssue("manifest", "manifest.json", f"cannot read manifest: {exc}")]
+        return [ReadinessIssue("manifest", "manifest.json", f"cannot read manifest: {exc}")], []
     actual_sha = _git(upstream_path, "rev-parse", "HEAD")
     issues.extend(
         ReadinessIssue(issue.code, issue.path, issue.detail)
@@ -172,9 +248,16 @@ def scan_snapshot(
         issues.append(
             ReadinessIssue("snapshot-git", ".git", "snapshot must not contain repository metadata")
         )
+    allowed_collisions, collision_evidence = inherited_case_collision_evidence(
+        snapshot_path,
+        upstream_path,
+    )
     issues.extend(
         ReadinessIssue(issue.code, issue.path, issue.detail)
-        for issue in audit_candidate_tree(snapshot_path)
+        for issue in audit_candidate_tree(
+            snapshot_path,
+            allowed_case_collision_groups=allowed_collisions,
+        )
     )
     # Keep inherited source fixtures visible in the weekly report, but do not
     # let them block candidate publication.  Any credential-like value added by
@@ -187,6 +270,16 @@ def scan_snapshot(
     for issue in _credential_signals(snapshot_path):
         if issue.path not in source_credential_paths:
             issues.append(issue)
+    return issues, collision_evidence
+
+
+def scan_snapshot(
+    snapshot: str | Path,
+    upstream: str | Path,
+    expected_upstream_sha: str,
+) -> list[ReadinessIssue]:
+    """Return blocking readiness findings for a candidate snapshot."""
+    issues, _ = scan_snapshot_details(snapshot, upstream, expected_upstream_sha)
     return issues
 
 
@@ -197,10 +290,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--expected-upstream-sha", required=True)
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
-    issues = scan_snapshot(args.snapshot, args.upstream, args.expected_upstream_sha)
+    issues, inherited_collisions = scan_snapshot_details(
+        args.snapshot,
+        args.upstream,
+        args.expected_upstream_sha,
+    )
     body = {
         "gate": "PASS" if not issues else "FAIL",
         "issues": [asdict(issue) for issue in issues],
+        "review_required": bool(inherited_collisions),
+        "inherited_case_collisions": inherited_collisions,
         "candidate_tree_sha256": tree_digest(args.snapshot),
     }
     Path(args.output).write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")

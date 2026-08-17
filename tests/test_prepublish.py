@@ -3,7 +3,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from hundredways.prepublish import scan_snapshot
+from hundredways.prepublish import scan_snapshot, scan_snapshot_details
 
 
 def _git_repo(path: Path) -> str:
@@ -49,6 +49,68 @@ def test_scan_snapshot_allows_inherited_source_credential_fixture(tmp_path):
     candidate_fixture.write_text("token = 'ghp_abcdefghijklmnopqrstuvwxyz1234567890'\n")
 
     assert scan_snapshot(snapshot, upstream, sha) == []
+
+
+def test_scan_snapshot_allows_exact_inherited_immutable_case_collision_for_review(tmp_path):
+    upstream = Path(_git_repo(tmp_path / "upstream"))
+    source_dir = upstream / "contributors" / "emails"
+    source_dir.mkdir(parents=True)
+    (source_dir / "agent@Agents-Mac-mini.local").write_text("first\\n")
+    (source_dir / "agent@agents-Mac-mini.local").write_text("second\\n")
+    subprocess.run(["git", "-C", str(upstream), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(upstream), "commit", "-q", "-m", "collision"], check=True)
+    sha = subprocess.check_output(["git", "-C", str(upstream), "rev-parse", "HEAD"], text=True).strip()
+
+    snapshot = tmp_path / "snapshot"
+    _snapshot(snapshot, sha)
+    candidate_dir = snapshot / "contributors" / "emails"
+    candidate_dir.mkdir(parents=True)
+    (candidate_dir / "agent@Agents-Mac-mini.local").write_text("first\\n")
+    (candidate_dir / "agent@agents-Mac-mini.local").write_text("second\\n")
+
+    issues, evidence = scan_snapshot_details(snapshot, upstream, sha)
+
+    assert issues == []
+    assert evidence[0]["paths"] == [
+        "contributors/emails/agent@Agents-Mac-mini.local",
+        "contributors/emails/agent@agents-Mac-mini.local",
+    ]
+    assert evidence[0]["portability"] == "review-required-case-insensitive-collision"
+
+
+def test_scan_snapshot_blocks_changed_inherited_case_collision(tmp_path):
+    upstream = Path(_git_repo(tmp_path / "upstream"))
+    source_dir = upstream / "contributors" / "emails"
+    source_dir.mkdir(parents=True)
+    (source_dir / "agent@Agents-Mac-mini.local").write_text("first\\n")
+    (source_dir / "agent@agents-Mac-mini.local").write_text("second\\n")
+    subprocess.run(["git", "-C", str(upstream), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(upstream), "commit", "-q", "-m", "collision"], check=True)
+    sha = subprocess.check_output(["git", "-C", str(upstream), "rev-parse", "HEAD"], text=True).strip()
+
+    snapshot = tmp_path / "snapshot"
+    _snapshot(snapshot, sha)
+    candidate_dir = snapshot / "contributors" / "emails"
+    candidate_dir.mkdir(parents=True)
+    (candidate_dir / "agent@Agents-Mac-mini.local").write_text("changed\\n")
+    (candidate_dir / "agent@agents-Mac-mini.local").write_text("second\\n")
+
+    assert [issue.code for issue in scan_snapshot(snapshot, upstream, sha)] == ["case-collision"]
+
+
+def test_scan_snapshot_blocks_candidate_created_case_collision(tmp_path):
+    upstream = Path(_git_repo(tmp_path / "upstream"))
+    (upstream / "clean.py").write_text("value = 'clean'\\n")
+    subprocess.run(["git", "-C", str(upstream), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(upstream), "commit", "-q", "-m", "clean"], check=True)
+    sha = subprocess.check_output(["git", "-C", str(upstream), "rev-parse", "HEAD"], text=True).strip()
+
+    snapshot = tmp_path / "snapshot"
+    _snapshot(snapshot, sha)
+    (snapshot / "File.txt").write_text("one\\n")
+    (snapshot / "file.txt").write_text("two\\n")
+
+    assert [issue.code for issue in scan_snapshot(snapshot, upstream, sha)] == ["case-collision"]
 
 
 def test_scan_snapshot_blocks_unsafe_candidate_tree_entry(tmp_path):

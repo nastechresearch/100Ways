@@ -31,6 +31,11 @@ on:
         required: false
         type: boolean
         default: false
+      acknowledge_inherited_case_collisions:
+        description: Acknowledge inherited source path collisions for a review-only NasTech PR
+        required: false
+        type: boolean
+        default: false
   schedule:
     - cron: "*/30 * * * *" # commit stream every 30 minutes; sync is commit-threshold driven
 
@@ -107,13 +112,15 @@ jobs:
   update-pr:
     name: "#344 — Push PR to NasTech"
     needs: [pipeline, forkcheck, all-checks-pass]
-    # Manual validation is read-only unless publication is separately requested.
-    if: ${{ (github.event_name == 'schedule' && needs.commit-stream.outputs.trigger_sync == 'true') || (github.event_name == 'workflow_dispatch' && inputs.publish_candidate_pr) }}
+    # Review-only inherited collisions never auto-publish. A manual operator must
+    # both request publication and acknowledge the exact collision evidence.
+    if: ${{ (github.event_name == 'schedule' && needs.commit-stream.outputs.trigger_sync == 'true' && needs.pipeline.outputs.review_required != 'true') || (github.event_name == 'workflow_dispatch' && inputs.publish_candidate_pr && (needs.pipeline.outputs.review_required != 'true' || inputs.acknowledge_inherited_case_collisions)) }}
     permissions:
       contents: read
     uses: ./.github/workflows/stage-update-pr.yml
     with:
       upstream_sha: ${{ needs.pipeline.outputs.upstream_sha }}
       gate: ${{ needs.pipeline.outputs.gate }}
+      inherited_collision_acknowledged: ${{ inputs.acknowledge_inherited_case_collisions }}
     secrets:
       NAS_TECH_AGENT_TOKEN: ${{ secrets.NAS_TECH_AGENT_TOKEN }}

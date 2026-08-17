@@ -141,3 +141,17 @@ def test_weekly_gate_analyzer_runs_after_a_failed_gate():
     analyzer = workflow[workflow.index("      - name: Analyze weekly gate failure") :]
     assert "if: ${{ failure() }}" in analyzer
     assert "--decision \"$HUNDREDWAYS_DECISION\"" in analyzer
+
+
+def test_inherited_collision_requires_explicit_acknowledgement_before_publication():
+    root = Path(__file__).resolve().parents[1]
+    ci_workflow = (root / ".github" / "workflows" / "ci.yml").read_text()
+    pipeline_workflow = (root / ".github" / "workflows" / "stage-pipeline.yml").read_text()
+    update_workflow = (root / ".github" / "workflows" / "stage-update-pr.yml").read_text()
+
+    update_pr = ci_workflow[ci_workflow.index("  update-pr:") :]
+    assert "acknowledge_inherited_case_collisions" in ci_workflow
+    assert "needs.pipeline.outputs.review_required != 'true'" in update_pr
+    assert "inputs.acknowledge_inherited_case_collisions" in update_pr
+    assert "review_required: ${{ steps.readiness.outputs.review_required }}" in pipeline_workflow
+    assert "inherited_collision_acknowledged" in update_workflow
