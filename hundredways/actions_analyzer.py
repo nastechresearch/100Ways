@@ -13,6 +13,11 @@ from dataclasses import asdict, dataclass
 
 _SECRET_PATTERNS = (
     re.compile(r"gh[pousr]_[A-Za-z0-9_\-]{20,}"),
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(r"gho_[A-Za-z0-9_]{20,}"),
+    re.compile(r"ghs_[A-Za-z0-9_]{20,}"),
+    re.compile(r"ghr_[A-Za-z0-9_]{20,}"),
+    re.compile(r"glpat-[A-Za-z0-9_\-]{20,}"),
     re.compile(r"(?:bot|token|secret|password|api[_-]?key)\s*[:=]\s*[^\s,;]+", re.I),
     re.compile(r"https://[^\s/@]+:[^\s/@]+@", re.I),
 )
@@ -138,7 +143,7 @@ def analyze_failure(log: str, *, step: str = "unknown") -> FailureReport:
                 retryable=True,
             )
         )
-    elif "http 429" in lowered or "error: rpc failed" in lowered and "429" in lowered:
+    elif ("http 429" in lowered or "error: rpc failed" in lowered) and "429" in lowered:
         findings.append(
             FailureFinding(
                 category="upstream_rate_limit",

@@ -51,21 +51,43 @@ jobs:
           echo 'The source fetch failed; publication remains fail-closed.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build public status payload
+        if: ${{ always() }}
         run: |
           set -euo pipefail
-          CANDIDATE_ARGS=()
-          if test -f nastech-candidate/manifest.json; then
-            CANDIDATE_ARGS=(--candidate-repo nastech-candidate)
+          mkdir -p site
+          if test ! -f decision.json; then
+            # The fetch step failed; emit a degraded payload so the public
+            # surface still reflects that 100Ways is alive.
+            python3 - <<'PY' > site/status.json
+          import json
+          from datetime import datetime, timezone
+          payload = {
+              "schema": "100ways.public-status.v1",
+              "generatedAt": datetime.now(timezone.utc).isoformat(),
+              "state": "DEGRADED",
+              "stateDetail": "Direct source fetch failed; publication remains fail-closed.",
+              "pending": 0,
+              "threshold": 50,
+              "remaining": 50,
+              "verified": "Latest source fetch failed",
+              "runUrl": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+              "upstreamSha": "",
+              "baselineSha": "",
+              "candidateSha": "—",
+              "syncState": "ON HOLD",
+              "gates": [],
+              "history": [],
+              "privacy": "Public sanitized evidence only; no secrets, tokens, chat IDs, or raw private logs.",
+              "publication": "Review PR only. No automatic merge, tag, release, or deployment.",
+          }
+          json.dump(payload, open("site/status.json", "w"), indent=2, sort_keys=True)
+          print(json.dumps(payload, indent=2))
+          PY
+          else
+            python3 scripts/build_pages_status.py \
+              --decision decision.json \
+              --output site/status.json
           fi
-          python3 -m hundredways.commit_stream \
-            --upstream-repo upstream-agent \
-            --nastech-repo nastech-agent \
-            "${CANDIDATE_ARGS[@]}" \
-            --threshold 50 \
-            --output decision.json
-          python3 scripts/build_pages_status.py \
-            --decision decision.json \
-            --output site/status.json
 
       - name: Prepare Pages artifact
         run: |

@@ -24,6 +24,7 @@ classifiers = [
 ]
 dependencies = [
   "pillow>=10,<12",
+  "httpx>=0.28,<1",
 ]
 
 [project.urls]
@@ -35,8 +36,10 @@ Issues = "https://github.com/nastechresearch/100ways/issues"
 100ways = "hundredways.cli:main"
 
 [project.optional-dependencies]
-ai = ["httpx>=0.28,<1"]
-telegram = ["httpx>=0.28,<1"]
+# httpx is a hard dependency (Telegram bot + Pages payload fetch); only the
+# Ollama Cloud AI advisory layer is truly optional.
+ai = []
+telegram = []
 dev = [
   "pytest>=8.3,<9",
   "ruff>=0.9,<1",
