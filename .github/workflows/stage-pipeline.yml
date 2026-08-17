@@ -159,6 +159,24 @@ jobs:
           echo "- Hard gate: **PASS**" >> "$GITHUB_STEP_SUMMARY"
           echo "- Decision: \`$DECISION\`" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Analyze weekly gate failure
+        if: ${{ always() && steps.weekly.outcome == 'failure' }}
+        continue-on-error: true
+        env:
+          HUNDREDWAYS_DECISION: ${{ runner.temp }}/weekly-decision.json
+          HUNDREDWAYS_ANALYSIS: ${{ runner.temp }}/weekly-gate-analysis.json
+        run: |
+          set -euo pipefail
+          if test -f "$HUNDREDWAYS_DECISION"; then
+            python3 scripts/analyze_actions_failure.py \
+              --decision "$HUNDREDWAYS_DECISION" \
+              --step "Run hardened weekly decision gate" \
+              --output "$HUNDREDWAYS_ANALYSIS" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo 'The weekly gate failed; publication remains fail-closed.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Weekly gate failed before a structured decision was written; inspect the original job log.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Run source-provenance and publication-readiness scans
         id: readiness
         env:

@@ -50,6 +50,74 @@ def redact(text: str) -> str:
     return result
 
 
+def analyze_decision(decision: dict[str, object]) -> FailureReport:
+    """Explain a structured weekly-gate failure without converting it to approval."""
+    findings: list[FailureFinding] = []
+    fields = (
+        "brand_issues",
+        "lock_issues",
+        "asset_issues",
+        "security_issues",
+        "ci_issues",
+        "skill_issues",
+    )
+    for field in fields:
+        issues = decision.get(field, [])
+        if not isinstance(issues, list):
+            continue
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
+            severity = str(issue.get("severity", "block"))
+            if field in {"ci_issues", "skill_issues"} and severity != "block":
+                continue
+            code = str(issue.get("code", "unknown"))
+            path = str(issue.get("path", "unknown"))
+            detail = redact(str(issue.get("detail", "")))
+            findings.append(
+                FailureFinding(
+                    category=f"weekly_gate_{field}",
+                    severity="error" if severity == "block" else severity,
+                    title=f"Weekly gate blocked by {code}",
+                    evidence=f"{path}: {detail}"[:300],
+                    recommendation=(
+                        "Resolve the reported gate issue and rerun; "
+                        "publication remains disabled."
+                    ),
+                    retryable=False,
+                )
+            )
+    if decision.get("freshness_ok") is False:
+        findings.append(
+            FailureFinding(
+                category="weekly_gate_freshness",
+                severity="error",
+                title="Weekly gate freshness lock failed",
+                evidence="The direct upstream ref changed or could not be confirmed stable.",
+                recommendation=(
+                    "Refetch the direct upstream source and rerun; "
+                    "do not use cached evidence."
+                ),
+                retryable=False,
+            )
+        )
+    if not findings:
+        findings.append(
+            FailureFinding(
+                category="weekly_gate_unknown",
+                severity="error",
+                title="Weekly gate failed without a structured blocking issue",
+                evidence="The decision payload contained no recognized blocking issue.",
+                recommendation=(
+                    "Inspect the original gate report manually; "
+                    "publication remains disabled."
+                ),
+                retryable=False,
+            )
+        )
+    return FailureReport(status="gate_failure", findings=tuple(findings), safe_to_retry=False)
+
+
 def analyze_failure(log: str, *, step: str = "unknown") -> FailureReport:
     """Classify an Actions log; failure reports remain fail-closed by default."""
     clean = redact(log)
