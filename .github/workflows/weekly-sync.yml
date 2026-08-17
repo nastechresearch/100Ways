@@ -30,6 +30,12 @@ permissions:
 jobs:
   weekly-sync:
     name: Weekly full-sync plan
+    # GitHub has a known quirk where a workflow can fire on the push that
+    # modifies its own YAML.  When that happens with no matching trigger in
+    # 'on:', the run has zero jobs and reports failure instantly.  Adding
+    # 'push: []' to 'on:' alone does NOT fully suppress this.  The 'if:'
+    # guard below ensures the job only runs on schedule or workflow_dispatch.
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
