@@ -115,13 +115,23 @@ def test_stage_pipeline_requires_final_conformance_and_candidate_tests_before_re
     assert "source .venv/bin/activate" in workflow
 
 
-def test_pull_requests_do_not_run_the_upstream_candidate_pipeline():
+def test_candidate_pipeline_requires_threshold_or_explicit_manual_validation():
     root = Path(__file__).resolve().parents[1]
     workflow = (root / ".github" / "workflows" / "ci.yml").read_text()
 
     pipeline = workflow[workflow.index("  pipeline:") : workflow.index("  forkcheck:")]
-    assert "if: ${{ github.event_name != 'pull_request' }}" in pipeline
+    assert "needs.commit-stream.outputs.trigger_sync == 'true'" in pipeline
+    assert "inputs.run_full_validation" in pipeline
     assert "uses: ./.github/workflows/stage-pipeline.yml" in pipeline
+
+
+def test_manual_full_validation_does_not_authorize_nastech_pr_publication():
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github" / "workflows" / "ci.yml").read_text()
+
+    update_pr = workflow[workflow.index("  update-pr:") :]
+    assert "inputs.publish_candidate_pr" in update_pr
+    assert "inputs.run_full_validation" in workflow
 
 
 def test_weekly_gate_analyzer_runs_after_a_failed_gate():

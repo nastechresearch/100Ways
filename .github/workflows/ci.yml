@@ -20,6 +20,17 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      run_full_validation:
+        description: Run the complete upstream candidate pipeline for manual review
+        required: false
+        type: boolean
+        default: false
+      publish_candidate_pr:
+        description: Permit #344 to create or update the NasTech review PR after every gate passes
+        required: false
+        type: boolean
+        default: false
   schedule:
     - cron: "*/30 * * * *" # commit stream every 30 minutes; sync is commit-threshold driven
 
@@ -57,9 +68,9 @@ jobs:
 
   pipeline:
     needs: rules
-    # A pull request validates tooling only. Direct upstream candidate creation
-    # stays on threshold-triggered schedules or explicit manual review runs.
-    if: ${{ github.event_name != 'pull_request' }}
+    # Tooling PRs validate the engine only. A candidate is built only after the
+    # scheduled threshold opens or an operator explicitly requests manual validation.
+    if: ${{ (github.event_name == 'schedule' && needs.commit-stream.outputs.trigger_sync == 'true') || (github.event_name == 'workflow_dispatch' && inputs.run_full_validation) }}
     uses: ./.github/workflows/stage-pipeline.yml
     secrets:
       OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
@@ -96,6 +107,8 @@ jobs:
   update-pr:
     name: "#344 — Push PR to NasTech"
     needs: [pipeline, forkcheck, all-checks-pass]
+    # Manual validation is read-only unless publication is separately requested.
+    if: ${{ (github.event_name == 'schedule' && needs.commit-stream.outputs.trigger_sync == 'true') || (github.event_name == 'workflow_dispatch' && inputs.publish_candidate_pr) }}
     permissions:
       contents: read
     uses: ./.github/workflows/stage-update-pr.yml
