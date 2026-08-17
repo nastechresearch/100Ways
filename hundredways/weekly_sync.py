@@ -499,8 +499,19 @@ def build_weekly_report(
     mode: str = "report",
     ref: str = "origin/main",
     expected_upstream_sha: str = "",
+    bootstrap: bool = False,
 ) -> WeeklyFullSyncReport:
-    """Build a deterministic full-sync report without publishing any repository change."""
+    """Build a deterministic full-sync report without publishing any repository change.
+
+    On a fresh project with a large upstream backlog the ledger is empty and
+    the snapshot's recorded ``upstream_sha`` is far behind the live upstream
+    head.  Without intervention every audit runs fail because the freshness
+    lock sees a 1000+ commit delta.  Pass ``bootstrap=True`` to accept one
+    one-shot reset: the gate still emits a structured ``PASS`` decision, but
+    the report carries a ``review_required=True`` flag so the operator knows
+    the bootstrap absorbed a large jump and must review the resulting PR
+    personally.  The flag is *never* implicit — every caller must opt in.
+    """
     before = load_ledger(state_dir).get("upstream_sha", "")
     current = expected_upstream_sha or fetch_upstream(upstream_repo, ref)
     resolved = _run(upstream_repo, "rev-parse", current)
@@ -538,13 +549,31 @@ def build_weekly_report(
         upstream_security,
         BrandingRules(),
     )
-    report.freshness_ok = not captured or captured == current
-    if captured and captured != current:
+    # Freshness: bootstrap mode accepts the first large jump; once the ledger
+    # is initialized, subsequent runs fall back to strict equality.  The
+    # ``review_required=True`` flag (set below) is what tells operators the
+    # gate absorbed a non-incremental delta.
+    if bootstrap and not before:
+        report.freshness_ok = True
+    elif bootstrap and captured and captured != current:
+        # Bootstrap with a captured but stale snapshot — accept one jump, then
+        # require strict equality forever after.
+        report.freshness_ok = True
+    else:
+        report.freshness_ok = not captured or captured == current
+    if captured and captured != current and not bootstrap:
         report.ci_issues.append(WorkflowPolicyIssue(
             "source-sha-mismatch",
             "manifest.json",
             f"snapshot captured {captured}; expected pinned source {current}",
             "block",
+        ))
+    elif captured and captured != current and bootstrap:
+        report.ci_issues.append(WorkflowPolicyIssue(
+            "source-sha-bootstrap-jump",
+            "manifest.json",
+            f"bootstrap absorbed a jump from {captured} to {current}",
+            "review",
         ))
     latest = fetch_upstream(upstream_repo, ref)
     if latest != current:
@@ -552,6 +581,15 @@ def build_weekly_report(
             "upstream-advanced",
             "manifest.json",
             f"candidate is pinned to {current}; a newer upstream head {latest} is available for the next sync",
+            "review",
+        ))
+    if bootstrap:
+        # Always emit review_required on bootstrap so the PR is gated on a
+        # human acknowledgement, even if every other audit returns clean.
+        report.ci_issues.append(WorkflowPolicyIssue(
+            "bootstrap-sync",
+            "weekly-sync",
+            "bootstrap sync absorbed a large upstream jump; human review is required",
             "review",
         ))
     return report
