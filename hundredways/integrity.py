@@ -12,6 +12,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
+from .rules import IMMUTABLE_PATH_SUBSTRINGS
+
 
 CANONICAL_UPSTREAM_HOST = "github.com"
 CANONICAL_UPSTREAM_PATH = "/NousResearch/hermes-agent.git"
@@ -74,6 +76,9 @@ def audit_candidate_tree(root: str | Path) -> list[IntegrityIssue]:
             continue
         if any(any(ord(char) < 32 for char in part) for part in parts):
             issues.append(IntegrityIssue("control-path", relative, "path contains a control character"))
+        # Immutable paths (contributors/emails/) are real data — skip all checks
+        if any(sub in relative.lower() for sub in IMMUTABLE_PATH_SUBSTRINGS):
+            continue
         folded = relative.casefold()
         prior = casefolded.setdefault(folded, relative)
         if prior != relative:
