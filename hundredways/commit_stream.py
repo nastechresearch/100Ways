@@ -11,6 +11,8 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Sequence
@@ -111,23 +113,42 @@ def _is_shallow_repository(repo: Path) -> bool:
     return _git(repo, "rev-parse", "--is-shallow-repository") == "true"
 
 
-def _recover_complete_history(repo: Path) -> None:
+def _recover_complete_history(repo: Path, *, max_attempts: int = 3) -> None:
     """Complete direct-source history only when a shallow clone blocks proof.
 
     This is a deterministic, read-only recovery.  It fetches from the existing
     direct ``origin`` remote and never changes candidate files, gates, or refs.
+
+    Bounded exponential backoff is used inside this function (in addition to
+    the outer retry in ``fetch_public_repo.sh``) because the main pipeline
+    runs against an already-cloned repo: the outer script's retry never
+    triggers when the issue surfaces only at the second ``fetch --unshallow``.
+    Raises ``RuntimeError`` after ``max_attempts`` exhausted.
     """
-    completed = subprocess.run(
-        [
-            "git", "-C", str(repo), "-c", "http.version=HTTP/1.1",
-            "-c", "protocol.version=2", "fetch", "--no-tags", "--unshallow", "origin",
-        ],
-        capture_output=True,
-        text=True,
+    last_error = ""
+    for attempt in range(1, max_attempts + 1):
+        completed = subprocess.run(
+            [
+                "git", "-C", str(repo), "-c", "http.version=HTTP/1.1",
+                "-c", "protocol.version=2", "fetch", "--no-tags", "--unshallow", "origin",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode == 0:
+            return
+        last_error = completed.stderr.strip() or completed.stdout.strip()
+        if attempt < max_attempts:
+            sleep_seconds = 10 * (attempt ** 2)
+            print(
+                f"history recovery attempt {attempt}/{max_attempts} failed; "
+                f"sleeping {sleep_seconds}s before retry",
+                file=sys.stderr,
+            )
+            time.sleep(sleep_seconds)
+    raise RuntimeError(
+        f"could not complete direct upstream history after {max_attempts} attempts: {last_error}"
     )
-    if completed.returncode:
-        detail = completed.stderr.strip() or completed.stdout.strip()
-        raise RuntimeError(f"could not complete direct upstream history: {detail}")
 
 
 def _is_ancestor(repo: Path, baseline: str, upstream_sha: str) -> bool:
