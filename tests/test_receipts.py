@@ -171,3 +171,51 @@ def test_publication_receipt_rejects_nonpass_gate(tmp_path):
             target_repository="nastechresearch/nastech-agent",
             target_base="main",
         )
+
+
+def test_inherited_collision_receipt_requires_explicit_publication_acknowledgement(tmp_path):
+    first = "contributors/emails/agent@Agents-Mac-mini.local"
+    second = "contributors/emails/agent@agents-Mac-mini.local"
+    candidate = tmp_path / "candidate"
+    (candidate / "contributors" / "emails").mkdir(parents=True)
+    (candidate / "manifest.json").write_text("{}")
+    (candidate / first).write_text("first")
+    (candidate / second).write_text("second")
+    artifact = tmp_path / "candidate.zip"
+    with zipfile.ZipFile(artifact, "w") as archive:
+        archive.writestr("nastech-agent/manifest.json", "{}")
+        archive.writestr(f"nastech-agent/{first}", "first")
+        archive.writestr(f"nastech-agent/{second}", "second")
+
+    report = _passing_report().to_dict()
+    report["review_required"] = True
+    report["inherited_case_collisions"] = [{"paths": [first, second]}]
+    gate_path = write_gate_decision_receipt(
+        tmp_path / "gate_receipt.json",
+        report,
+        candidate_root=candidate,
+        artifact_path=artifact,
+    )
+
+    receipt = json.loads(gate_path.read_text())
+    assert receipt["hard_gate_output"]["publication_allowed"] is False
+    with pytest.raises(ValueError, match="explicit acknowledgement"):
+        build_publication_authorization_receipt(
+            gate_receipt_path=gate_path,
+            artifact_path=artifact,
+            upstream_sha="a" * 40,
+            candidate_branch="100WAYS",
+            target_repository="nastechresearch/nastech-agent",
+            target_base="main",
+        )
+
+    approved = build_publication_authorization_receipt(
+        gate_receipt_path=gate_path,
+        artifact_path=artifact,
+        upstream_sha="a" * 40,
+        candidate_branch="100WAYS",
+        target_repository="nastechresearch/nastech-agent",
+        target_base="main",
+        inherited_collision_acknowledged=True,
+    )
+    assert approved["evidence"]["inherited_collision_acknowledged"] is True

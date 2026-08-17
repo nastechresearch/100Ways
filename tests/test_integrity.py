@@ -116,3 +116,25 @@ def test_archive_audit_rejects_unsafe_or_unexpected_entries(tmp_path):
     codes = {issue.code for issue in audit_candidate_archive(archive)}
 
     assert {"archive-path", "archive-root"} <= codes
+
+
+def test_archive_audit_allows_only_explicit_inherited_collision_group(tmp_path):
+    archive = tmp_path / "candidate.zip"
+    first = "nastech-agent/contributors/emails/agent@Agents-Mac-mini.local"
+    second = "nastech-agent/contributors/emails/agent@agents-Mac-mini.local"
+    _archive(
+        archive,
+        {
+            "nastech-agent/manifest.json": "{}",
+            first: "first",
+            second: "second",
+        },
+    )
+
+    assert "archive-case-collision" in {
+        issue.code for issue in audit_candidate_archive(archive)
+    }
+    assert audit_candidate_archive(
+        archive,
+        allowed_case_collision_groups={frozenset({first, second})},
+    ) == []

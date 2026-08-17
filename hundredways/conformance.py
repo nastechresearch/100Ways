@@ -17,6 +17,7 @@ from typing import Iterable, Sequence
 
 from .assets import OwnedAssets
 from .integrity import audit_candidate_tree, tree_digest
+from .prepublish import inherited_case_collision_evidence
 from .rules import BrandingRules
 from .updates import apply_owned_assets, brand_tree, reconcile_tree, verify_branded
 
@@ -135,7 +136,14 @@ def verify_final_candidate(
                 "candidate path is absent from the exact branded source tree",
             )
         )
-    for integrity_issue in audit_candidate_tree(candidate_path):
+    allowed_collisions, _ = inherited_case_collision_evidence(
+        candidate_path,
+        source_path,
+    )
+    for integrity_issue in audit_candidate_tree(
+        candidate_path,
+        allowed_case_collision_groups=allowed_collisions,
+    ):
         issues.append(
             ConformanceIssue(
                 f"candidate-{integrity_issue.code}",

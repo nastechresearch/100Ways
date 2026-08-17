@@ -5,9 +5,9 @@ name: CI
 #   lint  -> tests  -> ways  -> rules  -> pipeline  -> forkcheck  -> readme  -> upload  -> all-checks-pass  -> #344 Push PR to NasTech
 #
 # On a schedule, the commit stream runs first.  It compares the upstream
-# history with the merged NasTech baseline and enables the full chain only at
-# the configured commit threshold.  Pull-request and manual validation remain
-# complete so changes to 100Ways are always tested before review.
+# history with the merged NasTech baseline and enables the full candidate
+# chain only at the configured commit threshold. Pull requests validate 100Ways
+# tooling but never mint an upstream candidate; manual runs retain full review.
 #
 # ``pipeline`` brands the upstream tree and runs the 18-stage update pipeline
 # (including the fork-consistency diff against the real nastech-agent fork).
@@ -20,6 +20,22 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      run_full_validation:
+        description: Run the complete upstream candidate pipeline for manual review
+        required: false
+        type: boolean
+        default: false
+      publish_candidate_pr:
+        description: Permit #344 to create or update the NasTech review PR after every gate passes
+        required: false
+        type: boolean
+        default: false
+      acknowledge_inherited_case_collisions:
+        description: Acknowledge inherited source path collisions for a review-only NasTech PR
+        required: false
+        type: boolean
+        default: false
   schedule:
     - cron: "*/30 * * * *" # commit stream every 30 minutes; sync is commit-threshold driven
 
@@ -57,6 +73,9 @@ jobs:
 
   pipeline:
     needs: rules
+    # Tooling PRs validate the engine only. A candidate is built only after the
+    # scheduled threshold opens or an operator explicitly requests manual validation.
+    if: ${{ (github.event_name == 'schedule' && needs.commit-stream.outputs.trigger_sync == 'true') || (github.event_name == 'workflow_dispatch' && inputs.run_full_validation) }}
     uses: ./.github/workflows/stage-pipeline.yml
     secrets:
       OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
@@ -93,11 +112,15 @@ jobs:
   update-pr:
     name: "#344 — Push PR to NasTech"
     needs: [pipeline, forkcheck, all-checks-pass]
+    # Review-only inherited collisions never auto-publish. A manual operator must
+    # both request publication and acknowledge the exact collision evidence.
+    if: ${{ (github.event_name == 'schedule' && needs.commit-stream.outputs.trigger_sync == 'true' && needs.pipeline.outputs.review_required != 'true') || (github.event_name == 'workflow_dispatch' && inputs.publish_candidate_pr && (needs.pipeline.outputs.review_required != 'true' || inputs.acknowledge_inherited_case_collisions)) }}
     permissions:
       contents: read
     uses: ./.github/workflows/stage-update-pr.yml
     with:
       upstream_sha: ${{ needs.pipeline.outputs.upstream_sha }}
       gate: ${{ needs.pipeline.outputs.gate }}
+      inherited_collision_acknowledged: ${{ inputs.acknowledge_inherited_case_collisions }}
     secrets:
       NAS_TECH_AGENT_TOKEN: ${{ secrets.NAS_TECH_AGENT_TOKEN }}

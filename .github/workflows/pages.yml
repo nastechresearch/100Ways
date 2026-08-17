@@ -30,11 +30,25 @@ jobs:
         run: pip install -e .
 
       - name: Fetch public source refs directly
+        id: fetch_sources
         run: |
           set -euo pipefail
-          git clone --depth=1 https://github.com/nastechresearch/nastech-agent.git nastech-agent
-          git clone --depth=1 --branch 100WAYS https://github.com/nastechresearch/nastech-agent.git nastech-candidate || true
-          git clone https://github.com/NousResearch/hermes-agent.git upstream-agent
+          {
+            scripts/fetch_public_repo.sh https://github.com/nastechresearch/nastech-agent.git nastech-agent
+            scripts/fetch_public_repo.sh https://github.com/nastechresearch/nastech-agent.git nastech-candidate 100WAYS || true
+            scripts/fetch_public_repo.sh https://github.com/NousResearch/hermes-agent.git upstream-agent
+          } 2>&1 | tee "$RUNNER_TEMP/source-fetch.log"
+
+      - name: Analyze source-fetch failure
+        if: ${{ always() && steps.fetch_sources.outcome == 'failure' }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python3 scripts/analyze_actions_failure.py \
+            --log "$RUNNER_TEMP/source-fetch.log" \
+            --step "Fetch public source refs directly" \
+            --output "$RUNNER_TEMP/source-fetch-analysis.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo 'The source fetch failed; publication remains fail-closed.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build public status payload
         run: |

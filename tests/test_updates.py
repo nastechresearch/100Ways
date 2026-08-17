@@ -16,12 +16,12 @@ from hundredways.updates import (
     fork_manifest_upstream_sha,
     next_update_number,
     package_zip,
+    pull_hermes,
     reconcile_tree,
     update_path,
     verify_branded,
 )
 from hundredways.rules import BrandingRules
-from tests.conftest import git, git_repo
 
 
 def _hermes_repo(tmp_path):
@@ -38,6 +38,19 @@ def _hermes_repo(tmp_path):
     subprocess.run(["git", "-C", str(hermes), "add", "-A"], check=True)
     subprocess.run(["git", "-C", str(hermes), "commit", "-q", "-m", "fake hermes"], check=True)
     return str(hermes)
+
+
+def test_pull_hermes_can_pin_a_fresh_clone_to_an_observed_commit(tmp_path):
+    hermes = _hermes_repo(tmp_path)
+    expected = subprocess.check_output(["git", "-C", hermes, "rev-parse", "HEAD"], text=True).strip()
+    (tmp_path / "hermes-agent" / "later.py").write_text("value = 'later'\n")
+    subprocess.run(["git", "-C", hermes, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", hermes, "commit", "-q", "-m", "later upstream commit"], check=True)
+
+    actual = pull_hermes(str(tmp_path / "Updates-Commits"), hermes, expected_sha=expected)
+
+    assert actual == expected
+    assert not (tmp_path / "Updates-Commits" / "hermes-agent" / "later.py").exists()
 
 
 def test_fork_manifest_upstream_sha_enables_ephemeral_ci_delta_baseline(tmp_path):

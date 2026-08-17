@@ -68,6 +68,27 @@ def _source_provenance(candidate_root: Path) -> dict[str, Any]:
     return provenance if isinstance(provenance, dict) else {}
 
 
+def _allowed_collision_groups(
+    decision: dict[str, Any],
+    *,
+    archive: bool = False,
+) -> set[frozenset[str]]:
+    """Load only well-formed inherited collision groups from readiness evidence."""
+    groups: set[frozenset[str]] = set()
+    entries = decision.get("inherited_case_collisions", [])
+    if not isinstance(entries, list):
+        return groups
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        paths = entry.get("paths")
+        if not isinstance(paths, list) or len(paths) < 2 or not all(isinstance(path, str) for path in paths):
+            continue
+        prefix = "nastech-agent/" if archive else ""
+        groups.add(frozenset(f"{prefix}{path}" for path in paths))
+    return groups
+
+
 def _decision_payload(report: WeeklyFullSyncReport | dict[str, Any]) -> dict[str, Any]:
     if not isinstance(report, dict) and hasattr(report, "to_dict"):
         serialized = report.to_dict()
@@ -92,15 +113,21 @@ def build_gate_decision_receipt(
     if not artifact.is_file():
         raise ValueError(f"candidate artifact does not exist: {artifact}")
 
-    candidate_issues = audit_candidate_tree(root)
-    archive_issues = audit_candidate_archive(artifact)
+    decision = _decision_payload(report)
+    candidate_issues = audit_candidate_tree(
+        root,
+        allowed_case_collision_groups=_allowed_collision_groups(decision),
+    )
+    archive_issues = audit_candidate_archive(
+        artifact,
+        allowed_case_collision_groups=_allowed_collision_groups(decision, archive=True),
+    )
     if candidate_issues or archive_issues:
         details = ", ".join(
             f"{issue.code}:{issue.path}" for issue in (*candidate_issues, *archive_issues)
         )
         raise ValueError(f"candidate integrity checks failed: {details}")
 
-    decision = _decision_payload(report)
     gate = decision["gate"]
     payload: dict[str, Any] = {
         "schema": GATE_RECEIPT_SCHEMA,
@@ -110,7 +137,7 @@ def build_gate_decision_receipt(
         "hard_gate_output": {
             "gate_passes": gate == "PASS",
             "review_required": bool(decision.get("review_required", False)),
-            "publication_allowed": gate == "PASS",
+            "publication_allowed": gate == "PASS" and not bool(decision.get("review_required", False)),
         },
         "source": {
             "upstream_sha": decision.get("upstream_sha", ""),
@@ -161,6 +188,7 @@ def build_publication_authorization_receipt(
     candidate_branch: str,
     target_repository: str,
     target_base: str,
+    inherited_collision_acknowledged: bool = False,
 ) -> dict[str, Any]:
     """Authorize exactly one candidate-branch PR action after a PASS receipt."""
     gate_path = Path(gate_receipt_path)
@@ -171,6 +199,13 @@ def build_publication_authorization_receipt(
         raise ValueError("gate decision receipt integrity check failed")
     if gate_receipt.get("decision") != "PASS":
         raise ValueError("publication authorization requires a PASS gate receipt")
+    hard_gate = gate_receipt.get("hard_gate_output", {})
+    if not isinstance(hard_gate, dict):
+        raise ValueError("gate receipt is missing hard-gate output")
+    if hard_gate.get("review_required") and not inherited_collision_acknowledged:
+        raise ValueError(
+            "publication requires explicit acknowledgement of inherited case-collision evidence"
+        )
     artifact = gate_receipt.get("candidate_artifact", {})
     if not isinstance(artifact, dict) or not artifact.get("sha256"):
         raise ValueError("gate receipt is missing the candidate artifact digest")
@@ -190,6 +225,7 @@ def build_publication_authorization_receipt(
         "evidence": {
             "gate_receipt_sha256": sha256_file(gate_path),
             "candidate_artifact_sha256": actual_digest,
+            "inherited_collision_acknowledged": inherited_collision_acknowledged,
         },
         "authorized_actions": ["force-push-candidate-branch", "create-or-update-pull-request"],
         "prohibited_actions": ["merge", "tag", "release", "deploy"],

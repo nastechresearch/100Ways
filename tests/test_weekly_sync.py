@@ -239,3 +239,90 @@ def test_upstream_advance_is_review_evidence_not_a_hard_failure():
     assert report.review_required is True
     assert report.to_dict()["gate"] == "PASS"
     assert report.to_dict()["review_required"] is True
+
+
+def test_pinned_weekly_report_accepts_its_captured_source_and_marks_later_head_for_review(
+    tmp_path, monkeypatch
+):
+    import hundredways.weekly_sync as weekly_sync
+
+    upstream = tmp_path / "upstream"
+    candidate = tmp_path / "candidate"
+    upstream.mkdir()
+    candidate.mkdir()
+    expected = "a" * 40
+    newer = "b" * 40
+    (candidate / "manifest.json").write_text(json.dumps({"upstream_sha": expected}))
+
+    monkeypatch.setattr(weekly_sync, "fetch_upstream", lambda *_args: newer)
+    monkeypatch.setattr(weekly_sync, "_run", lambda _repo, *args: expected if args[0] == "rev-parse" else "")
+    monkeypatch.setattr(weekly_sync, "_git_changed_numstat", lambda *_args: (0, 0, 0))
+    monkeypatch.setattr(weekly_sync, "audit_nested_lockfiles", lambda *_args: [])
+    monkeypatch.setattr(weekly_sync, "audit_first_party_brand", lambda *_args: [])
+    monkeypatch.setattr(weekly_sync, "audit_branding_fixed_point", lambda *_args: [])
+    monkeypatch.setattr(weekly_sync, "audit_brand_symbols", lambda *_args: [])
+    monkeypatch.setattr(weekly_sync, "audit_fts5_trigram_fixtures", lambda *_args: [])
+    monkeypatch.setattr(weekly_sync, "audit_owned_assets", lambda *_args: [])
+    monkeypatch.setattr(weekly_sync, "audit_visual_assets", lambda *_args: [])
+    monkeypatch.setattr(weekly_sync, "audit_workflow_security", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(weekly_sync, "audit_skill_firewall", lambda *_args: [])
+    monkeypatch.setattr(weekly_sync, "audit_snapshot_safety", lambda *_args: [])
+
+    report = weekly_sync.build_weekly_report(
+        str(upstream),
+        str(candidate),
+        str(tmp_path / "state"),
+        expected_upstream_sha=expected,
+    )
+
+    assert report.upstream_sha == expected
+    assert report.snapshot_upstream_sha == expected
+    assert report.freshness_ok is True
+    assert report.gate_passes is True
+    assert [(issue.code, issue.severity) for issue in report.ci_issues] == [
+        ("upstream-advanced", "review")
+    ]
+
+
+def test_pinned_weekly_report_blocks_a_candidate_from_the_wrong_source_commit(tmp_path, monkeypatch):
+    import hundredways.weekly_sync as weekly_sync
+
+    upstream = tmp_path / "upstream"
+    candidate = tmp_path / "candidate"
+    upstream.mkdir()
+    candidate.mkdir()
+    expected = "a" * 40
+    wrong = "c" * 40
+    newer = "b" * 40
+    (candidate / "manifest.json").write_text(json.dumps({"upstream_sha": wrong}))
+
+    monkeypatch.setattr(weekly_sync, "fetch_upstream", lambda *_args: newer)
+    monkeypatch.setattr(weekly_sync, "_run", lambda _repo, *args: expected if args[0] == "rev-parse" else "")
+    monkeypatch.setattr(weekly_sync, "_git_changed_numstat", lambda *_args: (0, 0, 0))
+    for name in (
+        "audit_nested_lockfiles",
+        "audit_first_party_brand",
+        "audit_branding_fixed_point",
+        "audit_brand_symbols",
+        "audit_fts5_trigram_fixtures",
+        "audit_owned_assets",
+        "audit_visual_assets",
+        "audit_skill_firewall",
+        "audit_snapshot_safety",
+    ):
+        monkeypatch.setattr(weekly_sync, name, lambda *_args: [])
+    monkeypatch.setattr(weekly_sync, "audit_workflow_security", lambda *_args, **_kwargs: [])
+
+    report = weekly_sync.build_weekly_report(
+        str(upstream),
+        str(candidate),
+        str(tmp_path / "state"),
+        expected_upstream_sha=expected,
+    )
+
+    assert report.freshness_ok is False
+    assert report.gate_passes is False
+    assert {issue.code for issue in report.ci_issues} == {
+        "source-sha-mismatch",
+        "upstream-advanced",
+    }

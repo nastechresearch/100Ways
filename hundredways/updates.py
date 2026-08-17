@@ -119,7 +119,11 @@ def _run_ok(cmd: list[str], what: str) -> str:
     return proc.stdout.strip()
 
 
-def pull_hermes(updates_dir: str, hermes_url: str = DEFAULT_HERMES_URL) -> str:
+def pull_hermes(
+    updates_dir: str,
+    hermes_url: str = DEFAULT_HERMES_URL,
+    expected_sha: str = "",
+) -> str:
     """Acquire a new clone directly from the configured upstream remote.
 
     The prior checkout is deliberately discarded.  This prohibits a local git
@@ -132,7 +136,17 @@ def pull_hermes(updates_dir: str, hermes_url: str = DEFAULT_HERMES_URL) -> str:
     if os.path.exists(dest):
         shutil.rmtree(dest)
     _run_ok(["git", "clone", "--no-local", url, dest], "fresh direct upstream clone")
-    return _run_ok(["git", "-C", dest, "rev-parse", "HEAD"], "upstream head")
+    if expected_sha:
+        _run_ok(
+            ["git", "-C", dest, "checkout", "--detach", expected_sha],
+            "pin fresh upstream clone to expected commit",
+        )
+    actual = _run_ok(["git", "-C", dest, "rev-parse", "HEAD"], "upstream head")
+    if expected_sha and actual != expected_sha:
+        raise RuntimeError(
+            f"fresh upstream clone resolved {actual}, not the directly observed {expected_sha}"
+        )
+    return actual
 
 
 def fork_manifest_upstream_sha(fork_root: str) -> str:
@@ -520,8 +534,13 @@ def _reconcile_lock_record(rec: dict) -> bool:
         rec["name"] = _NPM_NAME_RENAMES[rec["name"]]
         changed = True
 
-    for field in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
-        deps = rec.get(field)
+    for dependency_field in (
+        "dependencies",
+        "devDependencies",
+        "optionalDependencies",
+        "peerDependencies",
+    ):
+        deps = rec.get(dependency_field)
         if not isinstance(deps, dict):
             continue
         new_deps: dict[str, object] = {}
@@ -535,7 +554,7 @@ def _reconcile_lock_record(rec: dict) -> bool:
                 dirty = True
             new_deps[new_dep] = new_spec
         if dirty:
-            rec[field] = new_deps
+            rec[dependency_field] = new_deps
             changed = True
 
     resolved = rec.get("resolved")
@@ -1371,9 +1390,17 @@ class UpdateResult:
 class UpdateManager:
     """Run one full update: the 18 ordered pipeline stages."""
 
-    def __init__(self, updates_dir: str, hermes_url: str = DEFAULT_HERMES_URL,
-                 rules: BrandingRules | None = None, threshold: float = 0.99,
-                 owned: OwnedAssets | None = None, ai=None, fork_root: str = ""):
+    def __init__(
+        self,
+        updates_dir: str,
+        hermes_url: str = DEFAULT_HERMES_URL,
+        rules: BrandingRules | None = None,
+        threshold: float = 0.99,
+        owned: OwnedAssets | None = None,
+        ai=None,
+        fork_root: str = "",
+        expected_upstream_sha: str = "",
+    ):
         self.updates_dir = updates_dir
         self.hermes_url = hermes_url
         self.rules = rules or BrandingRules()
@@ -1381,6 +1408,7 @@ class UpdateManager:
         self.owned = owned
         self.ai = ai
         self.fork_root = fork_root
+        self.expected_upstream_sha = expected_upstream_sha
 
     def run(self, keep_failed: bool = True, zip_path: str = "",
             project_name: str = "nastech-agent", notify=None) -> UpdateResult:
@@ -1400,8 +1428,17 @@ class UpdateManager:
         dest = update_path(self.updates_dir, number)
 
         fetched_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-        upstream_sha = stage("pull", lambda: pull_hermes(self.updates_dir, self.hermes_url),
-                             "fresh direct clone from configured upstream")
+        upstream_sha = stage(
+            "pull",
+            lambda: pull_hermes(
+                self.updates_dir,
+                self.hermes_url,
+                expected_sha=self.expected_upstream_sha,
+            ),
+            "fresh direct clone pinned to the observed upstream commit"
+            if self.expected_upstream_sha
+            else "fresh direct clone from configured upstream",
+        )
         src = hermes_path(self.updates_dir)
         baseline_sha = previous_upstream_sha(
             self.updates_dir, number

@@ -113,3 +113,45 @@ def test_stage_pipeline_requires_final_conformance_and_candidate_tests_before_re
     assert "astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39" in workflow
     assert "RG_SHA256=1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599" in workflow
     assert "source .venv/bin/activate" in workflow
+
+
+def test_candidate_pipeline_requires_threshold_or_explicit_manual_validation():
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github" / "workflows" / "ci.yml").read_text()
+
+    pipeline = workflow[workflow.index("  pipeline:") : workflow.index("  forkcheck:")]
+    assert "needs.commit-stream.outputs.trigger_sync == 'true'" in pipeline
+    assert "inputs.run_full_validation" in pipeline
+    assert "uses: ./.github/workflows/stage-pipeline.yml" in pipeline
+
+
+def test_manual_full_validation_does_not_authorize_nastech_pr_publication():
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github" / "workflows" / "ci.yml").read_text()
+
+    update_pr = workflow[workflow.index("  update-pr:") :]
+    assert "inputs.publish_candidate_pr" in update_pr
+    assert "inputs.run_full_validation" in workflow
+
+
+def test_weekly_gate_analyzer_runs_after_a_failed_gate():
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github" / "workflows" / "stage-pipeline.yml").read_text()
+
+    analyzer = workflow[workflow.index("      - name: Analyze weekly gate failure") :]
+    assert "if: ${{ failure() }}" in analyzer
+    assert "--decision \"$HUNDREDWAYS_DECISION\"" in analyzer
+
+
+def test_inherited_collision_requires_explicit_acknowledgement_before_publication():
+    root = Path(__file__).resolve().parents[1]
+    ci_workflow = (root / ".github" / "workflows" / "ci.yml").read_text()
+    pipeline_workflow = (root / ".github" / "workflows" / "stage-pipeline.yml").read_text()
+    update_workflow = (root / ".github" / "workflows" / "stage-update-pr.yml").read_text()
+
+    update_pr = ci_workflow[ci_workflow.index("  update-pr:") :]
+    assert "acknowledge_inherited_case_collisions" in ci_workflow
+    assert "needs.pipeline.outputs.review_required != 'true'" in update_pr
+    assert "inputs.acknowledge_inherited_case_collisions" in update_pr
+    assert "review_required: ${{ steps.readiness.outputs.review_required }}" in pipeline_workflow
+    assert "inherited_collision_acknowledged" in update_workflow
