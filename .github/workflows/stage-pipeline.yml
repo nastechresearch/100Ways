@@ -160,7 +160,7 @@ jobs:
           echo "- Decision: \`$DECISION\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Analyze weekly gate failure
-        if: ${{ always() && steps.weekly.outcome == 'failure' }}
+        if: ${{ failure() }}
         continue-on-error: true
         env:
           HUNDREDWAYS_DECISION: ${{ runner.temp }}/weekly-decision.json

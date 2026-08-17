@@ -113,3 +113,21 @@ def test_stage_pipeline_requires_final_conformance_and_candidate_tests_before_re
     assert "astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39" in workflow
     assert "RG_SHA256=1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599" in workflow
     assert "source .venv/bin/activate" in workflow
+
+
+def test_pull_requests_do_not_run_the_upstream_candidate_pipeline():
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github" / "workflows" / "ci.yml").read_text()
+
+    pipeline = workflow[workflow.index("  pipeline:") : workflow.index("  forkcheck:")]
+    assert "if: ${{ github.event_name != 'pull_request' }}" in pipeline
+    assert "uses: ./.github/workflows/stage-pipeline.yml" in pipeline
+
+
+def test_weekly_gate_analyzer_runs_after_a_failed_gate():
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github" / "workflows" / "stage-pipeline.yml").read_text()
+
+    analyzer = workflow[workflow.index("      - name: Analyze weekly gate failure") :]
+    assert "if: ${{ failure() }}" in analyzer
+    assert "--decision \"$HUNDREDWAYS_DECISION\"" in analyzer

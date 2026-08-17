@@ -5,9 +5,9 @@ name: CI
 #   lint  -> tests  -> ways  -> rules  -> pipeline  -> forkcheck  -> readme  -> upload  -> all-checks-pass  -> #344 Push PR to NasTech
 #
 # On a schedule, the commit stream runs first.  It compares the upstream
-# history with the merged NasTech baseline and enables the full chain only at
-# the configured commit threshold.  Pull-request and manual validation remain
-# complete so changes to 100Ways are always tested before review.
+# history with the merged NasTech baseline and enables the full candidate
+# chain only at the configured commit threshold. Pull requests validate 100Ways
+# tooling but never mint an upstream candidate; manual runs retain full review.
 #
 # ``pipeline`` brands the upstream tree and runs the 18-stage update pipeline
 # (including the fork-consistency diff against the real nastech-agent fork).
@@ -57,6 +57,9 @@ jobs:
 
   pipeline:
     needs: rules
+    # A pull request validates tooling only. Direct upstream candidate creation
+    # stays on threshold-triggered schedules or explicit manual review runs.
+    if: ${{ github.event_name != 'pull_request' }}
     uses: ./.github/workflows/stage-pipeline.yml
     secrets:
       OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
