@@ -20,8 +20,29 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      run_full_validation:
+        description: Run the complete upstream candidate pipeline for manual review
+        required: false
+        type: boolean
+        default: false
+      publish_candidate_pr:
+        description: Permit #344 to create or update the NasTech review PR after every gate passes
+        required: false
+        type: boolean
+        default: false
+      acknowledge_inherited_case_collisions:
+        description: Acknowledge inherited source path collisions for a review-only NasTech PR
+        required: false
+        type: boolean
+        default: false
   schedule:
-    - cron: "*/30 * * * *" # commit stream every 30 minutes; sync is commit-threshold driven
+    - cron: "0 */2 * * *"
+
+# 100Ways runs on three trigger paths:
+#   1. workflow_dispatch (manual)     — pipeline if run_full_validation=true
+#   2. schedule every 2 hours (auto)  — pipeline if trigger_sync == 'true'
+#   3. push / pull_request            — lint + tests only (engine validation, no pipeline)
 
 permissions:
   contents: read
@@ -57,6 +78,9 @@ jobs:
 
   pipeline:
     needs: rules
+    # Pipeline runs on workflow_dispatch (with run_full_validation=true)
+    # or on schedule (when commit-stream found >= 200 pending commits).
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
     uses: ./.github/workflows/stage-pipeline.yml
     secrets:
       OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
@@ -93,6 +117,8 @@ jobs:
   update-pr:
     name: "#344 — Push PR to NasTech"
     needs: [pipeline, forkcheck, all-checks-pass]
+    # update-pr fires when publish_candidate_pr=true AND pipeline ran AND gate passed
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     permissions:
       contents: read
     uses: ./.github/workflows/stage-update-pr.yml
