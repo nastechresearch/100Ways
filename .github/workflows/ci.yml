@@ -36,8 +36,11 @@ on:
         required: false
         type: boolean
         default: false
-  schedule:
-    - cron: "*/30 * * * *" # commit stream every 30 minutes; sync is commit-threshold driven
+  # 100Ways is event-driven only. No scheduled runs — the operator
+  # triggers a sync via workflow_dispatch when they want one. This
+  # avoids background CI burn on a project with 1 operator and 0
+  # production users, and keeps the 19-stage pipeline from being
+  # triggered by transient upstream activity.
 
 permissions:
   contents: read
@@ -47,8 +50,8 @@ jobs:
     name: Commit stream monitor
     uses: ./.github/workflows/stage-commit-stream.yml
     with:
-      threshold: 50
-      notify: ${{ github.event_name == 'schedule' }}
+      threshold: ${{ inputs.threshold_override || 100 }}
+      notify: ${{ github.event_name == 'workflow_dispatch' }}
     secrets:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -73,10 +76,13 @@ jobs:
 
   pipeline:
     needs: rules
-    # Tooling PRs validate the engine only. A candidate is built only after the
-    # scheduled threshold opens or an operator explicitly requests manual validation.
-    if: ${{ (github.event_name == 'schedule' && needs.commit-stream.outputs.trigger_sync == 'true') || (github.event_name == 'workflow_dispatch' && inputs.run_full_validation) }}
+    # Event-driven only: pipeline runs on workflow_dispatch with
+    # run_full_validation=true.  PRs against main validate the
+    # engine but never build a candidate.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_full_validation }}
     uses: ./.github/workflows/stage-pipeline.yml
+    with:
+      bootstrap: ${{ inputs.bootstrap || false }}
     secrets:
       OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
 
@@ -112,9 +118,10 @@ jobs:
   update-pr:
     name: "#344 — Push PR to NasTech"
     needs: [pipeline, forkcheck, all-checks-pass]
-    # Review-only inherited collisions never auto-publish. A manual operator must
-    # both request publication and acknowledge the exact collision evidence.
-    if: ${{ (github.event_name == 'schedule' && needs.commit-stream.outputs.trigger_sync == 'true' && needs.pipeline.outputs.review_required != 'true') || (github.event_name == 'workflow_dispatch' && inputs.publish_candidate_pr && (needs.pipeline.outputs.review_required != 'true' || inputs.acknowledge_inherited_case_collisions)) }}
+    # Event-driven: the operator must request publication explicitly via
+    # workflow_dispatch with publish_candidate_pr=true.  Inherited
+    # collisions still require an explicit acknowledgement.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_candidate_pr && (needs.pipeline.outputs.review_required != 'true' || inputs.acknowledge_inherited_case_collisions) }}
     permissions:
       contents: read
     uses: ./.github/workflows/stage-update-pr.yml

@@ -120,9 +120,12 @@ def test_candidate_pipeline_requires_threshold_or_explicit_manual_validation():
     workflow = (root / ".github" / "workflows" / "ci.yml").read_text()
 
     pipeline = workflow[workflow.index("  pipeline:") : workflow.index("  forkcheck:")]
-    assert "needs.commit-stream.outputs.trigger_sync == 'true'" in pipeline
+    # Event-driven only: pipeline runs on workflow_dispatch with
+    # run_full_validation=true.  No scheduled cron path.
+    assert "event_name == 'workflow_dispatch'" in pipeline
     assert "inputs.run_full_validation" in pipeline
     assert "uses: ./.github/workflows/stage-pipeline.yml" in pipeline
+    assert "event_name == 'schedule'" not in pipeline
 
 
 def test_manual_full_validation_does_not_authorize_nastech_pr_publication():
@@ -132,6 +135,8 @@ def test_manual_full_validation_does_not_authorize_nastech_pr_publication():
     update_pr = workflow[workflow.index("  update-pr:") :]
     assert "inputs.publish_candidate_pr" in update_pr
     assert "inputs.run_full_validation" in workflow
+    # Event-driven: no schedule path in update-pr.
+    assert "event_name == 'schedule'" not in update_pr
 
 
 def test_weekly_gate_analyzer_runs_after_a_failed_gate():
@@ -155,3 +160,32 @@ def test_inherited_collision_requires_explicit_acknowledgement_before_publicatio
     assert "inputs.acknowledge_inherited_case_collisions" in update_pr
     assert "review_required: ${{ steps.readiness.outputs.review_required }}" in pipeline_workflow
     assert "inherited_collision_acknowledged" in update_workflow
+
+
+def test_ci_is_event_driven_no_schedule_in_workflow_files():
+    """100Ways is event-driven only as of the 2026-08-17 config change.
+
+    Walks every workflow file and asserts no ``schedule:`` block with a
+    ``cron:`` expression survives.  Catches accidental re-introduction
+    of a background cron.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+    for path in sorted(root.glob("*.yml")):
+        text = path.read_text(encoding="utf-8")
+        assert "schedule:" not in text or "cron:" not in text, (
+            f"{path.name} re-introduced a cron schedule; 100Ways must "
+            "stay event-driven.  Use workflow_dispatch instead."
+        )
+
+
+def test_default_threshold_is_100():
+    """Default upstream-commit threshold is 100, not 50.
+
+    A higher threshold means a sync only fires when there's enough
+    upstream activity to justify the 6-minute end-to-end pipeline.
+    """
+    from hundredways.commit_stream import DEFAULT_THRESHOLD
+
+    assert DEFAULT_THRESHOLD == 100
