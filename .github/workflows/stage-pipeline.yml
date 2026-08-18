@@ -28,7 +28,7 @@ on:
         description: Upstream Hermes commit that was branded
         value: ${{ jobs.pipeline.outputs.upstream_sha }}
       gate:
-        description: Final gate result (PASS / FAIL)
+        description: Final gate result (PASS / WITHHELD)
         value: ${{ jobs.pipeline.outputs.gate }}
     secrets:
       OLLAMA_API_KEY:
@@ -39,10 +39,10 @@ jobs:
   pipeline:
     runs-on: ubuntu-latest
     outputs:
-      update_number: ${{ steps.update.outputs.update_number }}
-      upstream_sha: ${{ steps.update.outputs.upstream_sha }}
-      gate: ${{ steps.weekly.outputs.hard_gate }}
-      decision: ${{ steps.weekly.outputs.decision }}
+      update_number: ${{ steps.candidate-state.outputs.update_number }}
+      upstream_sha: ${{ steps.candidate-state.outputs.upstream_sha }}
+      gate: ${{ steps.candidate-state.outputs.gate }}
+      decision: ${{ steps.candidate-state.outputs.decision }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
 
@@ -91,6 +91,7 @@ jobs:
 
       - name: Run 20-stage update pipeline with mandatory direct-upstream test preflight
         id: update
+        continue-on-error: true
         env:
           HUNDREDWAYS_HERMES_URL: ${{ inputs.hermes_url }}
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
@@ -110,13 +111,37 @@ jobs:
             --zip "$HUNDREDWAYS_ZIP" \
             --project-name "${{ inputs.project_name }}" \
             --emit-outputs "$HUNDREDWAYS_OUTPUTS" 2>&1 | tee "$RUNNER_TEMP/update-pipeline.log"
+          echo "pipeline_status=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Classify candidate availability
+        id: candidate-state
+        env:
+          HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
+          HUNDREDWAYS_OUTPUTS: ${{ runner.temp }}/update-outputs.json
+          DIRECT_UPSTREAM_SHA: ${{ steps.direct-source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.update.outputs.pipeline_status }}" != "0" ]; then
+            {
+              echo "candidate_ready=false"
+              echo "gate=WITHHELD"
+              echo "decision=UPSTREAM_TEST_FAILURE"
+              echo "update_number="
+              echo "upstream_sha=$DIRECT_UPSTREAM_SHA"
+            } >> "$GITHUB_OUTPUT"
+            {
+              echo "## Candidate withheld"
+              echo "- Direct upstream canonical tests failed before branding."
+              echo "- Candidate creation, candidate tests, packaging, upload, and publication: **WITHHELD**."
+              echo "- Publication allowed: **NO**."
+              echo "- See the advisory-only analysis and update-pipeline log for the upstream test failure."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           python3 - <<'EOF'
           import json, os
-          with open(os.environ["HUNDREDWAYS_OUTPUTS"]) as fh:
+          with open(os.environ["HUNDREDWAYS_OUTPUTS"], encoding="utf-8") as fh:
               out = json.load(fh)
-          with open(os.environ["GITHUB_OUTPUT"], "a") as gh:
-              for key in ("update_number", "upstream_sha"):
-                  gh.write(f"{key}={out.get(key, '')}\n")
           snapshot = os.path.join(
               os.environ["HUNDREDWAYS_UPDATES_DIR"],
               f"Nastech-Update#{out['update_number']}",
@@ -132,6 +157,12 @@ jobs:
               or preflight.get("source_files") != census.get("files")
           ):
               raise SystemExit("direct upstream preflight evidence is incomplete")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as gh:
+              gh.write("candidate_ready=true\n")
+              gh.write("gate=PASS\n")
+              gh.write("decision=PASS\n")
+              gh.write(f"update_number={out.get('update_number', '')}\n")
+              gh.write(f"upstream_sha={out.get('upstream_sha', '')}\n")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
               summary.write("## Direct upstream preflight\n")
               summary.write("- Canonical upstream tests: **PASS** before branding.\n")
@@ -140,7 +171,7 @@ jobs:
           EOF
 
       - name: Advisory-only remediation analysis for failed update pipeline
-        if: ${{ failure() }}
+        if: ${{ steps.update.outputs.pipeline_status != '0' }}
         env:
           HUNDREDWAYS_AI_PROVIDER: ollama-cloud
           HUNDREDWAYS_AI_BASE_URL: https://ollama.com/v1
@@ -159,6 +190,7 @@ jobs:
 
       - name: Run hardened weekly decision gate
         id: weekly
+        if: ${{ steps.candidate-state.outputs.candidate_ready == 'true' }}
         env:
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
           HUNDREDWAYS_STATE_DIR: ${{ runner.temp }}/100ways-state
@@ -200,6 +232,7 @@ jobs:
 
       - name: Run source-provenance and publication-readiness scans
         id: readiness
+        if: ${{ steps.candidate-state.outputs.candidate_ready == 'true' }}
         env:
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
           EXPECTED_UPSTREAM_SHA: ${{ steps.direct-source.outputs.sha }}
@@ -235,6 +268,7 @@ jobs:
 
       - name: Verify final branded candidate against exact Hermes source
         id: final-conformance
+        if: ${{ steps.candidate-state.outputs.candidate_ready == 'true' }}
         env:
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
           HUNDREDWAYS_CONFORMANCE: ${{ runner.temp }}/candidate-conformance.json
@@ -251,6 +285,7 @@ jobs:
 
       - name: Run final branded candidate test suite
         id: candidate-tests
+        if: ${{ steps.candidate-state.outputs.candidate_ready == 'true' }}
         env:
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
           HUNDREDWAYS_CANDIDATE_TESTS: ${{ runner.temp }}/candidate-tests.json
@@ -299,6 +334,7 @@ jobs:
           echo "- Final branded-candidate tests: **PASS**" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Re-attest candidate after tests
+        if: ${{ steps.candidate-state.outputs.candidate_ready == 'true' }}
         env:
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
           HUNDREDWAYS_POST_TEST_CONFORMANCE: ${{ runner.temp }}/candidate-post-test-conformance.json
@@ -313,6 +349,7 @@ jobs:
           echo "- Post-test candidate conformance: **PASS**" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Write professional update summary
+        if: ${{ steps.candidate-state.outputs.candidate_ready == 'true' }}
         env:
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
           HUNDREDWAYS_SUMMARY: ${{ runner.temp }}/SYNC-SUMMARY.md
@@ -353,6 +390,7 @@ jobs:
           PYEOF
 
       - name: Repackage the exact verified tree
+        if: ${{ steps.candidate-state.outputs.candidate_ready == 'true' }}
         env:
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
           HUNDREDWAYS_ZIP: ${{ runner.temp }}/nastech-agent-update.zip
@@ -388,6 +426,7 @@ jobs:
           PYEOF
 
       - name: Write tamper-evident gate decision receipt
+        if: ${{ steps.candidate-state.outputs.candidate_ready == 'true' }}
         env:
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
           HUNDREDWAYS_DECISION: ${{ runner.temp }}/weekly-decision.json
@@ -418,6 +457,7 @@ jobs:
           PYEOF
 
       - name: Upload branded zip + reports
+        if: ${{ steps.candidate-state.outputs.candidate_ready == 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nastech-agent-update
