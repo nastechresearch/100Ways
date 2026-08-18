@@ -87,6 +87,7 @@ jobs:
 
   forkcheck:
     needs: pipeline
+    if: ${{ needs.pipeline.outputs.gate == 'PASS' }}
     uses: ./.github/workflows/stage-forkcheck.yml
     with:
       slice_count: 4
@@ -117,8 +118,9 @@ jobs:
   update-pr:
     name: "#344 — Push PR to NasTech"
     needs: [pipeline, forkcheck, all-checks-pass]
-    # update-pr fires when publish_candidate_pr=true AND pipeline ran AND gate passed
-    if: ${{ github.event_name == 'workflow_dispatch' }}
+    # update-pr fires only after a PASS pipeline gate; WITHHELD source-test
+    # results never create a candidate artifact or authorize publication.
+    if: ${{ github.event_name == 'workflow_dispatch' && needs.pipeline.outputs.gate == 'PASS' }}
     permissions:
       contents: read
     uses: ./.github/workflows/stage-update-pr.yml
