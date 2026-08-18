@@ -153,6 +153,49 @@ def test_preserve_fork_files_copies_fork_local_content(tmp_path):
     assert (tmp_path / "branded" / "local.md").read_text() == "fork\n"
 
 
+def test_collision_safe_contributor_alias_is_relocated_without_duplicate(tmp_path):
+    rules = BrandingRules()
+    upstream = _tree(tmp_path / "upstream", {
+        "contributors/emails/agent@agents-Mac-mini.local": "lower upstream record\n",
+        "contributors/emails/agent@Agents-Mac-mini.local": "title upstream record\n",
+    })
+    fork = _tree(tmp_path / "fork", {
+        # Legacy path from a pre-collision-safe candidate: it is not fork-local
+        # data because it exactly matches one upstream contributor record.
+        "contributors/emails/agent@agents-Mac-mini.local": "lower upstream record\n",
+    })
+    branded = str(tmp_path / "branded")
+    brand_tree(str(upstream), branded, rules)
+
+    preserved = preserve_fork_files(str(fork), branded, str(upstream), rules)
+    report = fork_consistency(str(fork), branded, str(upstream), rules)
+
+    email_files = sorted(_walk(os.path.join(branded, "contributors", "emails")))
+    assert len(email_files) == 2
+    assert all("--case-" in path for path in email_files)
+    assert preserved == []
+    assert report.entries[0].status == "relocated"
+    assert report.gate_passes()
+
+
+def test_collision_safe_alias_preserves_custom_fork_content(tmp_path):
+    rules = BrandingRules()
+    upstream = _tree(tmp_path / "upstream", {
+        "contributors/emails/agent@agents-Mac-mini.local": "lower upstream record\n",
+        "contributors/emails/agent@Agents-Mac-mini.local": "title upstream record\n",
+    })
+    fork = _tree(tmp_path / "fork", {
+        "contributors/emails/agent@agents-Mac-mini.local": "fork-specific contributor note\n",
+    })
+    branded = str(tmp_path / "branded")
+    brand_tree(str(upstream), branded, rules)
+
+    preserved = preserve_fork_files(str(fork), branded, str(upstream), rules)
+
+    assert "contributors/emails/agent@agents-Mac-mini.local" in preserved
+    assert (tmp_path / "branded" / "contributors" / "emails" / "agent@agents-Mac-mini.local").read_text() == "fork-specific contributor note\n"
+
+
 def test_source_tree_delta_records_added_modified_deleted_and_renamed_paths(tmp_path):
     rules = BrandingRules()
     hermes = _hermes_repo(tmp_path)

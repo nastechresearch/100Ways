@@ -13,6 +13,7 @@ boundary-guarded so English words (``venous``, ``anonymous``,
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from dataclasses import dataclass, field
@@ -135,6 +136,47 @@ class BrandingRules:
         tokens = list(self.tokens)
         pattern = self._pattern()
         return pattern.sub(lambda m: self._replacement(m, tokens), path)
+
+
+def collision_safe_path_map(paths: list[str], rules: BrandingRules | None = None) -> dict[str, str]:
+    """Map every source path to a deterministic case-safe candidate path.
+
+    Two distinct upstream paths can differ only by case.  That is valid on the
+    upstream's case-sensitive filesystem but unsafe on macOS and Windows.  A
+    collision is resolved *before* candidate materialization by appending a
+    stable source-path digest to each member of the colliding group.  Ordinary
+    contributor-email identities remain verbatim; only a genuine collision
+    receives a suffix.  No file is dropped, merged, or content-rewritten.
+    """
+    rules = rules or BrandingRules()
+    paths = sorted(paths)
+    mapped = {
+        path: path if is_immutable_path(path) else rules.transform_path(path)
+        for path in paths
+    }
+    groups: dict[str, list[str]] = {}
+    for path, target in mapped.items():
+        groups.setdefault(target.casefold(), []).append(path)
+
+    used = {target.casefold() for key, values in groups.items() if len(values) == 1
+            for target in (mapped[values[0]],)}
+    result = dict(mapped)
+    for values in groups.values():
+        if len(values) < 2:
+            continue
+        for path in sorted(values):
+            target = mapped[path]
+            parent, basename = os.path.split(target)
+            stem, extension = os.path.splitext(basename)
+            digest = hashlib.sha256(path.encode("utf-8")).hexdigest()[:12]
+            candidate = os.path.join(parent, f"{stem}--case-{digest}{extension}")
+            ordinal = 2
+            while candidate.casefold() in used:
+                candidate = os.path.join(parent, f"{stem}--case-{digest}-{ordinal}{extension}")
+                ordinal += 1
+            result[path] = candidate
+            used.add(candidate.casefold())
+    return result
 
 
 def tokens_from_overrides(path: str | None) -> list[TokenRule]:

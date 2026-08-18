@@ -8,6 +8,7 @@ import sys
 import zipfile
 
 from hundredways.assets import OwnedAssets
+from hundredways.integrity import audit_candidate_tree
 from hundredways.updates import (
     STAGES,
     UpdateManager,
@@ -20,7 +21,7 @@ from hundredways.updates import (
     update_path,
     verify_branded,
 )
-from hundredways.rules import BrandingRules
+from hundredways.rules import BrandingRules, collision_safe_path_map
 from tests.conftest import git, git_repo
 
 
@@ -85,6 +86,32 @@ def test_folder_and_file_names_are_branded(tmp_path):
     assert not os.path.exists(os.path.join(res.dir, "hermes_cli", "hermes_runner.py"))
     renamed = {e.mapped_path for e in res.diff.entries if e.action == "renamed"}
     assert "nastech_cli/nastech_runner.py" in renamed
+
+
+def test_case_colliding_contributor_records_are_disambiguated_without_data_loss(tmp_path):
+    src = tmp_path / "hermes-agent"
+    dst = tmp_path / "candidate"
+    emails = src / "contributors" / "emails"
+    emails.mkdir(parents=True)
+    lower = emails / "agent@agents-Mac-mini.local"
+    title = emails / "agent@Agents-Mac-mini.local"
+    lower.write_text("first distinct contributor record\n")
+    title.write_text("second distinct contributor record\n")
+
+    rules = BrandingRules()
+    paths = [
+        "contributors/emails/agent@agents-Mac-mini.local",
+        "contributors/emails/agent@Agents-Mac-mini.local",
+    ]
+    path_map = collision_safe_path_map(paths, rules)
+    assert len({target.casefold() for target in path_map.values()}) == 2
+    assert all("--case-" in target for target in path_map.values())
+
+    brand_tree(str(src), str(dst), rules)
+    assert (dst / path_map[paths[0]]).read_text() == lower.read_text()
+    assert (dst / path_map[paths[1]]).read_text() == title.read_text()
+    assert verify_branded(str(src), str(dst), rules).failed == []
+    assert not [issue for issue in audit_candidate_tree(dst) if issue.code == "case-collision"]
 
 
 def test_text_content_branded_binary_locked_untouched(tmp_path):

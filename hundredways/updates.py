@@ -41,7 +41,7 @@ from .forkcheck import (
     preserve_fork_files,
     source_tree_delta,
 )
-from .rules import BrandingRules, is_immutable_path, is_locked_path
+from .rules import BrandingRules, collision_safe_path_map, is_immutable_path, is_locked_path
 from .scanner import classify_path, is_text
 from .verify import FileResult, VerifyReport
 
@@ -281,18 +281,21 @@ def brand_tree(src: str, dst: str, rules: BrandingRules | None = None,
     """
     rules = rules or BrandingRules()
     result = BrandResult()
-    for rel in _walk_files(src):
+    source_files = _walk_files(src)
+    path_map = collision_safe_path_map(source_files, rules)
+    for rel in source_files:
         result.total += 1
         src_path = os.path.join(src, rel)
+        mapped = path_map[rel]
         if is_immutable_path(rel):
-            # real data: copy byte-for-byte, name untouched
-            dst_path = os.path.join(dst, rel)
+            # Real contributor data stays byte-for-byte intact, but its path
+            # still follows the collision-safe candidate map.
+            dst_path = os.path.join(dst, mapped)
             os.makedirs(os.path.dirname(dst_path), exist_ok=True)
             shutil.copyfile(src_path, dst_path)
             _restore_mode(src_path, dst_path)
             result.locked_copied += 1
             continue
-        mapped = rules.transform_path(rel)
         if mapped != rel:
             result.renamed += 1
         dst_path = os.path.join(dst, mapped)
@@ -1051,11 +1054,13 @@ def compare_trees(src: str, dst: str, rules: BrandingRules | None = None,
     """Diff the branded tree against the upstream source, file by file."""
     rules = rules or BrandingRules()
     report = DiffReport()
-    for rel in _walk_files(src):
+    source_files = _walk_files(src)
+    path_map = collision_safe_path_map(source_files, rules)
+    for rel in source_files:
+        mapped = path_map[rel]
         if is_immutable_path(rel):
-            report.entries.append(DiffEntry(rel, rel, "locked"))
+            report.entries.append(DiffEntry(rel, mapped, "locked"))
             continue
-        mapped = rules.transform_path(rel)
         if owned and owned.has(mapped):
             report.entries.append(DiffEntry(rel, mapped, "owned"))
             continue
@@ -1102,9 +1107,11 @@ def verify_branded(src: str, dst: str, rules: BrandingRules | None = None,
     reconciled bytes (the fork-local fixes applied after branding)."""
     rules = rules or BrandingRules()
     report = VerifyReport()
-    for rel in _walk_files(src):
+    source_files = _walk_files(src)
+    path_map = collision_safe_path_map(source_files, rules)
+    for rel in source_files:
         report.total += 1
-        mapped = rel if is_immutable_path(rel) else rules.transform_path(rel)
+        mapped = path_map[rel]
         locked = is_locked_path(rel) or is_locked_path(mapped) or is_immutable_path(rel)
         src_path = os.path.join(src, rel)
         dst_path = os.path.join(dst, mapped)

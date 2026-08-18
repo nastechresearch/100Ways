@@ -29,7 +29,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 
-from .rules import BrandingRules, is_immutable_path, is_locked_path
+from .rules import BrandingRules, collision_safe_path_map, is_immutable_path, is_locked_path
 from .scanner import is_text
 
 
@@ -88,6 +88,7 @@ class ForkCheckReport:
             f"{statuses.get('local_only', 0)} fork-local-unpreserved, "
             f"{statuses.get('stale_upstream', 0)} stale-upstream, "
             f"{statuses.get('locked', 0)} locked/binary, "
+            f"{statuses.get('relocated', 0)} collision-safe relocated, "
             f"{len(self.preserved)} preserved fork-local files, "
             f"{self.violation_count} violations"
         )
@@ -324,15 +325,35 @@ def source_tree_delta(
 def _upstream_mapped(upstream: list[str], rules: BrandingRules) -> set[str]:
     """Paths upstream files map to in the branded tree — mirroring brand_tree.
 
-    Immutable real-data paths (contributor emails) are kept verbatim, exactly
-    as ``brand_tree`` does; everything else is ``transform_path``'d.  A fork
-    file that lives at a mapped path is upstream-provided (must match);
-    anything else is fork-local and must be preserved.
+    Contributor records retain their bytes, but their destination names are
+    collision-safe so distinct upstream identities never alias on a
+    case-insensitive filesystem.  A fork file at a mapped path is upstream
+    provided; anything else remains fork-local and is preserved.
     """
-    mapped: set[str] = set()
-    for p in upstream:
-        mapped.add(p if is_immutable_path(p) else rules.transform_path(p))
-    return mapped
+    return set(collision_safe_path_map(upstream, rules).values())
+
+
+def _is_relocated_collision_alias(
+    rel: str,
+    path_map: dict[str, str],
+    fork_root: str,
+    branded_root: str,
+) -> bool:
+    """Return true only when a legacy raw path is byte-preserved at its safe path.
+
+    A prior candidate may contain an unsuffixed contributor record from before
+    collision handling existed.  It is safe to omit that legacy alias only if
+    its collision-safe upstream destination exists and contains exactly the
+    same bytes; custom fork data is never discarded.
+    """
+    mapped = path_map.get(rel)
+    if not mapped or mapped == rel:
+        return False
+    source = os.path.join(fork_root, rel)
+    destination = os.path.join(branded_root, mapped)
+    if not os.path.isfile(source) or not os.path.isfile(destination):
+        return False
+    return _read(source) == _read(destination)
 
 
 def preserve_fork_files(
@@ -358,7 +379,8 @@ def preserve_fork_files(
     obsolete_upstream_paths = obsolete_upstream_paths or set()
     owned_paths = owned_paths or set()
     upstream = _walk(upstream_root)
-    upstream_mapped = _upstream_mapped(upstream, rules)
+    upstream_path_map = collision_safe_path_map(upstream, rules)
+    upstream_mapped = set(upstream_path_map.values())
     engine_registry = os.path.isfile(
         os.path.join(branded_root, "config", "owned-assets", "manifest.json")
     )
@@ -366,6 +388,8 @@ def preserve_fork_files(
     for rel in _walk(fork_root):
         if rel in upstream_mapped:
             continue  # upstream provides it
+        if _is_relocated_collision_alias(rel, upstream_path_map, fork_root, branded_root):
+            continue  # exact contributor bytes already exist at their safe destination
         explicitly_owned = (
             rel in owned_paths
             or rel.startswith("config/owned-assets/")
@@ -424,10 +448,15 @@ def fork_consistency(
     fork_files = set(_walk(fork_root))
     branded_files = set(_walk(branded_root))
     upstream = set(_walk(upstream_root))
-    upstream_mapped = _upstream_mapped(list(upstream), rules)
+    upstream_path_map = collision_safe_path_map(list(upstream), rules)
+    upstream_mapped = set(upstream_path_map.values())
 
     for rel in sorted(fork_files):
         entry = ForkEntry(path=rel, status="missing")
+        if _is_relocated_collision_alias(rel, upstream_path_map, fork_root, branded_root):
+            entry.status = "relocated"
+            report.entries.append(entry)
+            continue
         explicitly_owned = (
             rel in owned_paths
             or rel.startswith("config/owned-assets/")
