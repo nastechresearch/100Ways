@@ -57,30 +57,34 @@ _RENAME_TO = re.compile(r"^rename to (.+)$")
 
 
 def _rebrand_patch(patch: str, rules: BrandingRules) -> str:
-    """Rebrand a unified diff: path headers, rename lines, and content."""
-    lines = patch.splitlines(keepends=True)
+    """Rebrand a unified diff while preserving valid git patch structure."""
     out: list[str] = []
-    for line in lines:
-        stripped = line.rstrip("\n")
-        # path header lines
-        if stripped.startswith(("--- a/", "+++ b/", "diff --git a/")):
-            out.append(rules.transform_path(stripped) + "\n")
+    for line in patch.splitlines(keepends=True):
+        newline = "\n" if line.endswith("\n") else ""
+        stripped = line[:-1] if newline else line
+        if stripped.startswith("diff --git "):
+            parts = stripped.split(" ", 3)
+            if len(parts) == 4:
+                out.append(" ".join(parts[:2] + [rules.transform_path(parts[2]), rules.transform_path(parts[3])]) + newline)
+                continue
+        if stripped.startswith("--- a/"):
+            out.append("--- " + rules.transform_path(stripped[4:]) + newline)
             continue
-        # rename lines
+        if stripped.startswith("+++ b/"):
+            out.append("+++ " + rules.transform_path(stripped[4:]) + newline)
+            continue
         m = _RENAME_FROM.match(stripped)
         if m:
-            out.append("rename from " + rules.transform_path(m.group(1)) + "\n")
+            out.append("rename from " + rules.transform_path(m.group(1)) + newline)
             continue
         m = _RENAME_TO.match(stripped)
         if m:
-            out.append("rename to " + rules.transform_path(m.group(1)) + "\n")
+            out.append("rename to " + rules.transform_path(m.group(1)) + newline)
             continue
-        # content lines (context stays untouched)
         if line.startswith(("+", "-")):
-            body = line[1:]
-            out.append(line[0] + rules.transform_text(body))
-            continue
-        out.append(line)
+            out.append(line[0] + rules.transform_text(line[1:]))
+        else:
+            out.append(line)
     return "".join(out)
 
 
@@ -156,16 +160,31 @@ def _port_one(
     wt: str, repo: str, sha: str, rules: BrandingRules,
     threshold: float, res: PortResult, last_good: str,
 ) -> None:
-    patch = _git_ok(repo, "show", "--format=email", sha)
-    rebranded = _rebrand_patch(patch, rules)
-    proc = subprocess.run(
-        ["git", "-C", wt, "apply", "--3way", "--allow-empty", "--whitespace=nowarn", "-"],
-        input=rebranded,
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0:
-        raise SyncError(f"git apply failed: {proc.stderr.strip() or proc.stdout.strip()}")
+    parent = _git_ok(repo, "rev-parse", f"{sha}^1").strip()
+    changes = _git_ok(repo, "diff", "--name-status", "--find-renames", parent, sha).splitlines()
+    for change in changes:
+        parts = change.split("\t")
+        status = parts[0][0]
+        old_path = parts[1]
+        new_path = parts[-1]
+        if status == "D":
+            target = os.path.join(wt, rules.transform_path(old_path))
+            if os.path.exists(target):
+                os.remove(target)
+            continue
+        source_path = new_path
+        target_rel = rules.transform_path(new_path)
+        target = os.path.join(wt, target_rel)
+        data = subprocess.check_output(["git", "-C", repo, "show", f"{sha}:{source_path}"], stderr=subprocess.PIPE)
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            rendered = data
+        else:
+            rendered = rules.transform_text(text).encode("utf-8")
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "wb") as fh:
+            fh.write(rendered)
 
     _git_ok(wt, "add", "-A")
     _git_ok(wt, "commit", "-m", f"port({sha[:8]}): {res.subject}")
@@ -183,9 +202,10 @@ def _port_one(
 
 
 def _worktree(repo: str, branch: str) -> str:
-    """Create a throwaway worktree on ``branch`` for isolation."""
+    """Create an isolated worktree on a unique temporary branch."""
     tmp = tempfile.mkdtemp(prefix="100ways-")
-    proc = _git(repo, "worktree", "add", "--detach", tmp, branch)
+    temp_branch = f"100ways-port-{os.getpid()}-{os.path.basename(tmp)}"
+    proc = _git(repo, "worktree", "add", "-b", temp_branch, tmp, branch)
     if proc.returncode != 0:
         shutil.rmtree(tmp, ignore_errors=True)
         raise SyncError(f"worktree add failed: {proc.stderr.strip()}")
@@ -193,5 +213,8 @@ def _worktree(repo: str, branch: str) -> str:
 
 
 def _remove_worktree(repo: str, wt: str) -> None:
+    branch = _git_ok(wt, "branch", "--show-current").strip() if os.path.isdir(os.path.join(wt, ".git")) else ""
     _git(repo, "worktree", "remove", "--force", wt)
+    if branch:
+        _git(repo, "branch", "-D", branch)
     shutil.rmtree(wt, ignore_errors=True)

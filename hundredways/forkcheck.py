@@ -29,7 +29,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 
-from .rules import BrandingRules, is_immutable_path, is_locked_path
+from .rules import BrandingRules, is_locked_path
 from .scanner import is_text
 
 
@@ -64,43 +64,85 @@ class ForkCheckReport:
     @property
     def statuses(self) -> dict[str, int]:
         counts: dict[str, int] = {}
-        for e in self.entries:
-            counts[e.status] = counts.get(e.status, 0) + 1
+        for entry in self.entries:
+            counts[entry.status] = counts.get(entry.status, 0) + 1
         return counts
 
     @property
     def violation_count(self) -> int:
-        return sum(len(e.violations) for e in self.entries)
+        return sum(len(entry.violations) for entry in self.entries)
 
     @property
     def updated_lines(self) -> tuple[int, int]:
-        added = sum(e.added_lines for e in self.entries if e.status == "updated")
-        deleted = sum(e.deleted_lines for e in self.entries if e.status == "updated")
+        added = sum(entry.added_lines for entry in self.entries if entry.status == "updated")
+        deleted = sum(entry.deleted_lines for entry in self.entries if entry.status == "updated")
         return added, deleted
 
     def summary(self) -> str:
-        s = self.statuses
-        added_l, deleted_l = self.updated_lines
+        statuses = self.statuses
+        added_lines, deleted_lines = self.updated_lines
         return (
-            f"{s.get('identical', 0)} identical, {s.get('updated', 0)} updated "
-            f"(+{added_l}/-{deleted_l} lines), {s.get('added', 0)} added, "
-            f"{s.get('missing', 0)} missing, {s.get('local_only', 0)} fork-local-unpreserved, "
-            f"{s.get('locked', 0)} locked/binary, "
+            f"{statuses.get('identical', 0)} identical, {statuses.get('updated', 0)} updated "
+            f"(+{added_lines}/-{deleted_lines} lines), {statuses.get('added', 0)} added, "
+            f"{statuses.get('missing', 0)} missing, "
+            f"{statuses.get('local_only', 0)} fork-local-unpreserved, "
+            f"{statuses.get('stale_upstream', 0)} stale-upstream, "
+            f"{statuses.get('locked', 0)} locked/binary, "
             f"{len(self.preserved)} preserved fork-local files, "
             f"{self.violation_count} violations"
         )
 
     def gate_passes(self, allow_violations: int = 0) -> bool:
-        """True when the branded tree is PR-safe.
-
-        Fails on: any missing file (branding dropped an upstream file), any
-        fork-local file not preserved (feature loss), or more than
-        ``allow_violations`` brand tokens on added/added-file lines.
-        """
-        for e in self.entries:
-            if e.status in ("missing", "local_only"):
+        """True when the branded candidate contains no unsafe retained source."""
+        for entry in self.entries:
+            if entry.status in ("missing", "local_only", "stale_upstream"):
                 return False
         return self.violation_count <= allow_violations
+
+
+@dataclass(frozen=True)
+class SourceChange:
+    """One direct upstream tree change, mapped to the NasTech candidate path."""
+
+    status: str  # added | modified | deleted | renamed
+    old_path: str = ""
+    new_path: str = ""
+    old_mapped: str = ""
+    new_mapped: str = ""
+
+
+@dataclass
+class SourceDeltaReport:
+    """Exact `git diff --name-status` evidence for a source synchronization."""
+
+    baseline_sha: str
+    upstream_sha: str
+    changes: list[SourceChange] = field(default_factory=list)
+    complete: bool = False
+
+    @property
+    def obsolete_mapped(self) -> set[str]:
+        """Candidate paths retired by an upstream deletion or rename."""
+        return {
+            change.old_mapped
+            for change in self.changes
+            if change.status in {"deleted", "renamed"} and change.old_mapped
+        }
+
+    @property
+    def counts(self) -> dict[str, int]:
+        values = {"added": 0, "modified": 0, "deleted": 0, "renamed": 0}
+        for change in self.changes:
+            values[change.status] = values.get(change.status, 0) + 1
+        return values
+
+    def summary(self) -> str:
+        counts = self.counts
+        status = "complete" if self.complete else "baseline-unavailable"
+        return (
+            f"{status}: +{counts['added']} ~{counts['modified']} "
+            f"-{counts['deleted']} ↪{counts['renamed']}"
+        )
 
 
 _JUNK_DIRS = {"node_modules", "__pycache__", ".git", ".venv", "venv"}
@@ -121,7 +163,7 @@ def _walk(root: str) -> list[str]:
                 capture_output=True, text=True, timeout=60,
             )
             if out.returncode == 0:
-                return sorted(l for l in out.stdout.splitlines() if l)
+                return sorted(line for line in out.stdout.splitlines() if line)
         except (OSError, subprocess.TimeoutExpired):
             pass
     out: list[str] = []
@@ -160,8 +202,6 @@ def scan_brand_violations(root: str, rules: BrandingRules | None = None,
     for rel in _walk(root):
         if is_locked_path(rel):
             continue
-        if skip_immutable and is_immutable_path(rel):
-            continue
         data = _read(os.path.join(root, rel))
         if not is_text(data):
             continue
@@ -198,6 +238,87 @@ def _added_line_violations(fork_text: str, branded_text: str,
     return hits
 
 
+def source_tree_delta(
+    repo: str,
+    baseline_sha: str,
+    upstream_sha: str,
+    rules: BrandingRules | None = None,
+) -> SourceDeltaReport:
+    """Return direct, rename-aware upstream tree evidence for one sync.
+
+    A previous upstream SHA is required for deletion and rename evidence.  The
+    caller treats an incomplete report as a fail-closed review condition rather
+    than guessing whether an extra fork file is truly local or stale upstream.
+    """
+    rules = rules or BrandingRules()
+    report = SourceDeltaReport(baseline_sha, upstream_sha)
+    if not baseline_sha or not upstream_sha:
+        return report
+    ancestry = subprocess.run(
+        [
+            "git",
+            "-C",
+            repo,
+            "merge-base",
+            "--is-ancestor",
+            baseline_sha,
+            upstream_sha,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if ancestry.returncode:
+        return report
+    result = subprocess.run(
+        [
+            "git", "-C", repo, "diff", "--name-status", "--find-renames=50%",
+            f"{baseline_sha}..{upstream_sha}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        return report
+    for line in result.stdout.splitlines():
+        fields = line.split("\t")
+        if not fields:
+            continue
+        code = fields[0][:1]
+        if code in {"R", "C"} and len(fields) == 3:
+            old_path, new_path = fields[1:]
+            status = "renamed" if code == "R" else "added"
+            report.changes.append(
+                SourceChange(
+                    status,
+                    old_path,
+                    new_path,
+                    rules.transform_path(old_path),
+                    rules.transform_path(new_path),
+                )
+            )
+        elif code == "D" and len(fields) == 2:
+            old_path = fields[1]
+            report.changes.append(
+                SourceChange(
+                    "deleted",
+                    old_path=old_path,
+                    old_mapped=rules.transform_path(old_path),
+                )
+            )
+        elif code in {"A", "M", "T"} and len(fields) == 2:
+            new_path = fields[1]
+            status = "added" if code == "A" else "modified"
+            report.changes.append(
+                SourceChange(
+                    status,
+                    new_path=new_path,
+                    new_mapped=rules.transform_path(new_path),
+                )
+            )
+    report.complete = True
+    return report
+
+
 def _upstream_mapped(upstream: list[str], rules: BrandingRules) -> set[str]:
     """Paths upstream files map to in the branded tree — mirroring brand_tree.
 
@@ -208,12 +329,20 @@ def _upstream_mapped(upstream: list[str], rules: BrandingRules) -> set[str]:
     """
     mapped: set[str] = set()
     for p in upstream:
-        mapped.add(p if is_immutable_path(p) else rules.transform_path(p))
+        mapped.add(rules.transform_path(p))
     return mapped
 
 
-def preserve_fork_files(fork_root: str, branded_root: str, upstream_root: str,
-                        rules: BrandingRules | None = None) -> list[str]:
+def preserve_fork_files(
+    fork_root: str,
+    branded_root: str,
+    upstream_root: str,
+    rules: BrandingRules | None = None,
+    *,
+    obsolete_upstream_paths: set[str] | None = None,
+    owned_paths: set[str] | None = None,
+    allow_unclassified_fork_files: bool = True,
+) -> list[str]:
     """Copy fork-local files (no upstream source) into the branded tree.
 
     Fork files whose path no upstream path maps to are fork-only content
@@ -224,14 +353,33 @@ def preserve_fork_files(fork_root: str, branded_root: str, upstream_root: str,
     if not fork_root or not os.path.isdir(fork_root):
         return []
     rules = rules or BrandingRules()
+    obsolete_upstream_paths = obsolete_upstream_paths or set()
+    owned_paths = owned_paths or set()
     upstream = _walk(upstream_root)
     upstream_mapped = _upstream_mapped(upstream, rules)
+    engine_registry = os.path.isfile(
+        os.path.join(branded_root, "config", "owned-assets", "manifest.json")
+    )
     preserved: list[str] = []
     for rel in _walk(fork_root):
         if rel in upstream_mapped:
             continue  # upstream provides it
+        explicitly_owned = (
+            rel in owned_paths
+            or rel.startswith("config/owned-assets/")
+        )
+        if rel in obsolete_upstream_paths and not explicitly_owned:
+            continue  # direct source evidence proves this is stale upstream code
+        if not allow_unclassified_fork_files and not explicitly_owned:
+            continue  # without a baseline, stop for ownership review
         dst = os.path.join(branded_root, rel)
         src = os.path.join(fork_root, rel)
+        # A 100Ways-owned registry is an explicit, reviewable visual identity
+        # overlay.  Preserve the fork's registry only when no engine-owned
+        # replacement already exists; otherwise a stale fork asset would
+        # overwrite the verified white NasTech asset pack.
+        if rel.startswith("config/owned-assets/") and engine_registry:
+            continue
         if os.path.abspath(dst) == os.path.abspath(src):
             continue
         os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -244,8 +392,15 @@ def preserve_fork_files(fork_root: str, branded_root: str, upstream_root: str,
     return preserved
 
 
-def fork_consistency(fork_root: str, branded_root: str, upstream_root: str,
-                     rules: BrandingRules | None = None) -> ForkCheckReport:
+def fork_consistency(
+    fork_root: str,
+    branded_root: str,
+    upstream_root: str,
+    rules: BrandingRules | None = None,
+    *,
+    obsolete_upstream_paths: set[str] | None = None,
+    owned_paths: set[str] | None = None,
+) -> ForkCheckReport:
     """Diff the branded tree against the nastech-agent fork, file by file.
 
     ``fork_root`` is a checkout of nastech-agent main (the previous branded
@@ -255,6 +410,8 @@ def fork_consistency(fork_root: str, branded_root: str, upstream_root: str,
     anything missing or fork-local-but-unpreserved fails the gate.
     """
     rules = rules or BrandingRules()
+    obsolete_upstream_paths = obsolete_upstream_paths or set()
+    owned_paths = owned_paths or set()
     report = ForkCheckReport()
     if not fork_root or not os.path.isdir(fork_root):
         return report
@@ -268,6 +425,14 @@ def fork_consistency(fork_root: str, branded_root: str, upstream_root: str,
 
     for rel in sorted(fork_files):
         entry = ForkEntry(path=rel, status="missing")
+        explicitly_owned = (
+            rel in owned_paths
+            or rel.startswith("config/owned-assets/")
+        )
+        if rel in obsolete_upstream_paths and not explicitly_owned:
+            entry.status = "stale_upstream" if rel in branded_files else "upstream_deleted"
+            report.entries.append(entry)
+            continue
         if rel not in branded_files:
             # upstream has a file mapping here -> branding dropped it (bug).
             # no upstream source -> fork-local content that was NOT preserved.
@@ -294,11 +459,18 @@ def fork_consistency(fork_root: str, branded_root: str, upstream_root: str,
         report.entries.append(entry)
 
     for rel in sorted(branded_files - fork_files):
+        explicitly_owned = (
+            rel in owned_paths
+            or rel.startswith("config/owned-assets/")
+        )
+        if rel in obsolete_upstream_paths and not explicitly_owned:
+            report.entries.append(ForkEntry(path=rel, status="stale_upstream"))
+            continue
         if rel in upstream_mapped:
             # brand-new upstream file: every line must be brand-clean
             data = _read(os.path.join(branded_root, rel))
             entry = ForkEntry(path=rel, status="added")
-            if is_text(data) and not is_locked_path(rel) and not is_immutable_path(rel):
+            if is_text(data) and not is_locked_path(rel):
                 text = data.decode("utf-8", "replace")
                 for line_no in _brand_violations(text, rules):
                     entry.violations.append(

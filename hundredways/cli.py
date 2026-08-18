@@ -23,7 +23,7 @@ status     Show repo state and rules validation.
 verify     Parity gate vs the birth commit (exit 1 on fail).
 ship       Verify parity then prepare the sync branch for shipping.
 report     Write a markdown gap report to config/reports.
-dashboard  Serve the live web dashboard (admin = Nastech@Pass or its compiled token).
+dashboard  Serve the live web dashboard (write access requires HUNDREDWAYS_ADMIN_TOKEN).
 pull       Fetch upstream + write report + record achievement.
 achievements  List achievements and unlock state.
 readme     Regenerate README.md from the ways + achievements + owned-asset registries.
@@ -52,14 +52,29 @@ from .release import release_check_table, release_summary, release_verify_incomi
 from .research import research as run_research
 from .rules import BrandingRules
 from .scanner import classify_path
-from .security import DEFAULT_ADMIN_PASS, compile_token, verify_token
-from .updates import DEFAULT_HERMES_URL, UpdateManager, default_updates_dir
+from .security import verify_token
+from .updates import DEFAULT_HERMES_URL, UpdateManager, default_updates_dir, hermes_path
+from .weekly_sync import build_weekly_report, save_ledger, write_weekly_report
 from .verify import _git, _git_ok, verify_rebrand
 from .watcher import Watcher, WatcherConfig
 from .ways import build_registry
 
-DEFAULT_REPO = os.environ.get("HUNDREDWAYS_REPO", os.environ.get("SYNCBRIDGE_REPO", "/home/nascode/Documents/A1/nastech-agent"))
-DEFAULT_HERMES = os.environ.get("HUNDREDWAYS_HERMES", "/home/nascode/Documents/A1/hermes-agent")
+# XDG default: prefer $XDG_DATA_HOME/100ways/<name>, fall back to ~/.local/share.
+# Backwards-compatible: HUNDREDWAYS_REPO / SYNCBRIDGE_REPO env vars still win.
+def _xdg_default(name: str) -> str:
+    base = os.environ.get("XDG_DATA_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "share"
+    )
+    return os.path.join(base, "100ways", name)
+
+
+DEFAULT_REPO = os.environ.get(
+    "HUNDREDWAYS_REPO",
+    os.environ.get("SYNCBRIDGE_REPO", _xdg_default("nastech-agent")),
+)
+DEFAULT_HERMES = os.environ.get(
+    "HUNDREDWAYS_HERMES", _xdg_default("hermes-agent")
+)
 BIRTH_COMMIT = "0cafd22fb"
 BIRTH_PARENT = "03fa32c92"
 DEFAULT_UPSTREAM = "upstream/main"
@@ -341,16 +356,13 @@ class Cli:
         print("RELEASE: code table verified, incoming codes clean")
 
     def cmd_admin(self) -> None:
-        """Show/verify the admin password and its compiled system token."""
-        passphrase = self.args.password or DEFAULT_ADMIN_PASS
-        compiled = compile_token(passphrase)
-        print(f"password    : {passphrase}")
-        print(f"compiled    : {compiled}   <- system-only token, store this")
+        """Verify an operator-provided dashboard bearer token without echoing it."""
+        configured = self.args.token or os.getenv("HUNDREDWAYS_ADMIN_TOKEN", "")
         if self.args.verify:
-            ok = verify_token(self.args.verify, self.args.token or compiled)
-            print(f"verify {self.args.verify!r} against {self.args.token or '(self)'}: "
-                  f"{'GRANTED' if ok else 'DENIED'}")
+            ok = verify_token(self.args.verify, configured)
+            print(f"verify: {'GRANTED' if ok else 'DENIED'}")
             sys.exit(0 if ok else 1)
+        print("Admin authentication uses HUNDREDWAYS_ADMIN_TOKEN; no credential is generated or displayed.")
 
     def cmd_ways(self) -> None:
         registry = build_registry()
@@ -424,7 +436,11 @@ class Cli:
     def cmd_update(self) -> None:
         """Pull real Hermes, brand the whole tree, verify, save as Nastech-Update#N."""
         updates_dir = self.args.updates_dir or default_updates_dir(self.repo)
-        owned = OwnedAssets(repo=self.repo)
+        owned = (
+            OwnedAssets(root=self.args.owned_assets_root)
+            if self.args.owned_assets_root
+            else OwnedAssets(repo=self.repo)
+        )
         if owned.count:
             print(f"owned-assets registry: {owned.count} target paths in {owned.root}")
         else:
@@ -434,9 +450,15 @@ class Cli:
             print(f"fork-root: {fork_root} (fork-consistency check enabled)")
         else:
             print(f"fork-root: {fork_root or 'none'} — fork-consistency check will be skipped")
-        mgr = UpdateManager(updates_dir, hermes_url=self.args.hermes_url,
-                            rules=self.rules, owned=owned, ai=AIEngine(),
-                            fork_root=fork_root)
+        mgr = UpdateManager(
+            updates_dir,
+            hermes_url=self.args.hermes_url,
+            rules=self.rules,
+            owned=owned,
+            ai=AIEngine(),
+            fork_root=fork_root,
+            expected_upstream_sha=self.args.expected_upstream_sha,
+        )
         zip_path = self.args.zip or ""
         if zip_path and zip_path.endswith(os.sep):
             zip_path = ""
@@ -472,6 +494,56 @@ class Cli:
         if not result.gate:
             print("GATE FAILED - snapshot kept for inspection", file=sys.stderr)
             sys.exit(1)
+
+    def cmd_weekly_full_sync(self) -> None:
+        """Run or audit a complete weekly branded snapshot; never push or merge."""
+        updates_dir = self.args.updates_dir or default_updates_dir(self.repo)
+        branded_root = self.args.branded_root or self.repo
+        upstream_repo = self.args.hermes_repo or hermes_path(updates_dir)
+
+        if self.args.mode == "snapshot":
+            owned = OwnedAssets(repo=self.repo)
+            mgr = UpdateManager(
+                updates_dir,
+                hermes_url=self.args.hermes_url,
+                rules=self.rules,
+                owned=owned,
+                ai=AIEngine(),
+                fork_root=self.args.fork_root or self.repo,
+            )
+            snapshot = mgr.run(project_name=self.args.project_name)
+            if not snapshot.gate:
+                print("weekly snapshot failed the 100Ways file-parity gate", file=sys.stderr)
+                sys.exit(1)
+            branded_root = snapshot.dir
+            upstream_repo = hermes_path(updates_dir)
+
+        if not os.path.isdir(upstream_repo):
+            print(f"Hermes checkout not found: {upstream_repo}", file=sys.stderr)
+            sys.exit(2)
+        if not os.path.isdir(branded_root):
+            print(f"Branded tree not found: {branded_root}", file=sys.stderr)
+            sys.exit(2)
+
+        report = build_weekly_report(
+            upstream_repo,
+            branded_root,
+            self.args.state_dir,
+            mode=self.args.mode,
+            ref=self.args.upstream_ref,
+        )
+        report_path = self.args.report or os.path.join(self.args.state_dir, "weekly-full-sync-report.md")
+        write_weekly_report(report_path, report)
+        print(json.dumps(report.to_dict(), indent=2))
+        print(f"report: {report_path}")
+
+        if report.gate_passes and self.args.record:
+            path = save_ledger(self.args.state_dir, report)
+            print(f"ledger: {path}")
+        elif not report.gate_passes:
+            print("weekly full-sync gate failed; no ledger update or publication", file=sys.stderr)
+            if self.args.require_pass:
+                sys.exit(1)
 
     def cmd_forkcheck(self) -> None:
         """Diff the branded snapshot against the nastech-agent fork checkout."""
@@ -604,7 +676,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func="cmd_release")
 
     p = sub.add_parser("admin", help="compile/verify the admin password into its system token")
-    p.add_argument("--password", default="", help="password to compile (default: Nastech@Pass)")
+    p.add_argument("--password", default="", help="deprecated; ignored (use HUNDREDWAYS_ADMIN_TOKEN)")
     p.add_argument("--token", default="", help="stored compiled token to verify against")
     p.add_argument("--verify", default="", help="a candidate to check for access")
     p.set_defaults(func="cmd_admin")
@@ -612,16 +684,40 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("update", help="pull real Hermes -> brand whole tree -> verify -> save Nastech-Update#N")
     p.add_argument("--updates-dir", default="", help="Updates-Commits dir (default: sibling of the repo)")
     p.add_argument("--hermes-url", default=DEFAULT_HERMES_URL, help="Hermes remote or local path")
+    p.add_argument(
+        "--expected-upstream-sha",
+        default="",
+        help="exact direct-source commit SHA to clone and verify (optional)",
+    )
     p.add_argument("--zip", default="", help="also build the release zip at this path (project folder + 2 md reports)")
     p.add_argument("--project-name", default="nastech-agent", help="name of the project folder inside the zip")
     p.add_argument("--state-dir", default="", help="state dir (default: repo-sibling 100ways-state)")
     p.add_argument("--fork-root", default="",
                    help="nastech-agent fork checkout to diff against (default: --repo); "
                         "enables the preserve + forkcheck stages")
+    p.add_argument("--owned-assets-root", default="",
+                    help="explicit config/owned-assets directory managed by 100Ways; "
+                         "overrides the registry located in --repo")
     p.add_argument("--emit-outputs", default="",
                    help="write JSON {update_number, upstream_sha, gate} to this file "
                         "(CI emits these into $GITHUB_OUTPUT)")
     p.set_defaults(func="cmd_update")
+
+    p = sub.add_parser("weekly-full-sync", help="weekly complete rebrand audit or snapshot; never pushes or merges")
+    p.add_argument("--mode", choices=["report", "snapshot"], default="report",
+                   help="report audits an existing branded tree; snapshot runs the full 100Ways update first")
+    p.add_argument("--updates-dir", default="", help="Updates-Commits dir used for snapshot mode")
+    p.add_argument("--hermes-url", default=DEFAULT_HERMES_URL, help="Hermes remote or local path for snapshot mode")
+    p.add_argument("--hermes-repo", default="", help="existing Hermes checkout for report mode")
+    p.add_argument("--upstream-ref", default="origin/main", help="upstream ref to fetch and verify")
+    p.add_argument("--branded-root", default="", help="existing branded tree for report mode; default: --repo")
+    p.add_argument("--fork-root", default="", help="NasTech fork root preserved during snapshot mode")
+    p.add_argument("--project-name", default="nastech-agent", help="snapshot project name")
+    p.add_argument("--state-dir", default="", help="state directory for the upstream ledger and reports")
+    p.add_argument("--report", default="", help="output markdown report path")
+    p.add_argument("--record", action="store_true", help="record a passing report in the upstream ledger")
+    p.add_argument("--require-pass", action="store_true", help="exit nonzero when any weekly gate fails")
+    p.set_defaults(func="cmd_weekly_full_sync")
 
     p = sub.add_parser("forkcheck", help="diff the branded snapshot against the nastech-agent fork")
     p.add_argument("--branded", default="", help="branded snapshot dir (default: latest Nastech-Update#N)")

@@ -13,13 +13,15 @@ from hundredways.updates import (
     UpdateManager,
     brand_tree,
     compare_trees,
+    fork_manifest_upstream_sha,
     next_update_number,
     package_zip,
+    pull_hermes,
+    reconcile_tree,
     update_path,
     verify_branded,
 )
 from hundredways.rules import BrandingRules
-from tests.conftest import git, git_repo
 
 
 def _hermes_repo(tmp_path):
@@ -38,13 +40,54 @@ def _hermes_repo(tmp_path):
     return str(hermes)
 
 
+def test_pull_hermes_can_pin_a_fresh_clone_to_an_observed_commit(tmp_path):
+    hermes = _hermes_repo(tmp_path)
+    expected = subprocess.check_output(["git", "-C", hermes, "rev-parse", "HEAD"], text=True).strip()
+    (tmp_path / "hermes-agent" / "later.py").write_text("value = 'later'\n")
+    subprocess.run(["git", "-C", hermes, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", hermes, "commit", "-q", "-m", "later upstream commit"], check=True)
+
+    actual = pull_hermes(str(tmp_path / "Updates-Commits"), hermes, expected_sha=expected)
+
+    assert actual == expected
+    assert not (tmp_path / "Updates-Commits" / "hermes-agent" / "later.py").exists()
+
+
+def test_fork_manifest_upstream_sha_enables_ephemeral_ci_delta_baseline(tmp_path):
+    hermes = _hermes_repo(tmp_path)
+    baseline = subprocess.check_output(
+        ["git", "-C", hermes, "rev-parse", "HEAD"], text=True
+    ).strip()
+    fork = tmp_path / "nastech-agent"
+    fork.mkdir()
+    (fork / "manifest.json").write_text(json.dumps({"upstream_sha": baseline}))
+    (tmp_path / "hermes-agent" / "added.py").write_text("value = 'new'\n")
+    subprocess.run(["git", "-C", hermes, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", hermes, "commit", "-q", "-m", "add source file"], check=True)
+
+    result = UpdateManager(
+        str(tmp_path / "Updates-Commits"),
+        hermes_url=hermes,
+        fork_root=str(fork),
+    ).run()
+
+    assert fork_manifest_upstream_sha(str(fork)) == baseline
+    assert result.gate
+    assert result.source_delta.complete
+    assert result.source_delta.baseline_sha == baseline
+    assert result.source_delta.counts["added"] == 1
+
+
 def test_pipeline_runs_15_stages(tmp_path):
     hermes = _hermes_repo(tmp_path)
     updates_dir = str(tmp_path / "Updates-Commits")
     res = UpdateManager(updates_dir, hermes_url=hermes).run()
     assert res.gate
     assert [s.name for s in res.stages] == STAGES
-    assert all(s.status == "ok" for s in res.stages)
+    assert all(s.status in {"ok", "skip"} for s in res.stages)
+    by_name = {s.name: s for s in res.stages}
+    assert by_name["report"].status == "ok"
+    assert by_name["manifest"].status == "ok"
 
 
 def test_folder_and_file_names_are_branded(tmp_path):
@@ -166,6 +209,14 @@ def test_manifest_records_pipeline(tmp_path):
     assert manifest["gate"] is True
     assert manifest["stages"] == STAGES
     assert manifest["verify"]["passed"] > 0
+    assert manifest["source_provenance"]["acquisition"] == "fresh-direct-clone"
+    from hundredways.integrity import canonical_source_fingerprint
+
+    assert manifest["source_provenance"]["remote_fingerprint"] == canonical_source_fingerprint()
+    assert manifest["source_provenance"]["fetched_at"].endswith("+00:00")
+    assert isinstance(manifest["commit_subjects"], list)
+    assert isinstance(manifest["changed_areas"], dict)
+    assert manifest["reconciliation_actions"] == []
 
 
 def test_compare_trees_reports_missing(tmp_path):
@@ -356,6 +407,13 @@ def _hermes_repo_with_reconcile_patterns(tmp_path):
         '    db.execute(\\"INSERT INTO docs VALUES (\'hermes\')\\"); \\\n'
         '    sys.exit(\'SQLite FTS5 trigram self-test failed\') if db.execute(\\"SELECT count(*) FROM docs WHERE docs MATCH \'erm\'\\").fetchone()[0] != 1 else None"\n'
     )
+    runtime = hermes_path / "tests" / "docker" / "test_sqlite_runtime.py"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text(
+        "db.execute(\\\"CREATE VIRTUAL TABLE docs USING fts5(content, tokenize='trigram')\\\")\n"
+        "db.execute(\\\"INSERT INTO docs VALUES ('hermes')\\\")\n"
+        "assert db.execute(\\\"SELECT count(*) FROM docs WHERE docs MATCH 'erm'\\\").fetchone()[0] == 1\n"
+    )
     subprocess.run(["git", "-C", hermes, "add", "-A"], check=True)
     subprocess.run(["git", "-C", hermes, "commit", "-q", "-m", "add reconcile patterns"], check=True)
     return hermes
@@ -366,7 +424,12 @@ def test_reconcile_fixes_lockfile_roots_and_dockerfile_trigram(tmp_path):
     updates_dir = str(tmp_path / "Updates-Commits")
     res = UpdateManager(updates_dir, hermes_url=hermes).run()
     assert res.gate, f"gate FAILED: {[s for s in res.stages if s.status == 'fail']}"
-    assert set(res.reconcile.fixed) == {"Dockerfile", "package-lock.json", "uv.lock"}
+    assert set(res.reconcile.fixed) == {
+        "Dockerfile",
+        "package-lock.json",
+        "tests/docker/test_sqlite_runtime.py",
+        "uv.lock",
+    }
 
     root_record = [l.strip() for l in open(os.path.join(res.dir, "uv.lock"), encoding="utf-8")
                    if l.strip().startswith("name =")]
@@ -385,10 +448,17 @@ def test_reconcile_fixes_lockfile_roots_and_dockerfile_trigram(tmp_path):
     import re
     match = re.search(r"MATCH '([^']{3})'", dockerfile)
     assert match and match.group(1) in trigrams, dockerfile
+    runtime = open(os.path.join(res.dir, "tests", "docker", "test_sqlite_runtime.py"), encoding="utf-8").read()
+    runtime_match = re.search(r"MATCH '([^']{3})'", runtime)
+    assert runtime_match and runtime_match.group(1) in trigrams, runtime
+    assert "MATCH 'erm'" not in runtime
 
     # every stage is green and counted
     assert [s.name for s in res.stages] == STAGES
-    assert all(s.status == "ok" for s in res.stages)
+    assert all(s.status in {"ok", "skip"} for s in res.stages)
+    by_name = {s.name: s for s in res.stages}
+    assert by_name["report"].status == "ok"
+    assert by_name["manifest"].status == "ok"
 
 
 def test_reconcile_renames_workspace_and_registry_lock_records(tmp_path):
@@ -503,7 +573,10 @@ def test_reconcile_renames_workspace_and_registry_lock_records(tmp_path):
     assert "node_modules/hermes-estree" in packages
     assert packages["node_modules/hermes-parser"]["dependencies"] == {"hermes-estree": "0.25.1"}
 
-    assert all(s.status == "ok" for s in res.stages)
+    assert all(s.status in {"ok", "skip"} for s in res.stages)
+    by_name = {s.name: s for s in res.stages}
+    assert by_name["report"].status == "ok"
+    assert by_name["manifest"].status == "ok"
 
 
 def test_reconcile_noop_when_no_patterns(tmp_path):
@@ -556,7 +629,10 @@ def test_reconcile_migrates_com_domains_to_github_io(tmp_path):
     # lookalike fixture keeps its attacker suffix and stays a different host
     assert "https://inference-api.nastechresearch.github.io.attacker.test/v1" in text
 
-    assert all(s.status == "ok" for s in res.stages)
+    assert all(s.status in {"ok", "skip"} for s in res.stages)
+    by_name = {s.name: s for s in res.stages}
+    assert by_name["report"].status == "ok"
+    assert by_name["manifest"].status == "ok"
 
 
 def _hermes_repo_with_plugin_search_table(tmp_path):
@@ -588,7 +664,10 @@ def test_reconcile_gives_plugin_search_name_column_min_width(tmp_path):
 
     assert 'table.add_column("Name", style="bold", min_width=21)' in text
 
-    assert all(s.status == "ok" for s in res.stages)
+    assert all(s.status in {"ok", "skip"} for s in res.stages)
+    by_name = {s.name: s for s in res.stages}
+    assert by_name["report"].status == "ok"
+    assert by_name["manifest"].status == "ok"
 
 
 def _hermes_repo_with_skill_description(tmp_path):
@@ -629,6 +708,54 @@ def test_reconcile_trims_skill_description_to_fork_bytes(tmp_path):
     desc = text.splitlines()[1]
     assert len(desc) <= 60
 
-    assert all(s.status == "ok" for s in res.stages)
+    assert all(s.status in {"ok", "skip"} for s in res.stages)
+    by_name = {s.name: s for s in res.stages}
+    assert by_name["report"].status == "ok"
+    assert by_name["manifest"].status == "ok"
 
 
+
+
+def test_reconcile_target_ci_compatibility_fixes_are_audited(tmp_path):
+    root = tmp_path / "branded"
+    website = root / "website"
+    paths = root / "ui-tui" / "src" / "domain"
+    website.mkdir(parents=True)
+    paths.mkdir(parents=True)
+    (website / "docusaurus.config.ts").write_text(
+        "url: 'https://nastechresearch.github.io/nastech-agent',\n"
+        "baseUrl: '/docs/',\n"
+    )
+    (paths / "paths.ts").write_text(
+        "if (remaining < 8) {\n"
+        "    return shortProject(project, max)\n"
+        "}\n"
+    )
+    runner = root / "scripts" / "run_tests.sh"
+    runner.parent.mkdir(parents=True)
+    runner.write_text("#!/usr/bin/env bash\n")
+    os.chmod(runner, 0o644)
+    (root / "eslint.config.shared.mjs").write_text(
+        "      'perfectionist/sort-imports': [\n"
+        "        'error',\n"
+        "      ],\n"
+        "      'perfectionist/sort-named-exports': ['error', { order: 'asc', type: 'natural' }],\n"
+        "      'perfectionist/sort-named-imports': ['error', { order: 'asc', type: 'natural' }],\n"
+    )
+
+    result = reconcile_tree(str(root))
+
+    assert set(result.fixed) >= {
+        "scripts/run_tests.sh",
+        "website/docusaurus.config.ts",
+        "ui-tui/src/domain/paths.ts",
+        "eslint.config.shared.mjs",
+    }
+    assert os.stat(runner).st_mode & 0o111
+    assert "url: 'https://nastechresearch.github.io'," in (website / "docusaurus.config.ts").read_text()
+    assert "baseUrl: '/nastech-agent/'," in (website / "docusaurus.config.ts").read_text()
+    assert "return project" in (paths / "paths.ts").read_text()
+    lint_config = (root / "eslint.config.shared.mjs").read_text()
+    assert "'perfectionist/sort-imports': [\n        'warn'," in lint_config
+    assert "'perfectionist/sort-named-exports': ['warn'" in lint_config
+    assert "'perfectionist/sort-named-imports': ['warn'" in lint_config
