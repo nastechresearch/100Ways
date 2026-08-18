@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Sequence
 
 from .integrity import audit_candidate_tree, audit_manifest_provenance, tree_digest
+from .reference_audit import audit_references
 from .rules import BrandingRules
 
 _SECRET_PATTERNS = (
@@ -187,6 +188,15 @@ def scan_snapshot(
     for issue in _credential_signals(snapshot_path):
         if issue.path not in source_credential_paths:
             issues.append(issue)
+    reference_report = audit_references(snapshot_path)
+    for finding in reference_report.findings:
+        issues.append(
+            ReadinessIssue(
+                "strict-reference",
+                finding.path,
+                f"{finding.token} at {finding.line}:{finding.column} — {finding.detail}",
+            )
+        )
     return issues
 
 
@@ -198,10 +208,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
     issues = scan_snapshot(args.snapshot, args.upstream, args.expected_upstream_sha)
+    reference_report = audit_references(args.snapshot)
     body = {
         "gate": "PASS" if not issues else "FAIL",
         "issues": [asdict(issue) for issue in issues],
         "candidate_tree_sha256": tree_digest(args.snapshot),
+        "reference_audit": reference_report.to_dict(),
     }
     Path(args.output).write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(body, indent=2))

@@ -18,7 +18,13 @@ from typing import Iterable, Sequence
 from .assets import OwnedAssets
 from .integrity import audit_candidate_tree, tree_digest
 from .rules import BrandingRules
-from .updates import apply_owned_assets, brand_tree, reconcile_tree, verify_branded
+from .updates import (
+    apply_owned_assets,
+    brand_tree,
+    enforce_strict_branding,
+    reconcile_tree,
+    verify_branded,
+)
 
 _REPORT_PATHS = {"GATE-REPORT.md", "UPDATE-REPORT.md", "manifest.json"}
 
@@ -91,6 +97,8 @@ def verify_final_candidate(
             brand_tree(str(source_path), str(expected), rules, owned)
             apply_owned_assets(str(expected), owned)
             reconciled = reconcile_tree(str(expected))
+            strict_changes = enforce_strict_branding(str(expected), rules)
+            reconciled.fixed.extend(f"strict-brand:{value}" for value in strict_changes)
         except (OSError, ValueError) as exc:
             return ConformanceReport(
                 0,

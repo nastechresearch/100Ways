@@ -81,7 +81,7 @@ jobs:
             --nastech-repo nastech-agent \
             "${CANDIDATE_ARGS[@]}" \
             --threshold "$THRESHOLD" \
-            --output "$DECISION"
+            --output "$DECISION" 2>&1 | tee "$RUNNER_TEMP/commit-stream.log"
           python3 - <<'PY'
           import json
           import os
@@ -102,7 +102,28 @@ jobs:
               summary.write(f"- Pending commits: **{decision['pending_commits']} / {decision['threshold']}**\n")
               summary.write(f"- State: **{decision['status']}**\n")
               summary.write(f"- Full sync enabled: **{decision['trigger_sync']}**\n")
+              action = decision.get("remediation_action", "none")
+              if action != "none":
+                  summary.write(f"- Deterministic history recovery: `{action}`\n")
           PY
+
+      - name: Advisory-only remediation analysis for failed commit stream
+        if: ${{ failure() }}
+        env:
+          HUNDREDWAYS_AI_PROVIDER: ollama-cloud
+          HUNDREDWAYS_AI_BASE_URL: https://ollama.com/v1
+          HUNDREDWAYS_AI_MODEL: gemma4:31b-cloud
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+          REMEDIATION_REPORT: ${{ runner.temp }}/commit-stream-remediation-advisory.json
+        run: |
+          set -euo pipefail
+          python3 scripts/analyze_failure.py \
+            --log "$RUNNER_TEMP/commit-stream.log" \
+            --output "$REMEDIATION_REPORT" || true
+          echo "## Advisory-only remediation" >> "$GITHUB_STEP_SUMMARY"
+          echo "- A redacted Ollama explanation was generated when available." >> "$GITHUB_STEP_SUMMARY"
+          echo "- It cannot change code, retry a gate, publish, merge, tag, release, or deploy." >> "$GITHUB_STEP_SUMMARY"
+          cat "$REMEDIATION_REPORT" >> "$GITHUB_STEP_SUMMARY" || true
 
       - name: Restore Telegram interaction memory
         if: ${{ inputs.notify }}

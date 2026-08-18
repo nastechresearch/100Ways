@@ -29,7 +29,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 
-from .rules import BrandingRules, is_immutable_path, is_locked_path
+from .rules import BrandingRules, is_locked_path
 from .scanner import is_text
 
 
@@ -192,8 +192,8 @@ def scan_brand_violations(root: str, rules: BrandingRules | None = None,
                           skip_immutable: bool = True) -> list[ForkViolation]:
     """Scan a whole tree for brand tokens the rules would rewrite.
 
-    Skips locked (lockfiles, binaries) and, by default, immutable real-data
-    files (contributor emails) where a token is a legitimate email address.
+    Skips locked (lockfiles, binaries). Contributor email records are scanned
+    like every other candidate path under the strict branding policy.
     Returns every (path, line, snippet) hit -- the full-tree sweep used by
     the CI stage and the ``forkcheck`` command.
     """
@@ -201,8 +201,6 @@ def scan_brand_violations(root: str, rules: BrandingRules | None = None,
     hits: list[ForkViolation] = []
     for rel in _walk(root):
         if is_locked_path(rel):
-            continue
-        if skip_immutable and is_immutable_path(rel):
             continue
         data = _read(os.path.join(root, rel))
         if not is_text(data):
@@ -322,17 +320,13 @@ def source_tree_delta(
 
 
 def _upstream_mapped(upstream: list[str], rules: BrandingRules) -> set[str]:
-    """Paths upstream files map to in the branded tree — mirroring brand_tree.
+    """Paths upstream files map to in the branded tree.
 
-    Immutable real-data paths (contributor emails) are kept verbatim, exactly
-    as ``brand_tree`` does; everything else is ``transform_path``'d.  A fork
-    file that lives at a mapped path is upstream-provided (must match);
-    anything else is fork-local and must be preserved.
+    Contributor email paths are branded too; only contributor names remain
+    identity metadata.  A fork file at a mapped path is upstream-provided and
+    must not be copied back under an unbranded filename.
     """
-    mapped: set[str] = set()
-    for p in upstream:
-        mapped.add(p if is_immutable_path(p) else rules.transform_path(p))
-    return mapped
+    return {rules.transform_path(path) for path in upstream}
 
 
 def preserve_fork_files(
@@ -364,18 +358,18 @@ def preserve_fork_files(
     )
     preserved: list[str] = []
     for rel in _walk(fork_root):
-        if rel in upstream_mapped:
+        mapped_rel = rules.transform_path(rel)
+        if mapped_rel in upstream_mapped:
             continue  # upstream provides it
         explicitly_owned = (
             rel in owned_paths
             or rel.startswith("config/owned-assets/")
-            or is_immutable_path(rel)
         )
-        if rel in obsolete_upstream_paths and not explicitly_owned:
+        if mapped_rel in obsolete_upstream_paths and not explicitly_owned:
             continue  # direct source evidence proves this is stale upstream code
         if not allow_unclassified_fork_files and not explicitly_owned:
             continue  # without a baseline, stop for ownership review
-        dst = os.path.join(branded_root, rel)
+        dst = os.path.join(branded_root, rules.transform_path(rel))
         src = os.path.join(fork_root, rel)
         # A 100Ways-owned registry is an explicit, reviewable visual identity
         # overlay.  Preserve the fork's registry only when no engine-owned
@@ -425,26 +419,31 @@ def fork_consistency(
     branded_files = set(_walk(branded_root))
     upstream = set(_walk(upstream_root))
     upstream_mapped = _upstream_mapped(list(upstream), rules)
+    fork_mapped = {rules.transform_path(path) for path in fork_files}
+    compared: set[str] = set()
 
     for rel in sorted(fork_files):
-        entry = ForkEntry(path=rel, status="missing")
+        candidate_rel = rules.transform_path(rel)
+        if candidate_rel in compared:
+            continue
+        compared.add(candidate_rel)
+        entry = ForkEntry(path=candidate_rel, status="missing")
         explicitly_owned = (
             rel in owned_paths
             or rel.startswith("config/owned-assets/")
-            or is_immutable_path(rel)
         )
-        if rel in obsolete_upstream_paths and not explicitly_owned:
-            entry.status = "stale_upstream" if rel in branded_files else "upstream_deleted"
+        if candidate_rel in obsolete_upstream_paths and not explicitly_owned:
+            entry.status = "stale_upstream" if candidate_rel in branded_files else "upstream_deleted"
             report.entries.append(entry)
             continue
-        if rel not in branded_files:
+        if candidate_rel not in branded_files:
             # upstream has a file mapping here -> branding dropped it (bug).
             # no upstream source -> fork-local content that was NOT preserved.
-            entry.status = "missing" if rel in upstream_mapped else "local_only"
+            entry.status = "missing" if candidate_rel in upstream_mapped else "local_only"
             report.entries.append(entry)
             continue
         fork_data = _read(os.path.join(fork_root, rel))
-        branded_data = _read(os.path.join(branded_root, rel))
+        branded_data = _read(os.path.join(branded_root, candidate_rel))
         if fork_data == branded_data:
             entry.status = "identical"
         elif is_locked_path(rel) or not is_text(fork_data) or not is_text(branded_data):
@@ -458,15 +457,14 @@ def fork_consistency(
             entry.violations = _added_line_violations(
                 fork_data.decode("utf-8", "replace"),
                 branded_data.decode("utf-8", "replace"),
-                rel, rules,
+                candidate_rel, rules,
             )
         report.entries.append(entry)
 
-    for rel in sorted(branded_files - fork_files):
+    for rel in sorted(branded_files - fork_mapped):
         explicitly_owned = (
             rel in owned_paths
             or rel.startswith("config/owned-assets/")
-            or is_immutable_path(rel)
         )
         if rel in obsolete_upstream_paths and not explicitly_owned:
             report.entries.append(ForkEntry(path=rel, status="stale_upstream"))
@@ -475,7 +473,7 @@ def fork_consistency(
             # brand-new upstream file: every line must be brand-clean
             data = _read(os.path.join(branded_root, rel))
             entry = ForkEntry(path=rel, status="added")
-            if is_text(data) and not is_locked_path(rel) and not is_immutable_path(rel):
+            if is_text(data) and not is_locked_path(rel):
                 text = data.decode("utf-8", "replace")
                 for line_no in _brand_violations(text, rules):
                     entry.violations.append(
@@ -486,7 +484,7 @@ def fork_consistency(
 
     # Fork-local files (no upstream source) that exist in the branded tree:
     # these are the ones ``preserve_fork_files`` carried over verbatim.
-    report.preserved = sorted(f for f in fork_files & branded_files
+    report.preserved = sorted(f for f in fork_mapped & branded_files
                               if f not in upstream_mapped)
     return report
 

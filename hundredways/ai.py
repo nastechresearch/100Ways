@@ -13,6 +13,7 @@ import re
 from dataclasses import dataclass, field
 
 from .analyzer import GapReport
+from .remediation import RemediationDecision, redact_failure_evidence
 from .updates import STAGES
 from .verify import VerifyReport
 
@@ -221,7 +222,45 @@ class AIEngine:
         except Exception as exc:
             return self._fallback_stage_review(stage, context) + f" [AI unavailable: {exc}]"
 
+    def advise_remediation(self, decision: RemediationDecision) -> str:
+        """Explain a deterministic remediation decision using redacted evidence only.
+
+        The returned text is advisory.  It cannot change the decision's action,
+        run a command, approve a retry, relax a gate, or authorize publication.
+        """
+        fallback = self._fallback_remediation_advice(decision)
+        if not self.available:
+            return fallback
+        try:
+            return self._chat(
+                "You are the advisory-only 100Ways remediation reviewer. Explain the "
+                "already-determined policy decision in two short paragraphs. Do not "
+                "change its classification or action. Never instruct a gate bypass, "
+                "cached-source substitution, code patch, merge, tag, release, deployment, "
+                "credential change, or publication. State that deterministic verification "
+                "remains required after any permitted recovery.",
+                "Decision:\n"
+                f"category={decision.category}\n"
+                f"disposition={decision.disposition}\n"
+                f"action={decision.action}\n"
+                f"hard={decision.hard}\n"
+                f"rationale={decision.rationale}\n\n"
+                f"Redacted evidence:\n{redact_failure_evidence(decision.evidence)}",
+                model=self.model_for_stage("gate"),
+            )
+        except Exception as exc:
+            return f"{fallback} [AI unavailable: {exc}]"
+
     # -- deterministic fallbacks --------------------------------------------
+
+    @staticmethod
+    def _fallback_remediation_advice(decision: RemediationDecision) -> str:
+        return (
+            f"Remediation decision: {decision.disposition} ({decision.category}). "
+            f"Allowed action: {decision.action}. {decision.rationale} "
+            "No gate, merge, tag, release, deployment, or publication is authorized; "
+            "deterministic verification remains required."
+        )
 
     @staticmethod
     def _fallback_stage_review(stage: str, context: str) -> str:

@@ -355,10 +355,9 @@ def test_preserve_fork_files_carries_executable_bit(tmp_path):
     assert os.stat(os.path.join(str(branded), "bin", "tool")).st_mode & stat.S_IXUSR
 
 
-def test_immutable_email_upstream_paths_map_verbatim(tmp_path):
-    # Contributor emails are real data: upstream's agent@hermes.dev must NOT
-    # map to agent@nastech.dev (that would wrongly classify the fork's
-    # agent@nastech.dev as upstream-provided and let it get dropped).
+def test_contributor_email_upstream_paths_must_be_branded(tmp_path):
+    # Contributor email paths are branded, so a raw upstream path cannot
+    # satisfy the candidate's transformed NasTech identity record.
     rules = BrandingRules()
     upstream = _tree(tmp_path / "upstream", {
         "contributors/emails/agent@hermes.dev": "real data\n",
@@ -374,8 +373,8 @@ def test_immutable_email_upstream_paths_map_verbatim(tmp_path):
     })
     report = fork_consistency(str(fork), str(branded), str(upstream), rules)
     by_status = {e.path: e.status for e in report.entries}
-    # the fork's corrected email has NO upstream twin -> fork-local
-    assert by_status["contributors/emails/agent@nastech.dev"] == "local_only"
+    # The raw candidate address is rejected because the exact transformed path is required.
+    assert by_status["contributors/emails/agent@nastech.dev"] == "missing"
     assert not report.gate_passes()
 
 

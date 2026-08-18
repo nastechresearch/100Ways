@@ -101,6 +101,7 @@ jobs:
           HUNDREDWAYS_AI_MODEL: gemma4:31b-cloud
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
         run: |
+          set -o pipefail
           python3 -m hundredways.cli --repo nastech-agent update \
             --updates-dir "$HUNDREDWAYS_UPDATES_DIR" \
             --hermes-url "$HUNDREDWAYS_HERMES_URL" \
@@ -108,7 +109,7 @@ jobs:
             --owned-assets-root "$GITHUB_WORKSPACE/config/owned-assets" \
             --zip "$HUNDREDWAYS_ZIP" \
             --project-name "${{ inputs.project_name }}" \
-            --emit-outputs "$HUNDREDWAYS_OUTPUTS"
+            --emit-outputs "$HUNDREDWAYS_OUTPUTS" 2>&1 | tee "$RUNNER_TEMP/update-pipeline.log"
           python3 - <<'EOF'
           import json, os
           with open(os.environ["HUNDREDWAYS_OUTPUTS"]) as fh:
@@ -117,6 +118,24 @@ jobs:
               for key in ("update_number", "upstream_sha"):
                   gh.write(f"{key}={out.get(key, '')}\n")
           EOF
+
+      - name: Advisory-only remediation analysis for failed update pipeline
+        if: ${{ failure() }}
+        env:
+          HUNDREDWAYS_AI_PROVIDER: ollama-cloud
+          HUNDREDWAYS_AI_BASE_URL: https://ollama.com/v1
+          HUNDREDWAYS_AI_MODEL: gemma4:31b-cloud
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+          REMEDIATION_REPORT: ${{ runner.temp }}/remediation-advisory.json
+        run: |
+          set -euo pipefail
+          python3 scripts/analyze_failure.py \
+            --log "$RUNNER_TEMP/update-pipeline.log" \
+            --output "$REMEDIATION_REPORT" || true
+          echo "## Advisory-only remediation" >> "$GITHUB_STEP_SUMMARY"
+          echo "- A redacted Ollama explanation was generated when available." >> "$GITHUB_STEP_SUMMARY"
+          echo "- It cannot change code, retry a gate, publish, merge, tag, release, or deploy." >> "$GITHUB_STEP_SUMMARY"
+          cat "$REMEDIATION_REPORT" >> "$GITHUB_STEP_SUMMARY" || true
 
       - name: Run hardened weekly decision gate
         id: weekly
@@ -173,6 +192,24 @@ jobs:
             --upstream "$HUNDREDWAYS_UPDATES_DIR/hermes-agent" \
             --expected-upstream-sha "$EXPECTED_UPSTREAM_SHA" \
             --output "$HUNDREDWAYS_READINESS"
+          python3 - <<'PYEOF'
+          import json
+          import os
+
+          with open(os.environ["HUNDREDWAYS_READINESS"], encoding="utf-8") as handle:
+              audit = json.load(handle)["reference_audit"]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("## Strict upstream-brand accounting\\n")
+              for token in ("hermes", "nous"):
+                  raw = audit["raw_occurrences"][token]
+                  allowed = audit["approved_occurrences"][token]
+                  lexical = audit["lexical_occurrences"][token]
+                  blocked = audit["blocking_occurrences"][token]
+                  summary.write(
+                      f"- `{token}`: raw={raw}; approved={allowed}; lexical={lexical}; blocking={blocked}\\n"
+                  )
+              summary.write("- Gate: **PASS** — only approved dependency records and exact summary attribution remain.\\n")
+          PYEOF
           echo "readiness=PASS" >> "$GITHUB_OUTPUT"
           echo "- Publication readiness: **PASS**" >> "$GITHUB_STEP_SUMMARY"
 
