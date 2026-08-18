@@ -29,7 +29,7 @@ from .achievements import Achievements
 from .analyzer import analyze
 from .codes import code_for
 from .rules import BrandingRules, tokens_from_overrides
-from .security import DEFAULT_ADMIN_PASS, compile_token, verify_token
+from .security import verify_token
 from .verify import _git_ok
 
 DEFAULT_BIRTH = "0cafd22fb"
@@ -145,11 +145,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return BrandingRules(tokens=tokens_from_overrides(self.rules_override))
 
     def _is_admin(self) -> bool:
-        # Admin gate: the compiled form of DEFAULT_ADMIN_PASS is the default;
-        # an operator-set token (HUNDREDWAYS_ADMIN_TOKEN) overrides it.  Typing
-        # either the password or its compiled form grants access (see security).
+        """Require an explicitly configured operator bearer token."""
         auth = self.headers.get("Authorization", "")
-        token = auth[7:] if auth.lower().startswith("bearer ") else ""
+        token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
         return verify_token(token, self.admin_token)
 
     def log_message(self, fmt: str, *args) -> None:  # quieter default
@@ -195,28 +193,51 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not self._is_admin():
             self._json({"error": "forbidden: admin token required"}, 403)
             return
+        max_body = 16 * 1024
         try:
-            length = int(self.headers.get("Content-Length", 0))
-            payload = json.loads(self.rfile.read(length).decode())
-        except (ValueError, json.JSONDecodeError):
+            length = int(self.headers.get("Content-Length", "-1"))
+        except ValueError:
+            length = -1
+        if length < 0 or length > max_body:
+            self._json({"error": "request body too large or missing"}, 413)
+            return
+        try:
+            raw = self.rfile.read(length)
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
             self._json({"error": "bad json"}, 400)
+            return
+        if not isinstance(payload, dict):
+            self._json({"error": "payload must be an object"}, 400)
+            return
+        action = payload.get("action")
+        if action not in {"add", "remove", "replace"}:
+            self._json({"error": "unknown action"}, 400)
+            return
+        match = payload.get("match")
+        replace = payload.get("replace", "")
+        if not isinstance(match, str) or not match or len(match) > 512:
+            self._json({"error": "match must be a non-empty string of at most 512 characters"}, 400)
+            return
+        if not isinstance(replace, str) or len(replace) > 2048:
+            self._json({"error": "replace must be a string of at most 2048 characters"}, 400)
+            return
+        if not isinstance(payload.get("anchored", False), bool):
+            self._json({"error": "anchored must be boolean"}, 400)
             return
         os.makedirs(os.path.dirname(self.rules_override), exist_ok=True)
         base = BrandingRules()
         base_matches = {t.match for t in base.tokens}
         current = tokens_from_overrides(self.rules_override)
         tokens = [{"match": t.match, "replace": t.replace, "anchored": t.anchored} for t in current if t.match not in base_matches]
-        if payload.get("action") == "add":
-            tokens.append({"match": payload["match"], "replace": payload.get("replace", ""), "anchored": bool(payload.get("anchored"))})
-        elif payload.get("action") == "remove":
-            tokens = [t for t in tokens if t["match"] != payload.get("match")]
-        elif payload.get("action") == "replace":
+        if action == "add":
+            tokens.append({"match": match, "replace": replace, "anchored": payload.get("anchored", False)})
+        elif action == "remove":
+            tokens = [t for t in tokens if t["match"] != match]
+        elif action == "replace":
             for t in tokens:
-                if t["match"] == payload.get("match"):
-                    t["replace"] = payload.get("replace", "")
-        else:
-            self._json({"error": "unknown action"}, 400)
-            return
+                if t["match"] == match:
+                    t["replace"] = replace
         with open(self.rules_override, "w", encoding="utf-8") as fh:
             json.dump({"tokens": tokens}, fh, indent=2)
         ach = Achievements(self.home)
@@ -310,30 +331,34 @@ async function load(){
   DATA.gaps=g.entries||[]; DATA.counts=g.counts||{}; DATA.rules=rw.tokens||[]; DATA.state=st.state||{};
   document.getElementById('sum').textContent=g.summary||'';
   document.getElementById('rcount').textContent=DATA.rules.length;
-  let s='';
   const d=DATA.state;
-  s+=`<span class="card">branch <b>${d.branch||'-'}</b></span>`;
-  s+=`<span class="card">HEAD <b>${d.head||'-'}</b></span>`;
-  s+=`<span class="card">behind <b>${d.behind ?? '-'}</b></span><span class="card">ahead <b>${d.ahead ?? '-'}</b></span>`;
-  s+=`<span class="card">missing <b>${DATA.counts.missing||0}</b></span>`;
-  s+=`<span class="card">violations <b>${DATA.counts.violations||0}</b></span>`;
-  s+=`<span class="card">drift <b>${DATA.counts.drift||0}</b></span>`;
-  s+=`<span class="card">extras <b>${DATA.counts.extras||0}</b></span>`;
-  document.getElementById('state').innerHTML=s;
+  const state=document.getElementById('state'); state.replaceChildren();
+  [['branch',d.branch||'-'],['HEAD',d.head||'-'],['behind',d.behind ?? '-'],['ahead',d.ahead ?? '-'],['missing',DATA.counts.missing||0],['violations',DATA.counts.violations||0],['drift',DATA.counts.drift||0],['extras',DATA.counts.extras||0]].forEach(([label,value])=>{
+    const card=document.createElement('span'); card.className='card';
+    const strong=document.createElement('b'); strong.textContent=String(value);
+    card.append(document.createTextNode(label+' '),strong); state.append(card);
+  });
   render(); renderRules();
 }
 function render(){
   const q=document.getElementById('q').value.toLowerCase();
   const c=document.getElementById('c').value;
   const rows=DATA.gaps.filter(g=>(!c||g.code_name===c)&&(!q||g.path.toLowerCase().includes(q)));
-  document.getElementById('gaps').innerHTML=rows.map(g=>{
+  const body=document.getElementById('gaps'); body.replaceChildren();
+  if(!rows.length){const tr=document.createElement('tr'),td=document.createElement('td'); td.colSpan=3; td.style.color='#8b949e'; td.textContent='clean - no gaps'; tr.append(td); body.append(tr); return;}
+  rows.forEach(g=>{
     const name=g.code_name==='MISSING'?'404':g.code_name==='VIOLATION'?'82':g.code_name==='DRIFT'?'83':'84';
     const why=g.violations&&g.violations.length?g.violations.join(', '):(g.explanation||g.status);
-    return `<tr><td class="c${name}"><b>${name}</b></td><td>${g.path}</td><td>${why}</td></tr>`;
-  }).join('')||'<tr><td colspan=3 style="color:#8b949e">clean - no gaps</td></tr>';
+    const tr=document.createElement('tr'); const code=document.createElement('td'); code.className='c'+name;
+    const bold=document.createElement('b'); bold.textContent=name; code.append(bold);
+    const path=document.createElement('td'); path.textContent=String(g.path||'');
+    const explanation=document.createElement('td'); explanation.textContent=String(why||'');
+    tr.append(code,path,explanation); body.append(tr);
+  });
 }
 function renderRules(){
-  document.getElementById('rules').innerHTML=DATA.rules.map(r=>`<span>${r.match} → ${r.replace}</span> &nbsp;`).join('');
+  const box=document.getElementById('rules'); box.replaceChildren();
+  DATA.rules.forEach(r=>{const span=document.createElement('span'); span.textContent=String(r.match)+' → '+String(r.replace); box.append(span,document.createTextNode('  '));});
 }
 async function admin(){
   document.getElementById('admin').classList.add('show');
@@ -355,7 +380,8 @@ async function logs(){const j=await get('/api/logs');document.getElementById('lo
 const es=new EventSource('/api/events');
 es.onmessage=e=>{
   const box=document.getElementById('events');
-  box.innerHTML=JSON.stringify(JSON.parse(e.data))+'<br>'+box.innerHTML.slice(0,4000);
+  const line=document.createElement('div'); line.textContent=JSON.stringify(JSON.parse(e.data)); box.prepend(line);
+  while(box.childElementCount>100) box.lastElementChild.remove();
 };
 load(); logs(); setInterval(load,8000); setInterval(logs,15000);
 </script></body></html>"""
@@ -371,8 +397,8 @@ def serve(
 ) -> None:
     """Run the dashboard until Ctrl-C."""
     home = home or os.path.join(repo, "..", "100ways-state")
-    if not admin_token:
-        admin_token = os.getenv("HUNDREDWAYS_ADMIN_TOKEN") or compile_token(DEFAULT_ADMIN_PASS)
+    if admin_token is None:
+        admin_token = os.getenv("HUNDREDWAYS_ADMIN_TOKEN", "")
     rules_override = rules_override or os.path.join(home, "config", "rules_override.json")
     state = DashboardState()
     handler = type("Handler", (DashboardHandler,), {
@@ -381,8 +407,10 @@ def serve(
     })
     server = ThreadingHTTPServer((host, port), handler)
     print(f"100Ways dashboard on http://{host}:{port}  (repo {repo})")
-    print(f"  admin: password '{DEFAULT_ADMIN_PASS}' or its compiled token "
-          f"'{compile_token(DEFAULT_ADMIN_PASS)}'")
+    if not admin_token:
+        print("  admin: disabled (set HUNDREDWAYS_ADMIN_TOKEN to enable write access)")
+    else:
+        print("  admin: enabled via operator-provided bearer token")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

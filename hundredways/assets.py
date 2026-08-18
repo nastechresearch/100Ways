@@ -62,6 +62,11 @@ class OwnedAssets:
     def count(self) -> int:
         return len(self._map)
 
+    @property
+    def mapping(self) -> dict[str, str]:
+        """Copy of the declared target-to-owned-source map for audit code."""
+        return dict(self._map)
+
     def has(self, fork_path: str) -> bool:
         return fork_path in self._map
 

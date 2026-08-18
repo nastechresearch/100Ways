@@ -1,0 +1,117 @@
+name: 100Ways Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install 100Ways
+        run: pip install -e .
+
+      - name: Fetch public source refs directly
+        id: fetch_sources
+        run: |
+          set -euo pipefail
+          {
+            bash scripts/fetch_public_repo.sh https://github.com/nastechresearch/nastech-agent.git nastech-agent
+            bash scripts/fetch_public_repo.sh https://github.com/nastechresearch/nastech-agent.git nastech-candidate 100WAYS || true
+            bash scripts/fetch_public_repo.sh https://github.com/NousResearch/hermes-agent.git upstream-agent
+          } 2>&1 | tee "$RUNNER_TEMP/source-fetch.log"
+
+      - name: Analyze source-fetch failure
+        if: ${{ always() && steps.fetch_sources.outcome == 'failure' }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python3 scripts/analyze_actions_failure.py \
+            --log "$RUNNER_TEMP/source-fetch.log" \
+            --step "Fetch public source refs directly" \
+            --output "$RUNNER_TEMP/source-fetch-analysis.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo 'The source fetch failed; publication remains fail-closed.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build public status payload
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          mkdir -p site
+          if test ! -f decision.json; then
+            # The fetch step failed; emit a degraded payload so the public
+            # surface still reflects that 100Ways is alive.
+            python3 - <<'PY' > site/status.json
+          import json
+          from datetime import datetime, timezone
+          payload = {
+              "schema": "100ways.public-status.v1",
+              "generatedAt": datetime.now(timezone.utc).isoformat(),
+              "state": "DEGRADED",
+              "stateDetail": "Direct source fetch failed; publication remains fail-closed.",
+              "pending": 0,
+              "threshold": 50,
+              "remaining": 50,
+              "verified": "Latest source fetch failed",
+              "runUrl": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+              "upstreamSha": "",
+              "baselineSha": "",
+              "candidateSha": "—",
+              "syncState": "ON HOLD",
+              "gates": [],
+              "history": [],
+              "privacy": "Public sanitized evidence only; no secrets, tokens, chat IDs, or raw private logs.",
+              "publication": "Review PR only. No automatic merge, tag, release, or deployment.",
+          }
+          json.dump(payload, open("site/status.json", "w"), indent=2, sort_keys=True)
+          print(json.dumps(payload, indent=2))
+          PY
+          else
+            python3 scripts/build_pages_status.py \
+              --decision decision.json \
+              --output site/status.json
+          fi
+
+      - name: Prepare Pages artifact
+        run: |
+          set -euo pipefail
+          mkdir -p public
+          cp -a site/. public/
+          printf '%s\n' '100Ways public evidence only; no secrets or private logs.' > public/robots.txt
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

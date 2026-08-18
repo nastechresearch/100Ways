@@ -10,7 +10,6 @@ import pytest
 from hundredways.achievements import Achievements
 from hundredways.dashboard import DashboardHandler, DashboardState, _HTML
 from hundredways.rules import BrandingRules, tokens_from_overrides
-from hundredways.security import compile_token
 
 
 # -- rules overrides ----------------------------------------------------------
@@ -57,7 +56,7 @@ def test_admin_edit_achievement(tmp_path):
 
 # -- dashboard ----------------------------------------------------------------
 
-ADMIN_COMPILED = compile_token("Nastech@Pass")
+ADMIN_TOKEN = "operator-secret"
 
 
 def _request(handler_cls, method, path, body=None, token=None):
@@ -65,12 +64,14 @@ def _request(handler_cls, method, path, body=None, token=None):
     handler.state = DashboardState()
     handler.repo = "/tmp"
     handler.home = tmp_home
-    handler.admin_token = ADMIN_COMPILED
+    handler.admin_token = ADMIN_TOKEN
     handler.rules_override = os.path.join(tmp_home, "config", "rules_override.json")
     send = _CaptureSend(handler)
     handler._send = send
     handler._json = lambda payload, code=200: send(code, json.dumps(payload).encode())
-    handler.headers = _FakeHeaders(token)
+    header = _FakeHeaders(token)
+    header.body = (body or "").encode()
+    handler.headers = header
     handler.path = path
     handler.rfile = type("R", (), {"read": lambda self, n=-1: (body or b"").encode()})()
     getattr(handler, f"do_{method}")()
@@ -94,6 +95,8 @@ class _FakeHeaders:
     def get(self, key, default=""):
         if key == "Authorization":
             return f"Bearer {self.token}" if self.token else ""
+        if key == "Content-Length":
+            return str(len(getattr(self, "body", b"")))
         return default
 
 @pytest.fixture(autouse=True)
@@ -109,18 +112,24 @@ def test_dashboard_rules_endpoint_no_auth(tmp_path):
 
 def test_dashboard_rules_add_persists(tmp_path):
     res = _request(DashboardHandler, "POST", "/api/rules",
-                   body=json.dumps({"action": "add", "match": "Acme", "replace": "Widget"}), token="Nastech@Pass")
+                   body=json.dumps({"action": "add", "match": "Acme", "replace": "Widget"}), token=ADMIN_TOKEN)
     assert res.code == 200
     assert json.loads(res.body)["ok"] is True
     saved = json.loads((tmp_path / "config" / "rules_override.json").read_text())
     assert {"match": "Acme", "replace": "Widget", "anchored": False} in saved["tokens"]
 
 
-def test_dashboard_admin_accepts_compiled_token(tmp_path):
-    """The compiled system token also grants access."""
-    res = _request(DashboardHandler, "POST", "/api/rules",
-                   body=json.dumps({"action": "add", "match": "Acme2", "replace": "W2"}), token=ADMIN_COMPILED)
-    assert res.code == 200
+def test_dashboard_rejects_missing_configured_token(tmp_path):
+    global tmp_home
+    handler = object.__new__(DashboardHandler)
+    handler.admin_token = ""
+    handler.headers = _FakeHeaders("operator-secret")
+    assert handler._is_admin() is False
+
+
+def test_dashboard_rejects_invalid_schema(tmp_path):
+    res = _request(DashboardHandler, "POST", "/api/rules", body=json.dumps({"action": "add", "match": 42}), token=ADMIN_TOKEN)
+    assert res.code == 400
 
 
 def test_dashboard_admin_denies_wrong_password(tmp_path):
@@ -133,7 +142,7 @@ def test_dashboard_rules_remove(tmp_path):
     rules_file = tmp_path / "config" / "rules_override.json"
     rules_file.parent.mkdir(parents=True, exist_ok=True)
     rules_file.write_text(json.dumps({"tokens": [{"match": "Acme", "replace": "Widget"}]}))
-    res = _request(DashboardHandler, "POST", "/api/rules", body=json.dumps({"action": "remove", "match": "Acme"}), token="Nastech@Pass")
+    res = _request(DashboardHandler, "POST", "/api/rules", body=json.dumps({"action": "remove", "match": "Acme"}), token=ADMIN_TOKEN)
     assert json.loads(res.body)["ok"] is True
     saved = json.loads(rules_file.read_text())
     assert all(t["match"] != "Acme" for t in saved["tokens"])
