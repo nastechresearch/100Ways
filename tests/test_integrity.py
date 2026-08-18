@@ -65,11 +65,11 @@ def test_manifest_provenance_rejects_missing_fingerprint_or_stale_source(tmp_pat
         "source-acquisition",
         "source-fingerprint",
         "source-fetch-time",
-        "upstream-preflight",
+        "source-census",
     } <= codes
 
 
-def test_manifest_provenance_rejects_failed_preflight_or_census_mismatch(tmp_path):
+def test_manifest_provenance_ignores_legacy_preflight_and_rejects_invalid_census(tmp_path):
     manifest = tmp_path / "manifest.json"
     _manifest(
         manifest,
@@ -88,7 +88,25 @@ def test_manifest_provenance_rejects_failed_preflight_or_census_mismatch(tmp_pat
 
     codes = {issue.code for issue in audit_manifest_provenance(manifest, expected_upstream_sha=UPSTREAM_SHA)}
 
-    assert {"upstream-preflight", "upstream-preflight-sha", "source-census"} <= codes
+    assert "upstream-preflight" not in codes
+    assert "upstream-preflight-sha" not in codes
+    assert "source-census" not in codes
+
+    _manifest(
+        manifest,
+        source_provenance={
+            "source_fingerprint": "a" * 64,
+            "fetched_at": "2026-08-16T00:00:00+00:00",
+            "acquisition": "fresh-direct-clone",
+            "source_census": {"files": 0, "dirs": 2},
+        },
+    )
+    invalid_codes = {
+        issue.code for issue in audit_manifest_provenance(
+            manifest, expected_upstream_sha=UPSTREAM_SHA
+        )
+    }
+    assert "source-census" in invalid_codes
 
 
 def test_tree_digest_is_stable_and_binds_file_modes(tmp_path):

@@ -100,34 +100,41 @@ def test_stage_pipeline_requires_final_conformance_and_candidate_tests_before_re
     root = Path(__file__).resolve().parents[1]
     workflow = (root / ".github" / "workflows" / "stage-pipeline.yml").read_text()
 
-    upstream_preflight = workflow.index("mandatory direct-upstream test preflight")
+    source_evidence = workflow.index("fresh direct-source evidence")
     first_conformance = workflow.index("Verify final branded candidate against exact Hermes source")
-    candidate_tests = workflow.index("Run final branded candidate test suite")
+    candidate_tests = workflow.index("Run baseline-aware final branded candidate tests")
     post_test_conformance = workflow.index("Re-attest candidate after tests")
+    final_gate = workflow.index("Write final pipeline gate")
     receipt = workflow.index("Write tamper-evident gate decision receipt")
 
     assert workflow.count("python3 -m hundredways.conformance") == 2
     assert (
-        upstream_preflight
+        source_evidence
         < first_conformance
         < candidate_tests
         < post_test_conformance
+        < final_gate
         < receipt
     )
-    assert "Canonical upstream tests: **PASS** before branding" in workflow
-    assert "direct upstream preflight evidence is incomplete" in workflow
+    assert "Canonical upstream test execution: **NOT RUN**" in workflow
+    assert "direct upstream source evidence is incomplete" in workflow
     assert "candidate_ready=false" in workflow
     assert "gate=WITHHELD" in workflow
-    assert "UPSTREAM_TEST_FAILURE" in workflow
+    assert "UPSTREAM_TEST_FAILURE" not in workflow
     assert "Candidate withheld" in workflow
     assert "Publication allowed: **NO**" in workflow
-    assert workflow.count("steps.candidate-state.outputs.candidate_ready == 'true'") >= 9
-    assert "./scripts/run_tests.sh" in workflow
+    assert workflow.count("steps.candidate-state.outputs.candidate_ready == 'true'") >= 5
+    assert "hundredways.test_baseline_runner" in workflow
+    assert "HUNDREDWAYS_UPSTREAM_TESTS" in workflow
+    assert "hundredways.test_baseline" in workflow
+    assert "evidence['nastech_only_failures']" in workflow
+    assert "steps.candidate-tests.outputs.review_ready == 'true'" in workflow
+    assert "steps.final-gate.outputs.gate == 'PASS'" in workflow
+    assert "CANDIDATE_VALIDATION_FAILURE" in workflow
     assert 'cp -a "$SNAPSHOT" "$TEST_TREE"' in workflow
     assert "uv sync --locked --python 3.11" in workflow
     assert "astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39" in workflow
     assert "RG_SHA256=1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599" in workflow
-    assert "source .venv/bin/activate" in workflow
 
 
 def test_ci_withheld_pipeline_gate_skips_candidate_jobs_and_publication():
@@ -136,4 +143,5 @@ def test_ci_withheld_pipeline_gate_skips_candidate_jobs_and_publication():
 
     assert "if: ${{ needs.pipeline.outputs.gate == 'PASS' }}" in workflow
     assert "needs.pipeline.outputs.gate == 'PASS'" in workflow
-    assert "WITHHELD source-test" in workflow
+    assert "complete candidate pipeline reaches PASS" in workflow
+    assert "WITHHELD source-test" not in workflow

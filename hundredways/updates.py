@@ -1,6 +1,6 @@
 """Ordered update pipeline: pull real Hermes, brand the whole tree, snapshot.
 
-The ``update`` command makes the sync engine real.  It runs as **20 ordered
+The ``update`` command makes the sync engine real.  It runs as **19 ordered
 stages** so every step is named, recorded, and reported:
 
     Updates-Commits/
@@ -49,7 +49,6 @@ from .rules import (
     is_locked_path,
 )
 from .scanner import classify_path, is_text
-from .upstream_preflight import UpstreamPreflightReport, run_upstream_preflight
 from .verify import FileResult, VerifyReport
 
 DEFAULT_HERMES_URL = "https://github.com/NousResearch/hermes-agent.git"
@@ -61,8 +60,9 @@ def source_fingerprint(remote: str) -> str:
 HERMES_DIR = "hermes-agent"
 UPDATE_PREFIX = "Nastech-Update#"
 
-# The 20 ordered pipeline stages.  `upstream-preflight` proves the freshly
-# cloned direct source passes its canonical suite before branding can begin.
+# The 19 ordered pipeline stages.  The direct source is always freshly cloned,
+# SHA-bound, and censused before branding.  Candidate correctness is then proven
+# by the full branded-tree conformance and candidate-test gates downstream.
 # `preserve` copies fork-local files (owned
 # assets, contributor emails, fork-only skills) into the snapshot so the PR
 # never deletes them; `forkcheck` diffs the snapshot against the real
@@ -71,7 +71,6 @@ UPDATE_PREFIX = "Nastech-Update#"
 # is where GitHub Actions uploads the zip; locally it is recorded as skipped.
 STAGES = [
     "pull",
-    "upstream-preflight",
     "source-evidence",
     "census",
     "plan",
@@ -1374,11 +1373,9 @@ def gate_passes(report: VerifyReport, threshold: float = 0.99) -> bool:
 
 def update_report_md(result: "UpdateResult") -> str:
     """The pipeline report: what stages ran and what each one did."""
-    preflight = result.upstream_preflight
-    preflight_runner = preflight.runner if preflight else "not recorded"
-    preflight_passed = bool(preflight and preflight.passed)
-    preflight_files = preflight.source_files if preflight else 0
-    coverage_passed = bool(preflight and preflight.source_files == result.verify.total)
+    source_census = result.source_census
+    source_files = source_census.files
+    coverage_passed = source_files == result.verify.total
     lines = [
         f"# Nastech Update Report #{result.number}",
         "",
@@ -1387,11 +1384,10 @@ def update_report_md(result: "UpdateResult") -> str:
         f"- snapshot     : `{os.path.basename(result.dir)}`",
         f"- gate         : **{'PASS' if result.gate else 'FAIL'}**",
         "",
-        "## Direct upstream preflight",
+        "## Direct upstream source evidence",
         "",
-        f"- canonical test runner: `{preflight_runner}`",
-        f"- test result: **{'PASS' if preflight_passed else 'FAIL'}**",
-        f"- tested source files: {preflight_files}",
+        "- canonical upstream test execution: **NOT RUN** (candidate validation is authoritative)",
+        f"- direct source files: {source_files}",
         f"- final parity files: {result.verify.total}",
         "- coverage binding: **PASS**"
         if coverage_passed
@@ -1564,7 +1560,7 @@ class UpdateResult:
     source_delta: SourceDeltaReport = field(
         default_factory=lambda: SourceDeltaReport("", "")
     )
-    upstream_preflight: UpstreamPreflightReport | None = None
+    source_census: Census = field(default_factory=Census)
 
     def summary(self) -> str:
         return (
@@ -1575,7 +1571,7 @@ class UpdateResult:
 
 
 class UpdateManager:
-    """Run one full update: the 18 ordered pipeline stages."""
+    """Run one full update through the ordered source, branding, and candidate stages."""
 
     def __init__(self, updates_dir: str, hermes_url: str = DEFAULT_HERMES_URL,
                  rules: BrandingRules | None = None, threshold: float = 0.99,
@@ -1609,17 +1605,6 @@ class UpdateManager:
         upstream_sha = stage("pull", lambda: pull_hermes(self.updates_dir, self.hermes_url),
                              "fresh direct clone from configured upstream")
         src = hermes_path(self.updates_dir)
-        upstream_preflight = stage(
-            "upstream-preflight",
-            lambda: run_upstream_preflight(src, expected_sha=upstream_sha or ""),
-            "run direct upstream canonical test suite before any branding",
-        )
-        if upstream_preflight is None:
-            detail = stages[-1].detail if stages else "upstream preflight failed"
-            raise RuntimeError(
-                "upstream preflight failed; branding and candidate creation are prohibited: "
-                f"{detail}"
-            )
         baseline_sha = previous_upstream_sha(
             self.updates_dir, number
         ) or fork_manifest_upstream_sha(self.fork_root)
@@ -1744,7 +1729,7 @@ class UpdateManager:
         forkcheck = forkcheck or ForkCheckReport()
         fork_ok = (not self.fork_root) or forkcheck.gate_passes()
         source_delta_ok = not baseline_sha or source_delta.complete
-        coverage_ok = verify.total == upstream_preflight.source_files == source_census.files
+        coverage_ok = verify.total == source_census.files
         passed = gate_passes(verify, self.threshold) and fork_ok and source_delta_ok and coverage_ok \
             and not any(s.status == "fail" for s in stages)
 
@@ -1752,7 +1737,7 @@ class UpdateManager:
             number=number, dir=dest, upstream_sha=upstream_sha or "", hermes_url=self.hermes_url,
             brand=brand, scan=scan, diff=diff, verify=verify, gate=passed, stages=stages,
             reconcile=reconcile, fork=forkcheck, source_delta=source_delta,
-            upstream_preflight=upstream_preflight,
+            source_census=source_census,
         )
 
         # These outputs depend on the complete stage list.  Reserve their
@@ -1856,7 +1841,6 @@ class UpdateManager:
                 "fetched_at": fetched_at,
                 "acquisition": "fresh-direct-clone",
                 "baseline_sha": baseline_sha,
-                "upstream_preflight": upstream_preflight.to_dict(),
                 "source_census": {"files": source_census.files, "dirs": source_census.dirs},
             },
             "commit_subjects": commit_subjects,

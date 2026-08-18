@@ -1,4 +1,4 @@
-"""Regression coverage for the mandatory direct-upstream test preflight."""
+"""Regression coverage for the optional direct-upstream test diagnostic helper."""
 
 import os
 import subprocess

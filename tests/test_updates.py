@@ -75,7 +75,7 @@ def test_fork_manifest_upstream_sha_enables_ephemeral_ci_delta_baseline(tmp_path
     assert result.source_delta.counts["added"] == 1
 
 
-def test_pipeline_runs_15_stages(tmp_path):
+def test_pipeline_runs_all_ordered_stages(tmp_path):
     hermes = _hermes_repo(tmp_path)
     updates_dir = str(tmp_path / "Updates-Commits")
     res = UpdateManager(updates_dir, hermes_url=hermes).run()
@@ -87,7 +87,7 @@ def test_pipeline_runs_15_stages(tmp_path):
     assert by_name["manifest"].status == "ok"
 
 
-def test_upstream_preflight_failure_prohibits_branding_and_snapshot_creation(tmp_path):
+def test_failing_upstream_test_script_does_not_block_branding_or_snapshot_creation(tmp_path):
     hermes = _hermes_repo(tmp_path)
     runner = os.path.join(hermes, "scripts", "run_tests.sh")
     with open(runner, "w", encoding="utf-8") as handle:
@@ -97,10 +97,14 @@ def test_upstream_preflight_failure_prohibits_branding_and_snapshot_creation(tmp
     subprocess.run(["git", "-C", hermes, "commit", "-q", "-m", "failing source tests"], check=True)
     updates_dir = str(tmp_path / "Updates-Commits")
 
-    with pytest.raises(RuntimeError, match="canonical upstream tests failed"):
-        UpdateManager(updates_dir, hermes_url=hermes).run()
+    result = UpdateManager(updates_dir, hermes_url=hermes).run()
 
-    assert not os.path.exists(update_path(updates_dir, 1))
+    assert result.gate
+    assert os.path.isdir(update_path(updates_dir, 1))
+    with open(result.manifest_path, encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    assert "upstream_preflight" not in manifest["source_provenance"]
+    assert manifest["source_provenance"]["source_census"]["files"] == result.verify.total
 
 
 def test_folder_and_file_names_are_branded(tmp_path):
@@ -228,10 +232,8 @@ def test_manifest_records_pipeline(tmp_path):
     assert manifest["source_provenance"]["source_fingerprint"]
     assert len(manifest["source_provenance"]["source_fingerprint"]) == 64
     assert manifest["source_provenance"]["fetched_at"].endswith("+00:00")
-    preflight = manifest["source_provenance"]["upstream_preflight"]
-    assert preflight["passed"] is True
-    assert preflight["source_sha"] == manifest["upstream_sha"]
-    assert preflight["source_files"] == manifest["source_provenance"]["source_census"]["files"]
+    assert "upstream_preflight" not in manifest["source_provenance"]
+    assert manifest["source_provenance"]["source_census"]["files"] == res.verify.total
     assert isinstance(manifest["commit_subjects"], list)
     assert isinstance(manifest["changed_areas"], dict)
     assert manifest["reconciliation_actions"] == []
