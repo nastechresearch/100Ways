@@ -1,9 +1,33 @@
+[build-system]
+requires = ["setuptools>=84.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "100ways"
 version = "0.1.0"
-description = "100Ways: 200 ways to sync the Hermes fork, rebrand it, verify parity, and release. 15-stage update pipeline with a per-snapshot parity gate."
+description = "100Ways: synchronize, rebrand, verify, and release the Hermes fork with a parity-gated update pipeline."
+readme = "README.md"
 requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Nastech Research" }]
+maintainers = [{ name = "Nastech Research" }]
+keywords = ["git", "synchronization", "parity", "release-automation"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/nastechresearch/100ways"
+Repository = "https://github.com/nastechresearch/100ways.git"
+Issues = "https://github.com/nastechresearch/100ways/issues"
 
 [project.scripts]
 100ways = "hundredways.cli:main"
@@ -11,9 +35,22 @@ dependencies = []
 [project.optional-dependencies]
 ai = ["httpx>=0.28,<1"]
 telegram = ["httpx>=0.28,<1"]
+dev = [
+  "pytest>=8.3,<9",
+  "ruff>=0.9,<1",
+  "build>=1.2,<2",
+  "pytest-cov>=6,<7",
+]
 
 [tool.setuptools]
 packages = ["hundredways"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
