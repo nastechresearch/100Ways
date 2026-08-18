@@ -29,6 +29,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 
+from .reference_audit import EXACT_ATTRIBUTION
 from .rules import BrandingRules, is_locked_path
 from .scanner import is_text
 
@@ -182,10 +183,15 @@ def _read(path: str) -> bytes:
         return b""
 
 
-def _brand_violations(text: str, rules: BrandingRules) -> list[int]:
-    """Line numbers (1-based) whose line would change under the rules."""
+def _brand_violations(text: str, rules: BrandingRules, path: str = "") -> list[int]:
+    """Line numbers whose unapproved source-brand reference would change."""
     lines = text.splitlines()
-    return [i + 1 for i, line in enumerate(lines) if rules.transform_text(line) != line]
+    return [
+        index + 1
+        for index, line in enumerate(lines)
+        if not (path == "reports/SYNC-SUMMARY.md" and EXACT_ATTRIBUTION in line)
+        and rules.transform_text(line) != line
+    ]
 
 
 def scan_brand_violations(root: str, rules: BrandingRules | None = None,
@@ -205,7 +211,7 @@ def scan_brand_violations(root: str, rules: BrandingRules | None = None,
         data = _read(os.path.join(root, rel))
         if not is_text(data):
             continue
-        for line_no in _brand_violations(data.decode("utf-8", "replace"), rules):
+        for line_no in _brand_violations(data.decode("utf-8", "replace"), rules, rel):
             snippet = data.decode("utf-8", "replace").splitlines()[line_no - 1]
             hits.append(ForkViolation(path=rel, line=line_no, snippet=snippet[:200]))
     return hits
@@ -233,7 +239,9 @@ def _added_line_violations(fork_text: str, branded_text: str,
             continue
         for k in range(op[3], op[4]):
             line = branded_lines[k] if k < len(branded_lines) else ""
-            if rules.transform_text(line) != line:
+            if not (
+                rel == "reports/SYNC-SUMMARY.md" and EXACT_ATTRIBUTION in line
+            ) and rules.transform_text(line) != line:
                 hits.append(ForkViolation(path=rel, line=k + 1, snippet=line[:200]))
     return hits
 
@@ -475,7 +483,7 @@ def fork_consistency(
             entry = ForkEntry(path=rel, status="added")
             if is_text(data) and not is_locked_path(rel):
                 text = data.decode("utf-8", "replace")
-                for line_no in _brand_violations(text, rules):
+                for line_no in _brand_violations(text, rules, rel):
                     entry.violations.append(
                         ForkViolation(path=rel, line=line_no,
                                       snippet=text.splitlines()[line_no - 1][:200])

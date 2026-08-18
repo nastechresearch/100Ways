@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Sequence
 
 from .integrity import audit_candidate_tree, audit_manifest_provenance, tree_digest
-from .reference_audit import audit_references
+from .reference_audit import EXACT_ATTRIBUTION, audit_references
 from .rules import BrandingRules
 
 _SECRET_PATTERNS = (
@@ -160,6 +160,25 @@ def scan_snapshot(
         issues.append(
             ReadinessIssue("license", "LICENSE", "MIT license text is missing or changed")
         )
+    summary_path = snapshot_path / "reports" / "SYNC-SUMMARY.md"
+    if not summary_path.is_file():
+        issues.append(
+            ReadinessIssue(
+                "summary-attribution",
+                "reports/SYNC-SUMMARY.md",
+                "required generated update summary is missing",
+            )
+        )
+    else:
+        summary_text = summary_path.read_text(encoding="utf-8", errors="replace")
+        if summary_text.count(EXACT_ATTRIBUTION) != 1:
+            issues.append(
+                ReadinessIssue(
+                    "summary-attribution",
+                    "reports/SYNC-SUMMARY.md",
+                    "summary must contain exactly one required attribution",
+                )
+            )
     runner = snapshot_path / "scripts" / "run_tests.sh"
     if not runner.is_file() or not os.access(runner, os.X_OK):
         issues.append(

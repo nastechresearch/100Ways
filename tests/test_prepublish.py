@@ -23,6 +23,12 @@ def _snapshot(path: Path, sha: str) -> None:
                 "source_fingerprint": "a" * 64,
                 "fetched_at": "2026-08-16T00:00:00+00:00",
                 "acquisition": "fresh-direct-clone",
+                "upstream_preflight": {
+                    "passed": True,
+                    "source_sha": sha,
+                    "source_files": 1,
+                },
+                "source_census": {"files": 1, "dirs": 1},
             },
         })
     )
@@ -31,6 +37,9 @@ def _snapshot(path: Path, sha: str) -> None:
     runner.parent.mkdir()
     runner.write_text("#!/bin/sh\n")
     os.chmod(runner, 0o755)
+    summary = path / "reports" / "SYNC-SUMMARY.md"
+    summary.parent.mkdir()
+    summary.write_text("# NasTech Update\n\n> Powered by NousResearch\n")
 
 
 def test_scan_snapshot_allows_inherited_source_credential_fixture(tmp_path):
@@ -49,6 +58,23 @@ def test_scan_snapshot_allows_inherited_source_credential_fixture(tmp_path):
     candidate_fixture.write_text("token = 'ghp_abcdefghijklmnopqrstuvwxyz1234567890'\n")
 
     assert scan_snapshot(snapshot, upstream, sha) == []
+
+
+def test_scan_snapshot_rejects_missing_required_summary_attribution(tmp_path):
+    upstream = Path(_git_repo(tmp_path / "upstream"))
+    (upstream / "clean.py").write_text("value = 'clean'\n")
+    subprocess.run(["git", "-C", str(upstream), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(upstream), "commit", "-q", "-m", "clean"], check=True)
+    sha = subprocess.check_output(["git", "-C", str(upstream), "rev-parse", "HEAD"], text=True).strip()
+    snapshot = tmp_path / "snapshot"
+    _snapshot(snapshot, sha)
+    (snapshot / "reports" / "SYNC-SUMMARY.md").write_text("# NasTech Update\n")
+
+    issues = scan_snapshot(snapshot, upstream, sha)
+
+    assert ("summary-attribution", "reports/SYNC-SUMMARY.md") in [
+        (issue.code, issue.path) for issue in issues
+    ]
 
 
 def test_scan_snapshot_blocks_unsafe_candidate_tree_entry(tmp_path):

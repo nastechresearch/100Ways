@@ -21,6 +21,12 @@ def _manifest(path: Path, **overrides: object) -> None:
             "source_fingerprint": "a" * 64,
             "fetched_at": "2026-08-16T00:00:00+00:00",
             "acquisition": "fresh-direct-clone",
+            "upstream_preflight": {
+                "passed": True,
+                "source_sha": UPSTREAM_SHA,
+                "source_files": 7,
+            },
+            "source_census": {"files": 7, "dirs": 2},
         },
     }
     manifest.update(overrides)
@@ -54,7 +60,35 @@ def test_manifest_provenance_rejects_missing_fingerprint_or_stale_source(tmp_pat
 
     codes = {issue.code for issue in audit_manifest_provenance(manifest, expected_upstream_sha=UPSTREAM_SHA)}
 
-    assert {"source-sha", "source-acquisition", "source-fingerprint", "source-fetch-time"} <= codes
+    assert {
+        "source-sha",
+        "source-acquisition",
+        "source-fingerprint",
+        "source-fetch-time",
+        "upstream-preflight",
+    } <= codes
+
+
+def test_manifest_provenance_rejects_failed_preflight_or_census_mismatch(tmp_path):
+    manifest = tmp_path / "manifest.json"
+    _manifest(
+        manifest,
+        source_provenance={
+            "source_fingerprint": "a" * 64,
+            "fetched_at": "2026-08-16T00:00:00+00:00",
+            "acquisition": "fresh-direct-clone",
+            "upstream_preflight": {
+                "passed": False,
+                "source_sha": "b" * 40,
+                "source_files": 4,
+            },
+            "source_census": {"files": 5, "dirs": 2},
+        },
+    )
+
+    codes = {issue.code for issue in audit_manifest_provenance(manifest, expected_upstream_sha=UPSTREAM_SHA)}
+
+    assert {"upstream-preflight", "upstream-preflight-sha", "source-census"} <= codes
 
 
 def test_tree_digest_is_stable_and_binds_file_modes(tmp_path):

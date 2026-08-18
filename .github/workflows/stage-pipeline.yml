@@ -1,8 +1,8 @@
 name: stage-pipeline
 
-# Stage 5: run the full 19-stage update pipeline against the direct source
-# repo, gate it, and upload the branded zip + reports as an artifact.
-# Keeps the immutable data files (contributors/emails) verbatim.
+# Stage 5: run the full 20-stage update pipeline against the direct source
+# repo. The second stage runs the canonical direct-upstream test suite before
+# any source path or content is branded; failure stops candidate creation.
 # Passes --fork-root nastech-agent (the shallow fork clone) so the preserve
 # stage carries fork-local files into the snapshot and the forkcheck stage
 # proves the tree is byte-faithful to the fork before anything ships.
@@ -89,7 +89,7 @@ jobs:
           echo "sha=$DIRECT_SHA" >> "$GITHUB_OUTPUT"
           echo "- Direct upstream SHA: \`$DIRECT_SHA\`" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Run 19-stage update pipeline
+      - name: Run 20-stage update pipeline with mandatory direct-upstream test preflight
         id: update
         env:
           HUNDREDWAYS_HERMES_URL: ${{ inputs.hermes_url }}
@@ -117,6 +117,26 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a") as gh:
               for key in ("update_number", "upstream_sha"):
                   gh.write(f"{key}={out.get(key, '')}\n")
+          snapshot = os.path.join(
+              os.environ["HUNDREDWAYS_UPDATES_DIR"],
+              f"Nastech-Update#{out['update_number']}",
+          )
+          with open(os.path.join(snapshot, "manifest.json"), encoding="utf-8") as fh:
+              manifest = json.load(fh)
+          provenance = manifest["source_provenance"]
+          preflight = provenance["upstream_preflight"]
+          census = provenance["source_census"]
+          if (
+              preflight.get("passed") is not True
+              or preflight.get("source_sha") != out.get("upstream_sha")
+              or preflight.get("source_files") != census.get("files")
+          ):
+              raise SystemExit("direct upstream preflight evidence is incomplete")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("## Direct upstream preflight\n")
+              summary.write("- Canonical upstream tests: **PASS** before branding.\n")
+              summary.write(f"- Tested source SHA: `{preflight['source_sha']}`.\n")
+              summary.write(f"- Tested source files: {preflight['source_files']}.\n")
           EOF
 
       - name: Advisory-only remediation analysis for failed update pipeline

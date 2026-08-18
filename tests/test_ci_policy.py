@@ -100,13 +100,16 @@ def test_stage_pipeline_requires_final_conformance_and_candidate_tests_before_re
     root = Path(__file__).resolve().parents[1]
     workflow = (root / ".github" / "workflows" / "stage-pipeline.yml").read_text()
 
+    upstream_preflight = workflow.index("mandatory direct-upstream test preflight")
     first_conformance = workflow.index("Verify final branded candidate against exact Hermes source")
     candidate_tests = workflow.index("Run final branded candidate test suite")
     post_test_conformance = workflow.index("Re-attest candidate after tests")
     receipt = workflow.index("Write tamper-evident gate decision receipt")
 
     assert workflow.count("python3 -m hundredways.conformance") == 2
-    assert first_conformance < candidate_tests < post_test_conformance < receipt
+    assert upstream_preflight < first_conformance < candidate_tests < post_test_conformance < receipt
+    assert "Canonical upstream tests: **PASS** before branding" in workflow
+    assert "direct upstream preflight evidence is incomplete" in workflow
     assert "./scripts/run_tests.sh" in workflow
     assert 'cp -a "$SNAPSHOT" "$TEST_TREE"' in workflow
     assert "uv sync --locked --python 3.11" in workflow

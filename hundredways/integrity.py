@@ -147,6 +147,48 @@ def audit_manifest_provenance(
             )
         )
 
+    preflight = provenance.get("upstream_preflight")
+    if not isinstance(preflight, dict):
+        issues.append(
+            IntegrityIssue(
+                "upstream-preflight",
+                path.name,
+                "candidate provenance requires a successful direct upstream test preflight",
+            )
+        )
+    else:
+        if preflight.get("passed") is not True:
+            issues.append(
+                IntegrityIssue(
+                    "upstream-preflight",
+                    path.name,
+                    "direct upstream canonical tests did not pass before branding",
+                )
+            )
+        if preflight.get("source_sha") != expected_upstream_sha:
+            issues.append(
+                IntegrityIssue(
+                    "upstream-preflight-sha",
+                    path.name,
+                    "upstream preflight SHA differs from freshly fetched upstream HEAD",
+                )
+            )
+        source_files = preflight.get("source_files")
+        census = provenance.get("source_census")
+        if (
+            not isinstance(source_files, int)
+            or source_files < 1
+            or not isinstance(census, dict)
+            or census.get("files") != source_files
+        ):
+            issues.append(
+                IntegrityIssue(
+                    "source-census",
+                    path.name,
+                    "upstream preflight file count must match recorded source census",
+                )
+            )
+
     fetched_at = provenance.get("fetched_at")
     try:
         parsed_time = datetime.fromisoformat(str(fetched_at).replace("Z", "+00:00"))
