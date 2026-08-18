@@ -39,7 +39,9 @@ class PortResult:
 
 def _git(repo: str, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["git", "-C", repo, *args], capture_output=True, text=True
+        ["git", "-C", repo, "-c", "color.ui=false", *args],
+        capture_output=True,
+        text=True,
     )
 
 
