@@ -20,6 +20,12 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      publish_candidate_pr:
+        description: "Create or update the review-only NasTech-agent PR after every gate passes"
+        type: boolean
+        required: false
+        default: true
   schedule:
     - cron: "0 4 * * 1" # weekly Monday 04:00 UTC
 
@@ -53,6 +59,9 @@ jobs:
       slice_count: 4
 
   update-pr:
+    # Never publish from a 100Ways pull-request validation run. Main pushes,
+    # schedules, and opted-in manual dispatches remain review-only candidates.
+    if: github.event_name != 'pull_request'
     needs: [forkcheck, pipeline]
     permissions:
       contents: read
@@ -60,6 +69,7 @@ jobs:
     with:
       upstream_sha: ${{ needs.pipeline.outputs.upstream_sha }}
       gate: ${{ needs.pipeline.outputs.gate }}
+      publish_candidate_pr: ${{ github.event_name != 'workflow_dispatch' || inputs.publish_candidate_pr }}
     secrets: inherit
 
   readme:

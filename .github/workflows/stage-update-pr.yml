@@ -1,7 +1,8 @@
 name: stage-update-pr
 
-# Stage 6: when the pipeline passes, push the branded tree to a test branch
-# in the nastech-agent FORK and open/update a PR against its main.  The fork
+# Stage 6: when the pipeline passes, push the branded tree only to the
+# dedicated `100WAYS` review branch in the nastech-agent fork, then open or
+# update a PR from that branch into main. The fork
 # runs its own full CI (Python slices, JS checks, E2E, CodeQL) on that PR, so
 # a green result proves the freshly-branded Hermes tree is sound enough to
 # merge upstream.
@@ -31,13 +32,21 @@ on:
         type: string
         required: false
         default: "PASS"
+      publish_candidate_pr:
+        description: Permit creation or update of the review-only NasTech-agent PR
+        type: boolean
+        required: false
+        default: true
 
 permissions:
   contents: read
 
 jobs:
   update-pr:
-    if: inputs.gate == 'PASS'
+    # This workflow has no merge, tag, release, or deployment permissions.
+    # The review branch can change only after every validation gate passes and
+    # the caller explicitly authorizes publication.
+    if: inputs.gate == 'PASS' && inputs.publish_candidate_pr
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
@@ -74,16 +83,23 @@ jobs:
           set -eux
           FORK="nastechresearch/nastech-agent"
           BASE="main"
-          TEST="100WAYS"
+          REVIEW_BRANCH="100WAYS"
           SHA="${{ inputs.upstream_sha }}"
           REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${FORK}.git"
+
+          # Safety boundary: a candidate may never be written directly to the
+          # protected base branch. It must always use the dedicated review ref.
+          if [ "$REVIEW_BRANCH" = "$BASE" ]; then
+            echo "review branch must differ from the NasTech-agent base branch" >&2
+            exit 1
+          fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           # fresh branch off the fork's main, then drop the branded tree in
           git fetch "$REMOTE" "$BASE"
-          git checkout -B "$TEST" "FETCH_HEAD"
+          git checkout -B "$REVIEW_BRANCH" "FETCH_HEAD"
 
           # Overlay the branded tree ONTO the checkout root.  The zip's
           # nastech-agent/ folder IS the whole project — the fork's content
@@ -108,16 +124,17 @@ jobs:
              commit -m "chore: branded update ${SHA:+($SHA)}" || echo "nothing to commit"
 
           # force-push (review branch; history is irrelevant)
-          git push --force "$REMOTE" "$TEST"
+          git push --force "$REMOTE" "$REVIEW_BRANCH"
 
-          # open or update the PR test -> main on the fork
+          # Open or update only the dedicated review PR; this workflow never
+          # merges, tags, releases, or deploys the candidate.
           PR_TITLE="Update ${SHA:+(${SHA:0:8})}"
-          BODY="Pipeline gate: PASS. Auto-generated from the 100Ways release pipeline. Runs the fork's full CI against the freshly-branded Hermes tree."
-          PR_URL=$(gh pr list --repo "$FORK" --head "$TEST" --base "$BASE" --json url --jq '.[0].url' 2>/dev/null) || true
+          BODY="Pipeline gate: PASS. Review-only candidate from the dedicated 100WAYS branch into nastech-agent/main. No merge, tag, release, or deployment is performed by 100Ways."
+          PR_URL=$(gh pr list --repo "$FORK" --head "$REVIEW_BRANCH" --base "$BASE" --json url --jq '.[0].url' 2>/dev/null) || true
           if [ -n "$PR_URL" ]; then
             gh pr edit "$PR_URL" --title "$PR_TITLE" --body "$BODY"
           else
-            gh pr create --repo "$FORK" --base "$BASE" --head "$TEST" \
+            gh pr create --repo "$FORK" --base "$BASE" --head "$REVIEW_BRANCH" \
               --title "$PR_TITLE" --body "$BODY"
           fi
-          gh pr view "$FORK#$TEST" --json url --jq .url || true
+          gh pr view "$FORK#$REVIEW_BRANCH" --json url --jq .url || true
