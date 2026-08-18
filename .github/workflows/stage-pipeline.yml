@@ -1,8 +1,8 @@
 name: stage-pipeline
 
-# Stage 5: run the full 20-stage update pipeline against the direct source
-# repo. The second stage runs the canonical direct-upstream test suite before
-# any source path or content is branded; failure stops candidate creation.
+# Stage 5: run the full 19-stage update pipeline against a fresh direct
+# source clone. Source SHA and file-census evidence bind every candidate to the
+# exact fetched source; the full branded-candidate test suite is the test gate.
 # Passes --fork-root nastech-agent (the shallow fork clone) so the preserve
 # stage carries fork-local files into the snapshot and the forkcheck stage
 # proves the tree is byte-faithful to the fork before anything ships.
@@ -41,8 +41,8 @@ jobs:
     outputs:
       update_number: ${{ steps.candidate-state.outputs.update_number }}
       upstream_sha: ${{ steps.candidate-state.outputs.upstream_sha }}
-      gate: ${{ steps.candidate-state.outputs.gate }}
-      decision: ${{ steps.candidate-state.outputs.decision }}
+      gate: ${{ steps.final-gate.outputs.gate }}
+      decision: ${{ steps.final-gate.outputs.decision }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
 
@@ -89,7 +89,7 @@ jobs:
           echo "sha=$DIRECT_SHA" >> "$GITHUB_OUTPUT"
           echo "- Direct upstream SHA: \`$DIRECT_SHA\`" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Run 20-stage update pipeline with mandatory direct-upstream test preflight
+      - name: Run 19-stage update pipeline with fresh direct-source evidence
         id: update
         continue-on-error: true
         env:
@@ -124,17 +124,15 @@ jobs:
           if [ "${{ steps.update.outputs.pipeline_status }}" != "0" ]; then
             {
               echo "candidate_ready=false"
-              echo "gate=WITHHELD"
-              echo "decision=UPSTREAM_TEST_FAILURE"
               echo "update_number="
               echo "upstream_sha=$DIRECT_UPSTREAM_SHA"
             } >> "$GITHUB_OUTPUT"
             {
               echo "## Candidate withheld"
-              echo "- Direct upstream canonical tests failed before branding."
-              echo "- Candidate creation, candidate tests, packaging, upload, and publication: **WITHHELD**."
+              echo "- The update pipeline did not create a complete candidate."
+              echo "- Candidate tests, packaging, upload, and publication: **WITHHELD**."
               echo "- Publication allowed: **NO**."
-              echo "- See the advisory-only analysis and update-pipeline log for the upstream test failure."
+              echo "- See the advisory-only analysis and update-pipeline log for the pipeline failure."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -149,25 +147,22 @@ jobs:
           with open(os.path.join(snapshot, "manifest.json"), encoding="utf-8") as fh:
               manifest = json.load(fh)
           provenance = manifest["source_provenance"]
-          preflight = provenance["upstream_preflight"]
           census = provenance["source_census"]
           if (
-              preflight.get("passed") is not True
-              or preflight.get("source_sha") != out.get("upstream_sha")
-              or preflight.get("source_files") != census.get("files")
+              manifest.get("upstream_sha") != out.get("upstream_sha")
+              or not isinstance(census.get("files"), int)
+              or census["files"] < 1
           ):
-              raise SystemExit("direct upstream preflight evidence is incomplete")
+              raise SystemExit("direct upstream source evidence is incomplete")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as gh:
               gh.write("candidate_ready=true\n")
-              gh.write("gate=PASS\n")
-              gh.write("decision=PASS\n")
               gh.write(f"update_number={out.get('update_number', '')}\n")
               gh.write(f"upstream_sha={out.get('upstream_sha', '')}\n")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
-              summary.write("## Direct upstream preflight\n")
-              summary.write("- Canonical upstream tests: **PASS** before branding.\n")
-              summary.write(f"- Tested source SHA: `{preflight['source_sha']}`.\n")
-              summary.write(f"- Tested source files: {preflight['source_files']}.\n")
+              summary.write("## Direct upstream source evidence\n")
+              summary.write("- Canonical upstream test execution: **NOT RUN**.\n")
+              summary.write(f"- Source SHA: `{manifest['upstream_sha']}`.\n")
+              summary.write(f"- Source files: {census['files']}.\n")
           EOF
 
       - name: Advisory-only remediation analysis for failed update pipeline
@@ -283,16 +278,21 @@ jobs:
           echo "conformance=PASS" >> "$GITHUB_OUTPUT"
           echo "- Final branded-tree conformance: **PASS**" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Run final branded candidate test suite
+      - name: Run baseline-aware final branded candidate tests
         id: candidate-tests
         if: ${{ steps.candidate-state.outputs.candidate_ready == 'true' }}
         env:
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
           HUNDREDWAYS_CANDIDATE_TESTS: ${{ runner.temp }}/candidate-tests.json
+          HUNDREDWAYS_UPSTREAM_TESTS: ${{ runner.temp }}/upstream-tests.log
+          DIRECT_UPSTREAM_SHA: ${{ steps.direct-source.outputs.sha }}
         run: |
           set -euo pipefail
           SNAPSHOT=$(find "$HUNDREDWAYS_UPDATES_DIR" -maxdepth 1 -type d -name 'Nastech-Update#*' | sort -V | tail -1)
+          UPSTREAM="$HUNDREDWAYS_UPDATES_DIR/hermes-agent"
           TEST_TREE="$RUNNER_TEMP/nastech-agent-candidate-test"
+          CANDIDATE_LOG="$RUNNER_TEMP/candidate-tests.log"
+          CANDIDATE_CONFIRMED_LOG="$RUNNER_TEMP/candidate-confirmed-tests.log"
           rm -rf "$TEST_TREE"
           cp -a "$SNAPSHOT" "$TEST_TREE"
           test -x "$TEST_TREE/scripts/run_tests.sh"
@@ -307,34 +307,50 @@ jobs:
               --extra all --extra dev --extra anthropic --extra mistral \
               --extra fal --extra modal --extra daytona --extra hindsight \
               --extra parallel-web
-            source .venv/bin/activate
-            OPENROUTER_API_KEY="" OPENAI_API_KEY="" NASTECH_API_KEY="" \
-              ./scripts/run_tests.sh
           )
+          (
+            cd "$UPSTREAM"
+            uv python install 3.11
+            uv sync --locked --python 3.11 \
+              --extra all --extra dev --extra anthropic --extra mistral \
+              --extra fal --extra modal --extra daytona --extra hindsight \
+              --extra parallel-web
+          )
+
+          python3 -m hundredways.test_baseline_runner \
+            --candidate "$TEST_TREE" \
+            --candidate-artifact "$SNAPSHOT" \
+            --source "$UPSTREAM" \
+            --source-sha "$DIRECT_UPSTREAM_SHA" \
+            --output "$HUNDREDWAYS_CANDIDATE_TESTS" \
+            --candidate-raw-log "$CANDIDATE_LOG" \
+            --candidate-confirmed-log "$CANDIDATE_CONFIRMED_LOG" \
+            --source-log "$HUNDREDWAYS_UPSTREAM_TESTS"
+          HUNDREDWAYS_CANDIDATE_CONFIRMED_TESTS="$CANDIDATE_CONFIRMED_LOG" \
           python3 - <<'PYEOF'
           import json
           import os
-          from hundredways.integrity import tree_digest
 
-          updates = os.environ["HUNDREDWAYS_UPDATES_DIR"]
-          candidates = sorted(
-              (name for name in os.listdir(updates) if name.startswith("Nastech-Update#")),
-              key=lambda value: int(value.rsplit("#", 1)[-1]),
-          )
-          snapshot = os.path.join(updates, candidates[-1])
-          evidence = {
-              "gate": "PASS",
-              "runner": "scripts/run_tests.sh",
-              "candidate_tree_sha256": tree_digest(snapshot),
-          }
-          with open(os.environ["HUNDREDWAYS_CANDIDATE_TESTS"], "w", encoding="utf-8") as handle:
-              json.dump(evidence, handle, indent=2)
+          with open(os.environ["HUNDREDWAYS_CANDIDATE_TESTS"], encoding="utf-8") as handle:
+              evidence = json.load(handle)
+          review_ready = bool(evidence["review_ready"])
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as gh:
+              gh.write(f"review_ready={'true' if review_ready else 'false'}\\n")
+              gh.write(f"candidate_tests={evidence['gate']}\\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("## Baseline-aware candidate tests\\n")
+              summary.write(f"- Parallel candidate failures: {len(evidence['parallel_candidate_failures'])}.\\n")
+              summary.write(f"- Serial candidate failures: {len(evidence['candidate_failed'])}.\\n")
+              summary.write(f"- Serial exact-source failures: {len(evidence['source_failed'])}.\\n")
+              summary.write(f"- Inherited failures: {len(evidence['inherited_failures'])}.\\n")
+              summary.write(f"- NasTech-only failures: {len(evidence['nastech_only_failures'])}.\\n")
+              summary.write(f"- Unresolved candidate failures: {len(evidence['unresolved_candidate_failures'])}.\\n")
+              summary.write(f"- Classification: **{evidence['classification']}**.\\n")
+              summary.write(f"- Review eligibility: **{'PASS' if review_ready else 'WITHHELD'}**.\\n")
           PYEOF
-          echo "candidate_tests=PASS" >> "$GITHUB_OUTPUT"
-          echo "- Final branded-candidate tests: **PASS**" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Re-attest candidate after tests
-        if: ${{ steps.candidate-state.outputs.candidate_ready == 'true' }}
+        if: ${{ steps.candidate-state.outputs.candidate_ready == 'true' && steps.candidate-tests.outputs.review_ready == 'true' }}
         env:
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
           HUNDREDWAYS_POST_TEST_CONFORMANCE: ${{ runner.temp }}/candidate-post-test-conformance.json
@@ -348,8 +364,31 @@ jobs:
             --output "$HUNDREDWAYS_POST_TEST_CONFORMANCE"
           echo "- Post-test candidate conformance: **PASS**" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Write final pipeline gate
+        id: final-gate
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.candidate-state.outputs.candidate_ready }}" = "true" ] \
+            && [ "${{ steps.weekly.outcome }}" = "success" ] \
+            && [ "${{ steps.readiness.outcome }}" = "success" ] \
+            && [ "${{ steps.final-conformance.outcome }}" = "success" ] \
+            && [ "${{ steps.candidate-tests.outputs.review_ready }}" = "true" ] \
+            && [ "${{ steps.candidate-tests.outcome }}" = "success" ] \
+            && [ "${{ steps.post-test-conformance.outcome }}" = "success" ]; then
+            echo "gate=PASS" >> "$GITHUB_OUTPUT"
+            echo "decision=REVIEW_READY" >> "$GITHUB_OUTPUT"
+            echo "## Final pipeline gate" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Decision: **PASS** — review PR preparation is authorized." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "gate=WITHHELD" >> "$GITHUB_OUTPUT"
+            echo "decision=CANDIDATE_VALIDATION_FAILURE" >> "$GITHUB_OUTPUT"
+            echo "## Final pipeline gate" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Decision: **WITHHELD** — candidate validation did not meet review eligibility." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Write professional update summary
-        if: ${{ steps.candidate-state.outputs.candidate_ready == 'true' }}
+        if: ${{ steps.final-gate.outputs.gate == 'PASS' }}
         env:
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
           HUNDREDWAYS_SUMMARY: ${{ runner.temp }}/SYNC-SUMMARY.md
@@ -390,7 +429,7 @@ jobs:
           PYEOF
 
       - name: Repackage the exact verified tree
-        if: ${{ steps.candidate-state.outputs.candidate_ready == 'true' }}
+        if: ${{ steps.final-gate.outputs.gate == 'PASS' }}
         env:
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
           HUNDREDWAYS_ZIP: ${{ runner.temp }}/nastech-agent-update.zip
@@ -426,7 +465,7 @@ jobs:
           PYEOF
 
       - name: Write tamper-evident gate decision receipt
-        if: ${{ steps.candidate-state.outputs.candidate_ready == 'true' }}
+        if: ${{ steps.final-gate.outputs.gate == 'PASS' }}
         env:
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
           HUNDREDWAYS_DECISION: ${{ runner.temp }}/weekly-decision.json
@@ -457,7 +496,7 @@ jobs:
           PYEOF
 
       - name: Upload branded zip + reports
-        if: ${{ steps.candidate-state.outputs.candidate_ready == 'true' }}
+        if: ${{ steps.final-gate.outputs.gate == 'PASS' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nastech-agent-update
@@ -470,6 +509,9 @@ jobs:
             ${{ runner.temp }}/publication-readiness.json
             ${{ runner.temp }}/candidate-conformance.json
             ${{ runner.temp }}/candidate-tests.json
+            ${{ runner.temp }}/candidate-tests.log
+            ${{ runner.temp }}/candidate-confirmed-tests.log
+            ${{ runner.temp }}/upstream-tests.log
             ${{ runner.temp }}/candidate-post-test-conformance.json
             ${{ runner.temp }}/gate_receipt.json
             ${{ runner.temp }}/SYNC-SUMMARY.md
