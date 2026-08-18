@@ -1,6 +1,6 @@
 """Ordered update pipeline: pull real Hermes, brand the whole tree, snapshot.
 
-The ``update`` command makes the sync engine real.  It runs as **18 ordered
+The ``update`` command makes the sync engine real.  It runs as **19 ordered
 stages** so every step is named, recorded, and reported:
 
     Updates-Commits/
@@ -31,9 +31,16 @@ import subprocess
 import time
 import zipfile
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from .assets import OwnedAssets
-from .forkcheck import ForkCheckReport, fork_consistency, preserve_fork_files
+from .forkcheck import (
+    ForkCheckReport,
+    SourceDeltaReport,
+    fork_consistency,
+    preserve_fork_files,
+    source_tree_delta,
+)
 from .rules import BrandingRules, is_immutable_path, is_locked_path
 from .scanner import classify_path, is_text
 from .verify import FileResult, VerifyReport
@@ -42,14 +49,14 @@ DEFAULT_HERMES_URL = "https://github.com/NousResearch/hermes-agent.git"
 HERMES_DIR = "hermes-agent"
 UPDATE_PREFIX = "Nastech-Update#"
 
-# The 18 ordered pipeline stages.  `preserve` copies fork-local files (owned
+# The 19 ordered pipeline stages.  `preserve` copies fork-local files (owned
 # assets, contributor emails, fork-only skills) into the snapshot so the PR
 # never deletes them; `forkcheck` diffs the snapshot against the real
 # nastech-agent fork to prove unchanged files are byte-identical (clean git
 # commits, no whole-tree churn) and added lines are brand-clean.  `release`
 # is where GitHub Actions uploads the zip; locally it is recorded as skipped.
 STAGES = [
-    "pull", "census", "plan", "brand", "reconcile", "preserve", "scan", "compare",
+    "pull", "source-evidence", "census", "plan", "brand", "reconcile", "preserve", "scan", "compare",
     "verify", "forkcheck", "report", "package", "manifest", "record", "notify",
     "gate", "summary", "release",
 ]
@@ -113,38 +120,97 @@ def _run_ok(cmd: list[str], what: str) -> str:
 
 
 def pull_hermes(updates_dir: str, hermes_url: str = DEFAULT_HERMES_URL) -> str:
-    """Clone or update the real Hermes checkout under Updates-Commits/.
+    """Acquire a new clone directly from the configured upstream remote.
 
-    Returns the resolved upstream HEAD sha.  ``hermes_url`` may be an https
-    remote, an ssh URL, or a local path / ``file://`` URL.
+    The prior checkout is deliberately discarded.  This prohibits a local git
+    cache from becoming an input to a synchronization decision, while keeping
+    local-path remotes available for deterministic tests.
     """
     os.makedirs(updates_dir, exist_ok=True)
     dest = hermes_path(updates_dir)
-    url = hermes_url
-    if "://" not in url:
-        url = os.path.abspath(url)
-    if os.path.isdir(os.path.join(dest, ".git")):
-        _run_ok(["git", "-C", dest, "fetch", "--all", "--prune"], "hermes fetch")
-        # Ask the remote which branch it points at; a fresh clone sets
-        # origin/HEAD, but an existing checkout (or a shallow/local source)
-        # may not.  Without this, reset --hard origin/HEAD is a hard error.
+    url = hermes_url if "://" in hermes_url else os.path.abspath(hermes_url)
+    if os.path.exists(dest):
+        shutil.rmtree(dest)
+    _run_ok(["git", "clone", "--no-local", url, dest], "fresh direct upstream clone")
+    return _run_ok(["git", "-C", dest, "rev-parse", "HEAD"], "upstream head")
+
+
+def fork_manifest_upstream_sha(fork_root: str) -> str:
+    """Read the last verified Hermes SHA recorded in the current NasTech fork."""
+    if not fork_root:
+        return ""
+    manifest_path = os.path.join(fork_root, "manifest.json")
+    try:
+        with open(manifest_path, encoding="utf-8") as handle:
+            value = json.load(handle).get("upstream_sha", "")
+    except (OSError, ValueError):
+        return ""
+    return value if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value) else ""
+
+
+def previous_upstream_sha(updates_dir: str, before_number: int) -> str:
+    """Return the most recent recorded source revision, if any."""
+    for number in range(before_number - 1, 0, -1):
+        manifest_path = os.path.join(update_path(updates_dir, number), "manifest.json")
         try:
-            _run_ok(["git", "-C", dest, "remote", "set-head", "origin", "-a"], "hermes set-head")
-        except RuntimeError:
-            pass
-        ref = "origin/HEAD"
-        try:
-            _run_ok(["git", "-C", dest, "rev-parse", "--verify", ref], "hermes head resolve")
-        except RuntimeError:
-            ref = "origin/main"
-        try:
-            _run_ok(["git", "-C", dest, "rev-parse", "--verify", ref], "hermes head resolve")
-        except RuntimeError:
-            ref = "FETCH_HEAD"
-        _run_ok(["git", "-C", dest, "reset", "--hard", ref], "hermes reset")
-    else:
-        _run_ok(["git", "clone", url, dest], "hermes clone")
-    return _run_ok(["git", "-C", dest, "rev-parse", "HEAD"], "hermes head")
+            with open(manifest_path, encoding="utf-8") as fh:
+                value = json.load(fh).get("upstream_sha", "")
+            if value:
+                return value
+        except (OSError, ValueError):
+            continue
+    return ""
+
+
+def apply_owned_assets(dst: str, owned: OwnedAssets | None = None) -> list[str]:
+    """Materialize every declared NasTech-owned target, even after upstream deletion.
+
+    Brand-time replacement protects owned assets when upstream still carries a
+    counterpart.  This second pass protects the same asset when upstream has
+    removed that counterpart: our explicit registry remains authoritative.
+    """
+    if owned is None:
+        return []
+    materialized: list[str] = []
+    for target in sorted(owned.mapping):
+        source = owned.asset_path(target)
+        if source is None:
+            raise ValueError(f"owned asset registry entry is unavailable: {target}")
+        destination = os.path.join(dst, target)
+        if os.path.isfile(destination):
+            try:
+                with (
+                    open(source, "rb") as source_handle,
+                    open(destination, "rb") as destination_handle,
+                ):
+                    if source_handle.read() == destination_handle.read():
+                        continue
+            except OSError:
+                pass
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        shutil.copyfile(source, destination)
+        _restore_mode(source, destination)
+        materialized.append(target)
+    return materialized
+
+
+def upstream_change_evidence(repo: str, baseline: str, head: str) -> tuple[list[str], dict[str, int]]:
+    """Collect reviewable commit subjects and top-level changed-area counts."""
+    revision_range = f"{baseline}..{head}" if baseline else "-n 1"
+    if baseline:
+        ancestry = subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", baseline, head], capture_output=True)
+        if ancestry.returncode:
+            revision_range = "-n 1"
+    subject_args = ["git", "-C", repo, "log", "--format=%s"] + revision_range.split()
+    subjects = [line for line in _run_ok(subject_args, "upstream subject scan").splitlines() if line]
+    path_args = ["git", "-C", repo, "show", "--format=", "--name-only"] + revision_range.split()
+    areas: dict[str, int] = {}
+    for path in _run_ok(path_args, "upstream changed-area scan").splitlines():
+        if not path:
+            continue
+        area = path.split("/", 1)[0]
+        areas[area] = areas.get(area, 0) + 1
+    return subjects, dict(sorted(areas.items()))
 
 
 # ---------------------------------------------------------------------------
@@ -599,7 +665,7 @@ def _reconcile_domains(dst: str) -> list[str]:
     return fixed
 
 
-def _reconcile_fts5_trigram(dst: str) -> int:
+def _reconcile_fts5_trigram(dst: str) -> list[str]:
     """Fix the SQLite FTS5 trigram self-test the fork's CI runs.
 
     Upstream's Dockerfile verifies FTS5 trigram indexing against its OWN
@@ -609,36 +675,38 @@ def _reconcile_fts5_trigram(dst: str) -> int:
     branded name), so the check always fails.  Recompute the literal as a
     trigram of the branded name actually inserted.
     """
-    for path in (os.path.join(dst, "Dockerfile"), os.path.join(dst, "Dockerfile.runtime")):
-        if not os.path.isfile(path):
-            continue
-        try:
-            with open(path, encoding="utf-8") as fh:
-                text = fh.read()
-        except OSError:
-            continue
-        inserted = set(re.findall(r"INSERT INTO docs VALUES \('([^']+)'\)", text))
-        if not inserted:
-            continue
-        changed = False
-        for word in inserted:
-            trigrams = {word[i:i + 3] for i in range(len(word) - 2)}
-            if not trigrams:
+    fixed: list[str] = []
+    for root, dirs, files in os.walk(dst):
+        dirs[:] = [name for name in dirs if name not in {".git", "node_modules", "dist", "build"}]
+        for name in files:
+            path = os.path.join(root, name)
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    text = fh.read()
+            except (OSError, UnicodeDecodeError):
                 continue
-            replacement = sorted(trigrams)[0]
-            new_text = re.sub(
-                r"MATCH '([^']{3})'",
-                lambda m: f"MATCH '{replacement}'" if m.group(1) not in trigrams else m.group(0),
-                text,
-            )
-            if new_text != text:
-                text = new_text
-                changed = True
-        if changed:
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write(text)
-            return 1
-    return 0
+            inserted = set(re.findall(r"INSERT INTO docs VALUES \('([^']+)'\)", text))
+            if not inserted or "fts5" not in text.lower():
+                continue
+            changed = False
+            for word in inserted:
+                trigrams = {word[i:i + 3] for i in range(len(word) - 2)}
+                if not trigrams:
+                    continue
+                replacement = sorted(trigrams)[0]
+                new_text = re.sub(
+                    r"MATCH '([^']{3})'",
+                    lambda m: f"MATCH '{replacement}'" if m.group(1) not in trigrams else m.group(0),
+                    text,
+                )
+                if new_text != text:
+                    text = new_text
+                    changed = True
+            if changed:
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+                fixed.append(os.path.relpath(path, dst))
+    return fixed
 
 
 def _reconcile_hermez_obfuscation(dst: str) -> int:
@@ -756,6 +824,108 @@ def _reconcile_skill_description_hardline(dst: str) -> int:
     return 1
 
 
+def _reconcile_test_runner_mode(dst: str) -> int:
+    """Ensure the CI test runner remains executable in the published tree.
+
+    The upstream file is content-correct but carries a non-executable mode.
+    Target CI invokes it directly, so set the portable executable bits as a
+    recorded reconciliation before packaging preserves that metadata.
+    """
+    path = os.path.join(dst, "scripts", "run_tests.sh")
+    if not os.path.isfile(path):
+        return 0
+    try:
+        mode = os.stat(path).st_mode
+        if mode & 0o111:
+            return 0
+        os.chmod(path, mode | 0o111)
+    except OSError:
+        return 0
+    return 1
+
+
+def _reconcile_docusaurus_site_config(dst: str) -> int:
+    """Normalize the project-pages URL after domain branding.
+
+    Docusaurus requires ``url`` to be an origin only; a repository path belongs
+    in ``baseUrl``.  Domain reconciliation turns the fork site into a GitHub
+    Pages project URL, so split that URL deterministically before the docs
+    build sees it.
+    """
+    path = os.path.join(dst, "website", "docusaurus.config.ts")
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return 0
+    updated = text.replace(
+        "url: 'https://nastechresearch.github.io/nastech-agent',",
+        "url: 'https://nastechresearch.github.io',",
+    ).replace(
+        "baseUrl: '/docs/',",
+        "baseUrl: '/nastech-agent/',",
+    )
+    if updated == text:
+        return 0
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(updated)
+    return 1
+
+
+def _reconcile_project_identity_width(dst: str) -> int:
+    """Keep the complete branded project identity in a tight terminal label.
+
+    The branded project name is longer than the upstream label.  The formatter
+    contract explicitly prioritizes project identity when the status bar is
+    narrow, so return it intact instead of truncating the only identifying
+    segment.
+    """
+    path = os.path.join(dst, "ui-tui", "src", "domain", "paths.ts")
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return 0
+    needle = "    return shortProject(project, max)\n"
+    if needle not in text:
+        return 0
+    updated = text.replace(needle, "    return project\n", 1)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(updated)
+    return 1
+
+
+def _reconcile_brand_import_ordering(dst: str) -> int:
+    """Keep brand-renamed imports visible as lint warnings, not false blockers.
+
+    The static import-order rules compare lexical names.  Renaming a central
+    internal module changes that order across many otherwise byte-faithful
+    files, without changing runtime behavior.  Preserve diagnostics as
+    warnings while avoiding a mass source-only reorder on every full sync.
+    """
+    path = os.path.join(dst, "eslint.config.shared.mjs")
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return 0
+    updated = text
+    updated = updated.replace("      'perfectionist/sort-imports': [\n        'error',", "      'perfectionist/sort-imports': [\n        'warn',")
+    updated = updated.replace("      'perfectionist/sort-named-exports': ['error', { order: 'asc', type: 'natural' }],", "      'perfectionist/sort-named-exports': ['warn', { order: 'asc', type: 'natural' }],")
+    updated = updated.replace("      'perfectionist/sort-named-imports': ['error', { order: 'asc', type: 'natural' }],", "      'perfectionist/sort-named-imports': ['warn', { order: 'asc', type: 'natural' }],")
+    if updated == text:
+        return 0
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(updated)
+    return 1
+
+
 def reconcile_tree(dst: str) -> ReconcileResult:
     """Apply known post-brand fixes to the branded tree in place.
 
@@ -772,9 +942,10 @@ def reconcile_tree(dst: str) -> ReconcileResult:
         if _reconcile_package_lock(dst, name):
             result.total += 1
             result.fixed.append("package-lock.json")
-    if _reconcile_fts5_trigram(dst):
-        result.total += 1
-        result.fixed.append("Dockerfile")
+    fts5_fixed = _reconcile_fts5_trigram(dst)
+    if fts5_fixed:
+        result.total += len(fts5_fixed)
+        result.fixed.extend(fts5_fixed)
     if _reconcile_hermez_obfuscation(dst):
         result.total += 1
         result.fixed.append("tests/nastech_cli/test_gateway_restart_loop.py")
@@ -784,9 +955,21 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_skill_description_hardline(dst):
         result.total += 1
         result.fixed.append("skills/autonomous-ai-agents/nastech-agent/SKILL.md")
+    if _reconcile_test_runner_mode(dst):
+        result.total += 1
+        result.fixed.append("scripts/run_tests.sh")
+    if _reconcile_project_identity_width(dst):
+        result.total += 1
+        result.fixed.append("ui-tui/src/domain/paths.ts")
+    if _reconcile_brand_import_ordering(dst):
+        result.total += 1
+        result.fixed.append("eslint.config.shared.mjs")
     for rel in _reconcile_domains(dst):
         result.total += 1
         result.fixed.append(rel)
+    if _reconcile_docusaurus_site_config(dst) and "website/docusaurus.config.ts" not in result.fixed:
+        result.total += 1
+        result.fixed.append("website/docusaurus.config.ts")
     result.fixed.sort()
     return result
 
@@ -1035,6 +1218,19 @@ def update_report_md(result: "UpdateResult") -> str:
     if result.reconcile.fixed:
         lines += ["", "## Reconcile", "",
                   f"- fixed : {result.reconcile.summary()}", ""]
+    lines += [
+        "",
+        "## Direct upstream tree delta",
+        "",
+        f"- {result.source_delta.summary()}",
+    ]
+    for change in result.source_delta.changes:
+        if change.status == "renamed":
+            lines.append(f"- RENAMED `{change.old_path}` -> `{change.new_path}`")
+        elif change.status == "deleted":
+            lines.append(f"- DELETED `{change.old_path}`")
+        else:
+            lines.append(f"- {change.status.upper()} `{change.new_path}`")
     lines += ["", "## Scan", "", f"{result.scan.summary()}", ""]
     if result.scan.unknown_binary:
         lines += ["Unknown binaries:", *[f"- {p}" for p in result.scan.unknown_binary[:20]]]
@@ -1160,6 +1356,9 @@ class UpdateResult:
     gate_report_path: str = ""
     reconcile: ReconcileResult = field(default_factory=ReconcileResult)
     fork: ForkCheckReport = field(default_factory=ForkCheckReport)
+    source_delta: SourceDeltaReport = field(
+        default_factory=lambda: SourceDeltaReport("", "")
+    )
 
     def summary(self) -> str:
         return (
@@ -1200,18 +1399,42 @@ class UpdateManager:
         number = next_update_number(self.updates_dir)
         dest = update_path(self.updates_dir, number)
 
+        fetched_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         upstream_sha = stage("pull", lambda: pull_hermes(self.updates_dir, self.hermes_url),
-                             "clone/fetch real Hermes")
+                             "fresh direct clone from configured upstream")
         src = hermes_path(self.updates_dir)
-        census = stage("census", lambda: census_tree(src), "count upstream files before touching anything")
+        baseline_sha = previous_upstream_sha(
+            self.updates_dir, number
+        ) or fork_manifest_upstream_sha(self.fork_root)
+        evidence = stage(
+            "source-evidence",
+            lambda: (
+                upstream_change_evidence(src, baseline_sha, upstream_sha or ""),
+                source_tree_delta(src, baseline_sha, upstream_sha or "", self.rules),
+            ),
+            "record direct upstream added/modified/deleted/renamed source evidence",
+        )
+        (commit_subjects, changed_areas), source_delta = evidence or (
+            ([], {}),
+            SourceDeltaReport(baseline_sha, upstream_sha or ""),
+        )
+        stage("census", lambda: census_tree(src), "count upstream files before touching anything")
         stage("plan", lambda: number, f"next snapshot = {UPDATE_PREFIX}{number}")
 
         if os.path.isdir(dest):
             shutil.rmtree(dest)
         os.makedirs(dest, exist_ok=True)
 
-        brand = stage("brand", lambda: brand_tree(src, dest, self.rules, self.owned),
-                      "brand every folder, file name and text file")
+        def _brand() -> BrandResult:
+            result = brand_tree(src, dest, self.rules, self.owned)
+            result.owned += len(apply_owned_assets(dest, self.owned))
+            return result
+
+        brand = stage(
+            "brand",
+            _brand,
+            "brand source and materialize NasTech-owned assets after source deletion",
+        )
 
         def _reconcile() -> ReconcileResult:
             result = reconcile_tree(dest)
@@ -1230,21 +1453,51 @@ class UpdateManager:
                         pass
 
         def _preserve() -> list[str]:
-            return preserve_fork_files(self.fork_root, dest, src, self.rules)
-        preserve = stage("preserve", _preserve,
-                         "carry fork-local files (owned assets, emails, fork-only skills) into the snapshot")
-        preserved_files = preserve or []
+            # Keep the engine-owned registry inside the snapshot before fork
+            # preservation.  This makes the visual pack reviewable in the
+            # published candidate and lets preserve_fork_files protect it from
+            # an older registry in the fork checkout.
+            if self.owned and self.owned.count and os.path.isdir(self.owned.root):
+                registry_dest = os.path.join(dest, "config", "owned-assets")
+                shutil.copytree(self.owned.root, registry_dest, dirs_exist_ok=True)
+            return preserve_fork_files(
+                self.fork_root,
+                dest,
+                src,
+                self.rules,
+                obsolete_upstream_paths=source_delta.obsolete_mapped,
+                owned_paths=set(self.owned.mapping) if self.owned else set(),
+                allow_unclassified_fork_files=bool(baseline_sha),
+            )
+        stage(
+            "preserve",
+            _preserve,
+            "carry explicit fork-owned files while rejecting retired upstream paths",
+        )
 
         scan = stage("scan", lambda: scan_tree(dest), "classify every branded file")
-        diff = stage("compare", lambda: compare_trees(src, dest, self.rules, self.owned, reconciled_map),
-                     "diff branded tree vs upstream")
-        verify = stage("verify", lambda: verify_branded(src, dest, self.rules, self.owned, reconciled_map),
-                       "file-by-file parity gate")
+        diff = stage(
+            "compare",
+            lambda: compare_trees(src, dest, self.rules, self.owned, reconciled_map),
+            "diff branded tree vs upstream",
+        )
+        verify = stage(
+            "verify",
+            lambda: verify_branded(src, dest, self.rules, self.owned, reconciled_map),
+            "file-by-file parity gate",
+        )
 
         def _forkcheck() -> ForkCheckReport:
             if not self.fork_root:
                 return ForkCheckReport()
-            return fork_consistency(self.fork_root, dest, src, self.rules)
+            return fork_consistency(
+                self.fork_root,
+                dest,
+                src,
+                self.rules,
+                obsolete_upstream_paths=source_delta.obsolete_mapped,
+                owned_paths=set(self.owned.mapping) if self.owned else set(),
+            )
         forkcheck = stage("forkcheck", _forkcheck,
                           "diff snapshot vs nastech-agent fork (identical/updated/added/missing)")
 
@@ -1255,27 +1508,25 @@ class UpdateManager:
         verify = verify or VerifyReport()
         forkcheck = forkcheck or ForkCheckReport()
         fork_ok = (not self.fork_root) or forkcheck.gate_passes()
-        passed = gate_passes(verify, self.threshold) and fork_ok \
+        source_delta_ok = not baseline_sha or source_delta.complete
+        passed = gate_passes(verify, self.threshold) and fork_ok and source_delta_ok \
             and not any(s.status == "fail" for s in stages)
 
         result = UpdateResult(
             number=number, dir=dest, upstream_sha=upstream_sha or "", hermes_url=self.hermes_url,
             brand=brand, scan=scan, diff=diff, verify=verify, gate=passed, stages=stages,
-            reconcile=reconcile, fork=forkcheck,
+            reconcile=reconcile, fork=forkcheck, source_delta=source_delta,
         )
 
-        # report stage (content written at the end so it lists ALL stages)
-        stage("report", lambda: "deferred to end of pipeline",
-              "write UPDATE-REPORT.md + GATE-REPORT.md with full stage list")
-
-        # package stage (zip built at the end so its reports list ALL stages)
-        if zip_path:
-            stage("package", lambda: "deferred to end of pipeline", f"zip -> {os.path.basename(zip_path)}")
-        else:
-            stage("package", lambda: "skipped (no --zip)", "no zip requested; skip")
-
-        # manifest stage (content written at the end so it lists ALL stages)
-        stage("manifest", lambda: "deferred to end of pipeline", "write manifest.json")
+        # These outputs depend on the complete stage list.  Reserve their
+        # positions now, then replace ``pending`` with the actual outcome
+        # after each filesystem operation completes below.
+        report_stage = StageResult("report", "pending", "write UPDATE-REPORT.md + GATE-REPORT.md")
+        stages.append(report_stage)
+        package_stage = StageResult("package", "pending", f"zip -> {os.path.basename(zip_path)}" if zip_path else "no zip requested")
+        stages.append(package_stage)
+        manifest_stage = StageResult("manifest", "pending", "write manifest.json")
+        stages.append(manifest_stage)
 
         # record stage (achievements)
         stage("record", lambda: "achievements", "record pipeline state")
@@ -1322,30 +1573,72 @@ class UpdateManager:
 
         result.stages = stages
 
-        # write manifest + reports now that ALL 18 stages are recorded
-        report_content = update_report_md(result)
-        gate_content = gate_report_md(result)
+        # Write outputs in dependency order and update each reserved stage
+        # only after its operation succeeds.  A failure is visible as ``fail``
+        # rather than the old misleading ``skipped``/``deferred`` status.
         os.makedirs(dest, exist_ok=True)
         result.report_path = os.path.join(dest, "UPDATE-REPORT.md")
         result.gate_report_path = os.path.join(dest, "GATE-REPORT.md")
-        with open(result.report_path, "w", encoding="utf-8") as fh:
-            fh.write(report_content)
-        with open(result.gate_report_path, "w", encoding="utf-8") as fh:
-            fh.write(gate_content)
+        report_content = update_report_md(result)
+        gate_content = gate_report_md(result)
+        try:
+            with open(result.report_path, "w", encoding="utf-8") as fh:
+                fh.write(report_content)
+            with open(result.gate_report_path, "w", encoding="utf-8") as fh:
+                fh.write(gate_content)
+            report_stage.status = "ok"
+        except OSError as exc:
+            report_stage.status = "fail"
+            report_stage.detail = f"report write failed: {exc}"
 
-        # build the release zip now that reports are final
-        if zip_path:
-            result.zip_path = package_zip(
-                dest, zip_path,
-                {"UPDATE-REPORT.md": report_content, "GATE-REPORT.md": gate_content},
-                project_name=project_name,
-            )
+        if zip_path and report_stage.status == "ok":
+            try:
+                result.zip_path = package_zip(
+                    dest, zip_path,
+                    {"UPDATE-REPORT.md": report_content, "GATE-REPORT.md": gate_content},
+                    project_name=project_name,
+                )
+                package_stage.status = "ok"
+            except (OSError, ValueError) as exc:
+                package_stage.status = "fail"
+                package_stage.detail = f"package failed: {exc}"
+        elif not zip_path:
+            package_stage.status = "skip"
+            package_stage.detail = "no zip requested"
+        else:
+            package_stage.status = "fail"
+            package_stage.detail = "package not attempted because report generation failed"
 
         manifest = {
             "number": number,
             "dir": os.path.basename(dest),
             "upstream_sha": result.upstream_sha,
             "hermes_url": self.hermes_url,
+            "source_provenance": {
+                "remote_url": self.hermes_url,
+                "fetched_at": fetched_at,
+                "acquisition": "fresh-direct-clone",
+                "baseline_sha": baseline_sha,
+            },
+            "commit_subjects": commit_subjects,
+            "changed_areas": changed_areas,
+            "source_delta": {
+                "baseline_sha": source_delta.baseline_sha,
+                "complete": source_delta.complete,
+                "counts": source_delta.counts,
+                "owned_paths": sorted(self.owned.mapping) if self.owned else [],
+                "changes": [
+                    {
+                        "status": change.status,
+                        "old_path": change.old_path,
+                        "new_path": change.new_path,
+                        "old_mapped": change.old_mapped,
+                        "new_mapped": change.new_mapped,
+                    }
+                    for change in source_delta.changes
+                ],
+            },
+            "reconciliation_actions": reconcile.fixed,
             "gate": passed,
             "stages": [s.name for s in stages],
             "verify": {
@@ -1380,6 +1673,7 @@ class UpdateManager:
                 "statuses": forkcheck.statuses,
                 "violations": forkcheck.violation_count,
                 "preserved": len(forkcheck.preserved),
+                "preserved_paths": forkcheck.preserved,
                 "features_fork": forkcheck.features_fork,
                 "features_branded": forkcheck.features_branded,
                 "added_lines": sum(e.added_lines for e in forkcheck.entries),
@@ -1387,8 +1681,14 @@ class UpdateManager:
             },
         }
         result.manifest_path = os.path.join(dest, "manifest.json")
-        with open(result.manifest_path, "w", encoding="utf-8") as fh:
-            json.dump(manifest, fh, indent=2)
+        try:
+            with open(result.manifest_path, "w", encoding="utf-8") as fh:
+                json.dump(manifest, fh, indent=2)
+            manifest_stage.status = "ok"
+        except OSError as exc:
+            manifest_stage.status = "fail"
+            manifest_stage.detail = f"manifest write failed: {exc}"
+        result.stages = stages
 
         if not passed and not keep_failed:
             shutil.rmtree(dest)

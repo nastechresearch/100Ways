@@ -1,6 +1,6 @@
-name: stage-update-pr
+name: "#344 — Push PR to NasTech"
 
-# Stage 6: when the pipeline passes, push the branded tree to a test branch
+# Final step #344: after every verification stage passes, push the branded tree to a test branch
 # in the nastech-agent FORK and open/update a PR against its main.  The fork
 # runs its own full CI (Python slices, JS checks, E2E, CodeQL) on that PR, so
 # a green result proves the freshly-branded Hermes tree is sound enough to
@@ -31,6 +31,10 @@ on:
         type: string
         required: false
         default: "PASS"
+    secrets:
+      NAS_TECH_AGENT_TOKEN:
+        description: Cross-repository PR token, scoped only to nastech-agent
+        required: false
 
 permissions:
   contents: read
@@ -59,15 +63,52 @@ jobs:
           mkdir -p tree
           cd tree
           python3 - <<'EOF'
+          import os
           import zipfile
           with zipfile.ZipFile("../artifact/nastech-agent-update.zip") as zf:
               zf.extractall(".")
+              for info in zf.infolist():
+                  mode = (info.external_attr >> 16) & 0o777
+                  path = os.path.abspath(info.filename)
+                  if mode and os.path.isfile(path):
+                      os.chmod(path, mode)
               top = sorted(set(n.split("/", 1)[0] for n in zf.namelist()))
           print("extracted:", top)
           EOF
-          # tree/ = nastech-agent/ + UPDATE-REPORT.md + GATE-REPORT.md (zip root)
+          # tree/ = nastech-agent/ + verification reports + professional summary (zip root)
+
+      # Pull requests from forks do not receive repository secrets.  The
+      # cross-repository PAT is therefore unavailable (or intentionally
+      # invalid) in this validation context.  Keep the CI stage green and
+      # reserve the write operation for trusted push, schedule, and manual
+      # runs where the secret is available.
+      - name: Skip cross-repository update for fork pull requests
+        if: github.event_name == 'pull_request'
+        run: echo "Skipping cross-repository update for fork pull request; repository secrets are unavailable."
+
+      - name: Verify gate receipt and write #344 authorization
+        if: github.event_name != 'pull_request'
+        env:
+          UPSTREAM_SHA: ${{ inputs.upstream_sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PYEOF'
+          import os
+          from hundredways.receipts import write_publication_authorization_receipt
+
+          write_publication_authorization_receipt(
+              "tree/PUBLICATION-AUTHORIZATION-RECEIPT.json",
+              gate_receipt_path="artifact/gate_receipt.json",
+              artifact_path="artifact/nastech-agent-update.zip",
+              upstream_sha=os.environ["UPSTREAM_SHA"],
+              candidate_branch="100WAYS",
+              target_repository="nastechresearch/nastech-agent",
+              target_base="main",
+          )
+          PYEOF
 
       - name: Commit branded tree to fork test branch
+        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.NAS_TECH_AGENT_TOKEN }}
         run: |
@@ -98,6 +139,8 @@ jobs:
           cp -a tree/nastech-agent/. .
           mv tree/UPDATE-REPORT.md reports/UPDATE-REPORT.md
           mv tree/GATE-REPORT.md reports/GATE-REPORT.md
+          mv tree/SYNC-SUMMARY.md reports/SYNC-SUMMARY.md
+          mv tree/PUBLICATION-AUTHORIZATION-RECEIPT.json reports/PUBLICATION-AUTHORIZATION-RECEIPT.json
           rm -rf tree artifact
 
           # force-add beats the nastech-*/* gitignore pattern; -A captures
@@ -112,12 +155,12 @@ jobs:
 
           # open or update the PR test -> main on the fork
           PR_TITLE="Update ${SHA:+(${SHA:0:8})}"
-          BODY="Pipeline gate: PASS. Auto-generated from the 100Ways release pipeline. Runs the fork's full CI against the freshly-branded Hermes tree."
+          BODY_FILE="reports/SYNC-SUMMARY.md"
           PR_URL=$(gh pr list --repo "$FORK" --head "$TEST" --base "$BASE" --json url --jq '.[0].url' 2>/dev/null) || true
           if [ -n "$PR_URL" ]; then
-            gh pr edit "$PR_URL" --title "$PR_TITLE" --body "$BODY"
+            gh pr edit "$PR_URL" --title "$PR_TITLE" --body-file "$BODY_FILE"
           else
             gh pr create --repo "$FORK" --base "$BASE" --head "$TEST" \
-              --title "$PR_TITLE" --body "$BODY"
+              --title "$PR_TITLE" --body-file "$BODY_FILE"
           fi
           gh pr view "$FORK#$TEST" --json url --jq .url || true
