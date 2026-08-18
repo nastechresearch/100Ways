@@ -237,10 +237,10 @@ LOCKED_EXTENSIONS = (
 
 
 # ---------------------------------------------------------------------------
-# Immutable data files.  No inherited contributor email record is immutable:
-# email filenames and content are branded like every other path so a strict
-# candidate scan cannot retain upstream brand tokens.  Contributor names are
-# identity metadata and are never generated from this email-path mechanism.
+# Whole-tree transformation policy.  No inherited contributor email record is
+# immutable: email filenames and content are branded like every other path so a
+# strict candidate scan cannot retain upstream brand tokens.  Contributor names
+# alone are identity metadata and may remain byte-stable.
 # ---------------------------------------------------------------------------
 
 IMMUTABLE_PATH_SUBSTRINGS: tuple[str, ...] = ()
@@ -255,6 +255,11 @@ def is_immutable_path(path: str) -> bool:
 def is_contributor_email_path(path: str) -> bool:
     """Identify contributor email records for narrow case-collision handling only."""
     return path.lower().startswith("contributors/emails/")
+
+
+def is_contributor_name_path(path: str) -> bool:
+    """Identify the sole identity-metadata tree allowed to remain byte-stable."""
+    return path.lower().startswith("contributors/names/")
 
 
 def is_locked_path(path: str) -> bool:

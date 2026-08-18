@@ -39,6 +39,14 @@ def _hermes_repo(tmp_path):
     cli.mkdir()
     (cli / "hermes_runner.py").write_text("def run_hermes():\n    return 'hermes-agent'\n")
     (hermes / "README.md").write_text("# Hermes Agent\nPowered by Nous Research.\n")
+    reports = hermes / "reports"
+    reports.mkdir()
+    (reports / "SYNC-SUMMARY.md").write_text("# Hermes Update\n\n> Powered by NousResearch\n")
+    scripts = hermes / "scripts"
+    scripts.mkdir()
+    runner = scripts / "run_tests.sh"
+    runner.write_text("#!/bin/sh\nset -eu\nexit 0\n")
+    runner.chmod(0o755)
     subprocess.run(["git", "-C", str(hermes), "add", "-A"], check=True)
     subprocess.run(["git", "-C", str(hermes), "commit", "-q", "-m", "fake hermes"], check=True)
     return str(hermes)

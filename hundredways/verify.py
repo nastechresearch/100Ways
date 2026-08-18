@@ -18,7 +18,7 @@ import difflib
 import subprocess
 from dataclasses import dataclass, field
 
-from .rules import BrandingRules, is_locked_path
+from .rules import BrandingRules, is_contributor_name_path, is_locked_path
 
 
 @dataclass
@@ -166,8 +166,12 @@ def verify_rebrand(
 
     for path in paths:
         report.total += 1
-        mapped = rules.transform_path(path)
-        locked = is_locked_path(path) or is_locked_path(mapped)
+        mapped = path if is_contributor_name_path(path) else rules.transform_path(path)
+        locked = (
+            is_contributor_name_path(path)
+            or is_locked_path(path)
+            or is_locked_path(mapped)
+        )
 
         base_blob = reader.read(base_commit, path)
         if mapped in rebrand_files:

@@ -1,6 +1,6 @@
 """Ordered update pipeline: pull real Hermes, brand the whole tree, snapshot.
 
-The ``update`` command makes the sync engine real.  It runs as **19 ordered
+The ``update`` command makes the sync engine real.  It runs as **20 ordered
 stages** so every step is named, recorded, and reported:
 
     Updates-Commits/
@@ -42,8 +42,14 @@ from .forkcheck import (
     preserve_fork_files,
     source_tree_delta,
 )
-from .rules import BrandingRules, is_immutable_path, is_locked_path
+from .rules import (
+    BrandingRules,
+    is_contributor_name_path,
+    is_immutable_path,
+    is_locked_path,
+)
 from .scanner import classify_path, is_text
+from .upstream_preflight import UpstreamPreflightReport, run_upstream_preflight
 from .verify import FileResult, VerifyReport
 
 DEFAULT_HERMES_URL = "https://github.com/NousResearch/hermes-agent.git"
@@ -55,16 +61,35 @@ def source_fingerprint(remote: str) -> str:
 HERMES_DIR = "hermes-agent"
 UPDATE_PREFIX = "Nastech-Update#"
 
-# The 19 ordered pipeline stages.  `preserve` copies fork-local files (owned
+# The 20 ordered pipeline stages.  `upstream-preflight` proves the freshly
+# cloned direct source passes its canonical suite before branding can begin.
+# `preserve` copies fork-local files (owned
 # assets, contributor emails, fork-only skills) into the snapshot so the PR
 # never deletes them; `forkcheck` diffs the snapshot against the real
 # nastech-agent fork to prove unchanged files are byte-identical (clean git
 # commits, no whole-tree churn) and added lines are brand-clean.  `release`
 # is where GitHub Actions uploads the zip; locally it is recorded as skipped.
 STAGES = [
-    "pull", "source-evidence", "census", "plan", "brand", "reconcile", "preserve", "scan", "compare",
-    "verify", "forkcheck", "report", "package", "manifest", "record", "notify",
-    "gate", "summary", "release",
+    "pull",
+    "upstream-preflight",
+    "source-evidence",
+    "census",
+    "plan",
+    "brand",
+    "reconcile",
+    "preserve",
+    "scan",
+    "compare",
+    "verify",
+    "forkcheck",
+    "report",
+    "package",
+    "manifest",
+    "record",
+    "notify",
+    "gate",
+    "summary",
+    "release",
 ]
 
 
@@ -233,9 +258,18 @@ class Census:
 
 
 def census_tree(root: str) -> Census:
+    """Count every source file while pruning only engine directories at the root."""
     census = Census()
+    root_abs = os.path.abspath(root)
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in (".git", HERMES_DIR) and not d.startswith(UPDATE_PREFIX)]
+        if os.path.abspath(dirpath) == root_abs:
+            dirnames[:] = [
+                name
+                for name in dirnames
+                if name not in (".git", HERMES_DIR) and not name.startswith(UPDATE_PREFIX)
+            ]
+        else:
+            dirnames[:] = [name for name in dirnames if name != ".git"]
         census.files += len(filenames)
         census.dirs += len(dirnames)
     return census
@@ -290,8 +324,8 @@ def brand_tree(src: str, dst: str, rules: BrandingRules | None = None,
     for rel in _walk_files(src):
         result.total += 1
         src_path = os.path.join(src, rel)
-        if is_immutable_path(rel):
-            # real data: copy byte-for-byte, name untouched
+        if is_immutable_path(rel) or is_contributor_name_path(rel):
+            # Explicit identity metadata only: copy byte-for-byte, name untouched.
             dst_path = os.path.join(dst, rel)
             os.makedirs(os.path.dirname(dst_path), exist_ok=True)
             shutil.copyfile(src_path, dst_path)
@@ -324,7 +358,7 @@ def brand_tree(src: str, dst: str, rules: BrandingRules | None = None,
             result.rewritten += 1
             text = data.decode("utf-8")
             with open(dst_path, "w", encoding="utf-8") as fh:
-                fh.write(rules.transform_text(text))
+                fh.write(_strict_text_transform(rel, text, rules))
         else:
             result.binary_copied += 1
             with open(dst_path, "wb") as fh:
@@ -338,20 +372,60 @@ _STRICT_DEPENDENCY_EXCEPTIONS = {
     "website/package-lock.json": ("@nous-research/image-size",),
     "website/.npmrc": ("@nous-research/image-size",),
 }
+_REQUIRED_SUMMARY_PATH = "reports/SYNC-SUMMARY.md"
+_EXACT_SUMMARY_ATTRIBUTION = "Powered by NousResearch"
 
 
 def _strict_text_transform(relative: str, text: str, rules: BrandingRules) -> str:
-    """Transform residual brand strings while retaining only exact dependency names."""
+    """Transform all residual brand strings except exact accepted records."""
     protected: dict[str, str] = {}
     value = text
     for index, dependency in enumerate(_STRICT_DEPENDENCY_EXCEPTIONS.get(relative, ())):
         marker = f"__100WAYS_APPROVED_DEPENDENCY_{index}__"
         value = value.replace(dependency, marker)
         protected[marker] = dependency
+    if relative == _REQUIRED_SUMMARY_PATH:
+        marker = "__100WAYS_REQUIRED_SUMMARY_ATTRIBUTION__"
+        value = value.replace(_EXACT_SUMMARY_ATTRIBUTION, marker)
+        protected[marker] = _EXACT_SUMMARY_ATTRIBUTION
     value = rules.transform_text(value)
-    for marker, dependency in protected.items():
-        value = value.replace(marker, dependency)
+    for marker, accepted in protected.items():
+        value = value.replace(marker, accepted)
     return value
+
+
+def ensure_required_summary_attribution(dst: str) -> list[str]:
+    """Normalize the attribution when a generated update summary is present."""
+    path = os.path.join(dst, *_REQUIRED_SUMMARY_PATH.split("/"))
+    if not os.path.isfile(path):
+        return []
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read()
+    if _EXACT_SUMMARY_ATTRIBUTION in text:
+        return []
+    lines = text.splitlines()
+    replacement = f"> {_EXACT_SUMMARY_ATTRIBUTION}"
+    for index, line in enumerate(lines):
+        if line.startswith("> Powered by "):
+            lines[index] = replacement
+            break
+    else:
+        lines.insert(2 if len(lines) >= 2 else len(lines), replacement)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+    return [_REQUIRED_SUMMARY_PATH]
+
+
+def require_update_summary_attribution(dst: str) -> list[str]:
+    """Fail closed unless a real update candidate carries the exact attribution."""
+    path = os.path.join(dst, *_REQUIRED_SUMMARY_PATH.split("/"))
+    if not os.path.isfile(path):
+        raise ValueError(f"required update summary is missing: {_REQUIRED_SUMMARY_PATH}")
+    changed = ensure_required_summary_attribution(dst)
+    with open(path, encoding="utf-8") as handle:
+        if _EXACT_SUMMARY_ATTRIBUTION not in handle.read():
+            raise ValueError(f"required attribution is missing: {_EXACT_SUMMARY_ATTRIBUTION}")
+    return changed
 
 
 def enforce_strict_branding(dst: str, rules: BrandingRules) -> list[str]:
@@ -364,7 +438,7 @@ def enforce_strict_branding(dst: str, rules: BrandingRules) -> list[str]:
     """
     changed: list[str] = []
     for relative in _walk_files(dst):
-        if relative.startswith("contributors/names/"):
+        if is_contributor_name_path(relative):
             continue
         path = os.path.join(dst, relative)
         try:
@@ -379,6 +453,7 @@ def enforce_strict_branding(dst: str, rules: BrandingRules) -> list[str]:
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write(updated)
             changed.append(relative)
+    changed.extend(ensure_required_summary_attribution(dst))
     entries: list[str] = []
     directories = sorted(
         (
@@ -389,7 +464,7 @@ def enforce_strict_branding(dst: str, rules: BrandingRules) -> list[str]:
         key=lambda value: (value.count("/"), value),
     )
     for relative in directories:
-        if relative.startswith("contributors/names/"):
+        if is_contributor_name_path(relative):
             continue
         original = os.path.join(dst, *relative.split("/"))
         if not os.path.isdir(original):
@@ -404,7 +479,7 @@ def enforce_strict_branding(dst: str, rules: BrandingRules) -> list[str]:
         os.replace(original, destination)
         entries.append(f"{relative} -> {mapped}")
     for relative in list(_walk_files(dst)):
-        if relative.startswith("contributors/names/"):
+        if is_contributor_name_path(relative):
             continue
         original = os.path.join(dst, *relative.split("/"))
         mapped = rules.transform_path(relative)
@@ -1158,7 +1233,7 @@ def compare_trees(src: str, dst: str, rules: BrandingRules | None = None,
     rules = rules or BrandingRules()
     report = DiffReport()
     for rel in _walk_files(src):
-        if is_immutable_path(rel):
+        if is_immutable_path(rel) or is_contributor_name_path(rel):
             report.entries.append(DiffEntry(rel, rel, "locked"))
             continue
         mapped = rules.transform_path(rel)
@@ -1185,7 +1260,7 @@ def compare_trees(src: str, dst: str, rules: BrandingRules | None = None,
             expected = reconciled[mapped]
             report.entries.append(DiffEntry(rel, mapped, "reconciled"))
             continue
-        expected = rules.transform_text(data.decode("utf-8")).encode("utf-8")
+        expected = _strict_text_transform(rel, data.decode("utf-8"), rules).encode("utf-8")
         if actual == expected:
             report.entries.append(DiffEntry(rel, mapped, "renamed" if mapped != rel else "identical"))
             continue
@@ -1210,8 +1285,14 @@ def verify_branded(src: str, dst: str, rules: BrandingRules | None = None,
     report = VerifyReport()
     for rel in _walk_files(src):
         report.total += 1
-        mapped = rel if is_immutable_path(rel) else rules.transform_path(rel)
-        locked = is_locked_path(rel) or is_locked_path(mapped) or is_immutable_path(rel)
+        identity_metadata = is_contributor_name_path(rel)
+        mapped = rel if is_immutable_path(rel) or identity_metadata else rules.transform_path(rel)
+        locked = (
+            is_locked_path(rel)
+            or is_locked_path(mapped)
+            or is_immutable_path(rel)
+            or identity_metadata
+        )
         src_path = os.path.join(src, rel)
         dst_path = os.path.join(dst, mapped)
         exists = os.path.isfile(dst_path)
@@ -1268,7 +1349,7 @@ def verify_branded(src: str, dst: str, rules: BrandingRules | None = None,
                 report.failed.append(res)
             report.results.append(res)
             continue
-        expected = rules.transform_text(data.decode("utf-8")).encode("utf-8")
+        expected = _strict_text_transform(rel, data.decode("utf-8"), rules).encode("utf-8")
         identical = actual == expected
         res = FileResult(path=rel, mapped_path=mapped, pass_=identical, locked=False)
         if identical:
@@ -1293,6 +1374,11 @@ def gate_passes(report: VerifyReport, threshold: float = 0.99) -> bool:
 
 def update_report_md(result: "UpdateResult") -> str:
     """The pipeline report: what stages ran and what each one did."""
+    preflight = result.upstream_preflight
+    preflight_runner = preflight.runner if preflight else "not recorded"
+    preflight_passed = bool(preflight and preflight.passed)
+    preflight_files = preflight.source_files if preflight else 0
+    coverage_passed = bool(preflight and preflight.source_files == result.verify.total)
     lines = [
         f"# Nastech Update Report #{result.number}",
         "",
@@ -1300,6 +1386,16 @@ def update_report_md(result: "UpdateResult") -> str:
         f"- source       : direct-upstream fingerprint `{source_fingerprint(result.hermes_url)[:16]}`",
         f"- snapshot     : `{os.path.basename(result.dir)}`",
         f"- gate         : **{'PASS' if result.gate else 'FAIL'}**",
+        "",
+        "## Direct upstream preflight",
+        "",
+        f"- canonical test runner: `{preflight_runner}`",
+        f"- test result: **{'PASS' if preflight_passed else 'FAIL'}**",
+        f"- tested source files: {preflight_files}",
+        f"- final parity files: {result.verify.total}",
+        "- coverage binding: **PASS**"
+        if coverage_passed
+        else "- coverage binding: **FAIL**",
         "",
         "## Stages",
         "",
@@ -1468,6 +1564,7 @@ class UpdateResult:
     source_delta: SourceDeltaReport = field(
         default_factory=lambda: SourceDeltaReport("", "")
     )
+    upstream_preflight: UpstreamPreflightReport | None = None
 
     def summary(self) -> str:
         return (
@@ -1512,6 +1609,17 @@ class UpdateManager:
         upstream_sha = stage("pull", lambda: pull_hermes(self.updates_dir, self.hermes_url),
                              "fresh direct clone from configured upstream")
         src = hermes_path(self.updates_dir)
+        upstream_preflight = stage(
+            "upstream-preflight",
+            lambda: run_upstream_preflight(src, expected_sha=upstream_sha or ""),
+            "run direct upstream canonical test suite before any branding",
+        )
+        if upstream_preflight is None:
+            detail = stages[-1].detail if stages else "upstream preflight failed"
+            raise RuntimeError(
+                "upstream preflight failed; branding and candidate creation are prohibited: "
+                f"{detail}"
+            )
         baseline_sha = previous_upstream_sha(
             self.updates_dir, number
         ) or fork_manifest_upstream_sha(self.fork_root)
@@ -1533,7 +1641,11 @@ class UpdateManager:
             mapped_area = self.rules.transform_path(area)
             branded_areas[mapped_area] = branded_areas.get(mapped_area, 0) + count
         changed_areas = branded_areas
-        stage("census", lambda: census_tree(src), "count upstream files before touching anything")
+        source_census = stage(
+            "census",
+            lambda: census_tree(src),
+            "count upstream files before touching anything",
+        ) or Census()
         stage("plan", lambda: number, f"next snapshot = {UPDATE_PREFIX}{number}")
 
         if os.path.isdir(dest):
@@ -1584,7 +1696,11 @@ class UpdateManager:
                 owned_paths=set(self.owned.mapping) if self.owned else set(),
                 allow_unclassified_fork_files=bool(baseline_sha),
             )
-            return preserved + enforce_strict_branding(dest, self.rules)
+            return (
+                preserved
+                + enforce_strict_branding(dest, self.rules)
+                + require_update_summary_attribution(dest)
+            )
         strict_changed = stage(
             "preserve",
             _preserve,
@@ -1628,13 +1744,15 @@ class UpdateManager:
         forkcheck = forkcheck or ForkCheckReport()
         fork_ok = (not self.fork_root) or forkcheck.gate_passes()
         source_delta_ok = not baseline_sha or source_delta.complete
-        passed = gate_passes(verify, self.threshold) and fork_ok and source_delta_ok \
+        coverage_ok = verify.total == upstream_preflight.source_files == source_census.files
+        passed = gate_passes(verify, self.threshold) and fork_ok and source_delta_ok and coverage_ok \
             and not any(s.status == "fail" for s in stages)
 
         result = UpdateResult(
             number=number, dir=dest, upstream_sha=upstream_sha or "", hermes_url=self.hermes_url,
             brand=brand, scan=scan, diff=diff, verify=verify, gate=passed, stages=stages,
             reconcile=reconcile, fork=forkcheck, source_delta=source_delta,
+            upstream_preflight=upstream_preflight,
         )
 
         # These outputs depend on the complete stage list.  Reserve their
@@ -1738,6 +1856,8 @@ class UpdateManager:
                 "fetched_at": fetched_at,
                 "acquisition": "fresh-direct-clone",
                 "baseline_sha": baseline_sha,
+                "upstream_preflight": upstream_preflight.to_dict(),
+                "source_census": {"files": source_census.files, "dirs": source_census.dirs},
             },
             "commit_subjects": commit_subjects,
             "changed_areas": changed_areas,
