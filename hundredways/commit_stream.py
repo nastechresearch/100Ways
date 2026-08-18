@@ -15,6 +15,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Sequence
 
+from .remediation import classify_failure
+
 DEFAULT_THRESHOLD = 50
 
 
@@ -29,6 +31,7 @@ class CommitStreamDecision:
     status: str
     trigger_sync: bool
     subjects: list[str]
+    remediation_action: str = "none"
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -105,6 +108,34 @@ def _git(repo: Path, *args: str, check: bool = True) -> str:
     return completed.stdout.strip()
 
 
+def _is_shallow_repository(repo: Path) -> bool:
+    """Return whether the direct source clone lacks full ancestry evidence."""
+    return _git(repo, "rev-parse", "--is-shallow-repository") == "true"
+
+
+def _complete_shallow_history(repo: Path) -> None:
+    """Fetch only the existing direct origin history after a shallow proof failure."""
+    completed = subprocess.run(
+        [
+            "git", "-C", str(repo), "-c", "http.version=HTTP/1.1",
+            "-c", "protocol.version=2", "fetch", "--no-tags", "--unshallow", "origin",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise RuntimeError(f"could not complete direct upstream history: {detail}")
+
+
+def _is_ancestor(repo: Path, baseline: str, upstream_sha: str) -> bool:
+    return subprocess.run(
+        ["git", "-C", str(repo), "merge-base", "--is-ancestor", baseline, upstream_sha],
+        capture_output=True,
+        text=True,
+    ).returncode == 0
+
+
 def load_baseline_sha(nastech_repo: str | Path) -> str:
     """Return the upstream SHA recorded by the last merged NasTech snapshot."""
     manifest = Path(nastech_repo) / "manifest.json"
@@ -138,12 +169,21 @@ def inspect_commit_stream(
     # audit context only; it must never hide a 50+ commit backlog from main.
     baseline = merged_baseline
     upstream_sha = _git(upstream, "rev-parse", "HEAD")
-    ancestry = subprocess.run(
-        ["git", "-C", str(upstream), "merge-base", "--is-ancestor", baseline, upstream_sha],
-        capture_output=True,
-        text=True,
-    )
-    if ancestry.returncode != 0:
+    remediation_action = "none"
+    if not _is_ancestor(upstream, baseline, upstream_sha):
+        evidence = (
+            f"effective NasTech baseline {baseline} is not an ancestor of upstream {upstream_sha}; "
+            "manual reconciliation is required before threshold evaluation"
+        )
+        remediation = classify_failure(
+            evidence,
+            source_is_shallow=_is_shallow_repository(upstream),
+        )
+        if remediation.action == "complete_shallow_history":
+            _complete_shallow_history(upstream)
+            remediation_action = remediation.action
+            upstream_sha = _git(upstream, "rev-parse", "HEAD")
+    if not _is_ancestor(upstream, baseline, upstream_sha):
         raise RuntimeError(
             f"effective NasTech baseline {baseline} is not an ancestor of upstream {upstream_sha}; "
             "manual reconciliation is required before threshold evaluation"
@@ -174,6 +214,7 @@ def inspect_commit_stream(
         status=status,
         trigger_sync=count >= threshold,
         subjects=subjects,
+        remediation_action=remediation_action,
     )
 
 

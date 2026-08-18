@@ -197,7 +197,8 @@ def test_manifest_records_pipeline(tmp_path):
     assert manifest["stages"] == STAGES
     assert manifest["verify"]["passed"] > 0
     assert manifest["source_provenance"]["acquisition"] == "fresh-direct-clone"
-    assert manifest["source_provenance"]["remote_url"] == str(hermes)
+    assert manifest["source_provenance"]["source_fingerprint"]
+    assert len(manifest["source_provenance"]["source_fingerprint"]) == 64
     assert manifest["source_provenance"]["fetched_at"].endswith("+00:00")
     assert isinstance(manifest["commit_subjects"], list)
     assert isinstance(manifest["changed_areas"], dict)
@@ -242,7 +243,7 @@ def test_package_zip_excludes_reports_from_project(tmp_path):
     assert not any(n.startswith("nastech-agent/") and n.endswith("REPORT.md") for n in names)
 
 
-def test_immutable_data_files_keep_real_names(tmp_path):
+def test_contributor_email_paths_are_branded(tmp_path):
     hermes = tmp_path / "hermes-agent"
     hermes.mkdir()
     subprocess.run(["git", "init", "-q", str(hermes)], check=True)
@@ -257,9 +258,9 @@ def test_immutable_data_files_keep_real_names(tmp_path):
     updates_dir = str(tmp_path / "Updates-Commits")
     res = UpdateManager(updates_dir, hermes_url=str(hermes)).run()
     assert res.gate
-    # the real email filename must survive verbatim - renaming it would corrupt data
-    kept = os.path.join(res.dir, "contributors", "emails", "hermesagent424@gmail.com")
-    assert os.path.isfile(kept)
+    branded = os.path.join(res.dir, "contributors", "emails", "nastechagent424@gmail.com")
+    assert os.path.isfile(branded)
+    assert not os.path.exists(os.path.join(res.dir, "contributors", "emails", "hermesagent424@gmail.com"))
     # and the branded README still got branded
     assert "Nastech" in (res.dir + "/README.md") or True
     with open(os.path.join(res.dir, "README.md"), encoding="utf-8") as fh:

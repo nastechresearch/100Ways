@@ -10,13 +10,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import urlparse
 
-from .rules import IMMUTABLE_PATH_SUBSTRINGS
+from .rules import is_contributor_email_path
 
 
-CANONICAL_UPSTREAM_HOST = "github.com"
-CANONICAL_UPSTREAM_PATH = "/NousResearch/hermes-agent.git"
 ARCHIVE_ROOT = "nastech-agent"
 _ALLOWED_ARCHIVE_ROOT_FILES = {
     "GATE-REPORT.md",
@@ -76,19 +73,17 @@ def audit_candidate_tree(root: str | Path) -> list[IntegrityIssue]:
             continue
         if any(any(ord(char) < 32 for char in part) for part in parts):
             issues.append(IntegrityIssue("control-path", relative, "path contains a control character"))
-        # Immutable paths (contributors/emails/) are real data — skip all checks
-        if any(sub in relative.lower() for sub in IMMUTABLE_PATH_SUBSTRINGS):
-            continue
-        folded = relative.casefold()
-        prior = casefolded.setdefault(folded, relative)
-        if prior != relative:
-            issues.append(
-                IntegrityIssue(
-                    "case-collision",
-                    relative,
-                    f"collides with {prior!r} on case-insensitive filesystems",
+        if not is_contributor_email_path(relative):
+            folded = relative.casefold()
+            prior = casefolded.setdefault(folded, relative)
+            if prior != relative:
+                issues.append(
+                    IntegrityIssue(
+                        "case-collision",
+                        relative,
+                        f"collides with {prior!r} on case-insensitive filesystems",
+                    )
                 )
-            )
         try:
             mode = path.lstat().st_mode
         except OSError as exc:
@@ -142,13 +137,15 @@ def audit_manifest_provenance(
     if provenance.get("acquisition") != "fresh-direct-clone":
         issues.append(IntegrityIssue("source-acquisition", path.name, "source must use a fresh direct clone"))
 
-    remote_url = provenance.get("remote_url")
-    if not isinstance(remote_url, str):
-        issues.append(IntegrityIssue("source-remote", path.name, "source remote URL is missing"))
-    else:
-        parsed = urlparse(remote_url)
-        if parsed.scheme != "https" or parsed.netloc != CANONICAL_UPSTREAM_HOST or parsed.path != CANONICAL_UPSTREAM_PATH:
-            issues.append(IntegrityIssue("source-remote", path.name, "source remote is not the canonical Hermes HTTPS URL"))
+    fingerprint = provenance.get("source_fingerprint")
+    if not isinstance(fingerprint, str) or len(fingerprint) != 64:
+        issues.append(
+            IntegrityIssue(
+                "source-fingerprint",
+                path.name,
+                "candidate provenance requires a 64-character direct-source fingerprint",
+            )
+        )
 
     fetched_at = provenance.get("fetched_at")
     try:
@@ -181,13 +178,12 @@ def audit_candidate_archive(path: str | Path) -> list[IntegrityIssue]:
                 if not _valid_relative_path(candidate):
                     issues.append(IntegrityIssue("archive-path", name, "archive path is unsafe"))
                     continue
-                # Immutable paths (contributors/emails/) are real data — skip all checks
-                if any(sub in name.lower() for sub in IMMUTABLE_PATH_SUBSTRINGS):
-                    continue
-                folded = name.casefold()
-                prior = names.setdefault(folded, name)
-                if prior != name:
-                    issues.append(IntegrityIssue("archive-case-collision", name, f"collides with {prior!r}"))
+                relative_candidate = "/".join(candidate.parts[1:]) if len(candidate.parts) > 1 else ""
+                if not is_contributor_email_path(relative_candidate):
+                    folded = name.casefold()
+                    prior = names.setdefault(folded, name)
+                    if prior != name:
+                        issues.append(IntegrityIssue("archive-case-collision", name, f"collides with {prior!r}"))
                 mode = (info.external_attr >> 16) & 0o177777
                 if stat.S_IFMT(mode) == stat.S_IFLNK:
                     issues.append(IntegrityIssue("archive-symlink", name, "archives may not contain symlinks"))

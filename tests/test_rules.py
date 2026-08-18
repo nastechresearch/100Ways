@@ -142,9 +142,9 @@ def test_real_english_words_still_protected_after_escapes():
         r"not\hermes"
     )
     out = rules.transform_text(text)
-    assert "nhermes" in out
+    assert "nhermes" not in out
+    assert "xhermes" not in out
     assert "venous" in out
-    assert "xhermes" in out
     assert "autonomous" in out
     assert r"\nnastech_nastech" in out
     assert r"not\nastech" in out

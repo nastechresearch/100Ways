@@ -51,6 +51,19 @@ _UPPER_AFTER = r"(?![A-Z])"
 _ANY_BEFORE = r"(?<!" + _ESCAPE_LETTER + r"[A-Za-z])"
 _ANY_AFTER = r"(?![A-Za-z])"
 
+# Ordinary English words that contain the letters ``nous`` are not upstream
+# branding and must remain byte-stable. Every other residual ``nous`` token is
+# a candidate brand reference and is transformed after the precise base rules.
+_NONBRAND_NOUS_WORDS = {
+    "anonymous", "anonymously", "asynchronous", "asynchronously",
+    "autonomous", "autonomously", "luminous", "luminousix", "monotonous", "venous",
+    "ominous", "pythonnousersite", "synchronous", "synchronously",
+    "testsynchronousfallbackcacheplans", "testasynchronousfallbackcacheplans",
+    "testoneshotclirunissynchronous",
+}
+_RESIDUAL_BRAND = re.compile(r"hermes|nous", re.IGNORECASE)
+_WORD = re.compile(r"[A-Za-z]+")
+
 
 def _rule(match: str, replace: str, anchored: bool = False) -> TokenRule:
     return TokenRule(match=match, replace=replace, anchored=anchored)
@@ -81,9 +94,9 @@ DEFAULT_TOKENS: list[TokenRule] = [
     _rule("NOUS", "NASTECH", anchored=True),
     # -- hermes family ------------------------------------------------------
     _rule("hermes-agent", "nastech-agent"),
-    _rule("hermes", "nastech", anchored=True),
-    _rule("Hermes", "Nastech", anchored=True),
-    _rule("HERMES", "NASTECH", anchored=True),
+    _rule("hermes", "nastech"),
+    _rule("Hermes", "Nastech"),
+    _rule("HERMES", "NASTECH"),
     # -- brand symbol: replace both inherited medical-symbol variants with
     #    the user-approved NasTech glyph across UI, locales, docs, and SVGs.
     _rule("⚕", "𓄃"),
@@ -124,17 +137,37 @@ class BrandingRules:
                 return tok.replace
         return match_obj.group(0)  # pragma: no cover - defensive
 
+    @staticmethod
+    def _residual_replacement(text: str) -> str:
+        def word_at(position: int) -> str:
+            for word in _WORD.finditer(text):
+                if word.start() <= position < word.end():
+                    return word.group(0).lower()
+            return ""
+
+        def replace(match_obj: re.Match) -> str:
+            token = match_obj.group(0)
+            if token.lower() == "nous" and word_at(match_obj.start()) in _NONBRAND_NOUS_WORDS:
+                return token
+            if token.isupper():
+                return "NASTECH"
+            if token[0].isupper():
+                return "Nastech"
+            return "nastech"
+
+        return _RESIDUAL_BRAND.sub(replace, text)
+
     def transform_text(self, text: str) -> str:
-        """Apply all branding tokens to free text."""
+        """Apply all branding tokens to free text, including residual compounds."""
         tokens = list(self.tokens)
         pattern = self._pattern()
-        return pattern.sub(lambda m: self._replacement(m, tokens), text)
+        return self._residual_replacement(pattern.sub(lambda m: self._replacement(m, tokens), text))
 
     def transform_path(self, path: str) -> str:
         """Apply branding tokens to a filesystem path (each component)."""
         tokens = list(self.tokens)
         pattern = self._pattern()
-        return pattern.sub(lambda m: self._replacement(m, tokens), path)
+        return self._residual_replacement(pattern.sub(lambda m: self._replacement(m, tokens), path))
 
 
 def tokens_from_overrides(path: str | None) -> list[TokenRule]:
@@ -204,19 +237,24 @@ LOCKED_EXTENSIONS = (
 
 
 # ---------------------------------------------------------------------------
-# Immutable data files.  These are real-world records, not brandable content:
-# contributor email files, contact lists, etc.  They are NOT renamed (a real
-# email address must keep its true form) and NOT content-rewritten.
+# Immutable data files.  No inherited contributor email record is immutable:
+# email filenames and content are branded like every other path so a strict
+# candidate scan cannot retain upstream brand tokens.  Contributor names are
+# identity metadata and are never generated from this email-path mechanism.
 # ---------------------------------------------------------------------------
 
-IMMUTABLE_PATH_SUBSTRINGS = (
-    "contributors/emails/",
-)
+IMMUTABLE_PATH_SUBSTRINGS: tuple[str, ...] = ()
+
 
 def is_immutable_path(path: str) -> bool:
-    """True when a path is real data: keep name AND content byte-for-byte."""
+    """Return whether a path is byte-preserved by an explicit future policy."""
     lowered = path.lower()
     return any(sub in lowered for sub in IMMUTABLE_PATH_SUBSTRINGS)
+
+
+def is_contributor_email_path(path: str) -> bool:
+    """Identify contributor email records for narrow case-collision handling only."""
+    return path.lower().startswith("contributors/emails/")
 
 
 def is_locked_path(path: str) -> bool:

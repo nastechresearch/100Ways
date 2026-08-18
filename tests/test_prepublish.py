@@ -20,7 +20,7 @@ def _snapshot(path: Path, sha: str) -> None:
         json.dumps({
             "upstream_sha": sha,
             "source_provenance": {
-                "remote_url": "https://github.com/NousResearch/hermes-agent.git",
+                "source_fingerprint": "a" * 64,
                 "fetched_at": "2026-08-16T00:00:00+00:00",
                 "acquisition": "fresh-direct-clone",
             },

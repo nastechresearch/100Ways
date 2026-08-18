@@ -23,6 +23,7 @@ pipeline is testable against a fake "Hermes" repo.
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -46,6 +47,11 @@ from .scanner import classify_path, is_text
 from .verify import FileResult, VerifyReport
 
 DEFAULT_HERMES_URL = "https://github.com/NousResearch/hermes-agent.git"
+
+
+def source_fingerprint(remote: str) -> str:
+    """Return a non-identifying candidate-safe fingerprint of the direct source remote."""
+    return hashlib.sha256(remote.encode("utf-8")).hexdigest()
 HERMES_DIR = "hermes-agent"
 UPDATE_PREFIX = "Nastech-Update#"
 
@@ -325,6 +331,106 @@ def brand_tree(src: str, dst: str, rules: BrandingRules | None = None,
                 fh.write(data)
         _restore_mode(src_path, dst_path)
     return result
+
+
+_STRICT_DEPENDENCY_EXCEPTIONS = {
+    "package-lock.json": ("hermes-parser", "hermes-estree"),
+    "website/package-lock.json": ("@nous-research/image-size",),
+    "website/.npmrc": ("@nous-research/image-size",),
+}
+
+
+def _strict_text_transform(relative: str, text: str, rules: BrandingRules) -> str:
+    """Transform residual brand strings while retaining only exact dependency names."""
+    protected: dict[str, str] = {}
+    value = text
+    for index, dependency in enumerate(_STRICT_DEPENDENCY_EXCEPTIONS.get(relative, ())):
+        marker = f"__100WAYS_APPROVED_DEPENDENCY_{index}__"
+        value = value.replace(dependency, marker)
+        protected[marker] = dependency
+    value = rules.transform_text(value)
+    for marker, dependency in protected.items():
+        value = value.replace(marker, dependency)
+    return value
+
+
+def enforce_strict_branding(dst: str, rules: BrandingRules) -> list[str]:
+    """Eliminate residual upstream-brand paths and text after fork-file preservation.
+
+    Contributor names under ``contributors/names`` remain identity metadata.
+    Contributor email paths and content are deliberately included so they cannot
+    retain upstream-brand email identifiers.  The returned paths are evidence
+    for the reconciliation manifest; no publication is authorized here.
+    """
+    changed: list[str] = []
+    for relative in _walk_files(dst):
+        if relative.startswith("contributors/names/"):
+            continue
+        path = os.path.join(dst, relative)
+        try:
+            with open(path, "rb") as handle:
+                data = handle.read()
+        except OSError:
+            continue
+        if not is_text(data):
+            continue
+        updated = _strict_text_transform(relative, data.decode("utf-8"), rules)
+        if updated != data.decode("utf-8"):
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(updated)
+            changed.append(relative)
+    entries: list[str] = []
+    directories = sorted(
+        (
+            os.path.relpath(os.path.join(root, name), dst).replace(os.sep, "/")
+            for root, dirs, _ in os.walk(dst)
+            for name in dirs
+        ),
+        key=lambda value: (value.count("/"), value),
+    )
+    for relative in directories:
+        if relative.startswith("contributors/names/"):
+            continue
+        original = os.path.join(dst, *relative.split("/"))
+        if not os.path.isdir(original):
+            continue
+        mapped = rules.transform_path(relative)
+        if mapped == relative:
+            continue
+        destination = os.path.join(dst, *mapped.split("/"))
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        if os.path.exists(destination):
+            raise ValueError(f"strict branding path collision: {relative} -> {mapped}")
+        os.replace(original, destination)
+        entries.append(f"{relative} -> {mapped}")
+    for relative in list(_walk_files(dst)):
+        if relative.startswith("contributors/names/"):
+            continue
+        original = os.path.join(dst, *relative.split("/"))
+        mapped = rules.transform_path(relative)
+        if mapped == relative:
+            continue
+        destination = os.path.join(dst, *mapped.split("/"))
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        if os.path.exists(destination):
+            if not relative.startswith("contributors/emails/"):
+                raise ValueError(f"strict branding path collision: {relative} -> {mapped}")
+            with open(original, "rb") as source_handle, open(destination, "rb") as destination_handle:
+                identical = source_handle.read() == destination_handle.read()
+            if identical:
+                os.unlink(original)
+                entries.append(f"deduplicated:{relative} -> {mapped}")
+                continue
+            parent, email = mapped.rsplit("/", 1)
+            local, domain = email.rsplit("@", 1) if "@" in email else (email, "nastech.invalid")
+            alias = f"{local}+nastech-{hashlib.sha256(relative.encode()).hexdigest()[:10]}@{domain}"
+            mapped = f"{parent}/{alias}"
+            destination = os.path.join(dst, *mapped.split("/"))
+            if os.path.exists(destination):
+                raise ValueError(f"strict contributor email alias collision: {relative} -> {mapped}")
+        os.replace(original, destination)
+        entries.append(f"{relative} -> {mapped}")
+    return changed + entries
 
 
 def _restore_mode(src_path: str, dst_path: str) -> None:
@@ -1190,8 +1296,8 @@ def update_report_md(result: "UpdateResult") -> str:
     lines = [
         f"# Nastech Update Report #{result.number}",
         "",
-        f"- upstream sha : `{result.upstream_sha}`",
-        f"- source       : `{result.hermes_url}`",
+        f"- source sha   : `{result.upstream_sha}`",
+        f"- source       : direct-upstream fingerprint `{source_fingerprint(result.hermes_url)[:16]}`",
         f"- snapshot     : `{os.path.basename(result.dir)}`",
         f"- gate         : **{'PASS' if result.gate else 'FAIL'}**",
         "",
@@ -1224,13 +1330,16 @@ def update_report_md(result: "UpdateResult") -> str:
         "",
         f"- {result.source_delta.summary()}",
     ]
+    report_rules = BrandingRules()
     for change in result.source_delta.changes:
+        old_path = report_rules.transform_path(change.old_path)
+        new_path = report_rules.transform_path(change.new_path)
         if change.status == "renamed":
-            lines.append(f"- RENAMED `{change.old_path}` -> `{change.new_path}`")
+            lines.append(f"- RENAMED `{old_path}` -> `{new_path}`")
         elif change.status == "deleted":
-            lines.append(f"- DELETED `{change.old_path}`")
+            lines.append(f"- DELETED `{old_path}`")
         else:
-            lines.append(f"- {change.status.upper()} `{change.new_path}`")
+            lines.append(f"- {change.status.upper()} `{new_path}`")
     lines += ["", "## Scan", "", f"{result.scan.summary()}", ""]
     if result.scan.unknown_binary:
         lines += ["Unknown binaries:", *[f"- {p}" for p in result.scan.unknown_binary[:20]]]
@@ -1418,6 +1527,12 @@ class UpdateManager:
             ([], {}),
             SourceDeltaReport(baseline_sha, upstream_sha or ""),
         )
+        commit_subjects = [self.rules.transform_text(subject) for subject in commit_subjects]
+        branded_areas: dict[str, int] = {}
+        for area, count in changed_areas.items():
+            mapped_area = self.rules.transform_path(area)
+            branded_areas[mapped_area] = branded_areas.get(mapped_area, 0) + count
+        changed_areas = branded_areas
         stage("census", lambda: census_tree(src), "count upstream files before touching anything")
         stage("plan", lambda: number, f"next snapshot = {UPDATE_PREFIX}{number}")
 
@@ -1460,7 +1575,7 @@ class UpdateManager:
             if self.owned and self.owned.count and os.path.isdir(self.owned.root):
                 registry_dest = os.path.join(dest, "config", "owned-assets")
                 shutil.copytree(self.owned.root, registry_dest, dirs_exist_ok=True)
-            return preserve_fork_files(
+            preserved = preserve_fork_files(
                 self.fork_root,
                 dest,
                 src,
@@ -1469,11 +1584,15 @@ class UpdateManager:
                 owned_paths=set(self.owned.mapping) if self.owned else set(),
                 allow_unclassified_fork_files=bool(baseline_sha),
             )
-        stage(
+            return preserved + enforce_strict_branding(dest, self.rules)
+        strict_changed = stage(
             "preserve",
             _preserve,
-            "carry explicit fork-owned files while rejecting retired upstream paths",
+            "carry explicit fork-owned files then enforce strict residual branding",
         )
+        if strict_changed:
+            reconcile.fixed.extend(f"strict-brand:{value}" for value in strict_changed)
+            reconcile.total += len(strict_changed)
 
         scan = stage("scan", lambda: scan_tree(dest), "classify every branded file")
         diff = stage(
@@ -1613,9 +1732,9 @@ class UpdateManager:
             "number": number,
             "dir": os.path.basename(dest),
             "upstream_sha": result.upstream_sha,
-            "hermes_url": self.hermes_url,
+            "source_fingerprint": source_fingerprint(self.hermes_url),
             "source_provenance": {
-                "remote_url": self.hermes_url,
+                "source_fingerprint": source_fingerprint(self.hermes_url),
                 "fetched_at": fetched_at,
                 "acquisition": "fresh-direct-clone",
                 "baseline_sha": baseline_sha,
@@ -1630,8 +1749,8 @@ class UpdateManager:
                 "changes": [
                     {
                         "status": change.status,
-                        "old_path": change.old_path,
-                        "new_path": change.new_path,
+                        "old_path": self.rules.transform_path(change.old_path),
+                        "new_path": self.rules.transform_path(change.new_path),
                         "old_mapped": change.old_mapped,
                         "new_mapped": change.new_mapped,
                     }

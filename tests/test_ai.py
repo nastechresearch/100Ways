@@ -12,6 +12,7 @@ from hundredways.ai import (
     sanitize_ai_context,
     validate_provider,
 )
+from hundredways.remediation import classify_failure
 from hundredways.updates import STAGES
 
 # -- env-driven configuration -------------------------------------------------
@@ -81,6 +82,19 @@ def test_sanitize_ai_context_redacts_credentials_and_bounds_data():
     assert "123456789:" not in redacted
     assert redacted.count("[REDACTED]") == 2
     assert len(sanitize_ai_context("x" * 90, limit=80)) == 80
+
+
+def test_remediation_advice_fallback_keeps_hard_skip_and_redaction():
+    decision = classify_failure(
+        "candidate integrity checks failed: archive-case-collision token=ghp_0123456789abcdefghijklmnopqrstuv"
+    )
+
+    advice = AIEngine(AIConfig(api_key="")).advise_remediation(decision)
+
+    assert "hard_skip" in advice
+    assert "Allowed action: none" in advice
+    assert "ghp_" not in advice
+    assert "publication" in advice
 
 
 # -- per-stage models ---------------------------------------------------------

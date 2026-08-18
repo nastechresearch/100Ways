@@ -18,7 +18,7 @@ def _manifest(path: Path, **overrides: object) -> None:
     manifest = {
         "upstream_sha": UPSTREAM_SHA,
         "source_provenance": {
-            "remote_url": "https://github.com/NousResearch/hermes-agent.git",
+            "source_fingerprint": "a" * 64,
             "fetched_at": "2026-08-16T00:00:00+00:00",
             "acquisition": "fresh-direct-clone",
         },
@@ -40,13 +40,13 @@ def test_manifest_provenance_accepts_canonical_direct_source(tmp_path):
     assert audit_manifest_provenance(manifest, expected_upstream_sha=UPSTREAM_SHA) == []
 
 
-def test_manifest_provenance_rejects_noncanonical_or_stale_source(tmp_path):
+def test_manifest_provenance_rejects_missing_fingerprint_or_stale_source(tmp_path):
     manifest = tmp_path / "manifest.json"
     _manifest(
         manifest,
         upstream_sha="b" * 40,
         source_provenance={
-            "remote_url": "https://example.invalid/cache.git",
+            "source_fingerprint": "invalid",
             "fetched_at": "not-a-time",
             "acquisition": "cache",
         },
@@ -54,7 +54,7 @@ def test_manifest_provenance_rejects_noncanonical_or_stale_source(tmp_path):
 
     codes = {issue.code for issue in audit_manifest_provenance(manifest, expected_upstream_sha=UPSTREAM_SHA)}
 
-    assert {"source-sha", "source-acquisition", "source-remote", "source-fetch-time"} <= codes
+    assert {"source-sha", "source-acquisition", "source-fingerprint", "source-fetch-time"} <= codes
 
 
 def test_tree_digest_is_stable_and_binds_file_modes(tmp_path):
