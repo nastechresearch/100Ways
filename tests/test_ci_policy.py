@@ -131,6 +131,8 @@ def test_stage_pipeline_requires_final_conformance_and_candidate_tests_before_re
     assert "steps.candidate-tests.outputs.review_ready == 'true'" in workflow
     assert "steps.final-gate.outputs.gate == 'PASS'" in workflow
     assert "CANDIDATE_VALIDATION_FAILURE" in workflow
+    assert 'gh.write(f"review_ready={\'true\' if review_ready else \'false\'}\\n")' in workflow
+    assert 'gh.write(f"review_ready={\'true\' if review_ready else \'false\'}\\\\n")' not in workflow
     assert 'cp -a "$SNAPSHOT" "$TEST_TREE"' in workflow
     assert "uv sync --locked --python 3.11" in workflow
     assert "astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39" in workflow
@@ -143,5 +145,7 @@ def test_ci_withheld_pipeline_gate_skips_candidate_jobs_and_publication():
 
     assert "if: ${{ needs.pipeline.outputs.gate == 'PASS' }}" in workflow
     assert "needs.pipeline.outputs.gate == 'PASS'" in workflow
+    assert "github.event_name == 'schedule'" in workflow
+    assert "github.event_name == 'workflow_dispatch'" in workflow
     assert "complete candidate pipeline reaches PASS" in workflow
     assert "WITHHELD source-test" not in workflow

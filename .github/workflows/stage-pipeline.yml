@@ -335,18 +335,18 @@ jobs:
               evidence = json.load(handle)
           review_ready = bool(evidence["review_ready"])
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as gh:
-              gh.write(f"review_ready={'true' if review_ready else 'false'}\\n")
-              gh.write(f"candidate_tests={evidence['gate']}\\n")
+              gh.write(f"review_ready={'true' if review_ready else 'false'}\n")
+              gh.write(f"candidate_tests={evidence['gate']}\n")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
-              summary.write("## Baseline-aware candidate tests\\n")
-              summary.write(f"- Parallel candidate failures: {len(evidence['parallel_candidate_failures'])}.\\n")
-              summary.write(f"- Serial candidate failures: {len(evidence['candidate_failed'])}.\\n")
-              summary.write(f"- Serial exact-source failures: {len(evidence['source_failed'])}.\\n")
-              summary.write(f"- Inherited failures: {len(evidence['inherited_failures'])}.\\n")
-              summary.write(f"- NasTech-only failures: {len(evidence['nastech_only_failures'])}.\\n")
-              summary.write(f"- Unresolved candidate failures: {len(evidence['unresolved_candidate_failures'])}.\\n")
-              summary.write(f"- Classification: **{evidence['classification']}**.\\n")
-              summary.write(f"- Review eligibility: **{'PASS' if review_ready else 'WITHHELD'}**.\\n")
+              summary.write("## Baseline-aware candidate tests\n")
+              summary.write(f"- Parallel candidate failures: {len(evidence['parallel_candidate_failures'])}.\n")
+              summary.write(f"- Serial candidate failures: {len(evidence['candidate_failed'])}.\n")
+              summary.write(f"- Serial exact-source failures: {len(evidence['source_failed'])}.\n")
+              summary.write(f"- Inherited failures: {len(evidence['inherited_failures'])}.\n")
+              summary.write(f"- NasTech-only failures: {len(evidence['nastech_only_failures'])}.\n")
+              summary.write(f"- Unresolved candidate failures: {len(evidence['unresolved_candidate_failures'])}.\n")
+              summary.write(f"- Classification: **{evidence['classification']}**.\n")
+              summary.write(f"- Review eligibility: **{'PASS' if review_ready else 'WITHHELD'}**.\n")
           PYEOF
 
       - name: Re-attest candidate after tests

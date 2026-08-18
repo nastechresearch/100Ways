@@ -118,9 +118,10 @@ jobs:
   update-pr:
     name: "#344 — Push PR to NasTech"
     needs: [pipeline, forkcheck, all-checks-pass]
-    # update-pr fires only after the complete candidate pipeline reaches PASS;
-    # any incomplete or failed candidate-validation run remains withheld.
-    if: ${{ github.event_name == 'workflow_dispatch' && needs.pipeline.outputs.gate == 'PASS' }}
+    # update-pr fires only after the complete candidate pipeline reaches PASS
+    # on a manual validation or scheduled synchronization; all other candidate
+    # outcomes remain withheld.
+    if: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && needs.pipeline.outputs.gate == 'PASS' }}
     permissions:
       contents: read
     uses: ./.github/workflows/stage-update-pr.yml
