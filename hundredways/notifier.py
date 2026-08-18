@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -96,11 +97,17 @@ class Notifier:
             "(porting commits, fixing brand violations, approving gaps), say so "
             "and tell the user the next concrete step."
         )
+        argv = shlex.split(self.cfg.agent_command)
+        if not argv:
+            raise RuntimeError("agent command is empty")
+        if shutil.which(argv[0]) is None:
+            raise RuntimeError(f"agent CLI not on PATH: {argv[0]}")
         subprocess.run(
-            [self.cfg.agent_command, prompt],
+            [*argv, prompt],
             capture_output=True,
             text=True,
             timeout=300,
+            check=False,
         )
 
 
