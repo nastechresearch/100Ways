@@ -181,6 +181,9 @@ def audit_candidate_archive(path: str | Path) -> list[IntegrityIssue]:
                 if not _valid_relative_path(candidate):
                     issues.append(IntegrityIssue("archive-path", name, "archive path is unsafe"))
                     continue
+                # Immutable paths (contributors/emails/) are real data — skip all checks
+                if any(sub in name.lower() for sub in IMMUTABLE_PATH_SUBSTRINGS):
+                    continue
                 folded = name.casefold()
                 prior = names.setdefault(folded, name)
                 if prior != name:
