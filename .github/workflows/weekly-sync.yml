@@ -1,0 +1,149 @@
+name: weekly-sync
+
+# Weekly full-sync cron. Runs Sunday 03:00 UTC and emits a plan-only
+# weekly report.  Never publishes a PR (#344 lives in ci.yml).  The
+# report is uploaded as an artifact and (optionally) sent to Telegram.
+
+on:
+  # Explicitly do NOT trigger on push — this workflow is cron + manual only.
+  # Without this, the workflow fires with zero jobs when its YAML changes
+  # and reports failure instantly.
+  push: []
+  schedule:
+    - cron: "0 3 * * 0"  # Sundays 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      bootstrap:
+        description: Accept the first large upstream jump with review_required
+        type: boolean
+        required: false
+        default: false
+      dry_run:
+        description: Skip Telegram notification and artifact upload
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  weekly-sync:
+    name: Weekly full-sync plan
+    # GitHub has a known quirk where a workflow can fire on the push that
+    # modifies its own YAML.  When that happens with no matching trigger in
+    # 'on:', the run has zero jobs and reports failure instantly.  Adding
+    # 'push: []' to 'on:' alone does NOT fully suppress this.  The 'if:'
+    # guard below ensures the job only runs on schedule or workflow_dispatch.
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install 100Ways
+        run: pip install -e .
+
+      - name: Clone upstream Hermes (full history) and the NasTech fork (shallow)
+        run: |
+          set -euo pipefail
+          # The weekly gate needs upstream history to compute diffs; clone
+          # Hermes with full history.  The shallow NasTech fork clone is the
+          # branded_root for the audit (treated as the candidate tree).
+          git clone https://github.com/NousResearch/hermes-agent.git hermes-agent
+          git clone --depth=1 \
+            https://github.com/nastechresearch/nastech-agent.git nastech-agent
+
+      - name: Initialize state directory
+        run: mkdir -p "${{ runner.temp }}/100ways-state"
+
+      - name: Capture direct upstream SHA
+        id: direct-source
+        run: |
+          set -euo pipefail
+          DIRECT_SHA=$(git -C hermes-agent rev-parse HEAD)
+          test -n "$DIRECT_SHA"
+          echo "sha=$DIRECT_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Build weekly report
+        env:
+          HUNDREDWAYS_STATE_DIR: ${{ runner.temp }}/100ways-state
+          HUNDREDWAYS_WEEKLY_REPORT: ${{ runner.temp }}/weekly-full-sync-report.md
+          HUNDREDWAYS_DECISION: ${{ runner.temp }}/weekly-decision.json
+          EXPECTED_UPSTREAM_SHA: ${{ steps.direct-source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PYEOF'
+          import json
+          import os
+          from hundredways.weekly_sync import build_weekly_report, write_weekly_report
+
+          report = build_weekly_report(
+              "hermes-agent",       # upstream_repo: full Hermes clone
+              "nastech-agent",      # branded_root: shallow NasTech fork clone
+              os.environ["HUNDREDWAYS_STATE_DIR"],
+              mode="plan",
+              expected_upstream_sha=os.environ["EXPECTED_UPSTREAM_SHA"],
+              bootstrap=${{ inputs.bootstrap || 'false' }},
+          )
+          write_weekly_report(os.environ["HUNDREDWAYS_WEEKLY_REPORT"], report)
+          with open(os.environ["HUNDREDWAYS_DECISION"], "w", encoding="utf-8") as fh:
+              json.dump(report.to_dict(), fh, indent=2)
+          print(f"Gate: {report.to_dict()['gate']}")
+          print(f"Review required: {report.review_required}")
+          PYEOF
+
+      - name: Upload weekly report
+        if: ${{ !inputs.dry_run }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: weekly-full-sync-report
+          path: |
+            ${{ runner.temp }}/weekly-full-sync-report.md
+            ${{ runner.temp }}/weekly-decision.json
+          if-no-files-found: warn
+
+      - name: Notify Telegram
+        if: ${{ !inputs.dry_run && secrets.TELEGRAM_BOT_TOKEN != '' }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          HUNDREDWAYS_DECISION: ${{ runner.temp }}/weekly-decision.json
+        run: |
+          set -euo pipefail
+          python3 - <<'PYEOF'
+          import json
+          import os
+          import urllib.request
+
+          with open(os.environ["HUNDREDWAYS_DECISION"], encoding="utf-8") as fh:
+              decision = json.load(fh)
+          gate = decision.get("gate", "?")
+          review = "YES" if decision.get("review_required") else "NO"
+          upstream = (decision.get("upstream_sha") or "?")[:12]
+          commits = decision.get("commits", 0)
+          body = (
+              "NASTECH / 100WAYS\n"
+              "WEEKLY SYNC PLAN\n"
+              "────────────────\n"
+              f"Gate      {gate}\n"
+              f"Review    {review}\n"
+              f"Upstream  {upstream}\n"
+              f"Commits   {commits} since last ledger entry\n"
+              "\nPlan-only: no PR is published by this workflow. "
+              "Trigger ci.yml with workflow_dispatch to actually publish."
+          )
+          req = urllib.request.Request(
+              f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
+              data=json.dumps({
+                  "chat_id": os.environ["TELEGRAM_CHAT_ID"],
+                  "text": body,
+              }).encode("utf-8"),
+              headers={"Content-Type": "application/json"},
+          )
+          urllib.request.urlopen(req, timeout=30).read()
+          print("Telegram notification sent")
+          PYEOF

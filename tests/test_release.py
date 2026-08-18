@@ -7,36 +7,17 @@ from hundredways.release import (
     release_summary,
     release_verify_incoming,
 )
-from hundredways.security import (
-    DEFAULT_ADMIN_PASS,
-    compile_token,
-    is_compiled,
-    verify_token,
-)
+from hundredways.security import verify_token
 
 
-# -- security / admin pass ----------------------------------------------------
+# -- security / operator token ------------------------------------------------
 
-def test_compile_token_shape():
-    token = compile_token("Nastech@Pass")
-    assert is_compiled(token)
-    assert len(token) > 15
-    assert token.isascii()
-
-
-def test_compile_token_deterministic():
-    assert compile_token("Nastech@Pass") == compile_token("Nastech@Pass")
-    assert compile_token("Nastech@Pass") != compile_token("Other@Pass")
-
-
-def test_verify_accepts_password_and_compiled():
-    stored = compile_token(DEFAULT_ADMIN_PASS)
-    assert verify_token("Nastech@Pass", stored)
-    assert verify_token(stored, stored)  # the compiled form works too
-    assert not verify_token("wrong-pass", stored)
-    assert not verify_token("", stored)
-    assert not verify_token("Nastech@Pass", None)
-    assert not verify_token("Nastech@Pass", "")
+def test_verify_requires_exact_operator_token():
+    assert verify_token("operator-secret", "operator-secret")
+    assert not verify_token("wrong-pass", "operator-secret")
+    assert not verify_token("operator-secret", None)
+    assert not verify_token("operator-secret", "")
+    assert not verify_token("", "operator-secret")
 
 
 # -- release verifier ---------------------------------------------------------

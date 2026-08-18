@@ -53,6 +53,12 @@ def test_custom_token():
     assert "Acme" not in rules.transform_text("Acme product")
 
 
+def test_inherited_medical_symbols_are_rebranded_to_the_approved_nastech_glyph():
+    rules = BrandingRules()
+    assert rules.transform_text("⚕ Hermes") == "𓄃 Nastech"
+    assert rules.transform_text("☤ hermes") == "𓄃 nastech"
+
+
 def test_locked_paths():
     assert is_locked_path("assets/logo.png")
     assert is_locked_path("tests/package-lock.json")
