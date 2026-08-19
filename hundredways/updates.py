@@ -769,7 +769,107 @@ def _reconcile_hermez_obfuscation(dst: str) -> int:
     return 0
 
 
-def _reconcile_plugin_search_table(dst: str) -> int:
+def _reconcile_desktop_export_order(dst: str) -> list[str]:
+    """Preserve desktop export ordering after ``hermes`` becomes ``nastech``.
+
+    The desktop ESLint configuration keeps export-path ordering as an error.
+    A lexical rename from ``hermes`` to ``nastech`` changes the required order
+    in three curated public-export blocks, so normalize only those blocks
+    rather than weakening the lint policy or applying a broad formatter.
+    """
+    repaired: list[str] = []
+    plugin = os.path.join(dst, "apps", "desktop", "src", "contrib", "plugin.ts")
+    plugin_before = (
+        "export type { PluginRestOptions } from '@/nastech'\n"
+        "export type { NastechOpenTarget } from '@/lib/nastech-open-target'\n"
+    )
+    plugin_after = (
+        "export type { NastechOpenTarget } from '@/lib/nastech-open-target'\n"
+        "export type { PluginRestOptions } from '@/nastech'\n"
+    )
+    if os.path.isfile(plugin):
+        text = open(plugin, encoding="utf-8").read()
+        updated = text.replace(plugin_before, plugin_after)
+        if updated != text:
+            with open(plugin, "w", encoding="utf-8") as fh:
+                fh.write(updated)
+            repaired.append("apps/desktop/src/contrib/plugin.ts")
+
+    sdk = os.path.join(dst, "apps", "desktop", "src", "sdk", "index.ts")
+    if os.path.isfile(sdk):
+        text = open(sdk, encoding="utf-8").read()
+        gateway_block = (
+            "/** The live gateway instance type — for typing the `gateway` prop `McpTab`\n"
+            " *  takes; obtain the instance from `host.getGateway()`. */\n"
+            "export type { NastechGateway } from '@/nastech'\n"
+        )
+        grab_block = (
+            "/** Grab-to-pan for overflow containers (boards, timelines, wide tables) —\n"
+            " *  the shared scrub primitive; don't hand-roll drag-to-scroll. */\n"
+            "export { type GrabScroll, useGrabScroll } from '@/hooks/use-grab-scroll'\n"
+        )
+        i18n_block = (
+            "/** Localized copy. `useI18n` reuses the app's strings; `usePluginI18n(id)` +\n"
+            " *  `ctx.i18n.register` let a plugin ship its OWN locale bundles, scoped like\n"
+            " *  `ctx.storage` and resolved against the app's active locale — no core edit. */\n"
+            "export {\n"
+            "  type Locale,\n"
+            "  type PluginI18n,\n"
+            "  type PluginLocaleBundles,\n"
+            "  type PluginMessages,\n"
+            "  type PluginMessageValue,\n"
+            "  type PluginTranslate,\n"
+            "  useI18n,\n"
+            "  usePluginI18n\n"
+            "} from '@/i18n'\n"
+        )
+        budgeted_loop_block = (
+            "/** THE way to run a decorative rAF animation (avatars, shimmer, sprites):\n"
+            " *  fps budget + hidden/minimized/unfocused pause + idle dormancy + teardown.\n"
+            " *  Plugins must route animation clocks through this instead of raw rAF loops\n"
+            " *  so a disabled plugin or an empty roster costs zero frames. */\n"
+            "export { type BudgetedLoop, type BudgetedLoopOptions, createBudgetedLoop } from '@/lib/budgeted-loop'\n"
+        )
+        icons_block = (
+            "/** The app's lucide icon set (RefreshCw, LayoutDashboard, Activity, …). */\n"
+            "export * as icons from '@/lib/icons'\n"
+        )
+        keybind_blocks = (
+            "export { type KeybindContribution, KEYBINDS_AREA } from '@/lib/keybinds/actions'\n"
+            "export { formatModifierToken } from '@/lib/keybinds/combo'\n"
+        )
+        open_target = "export type { NastechOpenTarget } from '@/lib/nastech-open-target'\n"
+        updated = text
+        if gateway_block + grab_block in updated:
+            updated = updated.replace(gateway_block + grab_block, grab_block + gateway_block)
+        if grab_block + gateway_block + i18n_block in updated:
+            updated = updated.replace(grab_block + gateway_block + i18n_block, grab_block + i18n_block + gateway_block)
+        if gateway_block + budgeted_loop_block in updated:
+            updated = updated.replace(gateway_block + budgeted_loop_block, budgeted_loop_block + gateway_block)
+        lib_tail = "export { cn } from '@/lib/utils'\n"
+        gateway_index = updated.find(gateway_block)
+        lib_tail_index = updated.find(lib_tail, gateway_index + len(gateway_block))
+        if gateway_index >= 0 and lib_tail_index >= 0:
+            lib_run = updated[gateway_index + len(gateway_block) : lib_tail_index + len(lib_tail)]
+            if "from '@/lib/" in lib_run and "from '@/themes/" not in lib_run:
+                updated = (
+                    updated[:gateway_index]
+                    + lib_run
+                    + gateway_block
+                    + updated[lib_tail_index + len(lib_tail) :]
+                )
+        if open_target + icons_block in updated:
+            updated = updated.replace(open_target + icons_block, icons_block + open_target)
+        if icons_block + open_target + keybind_blocks in updated:
+            updated = updated.replace(icons_block + open_target + keybind_blocks, icons_block + keybind_blocks + open_target)
+        if updated != text:
+            with open(sdk, "w", encoding="utf-8") as fh:
+                fh.write(updated)
+            repaired.append("apps/desktop/src/sdk/index.ts")
+    return repaired
+
+
+def _reconcile_plugin_search_table(dst: str) -> bool:
     """Widen the ``cmd_search`` Name column so branded names render fully.
 
     Upstream's ``plugins_cmd.cmd_search`` builds a rich ``Table`` whose
@@ -1051,6 +1151,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_plugin_search_table(dst):
         result.total += 1
         result.fixed.append("nastech_cli/plugins_cmd.py")
+    for rel in _reconcile_desktop_export_order(dst):
+        result.total += 1
+        result.fixed.append(rel)
     for rel in _reconcile_cli_banner_identity(dst):
         result.total += 1
         result.fixed.append(rel)

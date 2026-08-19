@@ -12,6 +12,7 @@ from hundredways.integrity import audit_candidate_tree
 from hundredways.updates import (
     STAGES,
     UpdateManager,
+    _reconcile_desktop_export_order,
     brand_tree,
     compare_trees,
     fork_manifest_upstream_sha,
@@ -112,6 +113,52 @@ def test_case_colliding_contributor_records_are_disambiguated_without_data_loss(
     assert (dst / path_map[paths[1]]).read_text() == title.read_text()
     assert verify_branded(str(src), str(dst), rules).failed == []
     assert not [issue for issue in audit_candidate_tree(dst) if issue.code == "case-collision"]
+
+
+def test_desktop_export_order_is_reconciled_after_nastech_rename(tmp_path):
+    candidate = tmp_path / "candidate"
+    plugin = candidate / "apps" / "desktop" / "src" / "contrib" / "plugin.ts"
+    sdk = candidate / "apps" / "desktop" / "src" / "sdk" / "index.ts"
+    plugin.parent.mkdir(parents=True)
+    sdk.parent.mkdir(parents=True)
+    plugin.write_text(
+        "export type { PluginRestOptions } from '@/nastech'\n"
+        "export type { NastechOpenTarget } from '@/lib/nastech-open-target'\n",
+        encoding="utf-8",
+    )
+    sdk.write_text(
+        "/** Grab-to-pan for overflow containers (boards, timelines, wide tables) —\n"
+        " *  the shared scrub primitive; don't hand-roll drag-to-scroll. */\n"
+        "export { type GrabScroll, useGrabScroll } from '@/hooks/use-grab-scroll'\n"
+        "/** Localized copy. `useI18n` reuses the app's strings; `usePluginI18n(id)` +\n"
+        " *  `ctx.i18n.register` let a plugin ship its OWN locale bundles, scoped like\n"
+        " *  `ctx.storage` and resolved against the app's active locale — no core edit. */\n"
+        "export {\n  type Locale,\n  type PluginI18n,\n  type PluginLocaleBundles,\n  type PluginMessages,\n  type PluginMessageValue,\n  type PluginTranslate,\n  useI18n,\n  usePluginI18n\n} from '@/i18n'\n"
+        "/** The live gateway instance type — for typing the `gateway` prop `McpTab`\n"
+        " *  takes; obtain the instance from `host.getGateway()`. */\n"
+        "export type { NastechGateway } from '@/nastech'\n"
+        "/** THE way to run a decorative rAF animation (avatars, shimmer, sprites):\n"
+        " *  fps budget + hidden/minimized/unfocused pause + idle dormancy + teardown.\n"
+        " *  Plugins must route animation clocks through this instead of raw rAF loops\n"
+        " *  so a disabled plugin or an empty roster costs zero frames. */\n"
+        "export { type BudgetedLoop, type BudgetedLoopOptions, createBudgetedLoop } from '@/lib/budgeted-loop'\n"
+        "export { compactNumber } from '@/lib/format'\n"
+        "export { cn } from '@/lib/utils'\n"
+        "export { THEMES_AREA } from '@/themes/user-themes'\n",
+        encoding="utf-8",
+    )
+
+    changed = _reconcile_desktop_export_order(str(candidate))
+    assert set(changed) == {
+        "apps/desktop/src/contrib/plugin.ts",
+        "apps/desktop/src/sdk/index.ts",
+    }
+    plugin_text = plugin.read_text(encoding="utf-8")
+    sdk_text = sdk.read_text(encoding="utf-8")
+    assert plugin_text.index("@/lib/nastech-open-target") < plugin_text.index("@/nastech")
+    assert sdk_text.index("@/lib/budgeted-loop") < sdk_text.index("@/nastech")
+    assert sdk_text.index("@/lib/format") < sdk_text.index("@/nastech")
+    assert sdk_text.index("@/lib/utils") < sdk_text.index("@/nastech")
 
 
 def test_text_content_branded_binary_locked_untouched(tmp_path):
