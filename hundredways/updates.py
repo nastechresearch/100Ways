@@ -41,7 +41,15 @@ from .forkcheck import (
     preserve_fork_files,
     source_tree_delta,
 )
-from .rules import BrandingRules, collision_safe_path_map, is_immutable_path, is_locked_path
+from .rules import (
+    BrandingRules,
+    collision_safe_path_map,
+    is_immutable_path,
+    is_locked_path,
+    transform_contributor_email_path,
+    transform_contributor_email_text,
+    transform_strict_metadata_text,
+)
 from .scanner import classify_path, is_text
 from .verify import FileResult, VerifyReport
 
@@ -268,6 +276,13 @@ def _walk_files(root: str) -> list[str]:
     return sorted(out)
 
 
+def _candidate_text_for(rel: str, text: str, rules: BrandingRules) -> str:
+    """Return the deterministic branded candidate payload for one text file."""
+    if "contributors/emails/" in rel.lower():
+        return transform_contributor_email_text(text, rules)
+    return rules.transform_text(text)
+
+
 def brand_tree(src: str, dst: str, rules: BrandingRules | None = None,
                owned: OwnedAssets | None = None) -> BrandResult:
     """Copy ``src`` into ``dst`` branding every path and text file.
@@ -321,7 +336,7 @@ def brand_tree(src: str, dst: str, rules: BrandingRules | None = None,
             result.rewritten += 1
             text = data.decode("utf-8")
             with open(dst_path, "w", encoding="utf-8") as fh:
-                fh.write(rules.transform_text(text))
+                fh.write(_candidate_text_for(rel, text, rules))
         else:
             result.binary_copied += 1
             with open(dst_path, "wb") as fh:
@@ -792,6 +807,87 @@ def _reconcile_plugin_search_table(dst: str) -> int:
     return 0
 
 
+_CLI_NASTECH_LOGO = '''[bold #FFD700]╔══════════════════════════════════════╗[/]
+[bold #FFD700]║            NASTECH AGENT             ║[/]
+[#FFBF00]║                 𓄃                    ║[/]
+[bold #FFD700]╚══════════════════════════════════════╝[/]'''
+_CLI_NASTECH_SYMBOL = '''[#FFBF00]𓄃[/]'''
+
+
+def _reconcile_generated_report_directory(dst: str) -> int:
+    """Drop preserved fork reports before generating the current review evidence.
+
+    Reports are generated per candidate and are not source or fork-owned
+    content.  Retaining a previous review branch's ``reports/`` directory can
+    reintroduce stale provenance and prohibited branding after the new root
+    reports have been written, so the directory is removed deterministically.
+    """
+    reports = os.path.join(dst, "reports")
+    if not os.path.isdir(reports):
+        return 0
+    shutil.rmtree(reports)
+    return 1
+
+
+def _reconcile_cli_banner_identity(dst: str) -> list[str]:
+    """Replace inherited banner art and skin overrides with NasTech identity.
+
+    Block-character ASCII art can visually spell a prohibited product name
+    without containing the literal token.  A textual token scanner cannot
+    prove that safe, so the CLI renderer is deterministically replaced with a
+    compact NasTech Agent banner and the user-approved ``𓄃`` symbol.  Custom
+    skin banner art is disabled in the generated candidate for the same reason:
+    all skins must render the audited identity, not an opaque inherited logo.
+    """
+    fixed: list[str] = []
+    banner_candidates = ("nastech_cli/banner.py", "hermes_cli/banner.py")
+    for rel in banner_candidates:
+        path = os.path.join(dst, rel)
+        if not os.path.isfile(path):
+            continue
+        try:
+            text = open(path, encoding="utf-8").read()
+        except OSError:
+            continue
+        new_text = re.sub(
+            r'NASTECH_AGENT_LOGO = """[\s\S]*?"""(?=\n\nNASTECH_CADUCEUS =)',
+            f'NASTECH_AGENT_LOGO = """{_CLI_NASTECH_LOGO}"""',
+            text,
+            count=1,
+        )
+        new_text = re.sub(
+            r'NASTECH_CADUCEUS = """[\s\S]*?"""(?=\n{2,}#)',
+            f'NASTECH_CADUCEUS = """{_CLI_NASTECH_SYMBOL}"""',
+            new_text,
+            count=1,
+        )
+        new_text = new_text.replace(
+            "_logo = _bskin.banner_logo if _bskin and hasattr(_bskin, 'banner_logo') and _bskin.banner_logo else NASTECH_AGENT_LOGO",
+            "_logo = NASTECH_AGENT_LOGO  # audited NasTech identity; ignore opaque skin art",
+        )
+        if new_text != text:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(new_text)
+            fixed.append(rel)
+
+    skin_path = os.path.join(dst, "nastech_cli", "skin_engine.py")
+    if os.path.isfile(skin_path):
+        try:
+            skin_text = open(skin_path, encoding="utf-8").read()
+        except OSError:
+            skin_text = ""
+        new_skin = re.sub(
+            r'("banner_logo":\s*)"""[\s\S]*?"""(,)',
+            r'\1"""[bold]NASTECH AGENT 𓄃[/]"""\2',
+            skin_text,
+        )
+        if new_skin != skin_text:
+            with open(skin_path, "w", encoding="utf-8") as fh:
+                fh.write(new_skin)
+            fixed.append("nastech_cli/skin_engine.py")
+    return fixed
+
+
 def _reconcile_skill_description_hardline(dst: str) -> int:
     """Trim the bundled ``nastech-agent`` skill description to the fork's.
 
@@ -955,6 +1051,16 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_plugin_search_table(dst):
         result.total += 1
         result.fixed.append("nastech_cli/plugins_cmd.py")
+    for rel in _reconcile_cli_banner_identity(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    # Token branding changes nested workspace package.json records.  Align the
+    # adjacent package-lock roots before strict metadata validation so no
+    # inherited package identity survives inside a locked child workspace.
+    from .weekly_sync import reconcile_nested_lockfile_roots
+    for rel in reconcile_nested_lockfile_roots(dst):
+        result.total += 1
+        result.fixed.append(rel)
     if _reconcile_skill_description_hardline(dst):
         result.total += 1
         result.fixed.append("skills/autonomous-ai-agents/nastech-agent/SKILL.md")
@@ -1084,7 +1190,7 @@ def compare_trees(src: str, dst: str, rules: BrandingRules | None = None,
             expected = reconciled[mapped]
             report.entries.append(DiffEntry(rel, mapped, "reconciled"))
             continue
-        expected = rules.transform_text(data.decode("utf-8")).encode("utf-8")
+        expected = _candidate_text_for(rel, data.decode("utf-8"), rules).encode("utf-8")
         if actual == expected:
             report.entries.append(DiffEntry(rel, mapped, "renamed" if mapped != rel else "identical"))
             continue
@@ -1169,7 +1275,7 @@ def verify_branded(src: str, dst: str, rules: BrandingRules | None = None,
                 report.failed.append(res)
             report.results.append(res)
             continue
-        expected = rules.transform_text(data.decode("utf-8")).encode("utf-8")
+        expected = _candidate_text_for(rel, data.decode("utf-8"), rules).encode("utf-8")
         identical = actual == expected
         res = FileResult(path=rel, mapped_path=mapped, pass_=identical, locked=False)
         if identical:
@@ -1584,10 +1690,17 @@ class UpdateManager:
         # only after its operation succeeds.  A failure is visible as ``fail``
         # rather than the old misleading ``skipped``/``deferred`` status.
         os.makedirs(dest, exist_ok=True)
+        # Fork preservation runs before this point and can restore stale
+        # reports from an older review branch.  Drop them now so the candidate
+        # ships only the freshly generated root review evidence below.
+        _reconcile_generated_report_directory(dest)
         result.report_path = os.path.join(dest, "UPDATE-REPORT.md")
         result.gate_report_path = os.path.join(dest, "GATE-REPORT.md")
-        report_content = update_report_md(result)
-        gate_content = gate_report_md(result)
+        # Reports are shipped in the review bundle, so they must obey the same
+        # zero-upstream-brand policy as source files rather than leaking raw
+        # provenance URLs, commit subjects, or upstream paths.
+        report_content = transform_strict_metadata_text(update_report_md(result), self.rules)
+        gate_content = transform_strict_metadata_text(gate_report_md(result), self.rules)
         try:
             with open(result.report_path, "w", encoding="utf-8") as fh:
                 fh.write(report_content)
@@ -1616,19 +1729,33 @@ class UpdateManager:
             package_stage.status = "fail"
             package_stage.detail = "package not attempted because report generation failed"
 
+        def _mapped_path(value: str) -> str:
+            if not isinstance(value, str):
+                return ""
+            mapped = transform_contributor_email_path(value, self.rules) \
+                if "contributors/emails/" in value.lower() \
+                else self.rules.transform_path(value)
+            return transform_strict_metadata_text(mapped, self.rules)
+
         manifest = {
             "number": number,
             "dir": os.path.basename(dest),
             "upstream_sha": result.upstream_sha,
-            "hermes_url": self.hermes_url,
+            # The shipped manifest identifies the NasTech review projection;
+            # direct-source URLs remain in CI-only evidence, never in a
+            # candidate file or review PR branch.
+            "nastech_url": transform_strict_metadata_text(self.hermes_url, self.rules),
             "source_provenance": {
-                "remote_url": self.hermes_url,
+                "remote_url": transform_strict_metadata_text(self.hermes_url, self.rules),
                 "fetched_at": fetched_at,
                 "acquisition": "fresh-direct-clone",
                 "baseline_sha": baseline_sha,
             },
-            "commit_subjects": commit_subjects,
-            "changed_areas": changed_areas,
+            "commit_subjects": [transform_strict_metadata_text(value, self.rules) for value in commit_subjects],
+            "changed_areas": {
+                transform_strict_metadata_text(area, self.rules): count
+                for area, count in changed_areas.items()
+            },
             "source_delta": {
                 "baseline_sha": source_delta.baseline_sha,
                 "complete": source_delta.complete,
@@ -1637,10 +1764,10 @@ class UpdateManager:
                 "changes": [
                     {
                         "status": change.status,
-                        "old_path": change.old_path,
-                        "new_path": change.new_path,
-                        "old_mapped": change.old_mapped,
-                        "new_mapped": change.new_mapped,
+                        "old_path": _mapped_path(change.old_path),
+                        "new_path": _mapped_path(change.new_path),
+                        "old_mapped": _mapped_path(change.old_mapped),
+                        "new_mapped": _mapped_path(change.new_mapped),
                     }
                     for change in source_delta.changes
                 ],

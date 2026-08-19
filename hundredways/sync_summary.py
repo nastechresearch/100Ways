@@ -7,7 +7,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Iterable
 
-from .rules import BrandingRules
+from .rules import BrandingRules, transform_strict_metadata_text
 
 
 def _git(repo: str | Path, *args: str) -> str:
@@ -37,7 +37,7 @@ def collect_changes(upstream_repo: str | Path, baseline_sha: str, upstream_sha: 
         return []
     subjects = _git(upstream_repo, "log", "--format=%s", f"{baseline_sha}..{upstream_sha}").splitlines()
     rules = BrandingRules()
-    return [rules.transform_text(subject).strip() for subject in subjects if subject.strip()]
+    return [transform_strict_metadata_text(subject, rules).strip() for subject in subjects if subject.strip()]
 
 
 def write_sync_summary(
@@ -56,7 +56,7 @@ def write_sync_summary(
         changes = collect_changes(upstream_repo, baseline_sha, upstream_sha)
     else:
         rules = BrandingRules()
-        changes = [rules.transform_text(subject).strip() for subject in commit_subjects if subject.strip()]
+        changes = [transform_strict_metadata_text(subject, rules).strip() for subject in commit_subjects if subject.strip()]
     grouped: dict[str, list[str]] = defaultdict(list)
     for subject in changes:
         grouped[_category(subject)].append(subject)
@@ -76,8 +76,12 @@ def write_sync_summary(
         "",
     ]
     if changed_areas:
+        rules = BrandingRules()
         lines.extend(["## Technical coverage", ""])
-        lines.extend(f"- **{area}/:** {count} changed files." for area, count in sorted(changed_areas.items()))
+        lines.extend(
+            f"- **{transform_strict_metadata_text(area, rules)}/:** {count} changed files."
+            for area, count in sorted(changed_areas.items())
+        )
         lines.append("")
     if grouped:
         lines.extend(["## Delivered improvements", ""])

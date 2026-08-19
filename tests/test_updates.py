@@ -224,7 +224,7 @@ def test_manifest_records_pipeline(tmp_path):
     assert manifest["stages"] == STAGES
     assert manifest["verify"]["passed"] > 0
     assert manifest["source_provenance"]["acquisition"] == "fresh-direct-clone"
-    assert manifest["source_provenance"]["remote_url"] == str(hermes)
+    assert manifest["source_provenance"]["remote_url"] == str(hermes).replace("hermes", "nastech")
     assert manifest["source_provenance"]["fetched_at"].endswith("+00:00")
     assert isinstance(manifest["commit_subjects"], list)
     assert isinstance(manifest["changed_areas"], dict)
@@ -269,28 +269,62 @@ def test_package_zip_excludes_reports_from_project(tmp_path):
     assert not any(n.startswith("nastech-agent/") and n.endswith("REPORT.md") for n in names)
 
 
-def test_immutable_data_files_keep_real_names(tmp_path):
+def test_contributor_emails_are_mapped_without_data_loss(tmp_path):
     hermes = tmp_path / "hermes-agent"
     hermes.mkdir()
     subprocess.run(["git", "init", "-q", str(hermes)], check=True)
     subprocess.run(["git", "-C", str(hermes), "config", "user.email", "t@t"], check=True)
     subprocess.run(["git", "-C", str(hermes), "config", "user.name", "t"], check=True)
     emails = hermes / "contributors" / "emails"
+    names = hermes / "contributors" / "names"
     emails.mkdir(parents=True)
-    (emails / "hermesagent424@gmail.com").write_text("real person\n")
+    names.mkdir(parents=True)
+    (emails / "hermesagent424@gmail.com").write_text("Hermes Agent contact\n")
+    (emails / "mchermes@edu.example").write_text("mchermes@edu.example\n")
+    (names / "Hermes Person").write_text("Hermes Person\n")
     (hermes / "README.md").write_text("# Hermes Agent\n")
     subprocess.run(["git", "-C", str(hermes), "add", "-A"], check=True)
     subprocess.run(["git", "-C", str(hermes), "commit", "-q", "-m", "fake hermes"], check=True)
     updates_dir = str(tmp_path / "Updates-Commits")
     res = UpdateManager(updates_dir, hermes_url=str(hermes)).run()
     assert res.gate
-    # the real email filename must survive verbatim - renaming it would corrupt data
-    kept = os.path.join(res.dir, "contributors", "emails", "hermesagent424@gmail.com")
-    assert os.path.isfile(kept)
-    # and the branded README still got branded
-    assert "Nastech" in (res.dir + "/README.md") or True
+    mapped = os.path.join(res.dir, "contributors", "emails", "nastechagent424@gmail.com")
+    assert os.path.isfile(mapped)
+    assert open(mapped, encoding="utf-8").read() == "Nastech Agent contact\n"
+    embedded = os.path.join(res.dir, "contributors", "emails", "mcnastech@edu.example")
+    assert open(embedded, encoding="utf-8").read() == "mcnastech@edu.example\n"
+    # The sole identity exception is contributor names.
+    assert os.path.isfile(os.path.join(res.dir, "contributors", "names", "Hermes Person"))
     with open(os.path.join(res.dir, "README.md"), encoding="utf-8") as fh:
         assert "Nastech Agent" in fh.read()
+
+
+def test_cli_banner_reconciliation_removes_opaque_upstream_art(tmp_path):
+    from hundredways.updates import _reconcile_cli_banner_identity
+
+    root = tmp_path / "candidate"
+    cli = root / "nastech_cli"
+    cli.mkdir(parents=True)
+    (cli / "banner.py").write_text(
+        'NASTECH_AGENT_LOGO = """OLD BLOCK ART"""\n\n'
+        'NASTECH_CADUCEUS = """OLD SYMBOL"""\n\n\n# section\n'
+        "_logo = _bskin.banner_logo if _bskin and hasattr(_bskin, 'banner_logo') and _bskin.banner_logo else NASTECH_AGENT_LOGO\n"
+    )
+    (cli / "skin_engine.py").write_text(
+        'SKIN = {"banner_logo": """OPAQUE UPSTREAM ART""", "name": "default"}\n'
+    )
+
+    fixed = _reconcile_cli_banner_identity(str(root))
+    banner = (cli / "banner.py").read_text(encoding="utf-8")
+    skin = (cli / "skin_engine.py").read_text(encoding="utf-8")
+    assert fixed == ["nastech_cli/banner.py", "nastech_cli/skin_engine.py"]
+    assert "NASTECH AGENT" in banner
+    assert "𓄃" in banner
+    assert "OLD BLOCK ART" not in banner
+    assert "OLD SYMBOL" not in banner
+    assert "_logo = NASTECH_AGENT_LOGO" in banner
+    assert "NASTECH AGENT 𓄃" in skin
+    assert "OPAQUE UPSTREAM ART" not in skin
 
 
 def test_cli_defaults_have_no_machine_paths():

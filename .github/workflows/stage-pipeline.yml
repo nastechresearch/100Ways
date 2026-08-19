@@ -314,7 +314,10 @@ jobs:
           reports = {"UPDATE-REPORT.md", "GATE-REPORT.md"}
           with zipfile.ZipFile(os.environ["HUNDREDWAYS_ZIP"], "w", zipfile.ZIP_DEFLATED) as archive:
               for current, dirs, files in os.walk(snapshot):
-                  dirs[:] = [name for name in dirs if name != ".git"]
+                  # Candidate reports are generated at archive root below;
+                  # never carry a preserved reports/ directory from a prior
+                  # fork snapshot into the review branch.
+                  dirs[:] = [name for name in dirs if name not in {".git", "reports"}]
                   for name in files:
                       source = os.path.join(current, name)
                       relative = os.path.relpath(source, snapshot)

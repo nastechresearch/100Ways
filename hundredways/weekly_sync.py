@@ -260,31 +260,78 @@ def audit_visual_assets(branded_root: str, upstream_root: str) -> list[VisualIss
     return compare_owned_to_upstream(owned.root, owned.mapping.values(), upstream_root)
 
 
-def _is_allowed(line: str, path: str) -> bool:
-    if path.startswith("contributors/emails/"):
+def _allowed_brand_occurrence(token: str, line: str, path: str) -> bool:
+    """Return True only for the user's explicit, path-scoped exceptions."""
+    lower = line.lower()
+    if path.startswith("contributors/names/"):
         return True
-    return any(allowed in line.lower() for allowed in THIRD_PARTY_BRAND_ALLOWLIST)
+    if path == "package-lock.json" and token == "hermes":
+        return "hermes-parser" in lower or "hermes-estree" in lower
+    if path in {"website/package-lock.json", "website/.npmrc"} and token in {"nous", "nousresearch"}:
+        return "@nous-research/image-size" in lower
+    if path == "reports/SYNC-SUMMARY.md" and token in {"nous", "nousresearch"}:
+        return line.strip() == "> powered by nousresearch"
+    return False
 
 
 def audit_first_party_brand(root: str, rules: BrandingRules | None = None) -> list[AuditIssue]:
-    """Flag exact first-party Hermes/Nous names while allowing immutable/vendor data."""
+    """Enforce the zero-upstream-brand policy on every shipped text and path.
+
+    The matcher deliberately permits punctuation around a token so compound
+    paths such as ``hermes-agent`` and ``hermes_cli`` are caught, while letters
+    on either side still protect ordinary English words such as "synchronous".
+    Reports, manifests, lockfiles, contributor emails, and generated outputs
+    are candidate files too and cannot bypass this audit.
+    """
     rules = rules or BrandingRules()
-    pattern = re.compile(r"(?i)(?<![a-z0-9_-])(hermes|nous)(?![a-z0-9_-])")
+    pattern = re.compile(r"(?i)(?<![a-z0-9])(hermes|nousresearch|nous)(?![a-z0-9])")
     issues: list[AuditIssue] = []
-    generated_reports = {"UPDATE-REPORT.md", "GATE-REPORT.md", "manifest.json"}
     for path in Path(root).rglob("*"):
         if not path.is_file() or ".git" in path.parts or "node_modules" in path.parts:
             continue
         rel = str(path.relative_to(root))
-        if path.name in generated_reports or is_immutable_path(rel):
-            continue
+        for match in pattern.finditer(rel):
+            token = match.group(1).lower()
+            if not _allowed_brand_occurrence(token, rel, rel):
+                issues.append(AuditIssue("first-party-brand-path", rel, f"prohibited {token!r} token in candidate path"))
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
         for number, line in enumerate(text.splitlines(), start=1):
-            if pattern.search(line) and not _is_allowed(line, rel):
-                issues.append(AuditIssue("first-party-brand", rel, f"line {number}: {line.strip()[:180]}"))
+            for match in pattern.finditer(line):
+                token = match.group(1).lower()
+                if not _allowed_brand_occurrence(token, line, rel):
+                    issues.append(AuditIssue("first-party-brand", rel, f"line {number}: {line.strip()[:180]}"))
+    return issues
+
+
+def audit_cli_banner_identity(root: str) -> list[AuditIssue]:
+    """Require the visible terminal banner to use only audited NasTech identity."""
+    issues: list[AuditIssue] = []
+    banner = Path(root) / "nastech_cli" / "banner.py"
+    try:
+        text = banner.read_text(encoding="utf-8")
+    except OSError:
+        return [AuditIssue("cli-banner", "nastech_cli/banner.py", "CLI banner renderer is missing")]
+    required = {
+        "NASTECH AGENT": "visible banner title must be NASTECH AGENT",
+        "𓄃": "visible banner must use the approved NasTech symbol 𓄃",
+        "_logo = NASTECH_AGENT_LOGO": "opaque skin banner overrides are not allowed",
+    }
+    for needle, detail in required.items():
+        if needle not in text:
+            issues.append(AuditIssue("cli-banner", "nastech_cli/banner.py", detail))
+    if "_bskin.banner_logo" in text:
+        issues.append(AuditIssue("cli-banner", "nastech_cli/banner.py", "skin-provided banner art can bypass the audited identity"))
+    skin = Path(root) / "nastech_cli" / "skin_engine.py"
+    if skin.is_file():
+        try:
+            skin_text = skin.read_text(encoding="utf-8")
+        except OSError:
+            skin_text = ""
+        if '"banner_logo": """' in skin_text and "NASTECH AGENT 𓄃" not in skin_text:
+            issues.append(AuditIssue("cli-banner", "nastech_cli/skin_engine.py", "bundled skin logo is not normalized to audited NasTech identity"))
     return issues
 
 
@@ -300,17 +347,11 @@ def audit_branding_fixed_point(
     """
     rules = rules or BrandingRules()
     issues: list[AuditIssue] = []
-    generated = {
-        "UPDATE-REPORT.md",
-        "GATE-REPORT.md",
-        "SYNC-SUMMARY.md",
-        "manifest.json",
-    }
     for path in Path(root).rglob("*"):
         if not path.is_file() or ".git" in path.parts or "node_modules" in path.parts:
             continue
         rel = str(path.relative_to(root))
-        if path.name in generated or is_immutable_path(rel) or is_locked_path(rel):
+        if is_immutable_path(rel) or is_locked_path(rel):
             continue
         transformed_path = rules.transform_path(rel)
         if transformed_path != rel:
@@ -340,12 +381,11 @@ def audit_branding_fixed_point(
 def audit_brand_symbols(root: str) -> list[AuditIssue]:
     """Block inherited medical-symbol glyphs after the NasTech text transformation."""
     issues: list[AuditIssue] = []
-    generated_reports = {"UPDATE-REPORT.md", "GATE-REPORT.md", "manifest.json"}
     for path in Path(root).rglob("*"):
         if not path.is_file() or ".git" in path.parts or "node_modules" in path.parts:
             continue
         rel = str(path.relative_to(root))
-        if path.name in generated_reports or is_immutable_path(rel):
+        if is_immutable_path(rel):
             continue
         try:
             text = path.read_text(encoding="utf-8")
@@ -520,6 +560,7 @@ def build_weekly_report(
     report.brand_issues = audit_first_party_brand(branded_root)
     report.brand_issues.extend(audit_branding_fixed_point(branded_root))
     report.brand_issues.extend(audit_brand_symbols(branded_root))
+    report.brand_issues.extend(audit_cli_banner_identity(branded_root))
     report.brand_issues.extend(audit_fts5_trigram_fixtures(branded_root))
     report.asset_issues = audit_owned_assets(branded_root)
     report.visual_issues = audit_visual_assets(branded_root, upstream_repo)

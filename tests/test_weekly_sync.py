@@ -7,6 +7,7 @@ from hundredways.weekly_sync import (
     audit_brand_symbols,
     audit_branding_fixed_point,
     audit_first_party_brand,
+    audit_cli_banner_identity,
     audit_fts5_trigram_fixtures,
     audit_nested_lockfiles,
     audit_snapshot_safety,
@@ -52,14 +53,45 @@ def test_brand_audit_flags_first_party_brand_and_allows_vendor_package(tmp_path)
 def test_brand_fixed_point_audit_blocks_transformable_text_and_paths(tmp_path):
     root = Path(tmp_path)
     (root / "hermes-notes.md").write_text("Launch Hermes with ⚕ support.\n")
-    immutable = root / "contributors" / "emails" / "hermes@example.com"
+    immutable = root / "contributors" / "names" / "Hermes Person"
     immutable.parent.mkdir(parents=True)
-    immutable.write_text("Hermes is a real contributor record.\n")
+    immutable.write_text("Hermes is approved identity metadata.\n")
 
     issues = audit_branding_fixed_point(str(root))
 
     assert {issue.code for issue in issues} == {"brand-path-not-fixed-point"}
     assert issues[0].path == "hermes-notes.md"
+
+
+def test_brand_audit_scans_generated_metadata_and_contributor_emails(tmp_path):
+    root = Path(tmp_path)
+    (root / "manifest.json").write_text('{"source": "https://github.com/NousResearch/hermes-agent"}\n')
+    (root / "reports").mkdir()
+    (root / "reports" / "UPDATE-REPORT.md").write_text("Hermes update evidence\n")
+    emails = root / "contributors" / "emails"
+    emails.mkdir(parents=True)
+    (emails / "agent@hermes.local").write_text("NousResearch mailbox\n")
+
+    issues = audit_first_party_brand(str(root))
+
+    assert {(issue.code, issue.path) for issue in issues} == {
+        ("first-party-brand", "manifest.json"),
+        ("first-party-brand", "reports/UPDATE-REPORT.md"),
+        ("first-party-brand", "contributors/emails/agent@hermes.local"),
+        ("first-party-brand-path", "contributors/emails/agent@hermes.local"),
+    }
+
+
+def test_cli_banner_audit_requires_nastech_title_and_approved_symbol(tmp_path):
+    root = Path(tmp_path)
+    cli = root / "nastech_cli"
+    cli.mkdir()
+    (cli / "banner.py").write_text("_logo = _bskin.banner_logo\n")
+
+    issues = audit_cli_banner_identity(str(root))
+
+    assert {issue.code for issue in issues} == {"cli-banner"}
+    assert len(issues) == 4
 
 
 def test_brand_fixed_point_audit_blocks_transformable_text(tmp_path):

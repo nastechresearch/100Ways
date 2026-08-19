@@ -138,20 +138,89 @@ class BrandingRules:
         return pattern.sub(lambda m: self._replacement(m, tokens), path)
 
 
+def transform_strict_metadata_text(text: str, rules: BrandingRules | None = None) -> str:
+    """Brand every token occurrence in generated metadata and report text.
+
+    Generated records often contain source paths such as ``hermes_cli`` or
+    ``hermes-bots``.  Those separators are identifiers rather than normal
+    prose, so the user’s zero-upstream-brand policy requires replacement even
+    where the conservative source-code transformer intentionally preserves an
+    embedded identifier.  This helper is restricted to generated metadata,
+    reports, and inventories; production source files retain the normal
+    boundary-safe transformer.
+    """
+    rules = rules or BrandingRules()
+    transformed = text
+    for token in rules.tokens:
+        pattern = re.compile(re.escape(token.match), re.IGNORECASE)
+
+        def replace(match: re.Match, replacement: str = token.replace) -> str:
+            value = match.group(0)
+            if value.isupper():
+                return replacement.upper()
+            if value[:1].isupper():
+                return replacement[:1].upper() + replacement[1:]
+            return replacement
+
+        transformed = pattern.sub(replace, transformed)
+    return transformed
+
+
+def transform_contributor_email_text(text: str, rules: BrandingRules | None = None) -> str:
+    """Apply the strict policy to a contributor-email record payload.
+
+    Contributor email records are text identity data, not source code.  Their
+    filename and payload must therefore not retain an inherited brand—even when
+    it is embedded in a mailbox label such as ``mchermes``.  Contributor names
+    remain the separate approved identity exception.
+    """
+    return transform_strict_metadata_text(text, rules)
+
+
+def transform_contributor_email_path(path: str, rules: BrandingRules | None = None) -> str:
+    """Map contributor-email filenames even when a brand is embedded in an address.
+
+    Email local parts and host labels frequently join an inherited product name
+    directly to another word (for example ``hermesagent@example.invalid``),
+    where ordinary identifier rules correctly avoid a broad text replacement.
+    The strict candidate policy nevertheless forbids that brand in an email
+    filename.  Apply the canonical longest-first replacements to that filename
+    only; no contributor record is removed and content still uses normal text
+    token boundaries.
+    """
+    rules = rules or BrandingRules()
+    marker = "contributors/emails/"
+    lowered = path.lower()
+    index = lowered.find(marker)
+    if index < 0:
+        return rules.transform_path(path)
+    prefix = path[: index + len(marker)]
+    suffix = path[index + len(marker):]
+    for token in rules.tokens:
+        suffix = suffix.replace(token.match, token.replace)
+    return prefix + suffix
+
+
 def collision_safe_path_map(paths: list[str], rules: BrandingRules | None = None) -> dict[str, str]:
     """Map every source path to a deterministic case-safe candidate path.
 
     Two distinct upstream paths can differ only by case.  That is valid on the
     upstream's case-sensitive filesystem but unsafe on macOS and Windows.  A
     collision is resolved *before* candidate materialization by appending a
-    stable source-path digest to each member of the colliding group.  Ordinary
-    contributor-email identities remain verbatim; only a genuine collision
-    receives a suffix.  No file is dropped, merged, or content-rewritten.
+    stable source-path digest to each member of the colliding group.  Contributor
+    names remain identity metadata, while contributor-email paths use the same
+    NasTech-safe token mapping as every other candidate path.  No record is
+    dropped or merged.
     """
     rules = rules or BrandingRules()
     paths = sorted(paths)
     mapped = {
-        path: path if is_immutable_path(path) else rules.transform_path(path)
+        path: (
+            path if is_immutable_path(path)
+            else transform_contributor_email_path(path, rules)
+            if "contributors/emails/" in path.lower()
+            else rules.transform_path(path)
+        )
         for path in paths
     }
     groups: dict[str, list[str]] = {}
@@ -246,17 +315,19 @@ LOCKED_EXTENSIONS = (
 
 
 # ---------------------------------------------------------------------------
-# Immutable data files.  These are real-world records, not brandable content:
-# contributor email files, contact lists, etc.  They are NOT renamed (a real
-# email address must keep its true form) and NOT content-rewritten.
+# Immutable identity metadata.  Contributor names are the one approved
+# identity exception in the strict brand policy, so they stay verbatim.  Email
+# records are intentionally NOT immutable: their path and textual payload must
+# pass through the NasTech token mapping, while collision_safe_path_map keeps
+# case-colliding records distinct and lossless.
 # ---------------------------------------------------------------------------
 
 IMMUTABLE_PATH_SUBSTRINGS = (
-    "contributors/emails/",
+    "contributors/names/",
 )
 
 def is_immutable_path(path: str) -> bool:
-    """True when a path is real data: keep name AND content byte-for-byte."""
+    """True only for approved contributor-name identity metadata."""
     lowered = path.lower()
     return any(sub in lowered for sub in IMMUTABLE_PATH_SUBSTRINGS)
 

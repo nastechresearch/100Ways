@@ -29,7 +29,14 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 
-from .rules import BrandingRules, collision_safe_path_map, is_immutable_path, is_locked_path
+from .rules import (
+    BrandingRules,
+    collision_safe_path_map,
+    is_immutable_path,
+    is_locked_path,
+    transform_contributor_email_path,
+    transform_contributor_email_text,
+)
 from .scanner import is_text
 
 
@@ -338,6 +345,7 @@ def _is_relocated_collision_alias(
     path_map: dict[str, str],
     fork_root: str,
     branded_root: str,
+    rules: BrandingRules | None = None,
 ) -> bool:
     """Return true only when a legacy raw path is byte-preserved at its safe path.
 
@@ -346,14 +354,28 @@ def _is_relocated_collision_alias(
     its collision-safe upstream destination exists and contains exactly the
     same bytes; custom fork data is never discarded.
     """
+    rules = rules or BrandingRules()
     mapped = path_map.get(rel)
+    is_email = "contributors/emails/" in rel.lower()
+    # A legacy fork can carry a pre-policy email alias whose source spelling
+    # differs from the current upstream spelling only by case or a brand token.
+    # Resolve it through the same strict email mapper, but only when that
+    # destination is an actual current upstream destination.
+    if is_email and (not mapped or mapped == rel):
+        candidate = transform_contributor_email_path(rel, rules)
+        if candidate in set(path_map.values()) and candidate != rel:
+            mapped = candidate
     if not mapped or mapped == rel:
         return False
     source = os.path.join(fork_root, rel)
     destination = os.path.join(branded_root, mapped)
     if not os.path.isfile(source) or not os.path.isfile(destination):
         return False
-    return _read(source) == _read(destination)
+    source_data = _read(source)
+    if is_email and is_text(source_data):
+        expected = transform_contributor_email_text(source_data.decode("utf-8", "replace"), rules).encode("utf-8")
+        return expected == _read(destination)
+    return source_data == _read(destination)
 
 
 def preserve_fork_files(
@@ -388,7 +410,7 @@ def preserve_fork_files(
     for rel in _walk(fork_root):
         if rel in upstream_mapped:
             continue  # upstream provides it
-        if _is_relocated_collision_alias(rel, upstream_path_map, fork_root, branded_root):
+        if _is_relocated_collision_alias(rel, upstream_path_map, fork_root, branded_root, rules):
             continue  # exact contributor bytes already exist at their safe destination
         explicitly_owned = (
             rel in owned_paths
@@ -453,7 +475,7 @@ def fork_consistency(
 
     for rel in sorted(fork_files):
         entry = ForkEntry(path=rel, status="missing")
-        if _is_relocated_collision_alias(rel, upstream_path_map, fork_root, branded_root):
+        if _is_relocated_collision_alias(rel, upstream_path_map, fork_root, branded_root, rules):
             entry.status = "relocated"
             report.entries.append(entry)
             continue
