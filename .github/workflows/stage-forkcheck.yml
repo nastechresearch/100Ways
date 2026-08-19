@@ -259,19 +259,31 @@ jobs:
         with:
           pattern: forkcheck-test-durations-slice-*
           path: durations
-          merge-multiple: true
+          # Each slice emits the same filename. Keep artifact directories so
+          # download-artifact never concatenates separate JSON documents.
+          merge-multiple: false
 
       - name: Merge into single durations file
         run: |
           python3 -c "
-          import json, glob, os
+          import json
+          from pathlib import Path
+
+          files = sorted(Path('durations').glob('*/test_durations.json'))
+          if not files:
+              raise SystemExit('No per-slice duration artifacts were downloaded')
+
           merged = {}
-          for f in glob.glob('durations/*test_durations.json'):
-            with open(f) as fh:
-              merged.update(json.load(fh))
-          with open('test_durations.json', 'w') as fh:
-            json.dump(merged, fh, indent=2, sort_keys=True)
-          print(f'Merged {len(merged)} file durations')
+          for path in files:
+              with path.open(encoding='utf-8') as fh:
+                  payload = json.load(fh)
+              if not isinstance(payload, dict):
+                  raise SystemExit(f'Expected object in {path}')
+              merged.update(payload)
+
+          with open('test_durations.json', 'w', encoding='utf-8') as fh:
+              json.dump(merged, fh, indent=2, sort_keys=True)
+          print(f'Merged {len(files)} duration artifacts and {len(merged)} file durations')
           "
 
       - name: Save merged duration cache
