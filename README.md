@@ -7,7 +7,7 @@ into the Nastech fork while keeping parity and the brand intact.
 
 - 200 ways across 10 strategy categories
 - 16 achievements, 2 unlocked
-- 32 owned-asset registry entries (see config/owned-assets/)
+- 34 owned-asset registry entries (see config/owned-assets/)
 - 19 pipeline stages per update run
 
 ## Ways
