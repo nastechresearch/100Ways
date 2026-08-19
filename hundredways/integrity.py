@@ -146,12 +146,15 @@ def audit_manifest_provenance(
         # retain upstream-brand text.  CI validates fresh direct acquisition
         # separately, while the shipped receipt carries only this deterministic
         # NasTech projection of the same repository endpoint.
-        allowed = {
-            (CANONICAL_UPSTREAM_HOST, CANONICAL_UPSTREAM_PATH),
-            ("github.com", "/NastechResearch/nastech-agent.git"),
-            ("github.com", "/nastechresearch/nastech-agent.git"),
+        allowed_paths = {
+            CANONICAL_UPSTREAM_PATH.lower(),
+            "/nastechresearch/nastech-agent.git",
         }
-        if parsed.scheme != "https" or (parsed.netloc, parsed.path) not in allowed:
+        if (
+            parsed.scheme != "https"
+            or parsed.netloc.lower() != "github.com"
+            or parsed.path.lower() not in allowed_paths
+        ):
             issues.append(IntegrityIssue("source-remote", path.name, "source remote is not an approved HTTPS provenance endpoint"))
 
     fetched_at = provenance.get("fetched_at")
