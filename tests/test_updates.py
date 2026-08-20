@@ -12,6 +12,7 @@ from hundredways.integrity import audit_candidate_tree
 from hundredways.updates import (
     STAGES,
     UpdateManager,
+    _reconcile_credential_display_test,
     _reconcile_desktop_export_order,
     brand_tree,
     compare_trees,
@@ -159,6 +160,24 @@ def test_desktop_export_order_is_reconciled_after_nastech_rename(tmp_path):
     assert sdk_text.index("@/lib/budgeted-loop") < sdk_text.index("@/nastech")
     assert sdk_text.index("@/lib/format") < sdk_text.index("@/nastech")
     assert sdk_text.index("@/lib/utils") < sdk_text.index("@/nastech")
+
+
+def test_reconcile_preserves_fixed_width_credential_mask_assertion(tmp_path):
+    candidate = tmp_path / "candidate"
+    target = candidate / "tests" / "cli" / "test_show_config_credential.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        'agent_key="nastech-REALKEY-abcdef9876"\n'
+        'assert "nastech-REA" in out\n',
+        encoding="utf-8",
+    )
+
+    assert _reconcile_credential_display_test(str(candidate)) == 1
+    updated = target.read_text(encoding="utf-8")
+    assert 'agent_key="nastech-REALKEY-abcdef9876"' in updated
+    assert 'assert "nastech-" in out' in updated
+    assert 'assert "nastech-REA" in out' not in updated
+    assert _reconcile_credential_display_test(str(candidate)) == 0
 
 
 def test_text_content_branded_binary_locked_untouched(tmp_path):

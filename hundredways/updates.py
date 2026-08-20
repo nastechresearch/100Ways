@@ -869,6 +869,36 @@ def _reconcile_desktop_export_order(dst: str) -> list[str]:
     return repaired
 
 
+def _reconcile_credential_display_test(dst: str) -> int:
+    """Preserve the fixed-width API-key masking assertion after branding.
+
+    The upstream credential-display test uses an eight-character assertion:
+    ``nous-REA`` is the first eight characters of its fixture value. Token
+    branding expands that fixture to ``nastech-REAL...`` but also mechanically
+    expands the assertion to ``nastech-REA``. The CLI deliberately masks every
+    API key after eight characters, so its correct branded output is
+    ``nastech-...``. Reconcile only this transformed assertion; production
+    credential masking remains byte-for-byte source-equivalent.
+    """
+    rel = "tests/cli/test_show_config_credential.py"
+    path = os.path.join(dst, rel)
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return 0
+    fixture = 'agent_key="nastech-REALKEY-abcdef9876"'
+    assertion = 'assert "nastech-REA" in out'
+    if fixture not in text or assertion not in text:
+        return 0
+    updated = text.replace(assertion, 'assert "nastech-" in out', 1)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(updated)
+    return 1
+
+
 def _reconcile_plugin_search_table(dst: str) -> bool:
     """Widen the ``cmd_search`` Name column so branded names render fully.
 
@@ -1148,6 +1178,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_hermez_obfuscation(dst):
         result.total += 1
         result.fixed.append("tests/nastech_cli/test_gateway_restart_loop.py")
+    if _reconcile_credential_display_test(dst):
+        result.total += 1
+        result.fixed.append("tests/cli/test_show_config_credential.py")
     if _reconcile_plugin_search_table(dst):
         result.total += 1
         result.fixed.append("nastech_cli/plugins_cmd.py")
