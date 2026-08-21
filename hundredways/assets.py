@@ -25,10 +25,36 @@ match the fork.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 
+from PIL import Image
+
 MANIFEST_NAME = "manifest.json"
+
+# Tauri validates these named bootstrap icons at compile time. Preserve the
+# approved NasTech pixels while normalizing container mode and dimensions every
+# time an owned candidate asset is materialized.
+_TAURI_BOOTSTRAP_ICON_SIZES: dict[str, tuple[int, int]] = {
+    "apps/bootstrap-installer/src-tauri/icons/32x32.png": (32, 32),
+    "apps/bootstrap-installer/src-tauri/icons/128x128.png": (128, 128),
+    "apps/bootstrap-installer/src-tauri/icons/128x128@2x.png": (256, 256),
+}
+
+
+def _normalized_tauri_icon_bytes(path: str, size: tuple[int, int]) -> bytes | None:
+    """Return a deterministic RGBA PNG for a declared bootstrap icon."""
+    try:
+        with Image.open(path) as image:
+            rgba = image.convert("RGBA")
+            if rgba.size != size:
+                rgba = rgba.resize(size, Image.Resampling.LANCZOS)
+            out = io.BytesIO()
+            rgba.save(out, format="PNG")
+            return out.getvalue()
+    except (OSError, ValueError):
+        return None
 
 
 def default_owned_assets_dir(repo: str) -> str:
@@ -78,6 +104,9 @@ class OwnedAssets:
         path = os.path.join(self.root, rel)
         if not os.path.isfile(path):
             return None
+        required_size = _TAURI_BOOTSTRAP_ICON_SIZES.get(fork_path)
+        if required_size:
+            return _normalized_tauri_icon_bytes(path, required_size)
         try:
             with open(path, "rb") as fh:
                 return fh.read()
