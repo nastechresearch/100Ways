@@ -40,7 +40,7 @@ jobs:
           mkdir -p tree
           cd tree
           python3 - <<'EOF'
-          import os, stat, zipfile
+          import os, stat, subprocess, zipfile
           with zipfile.ZipFile("../artifact/nastech-agent-update.zip") as zf:
               zf.extractall(".")
               # Python's zipfile.extractall drops exec bits, so restore every
@@ -123,7 +123,7 @@ jobs:
           mkdir -p tree
           cd tree
           python3 - <<'EOF'
-          import os, stat, zipfile
+          import os, stat, subprocess, zipfile
           with zipfile.ZipFile("../artifact/nastech-agent-update.zip") as zf:
               zf.extractall(".")
               for info in zf.infolist():
@@ -240,7 +240,7 @@ jobs:
           mkdir -p tree
           cd tree
           python3 - <<'EOF'
-          import os, stat, zipfile
+          import os, stat, subprocess, zipfile
           with zipfile.ZipFile("../artifact/nastech-agent-update.zip") as zf:
               zf.extractall(".")
               for info in zf.infolist():
