@@ -57,6 +57,33 @@ def _rule(match: str, replace: str, anchored: bool = False) -> TokenRule:
     return TokenRule(match=match, replace=replace, anchored=anchored)
 
 
+# ---------------------------------------------------------------------------
+# Runner-label normalization.  Upstream Hermes pays for GitHub larger runners
+# (ubuntu-latest-96-core, ubuntu-latest-32-arm-core, ...).  This org does not
+# configure them, so any such label queues a job forever (2026-08-24 incident:
+# the whole nastech-agent CI sat queued 4h+ after a branded update carried the
+# labels over).  Normalizing here — inside the canonical transform — keeps the
+# brander, porter, forkcheck, and analyzer in exact agreement.
+# ---------------------------------------------------------------------------
+
+_RUNNER_LABEL_RE = re.compile(
+    r"\b"
+    r"((?:ubuntu|windows|macos)-[a-z0-9.]+"      # base: ubuntu-latest, macos-14, ...
+    r"(?:-latest)?)"                              # tolerate ...-latest-NN-core
+    r"-(\d+)"
+    r"-(arm-)?"                                   # optional arm variant
+    r"core\b"
+)
+
+
+def _normalize_runner(match_obj: re.Match) -> str:
+    base, _, arm = match_obj.group(1), match_obj.group(2), match_obj.group(3)
+    if arm:
+        # Standard hosted arm64 label; windows/macos have no arm hosted tier.
+        return "ubuntu-24.04-arm" if base.startswith("ubuntu") else base
+    return base
+
+
 # The canonical learned set.  Order matters: longest compounds first.
 DEFAULT_TOKENS: list[TokenRule] = [
     # -- nous family: compounds before short forms -------------------------
@@ -129,7 +156,8 @@ class BrandingRules:
         """Apply all branding tokens to free text."""
         tokens = list(self.tokens)
         pattern = self._pattern()
-        return pattern.sub(lambda m: self._replacement(m, tokens), text)
+        branded = pattern.sub(lambda m: self._replacement(m, tokens), text)
+        return _RUNNER_LABEL_RE.sub(_normalize_runner, branded)
 
     def transform_path(self, path: str) -> str:
         """Apply branding tokens to a filesystem path (each component)."""
