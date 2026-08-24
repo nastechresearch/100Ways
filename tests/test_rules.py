@@ -148,3 +148,33 @@ def test_real_english_words_still_protected_after_escapes():
     assert "autonomous" in out
     assert r"\nnastech_nastech" in out
     assert r"not\nastech" in out
+
+
+def test_runner_labels_normalize_to_standard_hosted():
+    rules = BrandingRules()
+    text = (
+        "runs-on: ubuntu-latest-96-core\n"
+        "runs-on: ubuntu-latest-32-core\n"
+        "runner: windows-latest-32-core\n"
+        "runs-on: ubuntu-latest-32-arm-core\n"
+        "runs-on: macos-14-xlarge-core\n"  # no digits before core -> untouched
+    )
+    out = rules.transform_text(text)
+    assert "runs-on: ubuntu-latest\n" in out
+    assert "runner: windows-latest\n" in out
+    assert "runs-on: ubuntu-24.04-arm\n" in out
+    assert "-core" not in out.split("macos")[0]
+    # the non-matching line survives verbatim
+    assert "macos-14-xlarge-core" in out
+
+
+def test_runner_prose_is_untouched():
+    rules = BrandingRules()
+    text = "Measured on a 96-core EPYC, 377GB. The 32-core runner builds it."
+    assert rules.transform_text(text) == text
+
+
+def test_runner_normalization_is_idempotent_and_analyzer_stable():
+    rules = BrandingRules()
+    once = rules.transform_text("runs-on: ubuntu-latest-96-core")
+    assert rules.transform_text(once) == once == "runs-on: ubuntu-latest"
