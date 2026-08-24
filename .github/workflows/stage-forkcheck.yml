@@ -40,7 +40,7 @@ jobs:
           mkdir -p tree
           cd tree
           python3 - <<'EOF'
-          import os, stat, zipfile
+          import os, stat, subprocess, zipfile
           with zipfile.ZipFile("../artifact/nastech-agent-update.zip") as zf:
               zf.extractall(".")
               # Python's zipfile.extractall drops exec bits, so restore every
@@ -52,14 +52,13 @@ jobs:
                       path = os.path.join(*info.filename.split("/"))
                       if os.path.isfile(path):
                           os.chmod(path, os.stat(path).st_mode | (mode & 0o111))
-              # The zip carries no .git (it is a fresh clone of the branded tree),
-              # but update-path tests (test_cmd_update, test_update_yes_flag, ...)
-              # and `nastech update` check PROJECT_ROOT/.git exists before
-              # running.  An empty .git dir satisfies the existence gate; git
-              # subprocess calls are mocked in those tests.  Mirror the fork's
-              # real git checkout so the same tests pass here.  The zip also
-              # carries GATE-REPORT.md/UPDATE-REPORT.md at the top level, so
-              # pick the top-level directory (the tree), not a report file.
+              # The zip carries no .git. Mirror what actions/checkout gives
+              # upstream Hermes CI: a working `.git/` so `git check-ignore`,
+              # `git ls-files`, and similar git-subprocess calls work. The
+              # upstream test test_repo_gitignores_the_legacy_bin_dir (and
+              # scripts/run_tests.sh's `git ls-files` cache step) both fail
+              # with rc=128 against an empty .git/ stub. Init + add + commit
+              # makes the tree a real repo matching the upstream environment.
               top = sorted(
                   set(n.split("/", 1)[0] for n in zf.namelist() if "/" in n)
               )
@@ -67,7 +66,29 @@ jobs:
                   (t for t in top if os.path.isdir(t)), None
               )
               if tree_dir:
-                  os.makedirs(os.path.join(tree_dir, ".git"), exist_ok=True)
+                  subprocess.run(
+                      ["git", "-C", tree_dir, "init", "-q", "--initial-branch=main"],
+                      check=True,
+                  )
+                  subprocess.run(
+                      ["git", "-C", tree_dir, "config", "user.email",
+                       "forkcheck@100ways.local"],
+                      check=True,
+                  )
+                  subprocess.run(
+                      ["git", "-C", tree_dir, "config", "user.name",
+                       "100Ways Forkcheck"],
+                      check=True,
+                  )
+                  subprocess.run(
+                      ["git", "-C", tree_dir, "add", "-A"],
+                      check=True,
+                  )
+                  subprocess.run(
+                      ["git", "-C", tree_dir, "commit", "-q",
+                       "-m", "forkcheck: snapshot of branded candidate"],
+                      check=True,
+                  )
           print("extracted:", top)
           EOF
 
@@ -102,7 +123,7 @@ jobs:
           mkdir -p tree
           cd tree
           python3 - <<'EOF'
-          import os, stat, zipfile
+          import os, stat, subprocess, zipfile
           with zipfile.ZipFile("../artifact/nastech-agent-update.zip") as zf:
               zf.extractall(".")
               for info in zf.infolist():
@@ -118,7 +139,29 @@ jobs:
                   (t for t in top if os.path.isdir(t)), None
               )
               if tree_dir:
-                  os.makedirs(os.path.join(tree_dir, ".git"), exist_ok=True)
+                  subprocess.run(
+                      ["git", "-C", tree_dir, "init", "-q", "--initial-branch=main"],
+                      check=True,
+                  )
+                  subprocess.run(
+                      ["git", "-C", tree_dir, "config", "user.email",
+                       "forkcheck@100ways.local"],
+                      check=True,
+                  )
+                  subprocess.run(
+                      ["git", "-C", tree_dir, "config", "user.name",
+                       "100Ways Forkcheck"],
+                      check=True,
+                  )
+                  subprocess.run(
+                      ["git", "-C", tree_dir, "add", "-A"],
+                      check=True,
+                  )
+                  subprocess.run(
+                      ["git", "-C", tree_dir, "commit", "-q",
+                       "-m", "forkcheck: snapshot of branded candidate"],
+                      check=True,
+                  )
           EOF
 
       - name: Install ripgrep (prebuilt binary)
@@ -197,7 +240,7 @@ jobs:
           mkdir -p tree
           cd tree
           python3 - <<'EOF'
-          import os, stat, zipfile
+          import os, stat, subprocess, zipfile
           with zipfile.ZipFile("../artifact/nastech-agent-update.zip") as zf:
               zf.extractall(".")
               for info in zf.infolist():
@@ -213,7 +256,29 @@ jobs:
                   (t for t in top if os.path.isdir(t)), None
               )
               if tree_dir:
-                  os.makedirs(os.path.join(tree_dir, ".git"), exist_ok=True)
+                  subprocess.run(
+                      ["git", "-C", tree_dir, "init", "-q", "--initial-branch=main"],
+                      check=True,
+                  )
+                  subprocess.run(
+                      ["git", "-C", tree_dir, "config", "user.email",
+                       "forkcheck@100ways.local"],
+                      check=True,
+                  )
+                  subprocess.run(
+                      ["git", "-C", tree_dir, "config", "user.name",
+                       "100Ways Forkcheck"],
+                      check=True,
+                  )
+                  subprocess.run(
+                      ["git", "-C", tree_dir, "add", "-A"],
+                      check=True,
+                  )
+                  subprocess.run(
+                      ["git", "-C", tree_dir, "commit", "-q",
+                       "-m", "forkcheck: snapshot of branded candidate"],
+                      check=True,
+                  )
           EOF
 
       - name: Install uv
