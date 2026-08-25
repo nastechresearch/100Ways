@@ -643,10 +643,21 @@ def _reconcile_package_lock(dst: str, name: str) -> int:
 # rewritten BEFORE the bare-domain form, otherwise the `.com` in the middle
 # of the compound would already be gone when the compound rule runs.
 _DOMAIN_FIXES: list[tuple[str, str]] = [
+    # Plain URLs and hostnames.
     ("nastech-agent.nastechresearch.com", "nastechresearch.github.io/nastech-agent"),
     ("nastechresearch.com", "nastechresearch.github.io"),
     ("NastechResearch.com", "NastechResearch.github.io"),
     ("NASTECHRESEARCH.COM", "NASTECHRESEARCH.GITHUB.IO"),
+    # The same domains as written inside regex literals (for example,
+    # `nastechresearch\\.com`).  Text reconciliation is not regex-aware,
+    # so these forms must be listed explicitly.
+    (
+        "nastech-agent\\.nastechresearch\\.com",
+        "nastechresearch\\.github\\.io/nastech-agent",
+    ),
+    ("nastechresearch\\.com", "nastechresearch\\.github\\.io"),
+    ("NastechResearch\\.com", "NastechResearch\\.github\\.io"),
+    ("NASTECHRESEARCH\\.COM", "NASTECHRESEARCH\\.GITHUB\\.IO"),
 ]
 
 
@@ -671,8 +682,7 @@ def _reconcile_domains(dst: str) -> list[str]:
         if not is_text(data):
             continue
         text = data.decode("utf-8")
-        if "nastechresearch.com" not in text and "NastechResearch.com" not in text \
-                and "NASTECHRESEARCH.COM" not in text:
+        if not any(needle in text for needle, _ in _DOMAIN_FIXES):
             continue
         for needle, replacement in _DOMAIN_FIXES:
             if needle in text:
@@ -1094,12 +1104,51 @@ def _reconcile_docusaurus_site_config(dst: str) -> int:
         "url: 'https://nastechresearch.github.io',",
     ).replace(
         "baseUrl: '/docs/',",
-        "baseUrl: '/nastech-agent/',",
+        "baseUrl: '/nastech-agent/docs/',",
     )
     if updated == text:
         return 0
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(updated)
+    return 1
+
+
+def _reconcile_pages_deploy_workflow(dst: str) -> int:
+    """Keep the generated GitHub Pages artifact aligned with Docusaurus URLs.
+
+    The Nastech workflow stages Docusaurus under ``_site/docs``.  Publish the
+    documented installer at the artifact root and provide a root redirect so
+    existing download links do not land on a blank GitHub Pages path.
+    """
+    path = os.path.join(dst, ".github", "workflows", "deploy-site.yml")
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return 0
+    needle = """          mkdir -p _site/docs
+          cp -r website/build/* _site/docs/
+"""
+    replacement = """          mkdir -p _site/docs
+          cp -r website/build/* _site/docs/
+          # The docs build is staged under /docs/, while installers and legacy
+          # links are intentionally published at the project root.
+          cp scripts/install.sh _site/install.sh
+          cat > _site/index.html <<'HTML'
+          <!doctype html>
+          <meta charset=\"utf-8\">
+          <meta http-equiv=\"refresh\" content=\"0; url=./docs/\">
+          <link rel=\"canonical\" href=\"./docs/\">
+          <title>Nastech Agent</title>
+          <p><a href=\"./docs/\">Open Nastech Agent documentation</a></p>
+          HTML
+"""
+    if needle not in text or replacement in text:
+        return 0
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text.replace(needle, replacement, 1))
     return 1
 
 
@@ -1215,6 +1264,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_docusaurus_site_config(dst) and "website/docusaurus.config.ts" not in result.fixed:
         result.total += 1
         result.fixed.append("website/docusaurus.config.ts")
+    if _reconcile_pages_deploy_workflow(dst):
+        result.total += 1
+        result.fixed.append(".github/workflows/deploy-site.yml")
     result.fixed.sort()
     return result
 
