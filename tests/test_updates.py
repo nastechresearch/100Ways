@@ -711,6 +711,7 @@ def _hermes_repo_with_domains(tmp_path):
         "Portal: https://portal.nousresearch.com\n"
         "Inference: https://inference-api.nousresearch.com/v1\n"
         "Email: hermes@nousresearch.com\n"
+        "Cloud regex: /ares-3009\\.agents\\.nastechresearch\\.com/i\n"
         "Lookalike: https://inference-api.nousresearch.com.attacker.test/v1\n"
     )
     subprocess.run(["git", "-C", hermes, "add", "-A"], check=True)
@@ -738,6 +739,9 @@ def test_reconcile_migrates_com_domains_to_github_io(tmp_path):
     assert "https://inference-api.nastechresearch.github.io/v1" in text
     # email address follows the same migration
     assert "nastech@nastechresearch.github.io" in text
+    # regex-escaped hostnames follow the same migration as literal URLs.
+    assert r"ares-3009\.agents\.nastechresearch\.github\.io" in text
+    assert r"ares-3009\.agents\.nastechresearch\.com" not in text
     # lookalike fixture keeps its attacker suffix and stays a different host
     assert "https://inference-api.nastechresearch.github.io.attacker.test/v1" in text
 
@@ -828,6 +832,28 @@ def test_reconcile_trims_skill_description_to_fork_bytes(tmp_path):
 
 
 
+def test_reconcile_pages_workflow_publishes_installer_and_root_redirect(tmp_path):
+    root = tmp_path / "branded"
+    workflow = root / ".github" / "workflows" / "deploy-site.yml"
+    workflow.parent.mkdir(parents=True)
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "install.sh").write_text("#!/usr/bin/env bash\n")
+    workflow.write_text(
+        "      - name: Stage deployment\n"
+        "        run: |\n"
+        "          mkdir -p _site/docs\n"
+        "          cp -r website/build/* _site/docs/\n"
+    )
+
+    result = reconcile_tree(str(root))
+    text = workflow.read_text()
+
+    assert ".github/workflows/deploy-site.yml" in result.fixed
+    assert "cp scripts/install.sh _site/install.sh" in text
+    assert "cat > _site/index.html <<'HTML'" in text
+    assert "url=./docs/" in text
+
+
 def test_reconcile_target_ci_compatibility_fixes_are_audited(tmp_path):
     root = tmp_path / "branded"
     website = root / "website"
@@ -865,7 +891,7 @@ def test_reconcile_target_ci_compatibility_fixes_are_audited(tmp_path):
     }
     assert os.stat(runner).st_mode & 0o111
     assert "url: 'https://nastechresearch.github.io'," in (website / "docusaurus.config.ts").read_text()
-    assert "baseUrl: '/nastech-agent/'," in (website / "docusaurus.config.ts").read_text()
+    assert "baseUrl: '/nastech-agent/docs/'," in (website / "docusaurus.config.ts").read_text()
     assert "return project" in (paths / "paths.ts").read_text()
     lint_config = (root / "eslint.config.shared.mjs").read_text()
     assert "'perfectionist/sort-imports': [\n        'warn'," in lint_config
