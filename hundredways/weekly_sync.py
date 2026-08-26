@@ -114,21 +114,48 @@ class WeeklyFullSyncReport:
     freshness_ok: bool = False
     mode: str = "report"
     generated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    changed_areas: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def gate_blockers(self) -> list[dict[str, str]]:
+        """Return every hard blocker in a machine- and human-readable shape."""
+        blockers: list[dict[str, str]] = []
+
+        def add(category: str, issue: Any) -> None:
+            blockers.append({
+                "category": category,
+                "code": getattr(issue, "code", "unknown"),
+                "path": getattr(issue, "path", ""),
+                "detail": getattr(issue, "detail", str(issue)),
+            })
+
+        for category, issues in (
+            ("brand", self.brand_issues),
+            ("lock", self.lock_issues),
+            ("asset", self.asset_issues),
+            ("security", self.security_issues),
+        ):
+            for issue in issues:
+                add(category, issue)
+        for category, issues in (
+            ("visual", [i for i in self.visual_issues if i.severity == "block"]),
+            ("ci", [i for i in self.ci_issues if i.severity == "block"]),
+            ("skill", [i for i in self.skill_issues if i.severity == "block"]),
+        ):
+            for issue in issues:
+                add(category, issue)
+        if not self.freshness_ok:
+            blockers.append({
+                "category": "freshness",
+                "code": "upstream-not-fresh",
+                "path": "",
+                "detail": "upstream changed or could not be confirmed stable during the gate",
+            })
+        return blockers
 
     @property
     def gate_passes(self) -> bool:
-        visual_blocks = any(issue.severity == "block" for issue in self.visual_issues)
-        ci_blocks = any(issue.severity == "block" for issue in self.ci_issues)
-        skill_blocks = any(issue.severity == "block" for issue in self.skill_issues)
-        return not (
-            self.brand_issues
-            or self.lock_issues
-            or self.asset_issues
-            or self.security_issues
-            or visual_blocks
-            or ci_blocks
-            or skill_blocks
-        ) and self.freshness_ok
+        return not self.gate_blockers
 
     @property
     def review_required(self) -> bool:
@@ -140,7 +167,11 @@ class WeeklyFullSyncReport:
     def to_dict(self) -> dict[str, Any]:
         """Serialize a binary authorization gate plus non-blocking review evidence."""
         decision = "PASS" if self.gate_passes else "FAIL"
-        return asdict(self) | {"gate": decision, "review_required": self.review_required}
+        return asdict(self) | {
+            "gate": decision,
+            "gate_blockers": self.gate_blockers,
+            "review_required": self.review_required,
+        }
 
 
 def _run(repo: str, *args: str, check: bool = True) -> str:
@@ -545,6 +576,14 @@ def build_weekly_report(
     files, added, deleted = _git_changed_numstat(upstream_repo, before, current)
     commits = int(_run(upstream_repo, "rev-list", "--count", f"{before}..{current}") or 0) if before else 0
     captured = _snapshot_upstream_sha(branded_root)
+    changed_areas: dict[str, int] = {}
+    try:
+        manifest = json.loads((Path(branded_root) / "manifest.json").read_text(encoding="utf-8"))
+        raw_areas = manifest.get("changed_areas", {})
+        if isinstance(raw_areas, dict):
+            changed_areas = {str(key): int(value) for key, value in raw_areas.items()}
+    except (OSError, ValueError, TypeError):
+        changed_areas = {}
     report = WeeklyFullSyncReport(
         upstream_sha=current,
         previous_sha=before,
@@ -554,6 +593,7 @@ def build_weekly_report(
         added_lines=added,
         deleted_lines=deleted,
         mode=mode,
+        changed_areas=changed_areas,
     )
     reconcile_nested_lockfile_roots(branded_root)
     report.lock_issues = audit_nested_lockfiles(branded_root)
@@ -600,8 +640,26 @@ def write_weekly_report(path: str, report: WeeklyFullSyncReport) -> None:
         f"- full-sync capabilities: {report.capabilities}",
         f"- freshness lock: {'PASS' if report.freshness_ok else 'FAIL'}",
         f"- review required: {'YES' if report.review_required else 'NO'}",
-        f"- gate: {report.to_dict()['gate']}", "",
+        f"- gate: {report.to_dict()['gate']}",
+        f"- hard blockers: {len(report.gate_blockers)}",
+        "",
     ]
+    if report.changed_areas:
+        lines.extend(["## Changed areas", ""])
+        lines.extend(
+            f"- `{area}`: {count} changed files"
+            for area, count in sorted(report.changed_areas.items())
+        )
+        lines.append("")
+
+    if report.gate_blockers:
+        lines.extend(["## Hard gate blockers", ""])
+        lines.extend(
+            f"- `{item['category']}` `{item['code']}` `{item['path']}` — {item['detail']}"
+            for item in report.gate_blockers
+        )
+        lines.append("")
+
     for title, issues in (
         ("Brand issues", report.brand_issues),
         ("Nested lock issues", report.lock_issues),
