@@ -123,6 +123,7 @@ jobs:
         env:
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
           HUNDREDWAYS_STATE_DIR: ${{ runner.temp }}/100ways-state
+          HUNDREDWAYS_UPSTREAM_SHA: ${{ steps.update.outputs.upstream_sha }}
           HUNDREDWAYS_WEEKLY_REPORT: ${{ runner.temp }}/weekly-full-sync-report.md
           HUNDREDWAYS_DECISION: ${{ runner.temp }}/weekly-decision.json
         run: |
@@ -145,6 +146,7 @@ jobs:
               snapshot,
               os.environ["HUNDREDWAYS_STATE_DIR"],
               mode="snapshot",
+              ref=os.environ["HUNDREDWAYS_UPSTREAM_SHA"] or "origin/main",
           )
           write_weekly_report(os.environ["HUNDREDWAYS_WEEKLY_REPORT"], report)
           with open(os.environ["HUNDREDWAYS_DECISION"], "w", encoding="utf-8") as fh:

@@ -113,3 +113,11 @@ def test_stage_pipeline_requires_final_conformance_and_candidate_tests_before_re
     assert "astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39" in workflow
     assert "RG_SHA256=1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599" in workflow
     assert "source .venv/bin/activate" in workflow
+
+
+def test_weekly_gate_uses_immutable_update_source_sha():
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github" / "workflows" / "stage-pipeline.yml").read_text()
+
+    assert "HUNDREDWAYS_UPSTREAM_SHA: ${{ steps.update.outputs.upstream_sha }}" in workflow
+    assert 'ref=os.environ["HUNDREDWAYS_UPSTREAM_SHA"] or "origin/main"' in workflow
