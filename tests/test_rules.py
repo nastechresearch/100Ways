@@ -188,6 +188,23 @@ def test_unrelated_worker_values_are_untouched():
     assert rules.transform_text(text) == text
 
 
+def test_full_python_test_timeout_normalizes_to_40_minutes_only():
+    rules = BrandingRules()
+    text = (
+        "jobs:\n"
+        "  test:\n"
+        "    name: Run tests\n"
+        "    runs-on: ubuntu-latest-96-core\n"
+        "    timeout-minutes: 30\n"
+        "  e2e:\n"
+        "    name: e2e\n"
+        "    timeout-minutes: 30\n"
+    )
+    out = rules.transform_text(text)
+    assert "name: Run tests\n    runs-on: ubuntu-latest\n    timeout-minutes: 40" in out
+    assert "name: e2e\n    timeout-minutes: 30" in out
+
+
 def test_runner_normalization_is_idempotent_and_analyzer_stable():
     rules = BrandingRules()
     once = rules.transform_text("runs-on: ubuntu-latest-96-core")

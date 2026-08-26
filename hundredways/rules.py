@@ -87,6 +87,17 @@ def _normalize_test_workers(text: str) -> str:
     return _TEST_WORKERS_RE.sub(r"\g<prefix>8\g<suffix>", text)
 
 
+# Standard runners need a little more wall-clock allowance for the complete
+# Python suite, while the smaller auxiliary jobs retain their upstream limits.
+_FULL_TEST_TIMEOUT_RE = re.compile(
+    r"(?ms)(^\s*name:\s*Run tests\s*$.*?^\s*timeout-minutes:\s*)30(\s*$)"
+)
+
+
+def _normalize_test_timeout(text: str) -> str:
+    return _FULL_TEST_TIMEOUT_RE.sub(r"\g<1>40\g<2>", text, count=1)
+
+
 def _normalize_runner(match_obj: re.Match) -> str:
     base, _, arm = match_obj.group(1), match_obj.group(2), match_obj.group(3)
     if arm:
@@ -169,7 +180,8 @@ class BrandingRules:
         pattern = self._pattern()
         branded = pattern.sub(lambda m: self._replacement(m, tokens), text)
         branded = _RUNNER_LABEL_RE.sub(_normalize_runner, branded)
-        return _normalize_test_workers(branded)
+        branded = _normalize_test_workers(branded)
+        return _normalize_test_timeout(branded)
 
     def transform_path(self, path: str) -> str:
         """Apply branding tokens to a filesystem path (each component)."""
