@@ -75,6 +75,17 @@ _RUNNER_LABEL_RE = re.compile(
     r"core\b"
 )
 
+# The upstream test workflow is tuned for a 96-core larger runner.  The
+# Nastech organization uses standard GitHub-hosted runners, where that fan-out
+# causes timing-sensitive subprocess, SQLite, and gateway tests to contend.
+_TEST_WORKERS_RE = re.compile(
+    r"(?m)^(?P<prefix>\s*NASTECH_TEST_WORKERS:\s*)96(?P<suffix>\s*(?:#.*)?)$"
+)
+
+
+def _normalize_test_workers(text: str) -> str:
+    return _TEST_WORKERS_RE.sub(r"\g<prefix>8\g<suffix>", text)
+
 
 def _normalize_runner(match_obj: re.Match) -> str:
     base, _, arm = match_obj.group(1), match_obj.group(2), match_obj.group(3)
@@ -157,7 +168,8 @@ class BrandingRules:
         tokens = list(self.tokens)
         pattern = self._pattern()
         branded = pattern.sub(lambda m: self._replacement(m, tokens), text)
-        return _RUNNER_LABEL_RE.sub(_normalize_runner, branded)
+        branded = _RUNNER_LABEL_RE.sub(_normalize_runner, branded)
+        return _normalize_test_workers(branded)
 
     def transform_path(self, path: str) -> str:
         """Apply branding tokens to a filesystem path (each component)."""

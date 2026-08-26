@@ -174,6 +174,20 @@ def test_runner_prose_is_untouched():
     assert rules.transform_text(text) == text
 
 
+def test_large_runner_test_workers_normalize_to_standard_runner_fanout():
+    rules = BrandingRules()
+    text = "          NASTECH_TEST_WORKERS: 96  # upstream larger runner\n"
+    out = rules.transform_text(text)
+    assert out == "          NASTECH_TEST_WORKERS: 8  # upstream larger runner\n"
+    assert rules.transform_text(out) == out
+
+
+def test_unrelated_worker_values_are_untouched():
+    rules = BrandingRules()
+    text = "NASTECH_TEST_WORKERS: 16\nOTHER_WORKERS: 96\n"
+    assert rules.transform_text(text) == text
+
+
 def test_runner_normalization_is_idempotent_and_analyzer_stable():
     rules = BrandingRules()
     once = rules.transform_text("runs-on: ubuntu-latest-96-core")
