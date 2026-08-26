@@ -133,6 +133,37 @@ def test_fts5_fixture_audit_blocks_stale_branded_query_token(tmp_path):
     assert issues[0].path == "tests/docker/test_sqlite_runtime.py"
 
 
+def test_report_includes_changed_areas_and_hard_blocker_details(tmp_path):
+    from hundredways.weekly_sync import write_weekly_report
+
+    report = WeeklyFullSyncReport(
+        "sha", "", 0, 0, 0, 0, freshness_ok=False,
+        changed_areas={"apps/desktop": 3, "website": 2},
+    )
+    path = tmp_path / "weekly.md"
+    write_weekly_report(str(path), report)
+
+    text = path.read_text()
+    assert "## Changed areas" in text
+    assert "`apps/desktop`: 3 changed files" in text
+    assert "`website`: 2 changed files" in text
+    assert "hard blockers: 1" in text
+    assert "upstream-not-fresh" in text
+
+
+def test_report_includes_hard_blocker_details(tmp_path):
+    from hundredways.weekly_sync import write_weekly_report
+
+    report = WeeklyFullSyncReport("sha", "", 0, 0, 0, 0, freshness_ok=False)
+    path = tmp_path / "weekly.md"
+    write_weekly_report(str(path), report)
+
+    text = path.read_text()
+    assert "hard blockers: 1" in text
+    assert "upstream-not-fresh" in text
+    assert "upstream changed" in text
+
+
 def test_passing_weekly_report_round_trips_through_ledger(tmp_path):
     report = WeeklyFullSyncReport(
         upstream_sha="abc123",
@@ -181,6 +212,29 @@ def test_reconcile_nested_lockfile_roots_repairs_branded_identity(tmp_path):
 
     assert changed == ["sidecar/package-lock.json"]
     assert audit_nested_lockfiles(str(tmp_path)) == []
+
+
+def test_gate_blockers_explain_freshness_failure():
+    report = WeeklyFullSyncReport("sha", "", 0, 0, 0, 0, freshness_ok=False)
+
+    assert report.gate_passes is False
+    assert report.gate_blockers == [{
+        "category": "freshness",
+        "code": "upstream-not-fresh",
+        "path": "",
+        "detail": "upstream changed or could not be confirmed stable during the gate",
+    }]
+    assert report.to_dict()["gate_blockers"] == report.gate_blockers
+
+
+def test_gate_blockers_exclude_review_only_findings():
+    from hundredways.ci_policy import WorkflowPolicyIssue
+
+    report = WeeklyFullSyncReport("sha", "", 0, 0, 0, 0, freshness_ok=True)
+    report.ci_issues = [WorkflowPolicyIssue("secret-inheritance", "workflow.yml", "review", "review")]
+
+    assert report.gate_passes is True
+    assert report.gate_blockers == []
 
 
 def test_review_only_ci_issue_does_not_block_candidate_gate():
