@@ -131,6 +131,11 @@ DEFAULT_TOKENS: list[TokenRule] = [
     _rule("NOUS", "NASTECH", anchored=True),
     # -- hermes family ------------------------------------------------------
     _rule("hermes-agent", "nastech-agent"),
+    # HTTP Authorization scheme for cross-gateway room grants.  Must be an
+    # explicit compound: the lowercase `hermes` token is boundary-guarded so
+    # it never fires inside `hermesroom` (protected lowercase substring),
+    # leaving a thr:scheme mismatch that 401s every room-grant request.
+    _rule("hermesroom", "nastechroom"),
     _rule("hermes", "nastech", anchored=True),
     _rule("Hermes", "Nastech", anchored=True),
     _rule("HERMES", "NASTECH", anchored=True),

@@ -42,6 +42,26 @@ def test_snake_case_handling():
     assert "hermes" not in out.lower()
 
 
+def test_room_grant_auth_scheme_stays_aligned():
+    """The lowercased HTTP Authorization scheme must be rebranded along with
+    the title-case token the tests send, or every room-grant request 401s.
+
+    Parser guards ``scheme.lower() != "hermesroom"`` while tests send
+    ``HermesRoom <grant>``.  A generic lowercase ``hermes`` token is
+    boundary-guarded and can't fire inside ``hermesroom``, so it needs an
+    explicit compound.
+    """
+    rules = BrandingRules()
+    parser = rules.transform_text('scheme.lower() != "hermesroom"')
+    assert "nastechroom" in parser
+    assert "hermesroom" not in parser
+    sent = rules.transform_text('f"HermesRoom {grant}"')
+    assert "NastechRoom" in sent
+    # both the scheme the parser compares against and the scheme the test
+    # sends lower to the same value, so the auth branch lines up.
+    assert "nastechroom" in sent.lower()
+
+
 def test_path_transforms():
     rules = BrandingRules()
     assert "nastech" in rules.transform_path("tools/hermes_runner.py").lower()
