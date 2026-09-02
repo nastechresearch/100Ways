@@ -84,7 +84,38 @@ jobs:
           HUNDREDWAYS_HERMES_URL: ${{ inputs.hermes_url }}
         run: |
           set -euo pipefail
-          DIRECT_SHA=$(git ls-remote "$HUNDREDWAYS_HERMES_URL" HEAD | awk 'NR == 1 {print $1}')
+          # Authenticated git raises the rate-limit bucket from per-IP
+          # (anonymous, ~100/hr, the source of recurring HTTP 429s on the
+          # shared runner IP) to per-token, and it is retried with backoff so
+          # a transient 429/5xx on upstream never kills the scheduled sync.
+          # Final fallback: the last verified upstream SHA recorded in the
+          # fork's manifest (degraded but keeps the cadence alive).
+          if [ -n "${GITHUB_TOKEN:-}" ]; then
+            AUTH_HEADER=$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)
+          else
+            AUTH_HEADER=""
+          fi
+          DIRECT_SHA=""
+          for attempt in 1 2 3 4 5; do
+            set +e
+            if [ -n "$AUTH_HEADER" ]; then
+              DIRECT_SHA=$(git -c "http.extraheader=AUTHORIZATION: basic $AUTH_HEADER" \
+                ls-remote "$HUNDREDWAYS_HERMES_URL" HEAD 2>/dev/null | awk 'NR == 1 {print $1}')
+            else
+              DIRECT_SHA=$(git ls-remote "$HUNDREDWAYS_HERMES_URL" HEAD 2>/dev/null | awk 'NR == 1 {print $1}')
+            fi
+            status=$?
+            set -e
+            if [ -n "$DIRECT_SHA" ]; then
+              break
+            fi
+            echo "  Direct upstream ls-remote (attempt $attempt) failed; backing off"
+            sleep $((attempt * 5))
+          done
+          if [ -z "$DIRECT_SHA" ]; then
+            echo "  Direct upstream unreachable after retries; using fork manifest upstream_sha"
+            DIRECT_SHA=$(python3 -c 'import json; print(json.load(open("nastech-agent/manifest.json")).get("upstream_sha",""))' 2>/dev/null || true)
+          fi
           test -n "$DIRECT_SHA"
           echo "sha=$DIRECT_SHA" >> "$GITHUB_OUTPUT"
           echo "- Direct upstream SHA: \`$DIRECT_SHA\`" >> "$GITHUB_STEP_SUMMARY"
@@ -93,6 +124,7 @@ jobs:
         id: update
         env:
           HUNDREDWAYS_HERMES_URL: ${{ inputs.hermes_url }}
+          HUNDREDWAYS_HERMES_TOKEN: ${{ github.token }}
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
           HUNDREDWAYS_OUTPUTS: ${{ runner.temp }}/update-outputs.json
           HUNDREDWAYS_ZIP: ${{ runner.temp }}/nastech-agent-update.zip
