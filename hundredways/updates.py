@@ -22,6 +22,7 @@ pipeline is testable against a fake "Hermes" repo.
 
 from __future__ import annotations
 
+import base64
 import difflib
 import json
 import os
@@ -127,6 +128,36 @@ def _run_ok(cmd: list[str], what: str) -> str:
     return proc.stdout.strip()
 
 
+def _git_auth_extraheader() -> list[str]:
+    """Return ``-c http.extraheader=...`` args when a token is configured.
+
+    The 100Ways scheduled pipeline clones the public Hermes repo from shared
+    GitHub runner IPs, whose anonymous per-IP git quota is small and routinely
+    trips HTTP 429.  Authenticating as ``x-access-token`` raises the bucket to
+    the per-token quota (5k/hr).  Single use: it only counts against us.
+    """
+    token = os.environ.get("HUNDREDWAYS_HERMES_TOKEN", "").strip()
+    if not token:
+        return []
+    encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    return ["-c", f"http.extraheader=AUTHORIZATION: basic {encoded}"]
+
+
+def _git_with_retry(cmd_prefix: list[str], args: list[str], what: str, tries: int = 5) -> str:
+    """Run a git command, retrying on transient 429/5xx or empty output."""
+    last_err = ""
+    for attempt in range(1, tries + 1):
+        proc = _run(cmd_prefix + args)
+        if proc.returncode == 0:
+            return proc.stdout.strip()
+        last_err = proc.stderr.strip() or proc.stdout.strip()
+        if "429" not in last_err and "5" not in last_err[:1]:
+            raise RuntimeError(f"{what} failed: {last_err}")
+        if attempt < tries:
+            time.sleep(attempt * 5)
+    raise RuntimeError(f"{what} failed after {tries} attempts: {last_err}")
+
+
 def pull_hermes(updates_dir: str, hermes_url: str = DEFAULT_HERMES_URL) -> str:
     """Acquire a new clone directly from the configured upstream remote.
 
@@ -139,8 +170,17 @@ def pull_hermes(updates_dir: str, hermes_url: str = DEFAULT_HERMES_URL) -> str:
     url = hermes_url if "://" in hermes_url else os.path.abspath(hermes_url)
     if os.path.exists(dest):
         shutil.rmtree(dest)
-    _run_ok(["git", "clone", "--no-local", url, dest], "fresh direct upstream clone")
-    return _run_ok(["git", "-C", dest, "rev-parse", "HEAD"], "upstream head")
+    auth = _git_auth_extraheader()
+    _git_with_retry(
+        ["git"] + auth,
+        ["clone", "--no-local", url, dest],
+        "fresh direct upstream clone",
+    )
+    try:
+        return _git_with_retry(["git", "-C", dest], ["rev-parse", "HEAD"], "upstream head", tries=3)
+    except RuntimeError:
+        # Local clone already succeeded; a bare rev-parse should not fail.
+        return _run_ok(["git", "-C", dest, "rev-parse", "HEAD"], "upstream head")
 
 
 def fork_manifest_upstream_sha(fork_root: str) -> str:
