@@ -854,6 +854,28 @@ def test_reconcile_pages_workflow_publishes_installer_and_root_redirect(tmp_path
     assert "url=./docs/" in text
 
 
+def test_reconcile_quickstart_hardware_fixture(tmp_path):
+    root = tmp_path / "branded"
+    test_path = root / "tests" / "nastech_cli" / "test_local_quickstart.py"
+    test_path.parent.mkdir(parents=True)
+    test_path.write_text(
+        "def test_quickstart_runs_all_three_legs(client, monkeypatch, tmp_path):\n"
+        "    calls: list[str] = []\n\n"
+        "    # Leg 1:\n"
+        "    monkeypatch.setattr(\n"
+        "        \\\"nastech_cli.local_runtime.binaries.installed_tags\\\", lambda: [])\n\n"
+        "def test_quickstart_skips_satisfied_legs(client, monkeypatch):\n"
+        "    calls: list[str] = []\n\n"
+        "    monkeypatch.setattr(\n"
+        "        \\\"nastech_cli.local_runtime.binaries.installed_tags\\\", lambda: [\\\"b10362\\\"])\n"
+    )
+    result = reconcile_tree(str(root))
+    assert result.fixed == ["tests/nastech_cli/test_local_quickstart.py"]
+    text = test_path.read_text()
+    assert text.count("100WAYS: hardware-independent quickstart fixture") == 2
+    assert text.count("catalog.select_variant") == 2
+
+
 def test_reconcile_target_ci_compatibility_fixes_are_audited(tmp_path):
     root = tmp_path / "branded"
     website = root / "website"

@@ -62,6 +62,12 @@ def test_room_grant_auth_scheme_stays_aligned():
     assert "nastechroom" in sent.lower()
 
 
+def test_compact_python_module_flags_are_branded():
+    rules = BrandingRules()
+    assert rules.transform_text("python3 -mhermes_cli.main gateway") == \
+        "python3 -mnastech_cli.main gateway"
+
+
 def test_path_transforms():
     rules = BrandingRules()
     assert "nastech" in rules.transform_path("tools/hermes_runner.py").lower()
