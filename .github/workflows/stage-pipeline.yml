@@ -78,22 +78,27 @@ jobs:
           git clone --depth=1 \
             https://github.com/nastechresearch/nastech-agent.git nastech-agent
 
-      - name: Capture direct upstream source evidence
-        id: direct-source
+      - name: Clone upstream source once
         env:
           HUNDREDWAYS_HERMES_URL: ${{ inputs.hermes_url }}
         run: |
           set -euo pipefail
-          DIRECT_SHA=""
+          rm -rf upstream-agent
           for attempt in 1 2 3 4 5; do
-            if DIRECT_SHA=$(git -c http.version=HTTP/1.1 ls-remote "$HUNDREDWAYS_HERMES_URL" HEAD | awk 'NR == 1 {print $1}') \
-              && test -n "$DIRECT_SHA"; then
+            if git -c http.version=HTTP/1.1 clone "$HUNDREDWAYS_HERMES_URL" upstream-agent; then
               break
             fi
-            echo "Upstream SHA lookup failed (attempt $attempt/5); retrying..." >&2
-            DIRECT_SHA=""
+            echo "Upstream clone failed (attempt $attempt/5); retrying..." >&2
+            rm -rf upstream-agent
             sleep $((attempt * 10))
           done
+          test -d upstream-agent/.git
+
+      - name: Capture direct upstream source evidence
+        id: direct-source
+        run: |
+          set -euo pipefail
+          DIRECT_SHA=$(git -C upstream-agent rev-parse HEAD)
           test -n "$DIRECT_SHA"
           echo "sha=$DIRECT_SHA" >> "$GITHUB_OUTPUT"
           echo "- Direct upstream SHA: \`$DIRECT_SHA\`" >> "$GITHUB_STEP_SUMMARY"
@@ -101,7 +106,7 @@ jobs:
       - name: Run 19-stage update pipeline
         id: update
         env:
-          HUNDREDWAYS_HERMES_URL: ${{ inputs.hermes_url }}
+          HUNDREDWAYS_HERMES_URL: ${{ github.workspace }}/upstream-agent
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
           HUNDREDWAYS_OUTPUTS: ${{ runner.temp }}/update-outputs.json
           HUNDREDWAYS_ZIP: ${{ runner.temp }}/nastech-agent-update.zip
