@@ -139,7 +139,18 @@ def pull_hermes(updates_dir: str, hermes_url: str = DEFAULT_HERMES_URL) -> str:
     url = hermes_url if "://" in hermes_url else os.path.abspath(hermes_url)
     if os.path.exists(dest):
         shutil.rmtree(dest)
-    _run_ok(["git", "clone", "--no-local", url, dest], "fresh direct upstream clone")
+    last_error = ""
+    for attempt in range(1, 6):
+        proc = _run(["git", "-c", "http.version=HTTP/1.1", "clone", "--no-local", url, dest])
+        if proc.returncode == 0:
+            break
+        last_error = proc.stderr.strip() or proc.stdout.strip()
+        if os.path.exists(dest):
+            shutil.rmtree(dest)
+        if attempt < 5:
+            time.sleep(attempt * 10)
+    else:
+        raise RuntimeError(f"fresh direct upstream clone failed: {last_error}")
     return _run_ok(["git", "-C", dest, "rev-parse", "HEAD"], "upstream head")
 
 
@@ -1083,6 +1094,46 @@ def _reconcile_test_runner_mode(dst: str) -> int:
     return 1
 
 
+def _reconcile_quickstart_hardware_fixture(dst: str) -> int:
+    """Make generated quickstart tests independent of runner hardware.
+
+    The upstream contract tests stub installation and downloads but leave model
+    selection live. On a standard CI runner that can produce no eligible model
+    and a legitimate synchronous 409, so the tests never exercise the behavior
+    they intend to cover. Stub selection only in these two tests; the route and
+    its explicit no-fit test remain unchanged.
+    """
+    path = os.path.join(dst, "tests", "nastech_cli", "test_local_quickstart.py")
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return 0
+    marker = "# 100WAYS: hardware-independent quickstart fixture"
+    if marker in text:
+        return 0
+    fixture = (
+        "    calls: list[str] = []\n\n"
+        "    # 100WAYS: hardware-independent quickstart fixture\n"
+        "    from nastech_cli.local_runtime.catalog import VariantChoice\n"
+        "    monkeypatch.setattr(\n"
+        "        \"nastech_cli.local_runtime.catalog.select_variant\",\n"
+        "        lambda entry, budget: VariantChoice(variant=entry.variants[0],\n"
+        "                                            zero_spill=True,\n"
+        "                                            reason_key=\"best-fits\"),\n"
+        "    )\n"
+    )
+    occurrences = text.count("    calls: list[str] = []\n")
+    if occurrences != 2:
+        return 0
+    text = text.replace("    calls: list[str] = []\n", fixture, 2)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    return 1
+
+
 def _reconcile_docusaurus_site_config(dst: str) -> int:
     """Normalize the project-pages URL after domain branding.
 
@@ -1252,6 +1303,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_test_runner_mode(dst):
         result.total += 1
         result.fixed.append("scripts/run_tests.sh")
+    if _reconcile_quickstart_hardware_fixture(dst):
+        result.total += 1
+        result.fixed.append("tests/nastech_cli/test_local_quickstart.py")
     if _reconcile_project_identity_width(dst):
         result.total += 1
         result.fixed.append("ui-tui/src/domain/paths.ts")
@@ -1674,9 +1728,11 @@ class UpdateManager:
 
     def __init__(self, updates_dir: str, hermes_url: str = DEFAULT_HERMES_URL,
                  rules: BrandingRules | None = None, threshold: float = 0.99,
-                 owned: OwnedAssets | None = None, ai=None, fork_root: str = ""):
+                 owned: OwnedAssets | None = None, ai=None, fork_root: str = "",
+                 source_provenance_url: str = ""):
         self.updates_dir = updates_dir
         self.hermes_url = hermes_url
+        self.source_provenance_url = source_provenance_url or hermes_url
         self.rules = rules or BrandingRules()
         self.threshold = threshold
         self.owned = owned
@@ -1932,9 +1988,9 @@ class UpdateManager:
             # The shipped manifest identifies the NasTech review projection;
             # direct-source URLs remain in CI-only evidence, never in a
             # candidate file or review PR branch.
-            "nastech_url": transform_strict_metadata_text(self.hermes_url, self.rules),
+            "nastech_url": transform_strict_metadata_text(self.source_provenance_url, self.rules),
             "source_provenance": {
-                "remote_url": transform_strict_metadata_text(self.hermes_url, self.rules),
+                "remote_url": transform_strict_metadata_text(self.source_provenance_url, self.rules),
                 "fetched_at": fetched_at,
                 "acquisition": "fresh-direct-clone",
                 "baseline_sha": baseline_sha,

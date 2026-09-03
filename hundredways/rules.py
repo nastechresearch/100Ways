@@ -184,6 +184,17 @@ class BrandingRules:
         tokens = list(self.tokens)
         pattern = self._pattern()
         branded = pattern.sub(lambda m: self._replacement(m, tokens), text)
+        # ``python -m<module>`` is a valid compact spelling. The normal
+        # boundary-aware matcher does not rewrite the embedded module name,
+        # which would leave generated candidates with stale ``-mhermes_*``
+        # targets after branding.
+        for tok in tokens:
+            branded = re.sub(
+                rf"(?<![A-Za-z0-9_])(-I?m){re.escape(tok.match)}(?=[./_A-Za-z0-9-]|$)",
+                lambda m, replacement=tok.replace: m.group(1) + replacement,
+                branded,
+                flags=re.IGNORECASE,
+            )
         branded = _RUNNER_LABEL_RE.sub(_normalize_runner, branded)
         branded = _normalize_test_workers(branded)
         return _normalize_test_timeout(branded)

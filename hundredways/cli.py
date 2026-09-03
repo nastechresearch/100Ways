@@ -438,7 +438,8 @@ class Cli:
             print(f"fork-root: {fork_root or 'none'} — fork-consistency check will be skipped")
         mgr = UpdateManager(updates_dir, hermes_url=self.args.hermes_url,
                             rules=self.rules, owned=owned, ai=AIEngine(),
-                            fork_root=fork_root)
+                            fork_root=fork_root,
+                            source_provenance_url=self.args.source_provenance_url)
         zip_path = self.args.zip or ""
         if zip_path and zip_path.endswith(os.sep):
             zip_path = ""
@@ -664,6 +665,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("update", help="pull real Hermes -> brand whole tree -> verify -> save Nastech-Update#N")
     p.add_argument("--updates-dir", default="", help="Updates-Commits dir (default: sibling of the repo)")
     p.add_argument("--hermes-url", default=DEFAULT_HERMES_URL, help="Hermes remote or local path")
+    p.add_argument("--source-provenance-url", default="", help="approved HTTPS source URL recorded in the candidate manifest")
     p.add_argument("--zip", default="", help="also build the release zip at this path (project folder + 2 md reports)")
     p.add_argument("--project-name", default="nastech-agent", help="name of the project folder inside the zip")
     p.add_argument("--state-dir", default="", help="state dir (default: repo-sibling 100ways-state)")
