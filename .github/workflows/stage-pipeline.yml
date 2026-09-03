@@ -84,7 +84,16 @@ jobs:
           HUNDREDWAYS_HERMES_URL: ${{ inputs.hermes_url }}
         run: |
           set -euo pipefail
-          DIRECT_SHA=$(git ls-remote "$HUNDREDWAYS_HERMES_URL" HEAD | awk 'NR == 1 {print $1}')
+          DIRECT_SHA=""
+          for attempt in 1 2 3 4 5; do
+            if DIRECT_SHA=$(git -c http.version=HTTP/1.1 ls-remote "$HUNDREDWAYS_HERMES_URL" HEAD | awk 'NR == 1 {print $1}') \
+              && test -n "$DIRECT_SHA"; then
+              break
+            fi
+            echo "Upstream SHA lookup failed (attempt $attempt/5); retrying..." >&2
+            DIRECT_SHA=""
+            sleep $((attempt * 10))
+          done
           test -n "$DIRECT_SHA"
           echo "sha=$DIRECT_SHA" >> "$GITHUB_OUTPUT"
           echo "- Direct upstream SHA: \`$DIRECT_SHA\`" >> "$GITHUB_STEP_SUMMARY"

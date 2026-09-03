@@ -139,7 +139,18 @@ def pull_hermes(updates_dir: str, hermes_url: str = DEFAULT_HERMES_URL) -> str:
     url = hermes_url if "://" in hermes_url else os.path.abspath(hermes_url)
     if os.path.exists(dest):
         shutil.rmtree(dest)
-    _run_ok(["git", "clone", "--no-local", url, dest], "fresh direct upstream clone")
+    last_error = ""
+    for attempt in range(1, 6):
+        proc = _run(["git", "-c", "http.version=HTTP/1.1", "clone", "--no-local", url, dest])
+        if proc.returncode == 0:
+            break
+        last_error = proc.stderr.strip() or proc.stdout.strip()
+        if os.path.exists(dest):
+            shutil.rmtree(dest)
+        if attempt < 5:
+            time.sleep(attempt * 10)
+    else:
+        raise RuntimeError(f"fresh direct upstream clone failed: {last_error}")
     return _run_ok(["git", "-C", dest, "rev-parse", "HEAD"], "upstream head")
 
 
