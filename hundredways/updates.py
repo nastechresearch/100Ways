@@ -1728,9 +1728,11 @@ class UpdateManager:
 
     def __init__(self, updates_dir: str, hermes_url: str = DEFAULT_HERMES_URL,
                  rules: BrandingRules | None = None, threshold: float = 0.99,
-                 owned: OwnedAssets | None = None, ai=None, fork_root: str = ""):
+                 owned: OwnedAssets | None = None, ai=None, fork_root: str = "",
+                 source_provenance_url: str = ""):
         self.updates_dir = updates_dir
         self.hermes_url = hermes_url
+        self.source_provenance_url = source_provenance_url or hermes_url
         self.rules = rules or BrandingRules()
         self.threshold = threshold
         self.owned = owned
@@ -1986,9 +1988,9 @@ class UpdateManager:
             # The shipped manifest identifies the NasTech review projection;
             # direct-source URLs remain in CI-only evidence, never in a
             # candidate file or review PR branch.
-            "nastech_url": transform_strict_metadata_text(self.hermes_url, self.rules),
+            "nastech_url": transform_strict_metadata_text(self.source_provenance_url, self.rules),
             "source_provenance": {
-                "remote_url": transform_strict_metadata_text(self.hermes_url, self.rules),
+                "remote_url": transform_strict_metadata_text(self.source_provenance_url, self.rules),
                 "fetched_at": fetched_at,
                 "acquisition": "fresh-direct-clone",
                 "baseline_sha": baseline_sha,

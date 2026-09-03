@@ -107,6 +107,7 @@ jobs:
         id: update
         env:
           HUNDREDWAYS_HERMES_URL: ${{ github.workspace }}/upstream-agent
+          HUNDREDWAYS_PROVENANCE_URL: ${{ inputs.hermes_url }}
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
           HUNDREDWAYS_OUTPUTS: ${{ runner.temp }}/update-outputs.json
           HUNDREDWAYS_ZIP: ${{ runner.temp }}/nastech-agent-update.zip
@@ -118,6 +119,7 @@ jobs:
           python3 -m hundredways.cli --repo nastech-agent update \
             --updates-dir "$HUNDREDWAYS_UPDATES_DIR" \
             --hermes-url "$HUNDREDWAYS_HERMES_URL" \
+            --source-provenance-url "$HUNDREDWAYS_PROVENANCE_URL" \
             --fork-root nastech-agent \
             --owned-assets-root "$GITHUB_WORKSPACE/config/owned-assets" \
             --zip "$HUNDREDWAYS_ZIP" \
