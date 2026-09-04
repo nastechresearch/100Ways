@@ -1024,6 +1024,10 @@ def _reconcile_cli_banner_identity(dst: str) -> list[str]:
             "_logo = _bskin.banner_logo if _bskin and hasattr(_bskin, 'banner_logo') and _bskin.banner_logo else NASTECH_AGENT_LOGO",
             "_logo = NASTECH_AGENT_LOGO  # audited NasTech identity; ignore opaque skin art",
         )
+        new_text = new_text.replace(
+            'console.print(getattr(_bskin, "banner_logo", None) or NASTECH_AGENT_LOGO)',
+            '_logo = NASTECH_AGENT_LOGO  # audited NasTech identity; ignore opaque skin art\\n        console.print(_logo)',
+        )
         if new_text != text:
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(new_text)
