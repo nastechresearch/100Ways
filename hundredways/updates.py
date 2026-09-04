@@ -958,10 +958,18 @@ def _reconcile_plugin_search_table(dst: str) -> bool:
     return 0
 
 
-_CLI_NASTECH_LOGO = '''[bold #FFD700]╔══════════════════════════════════════╗[/]
-[bold #FFD700]║            NASTECH AGENT             ║[/]
-[#FFBF00]║                 𓄃                    ║[/]
-[bold #FFD700]╚══════════════════════════════════════╝[/]'''
+_CLI_NASTECH_LOGO = '''[bold #FFD700]███╗   ██╗ █████╗ ███████╗████████╗███████╗ ██████╗██╗  ██╗[/]
+[bold #FFD700]████╗  ██║██╔══██╗██╔════╝╚══██╔══╝██╔════╝██╔════╝██║  ██║[/]
+[#FFBF00]██╔██╗ ██║███████║███████╗   ██║   █████╗  ██║     ███████║[/]
+[#FFBF00]██║╚██╗██║██╔══██║╚════██║   ██║   ██╔══╝  ██║     ██╔══██║[/]
+[#CD7F32]██║ ╚████║██║  ██║███████║   ██║   ███████╗╚██████╗██║  ██║[/]
+[#CD7F32]╚═╝  ╚═══╝╚═╝  ╚═╝╚══════╝   ╚═╝   ╚══════╝ ╚═════╝╚═╝  ╚═╝[/]
+[bold #FFD700] █████╗  ██████╗ ███████╗███╗   ██╗████████╗[/]
+[bold #FFD700]██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝[/]
+[#FFBF00]███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║[/]
+[#FFBF00]██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║[/]
+[#CD7F32]██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║[/]
+[#CD7F32]╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝[/]'''
 _CLI_NASTECH_SYMBOL = '''[#FFBF00]𓄃[/]'''
 
 
@@ -986,7 +994,7 @@ def _reconcile_cli_banner_identity(dst: str) -> list[str]:
     Block-character ASCII art can visually spell a prohibited product name
     without containing the literal token.  A textual token scanner cannot
     prove that safe, so the CLI renderer is deterministically replaced with a
-    compact NasTech Agent banner and the user-approved ``𓄃`` symbol.  Custom
+    large Hermes-style NasTech Agent wordmark and the user-approved ``𓄃`` symbol.  Custom
     skin banner art is disabled in the generated candidate for the same reason:
     all skins must render the audited identity, not an opaque inherited logo.
     """
@@ -1002,7 +1010,7 @@ def _reconcile_cli_banner_identity(dst: str) -> list[str]:
             continue
         new_text = re.sub(
             r'NASTECH_AGENT_LOGO = """[\s\S]*?"""(?=\n\nNASTECH_CADUCEUS =)',
-            f'NASTECH_AGENT_LOGO = """{_CLI_NASTECH_LOGO}"""',
+            f'NASTECH_AGENT_LOGO = """{_CLI_NASTECH_LOGO}"""\n# NASTECH AGENT approved wordmark',
             text,
             count=1,
         )
@@ -1029,7 +1037,7 @@ def _reconcile_cli_banner_identity(dst: str) -> list[str]:
             skin_text = ""
         new_skin = re.sub(
             r'("banner_logo":\s*)"""[\s\S]*?"""(,)',
-            r'\1"""[bold]NASTECH AGENT 𓄃[/]"""\2',
+            fr'\1"""{_CLI_NASTECH_LOGO}"""  # NASTECH AGENT 𓄃\2',
             skin_text,
         )
         if new_skin != skin_text:
