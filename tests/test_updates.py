@@ -393,6 +393,26 @@ def test_cli_banner_reconciliation_removes_opaque_upstream_art(tmp_path):
     assert "OPAQUE UPSTREAM ART" not in skin
 
 
+def test_cli_banner_reconciliation_handles_getattr_skin_logo_form(tmp_path):
+    from hundredways.updates import _reconcile_cli_banner_identity
+
+    root = tmp_path / "candidate"
+    cli = root / "nastech_cli"
+    cli.mkdir(parents=True)
+    (cli / "banner.py").write_text(
+        'NASTECH_AGENT_LOGO = """OLD BLOCK ART"""\n\n'
+        'NASTECH_CADUCEUS = """OLD SYMBOL"""\n\n\n'
+        '        console.print(getattr(_bskin, "banner_logo", None) or NASTECH_AGENT_LOGO)\n'
+    )
+
+    fixed = _reconcile_cli_banner_identity(str(root))
+    banner = (cli / "banner.py").read_text(encoding="utf-8")
+    assert fixed == ["nastech_cli/banner.py"]
+    assert "_logo = NASTECH_AGENT_LOGO" in banner
+    assert 'getattr(_bskin, "banner_logo"' not in banner
+    assert "console.print(_logo)" in banner
+
+
 def test_cli_defaults_have_no_machine_paths():
     """CLI defaults must not bake in developer-machine paths (breaks CI)."""
     from hundredways.cli import build_parser
