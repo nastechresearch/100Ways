@@ -920,7 +920,51 @@ def _reconcile_credential_display_test(dst: str) -> int:
     return 1
 
 
-def _reconcile_plugin_search_table(dst: str) -> bool:
+def _reconcile_compression_fallback_admission(dst: str) -> int:
+    """Allow the configured compression fallback to start while a stalled primary winds down.
+
+    The upstream timeout pool deliberately refuses queued jobs.  A stalled primary is fenced and
+    cannot publish, but it can still occupy an executor admission slot long enough to make the
+    one configured fallback retry fail before it starts.  The generated candidate therefore gives
+    only that fallback call an explicit admission bypass; normal compression calls retain the
+    bounded-pool guard.
+    """
+    path = os.path.join(dst, "agent", "conversation_compression.py")
+    if not os.path.isfile(path):
+        return 0
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError:
+        return 0
+    replacements = (
+        (
+            "stall_fallback: bool = True,\n    new_fence: Optional[Callable[[], CompressionCommitFence]] = None,",
+            "stall_fallback: bool = True, bypass_admission: bool = False,\n    new_fence: Optional[Callable[[], CompressionCommitFence]] = None,",
+        ),
+        (
+            "if not _try_admit_compression_job():",
+            "if not bypass_admission and not _try_admit_compression_job():",
+        ),
+        (
+            "    except BaseException:\n        _release_compression_admission()\n        raise\n    future.add_done_callback(_release_compression_admission)",
+            "    except BaseException:\n        if not bypass_admission:\n            _release_compression_admission()\n        raise\n    if not bypass_admission:\n        future.add_done_callback(_release_compression_admission)",
+        ),
+        (
+            "                stall_fallback=False,\n            )",
+            "                stall_fallback=False, bypass_admission=True,\n            )",
+        ),
+    )
+    new_text = text
+    for old, new in replacements:
+        new_text = new_text.replace(old, new, 1)
+    if new_text == text:
+        return 0
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(new_text)
+    return 1
+
+
+def _reconcile_plugin_search_table(dst: str) -> int:
     """Widen the ``cmd_search`` Name column so branded names render fully.
 
     Upstream's ``plugins_cmd.cmd_search`` builds a rich ``Table`` whose
@@ -930,8 +974,7 @@ def _reconcile_plugin_search_table(dst: str) -> bool:
     over the edge and rich truncates it to ``nastech-media-stud…`` — so
     the fork's ``test_plugin_index_search.py`` assertion that the full
     name appears in the search output fails on the branded tree while
-    passing upstream.  Give the Name column a ``min_width`` so branded
-    names render exactly as upstream's do.
+    passing upstream.  Prevent Rich from cropping the branded Name column.
     """
     if not os.path.isdir(dst):
         return 0
@@ -944,13 +987,22 @@ def _reconcile_plugin_search_table(dst: str) -> bool:
                 text = fh.read()
         except OSError:
             continue
-        needle = 'table.add_column("Name", style="bold")'
-        if needle not in text:
+        literal = 'table.add_column("Name", style="bold")'
+        generic = 'table.add_column(header, style=style)'
+        if literal in text:
+            new_text = text.replace(
+                literal,
+                'table.add_column("Name", style="bold", min_width=21)',
+                1,
+            )
+        elif generic in text:
+            new_text = text.replace(
+                generic,
+                'table.add_column(header, style=style, no_wrap=(header == "Name"))',
+                1,
+            )
+        else:
             continue
-        new_text = text.replace(
-            needle,
-            'table.add_column("Name", style="bold", min_width=21)',
-        )
         if new_text != text:
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(new_text)
@@ -1041,7 +1093,7 @@ def _reconcile_cli_banner_identity(dst: str) -> list[str]:
             skin_text = ""
         new_skin = re.sub(
             r'("banner_logo":\s*)"""[\s\S]*?"""(,)',
-            fr'\1"""{_CLI_NASTECH_LOGO}"""  # NASTECH AGENT 𓄃\2',
+            fr'\1"""{_CLI_NASTECH_LOGO}"""\2  # NASTECH AGENT 𓄃',
             skin_text,
         )
         if new_skin != skin_text:
@@ -1293,6 +1345,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_credential_display_test(dst):
         result.total += 1
         result.fixed.append("tests/cli/test_show_config_credential.py")
+    if _reconcile_compression_fallback_admission(dst):
+        result.total += 1
+        result.fixed.append("agent/conversation_compression.py")
     if _reconcile_plugin_search_table(dst):
         result.total += 1
         result.fixed.append("nastech_cli/plugins_cmd.py")
