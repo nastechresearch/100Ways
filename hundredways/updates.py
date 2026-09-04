@@ -1825,7 +1825,7 @@ class UpdateManager:
             if self.owned and self.owned.count and os.path.isdir(self.owned.root):
                 registry_dest = os.path.join(dest, "config", "owned-assets")
                 shutil.copytree(self.owned.root, registry_dest, dirs_exist_ok=True)
-            return preserve_fork_files(
+            preserved = preserve_fork_files(
                 self.fork_root,
                 dest,
                 src,
@@ -1834,6 +1834,19 @@ class UpdateManager:
                 owned_paths=set(self.owned.mapping) if self.owned else set(),
                 allow_unclassified_fork_files=bool(baseline_sha),
             )
+            # Fork preservation can restore an older banner.py/skin_engine.py
+            # after the first reconcile pass. Reapply the audited identity last
+            # without adding a new pipeline stage to the public stage contract.
+            fixed = _reconcile_cli_banner_identity(dest)
+            for rel in fixed:
+                path = os.path.join(dest, rel)
+                if os.path.isfile(path):
+                    try:
+                        with open(path, "rb") as fh:
+                            reconciled_map[rel] = fh.read()
+                    except OSError:
+                        pass
+            return preserved + fixed
         stage(
             "preserve",
             _preserve,
