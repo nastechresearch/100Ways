@@ -2,7 +2,7 @@
 # Copy to .env / environment or edit directly. Secrets live in the env, not here.
 
 # --- target repos ---
-repo: /home/nascode/Documents/A1/nastech-agent
+repo: /home/runner/.nastech/skills/100wayskills
 local_hermes: /home/nascode/Documents/A1/hermes-agent
 upstream: upstream/main
 live_ref: origin/main
