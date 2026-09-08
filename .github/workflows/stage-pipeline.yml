@@ -230,6 +230,19 @@ jobs:
           echo "conformance=PASS" >> "$GITHUB_OUTPUT"
           echo "- Final branded-tree conformance: **PASS**" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Verify candidate source/test contract
+        id: candidate-contract
+        env:
+          HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
+          HUNDREDWAYS_CONTRACT: ${{ runner.temp }}/candidate-contract.json
+        run: |
+          set -euo pipefail
+          SNAPSHOT=$(find "$HUNDREDWAYS_UPDATES_DIR" -maxdepth 1 -type d -name 'Nastech-Update#*' | sort -V | tail -1)
+          test -n "$SNAPSHOT"
+          python3 -m hundredways.candidate_contract "$SNAPSHOT" --json "$HUNDREDWAYS_CONTRACT"
+          echo "contract=PASS" >> "$GITHUB_OUTPUT"
+          echo "- Candidate source/test contract: **PASS**" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Run final branded candidate test suite
         id: candidate-tests
         env:
@@ -242,6 +255,9 @@ jobs:
           rm -rf "$TEST_TREE"
           cp -a "$SNAPSHOT" "$TEST_TREE"
           test -x "$TEST_TREE/scripts/run_tests.sh"
+          export TEST_TREE
+          CANDIDATE_BEFORE=$(python3 -c 'from hundredways.integrity import tree_digest; import os; print(tree_digest(os.environ["TEST_TREE"]))')
+          export CANDIDATE_BEFORE
           (
             cd "$TEST_TREE"
             git init -q
@@ -268,10 +284,17 @@ jobs:
               key=lambda value: int(value.rsplit("#", 1)[-1]),
           )
           snapshot = os.path.join(updates, candidates[-1])
+          tested_tree = os.environ["TEST_TREE"]
+          before = os.environ["CANDIDATE_BEFORE"]
+          after = tree_digest(tested_tree)
+          if before != after:
+              raise SystemExit("candidate tree changed while tests were running")
           evidence = {
               "gate": "PASS",
               "runner": "scripts/run_tests.sh",
               "candidate_tree_sha256": tree_digest(snapshot),
+              "tested_tree_sha256": after,
+              "tested_tree_unchanged": True,
           }
           with open(os.environ["HUNDREDWAYS_CANDIDATE_TESTS"], "w", encoding="utf-8") as handle:
               json.dump(evidence, handle, indent=2)
@@ -413,6 +436,7 @@ jobs:
             ${{ runner.temp }}/weekly-decision.json
             ${{ runner.temp }}/publication-readiness.json
             ${{ runner.temp }}/candidate-conformance.json
+            ${{ runner.temp }}/candidate-contract.json
             ${{ runner.temp }}/candidate-tests.json
             ${{ runner.temp }}/candidate-post-test-conformance.json
             ${{ runner.temp }}/gate_receipt.json
