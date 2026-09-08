@@ -61,6 +61,18 @@ _PUBLISH_COMMAND = re.compile(
 )
 
 
+def _is_guarded_repair_workflow(name: str, text: str) -> bool:
+    """Allow only isolated, unique, review-only Gemma repair handoffs."""
+    return (
+        name == "gemma-repair.yml"
+        and re.search(r"(?m)^\s*workflow_dispatch\s*:", text) is not None
+        and "ai-repair/" in text
+        and "gh pr create" in text
+        and "git push" in text
+        and "human review" in text.casefold()
+    )
+
+
 def audit_workflow_security(
     root: str, *, enforce_publication_policy: bool = True
 ) -> list[WorkflowPolicyIssue]:
@@ -121,13 +133,30 @@ def audit_workflow_security(
                 if pattern.search(text):
                     issues.append(WorkflowPolicyIssue(code, rel, detail))
 
-            if workflow.name != _PUBLICATION_WORKFLOW and _PUBLISH_COMMAND.search(text):
+            guarded_repair = _is_guarded_repair_workflow(workflow.name, text)
+            if (
+                workflow.name not in {_PUBLICATION_WORKFLOW, "gemma-repair.yml"}
+                and _PUBLISH_COMMAND.search(text)
+            ):
                 issues.append(
                     WorkflowPolicyIssue(
                         "unauthorized-publication-path",
                         rel,
                         "candidate PR creation and push are reserved for "
                         f"{_PUBLICATION_WORKFLOW} (#344)",
+                    )
+                )
+            elif (
+                workflow.name == "gemma-repair.yml"
+                and _PUBLISH_COMMAND.search(text)
+                and not guarded_repair
+            ):
+                issues.append(
+                    WorkflowPolicyIssue(
+                        "unauthorized-publication-path",
+                        rel,
+                        "Gemma repair publication requires a unique ai-repair/* branch "
+                        "and human review",
                     )
                 )
 

@@ -1,0 +1,113 @@
+name: gemma-repair
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Failed GitHub Actions run ID to diagnose
+        required: true
+        type: string
+      job_id:
+        description: Optional failed job database ID
+        required: false
+        type: string
+      apply:
+        description: Apply a validated proposal in a disposable worktree and open a review PR
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out 100Ways
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install 100Ways repair dependencies
+        run: pip install -e '.[ai]'
+
+      - name: Collect failed-run evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
+          JOB_ID: ${{ inputs.job_id }}
+        run: |
+          set -euo pipefail
+          if [ -n "$JOB_ID" ]; then
+            gh run view "$RUN_ID" --repo "$GITHUB_REPOSITORY" --job "$JOB_ID" --log-failed > "$RUNNER_TEMP/failed-evidence.txt"
+          else
+            gh run view "$RUN_ID" --repo "$GITHUB_REPOSITORY" --log-failed > "$RUNNER_TEMP/failed-evidence.txt"
+          fi
+          test -s "$RUNNER_TEMP/failed-evidence.txt"
+
+      - name: Create isolated repair worktree
+        id: worktree
+        run: |
+          set -euo pipefail
+          branch="ai-repair/${{ inputs.run_id }}-${GITHUB_RUN_ID}"
+          worktree="$RUNNER_TEMP/100ways-repair"
+          git worktree add -b "$branch" "$worktree" HEAD
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "worktree=$worktree" >> "$GITHUB_OUTPUT"
+
+      - name: Ask Gemma for a narrow patch and apply only in the worktree
+        if: ${{ inputs.apply }}
+        env:
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+          EVIDENCE: ${{ runner.temp }}/failed-evidence.txt
+          WORKTREE: ${{ steps.worktree.outputs.worktree }}
+        run: |
+          set -euo pipefail
+          test -n "$OLLAMA_API_KEY"
+          python3 -m hundredways.repair_agent "$WORKTREE" --evidence "$EVIDENCE" --apply | tee "$RUNNER_TEMP/gemma-repair-proposal.json"
+
+      - name: Validate and test the proposed repair
+        if: ${{ inputs.apply }}
+        working-directory: ${{ steps.worktree.outputs.worktree }}
+        run: |
+          set -euo pipefail
+          pytest -q
+          git diff --check
+          python3 -m hundredways.candidate_contract .
+
+      - name: Push unique repair branch and open review PR
+        if: ${{ inputs.apply }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.worktree.outputs.branch }}
+        working-directory: ${{ steps.worktree.outputs.worktree }}
+        run: |
+          set -euo pipefail
+          git status --short
+          git diff --quiet && { echo "No repair changes were produced"; exit 1; }
+          git config user.name "100Ways Gemma Repair"
+          git config user.email "100ways-gemma-repair@invalid"
+          git add hundredways tests config .github/workflows
+          git commit -m "fix: apply validated Gemma repair proposal"
+          git push --set-upstream origin "$BRANCH"
+          gh pr create --base main --head "$BRANCH" \
+            --title "fix: Gemma repair for run ${{ inputs.run_id }}" \
+            --body "Gemma applied a narrow patch in an isolated 100Ways worktree. Deterministic tests and candidate checks passed. Human review is required; no merge, release, tag, or deployment was performed."
+
+      - name: Upload repair evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gemma-repair-evidence
+          path: |
+            ${{ runner.temp }}/failed-evidence.txt
+            ${{ runner.temp }}/gemma-repair-proposal.json
+          if-no-files-found: warn
+          retention-days: 14
