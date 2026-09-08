@@ -1191,10 +1191,10 @@ def _reconcile_child_timeout_start_handshake(dst: str) -> int:
     text = text.replace(
         wait_marker,
         "        # Do not charge executor startup against the child timeout.\n"
-        "        worker_entered.wait(timeout=1.0)\n"
-        "        startup_grace = max(float(child_timeout or 0.0), 1.0)\n"
+        "        worker_started = worker_entered.wait(timeout=1.0)\n"
         + wait_marker.replace(
-            "timeout=child_timeout", "timeout=(child_timeout or 0.0) + startup_grace"
+            "timeout=child_timeout",
+            "timeout=(child_timeout or 0.0) + (0.0 if worker_started else 1.0)",
         ),
         1,
     )
