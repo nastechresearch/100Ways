@@ -957,3 +957,38 @@ def test_reconcile_restores_migrated_reasoning_helper_import_path(tmp_path):
     text = (cli / "main.py").read_text()
     assert "from nastech_cli.main_provider_setup import" in text
     assert "def _prompt_reasoning_effort_selection" in text
+
+
+def test_reconcile_repairs_branded_telegram_entity_length(tmp_path):
+    root = tmp_path / "branded"
+    path = root / "tests" / "gateway" / "test_telegram_mention_context.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '            text = "😀 @nastech_bot 2"\n'
+        '            msg = _group_message(text, entities=[SimpleNamespace(type="mention", offset=3, length=11)])\n'
+    )
+
+    result = reconcile_tree(str(root))
+
+    assert "tests/gateway/test_telegram_mention_context.py" in result.fixed
+    assert "offset=3, length=12" in path.read_text()
+
+
+def test_reconcile_adds_child_worker_start_handshake(tmp_path):
+    root = tmp_path / "branded"
+    path = root / "tools" / "delegate_tool_child_run.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "        worker_thread_holder: Dict[str, Optional[threading.Thread]] = {\"t\": None}\n"
+        "        def _run_with_thread_capture():\n"
+        "            worker_thread_holder[\"t\"] = threading.current_thread()\n"
+        "        try:\n"
+        "            return future.result(timeout=child_timeout), None, False\n"
+    )
+
+    result = reconcile_tree(str(root))
+
+    assert "tools/delegate_tool_child_run.py" in result.fixed
+    text = path.read_text()
+    assert "worker_entered = threading.Event()" in text
+    assert "worker_entered.wait(timeout=1.0)" in text
