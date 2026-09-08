@@ -939,3 +939,21 @@ def test_reconcile_target_ci_compatibility_fixes_are_audited(tmp_path):
     assert "'perfectionist/sort-imports': [\n        'warn'," in lint_config
     assert "'perfectionist/sort-named-exports': ['warn'" in lint_config
     assert "'perfectionist/sort-named-imports': ['warn'" in lint_config
+
+
+def test_reconcile_restores_migrated_reasoning_helper_import_path(tmp_path):
+    root = tmp_path / "branded"
+    cli = root / "nastech_cli"
+    cli.mkdir(parents=True)
+    (cli / "main.py").write_text("def existing():\n    return None\n")
+    (cli / "main_provider_setup.py").write_text(
+        "def _prompt_reasoning_effort_selection(efforts, current_effort=\"\"):\n"
+        "    return efforts[0] if efforts else None\n"
+    )
+
+    result = reconcile_tree(str(root))
+
+    assert "nastech_cli/main.py" in result.fixed
+    text = (cli / "main.py").read_text()
+    assert "from nastech_cli.main_provider_setup import" in text
+    assert "def _prompt_reasoning_effort_selection" in text

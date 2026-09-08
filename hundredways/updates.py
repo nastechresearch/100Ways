@@ -1103,6 +1103,42 @@ def _reconcile_cli_banner_identity(dst: str) -> list[str]:
     return fixed
 
 
+def _reconcile_reasoning_effort_helper(dst: str) -> int:
+    """Preserve the fork's legacy import path for the reasoning menu helper.
+
+    Upstream keeps the helper in ``main_provider_setup.py`` while the Nastech
+    fork's migrated setup flow imports it from ``main.py``. A small wrapper
+    avoids silently dropping the fork contract during branding.
+    """
+    main_path = os.path.join(dst, "nastech_cli", "main.py")
+    provider_path = os.path.join(dst, "nastech_cli", "main_provider_setup.py")
+    if not os.path.isfile(main_path) or not os.path.isfile(provider_path):
+        return 0
+    try:
+        main_text = open(main_path, encoding="utf-8").read()
+        provider_text = open(provider_path, encoding="utf-8").read()
+    except OSError:
+        return 0
+    if "def _prompt_reasoning_effort_selection(" in main_text:
+        return 0
+    if "def _prompt_reasoning_effort_selection(" not in provider_text:
+        return 0
+    wrapper = (
+        "\n\n"
+        "def _prompt_reasoning_effort_selection(efforts, current_effort=\"\"):\n"
+        "    \"\"\"Compatibility wrapper for the fork's migrated setup flow.\"\"\"\n"
+        "    from nastech_cli.main_provider_setup import (\n"
+        "        _prompt_reasoning_effort_selection as _upstream_prompt_reasoning_effort_selection,\n"
+        "    )\n"
+        "    return _upstream_prompt_reasoning_effort_selection(\n"
+        "        efforts, current_effort=current_effort\n"
+        "    )\n"
+    )
+    with open(main_path, "w", encoding="utf-8") as fh:
+        fh.write(main_text.rstrip() + wrapper)
+    return 1
+
+
 def _reconcile_skill_description_hardline(dst: str) -> int:
     """Trim the bundled ``nastech-agent`` skill description to the fork's.
 
@@ -1364,6 +1400,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     for rel in reconcile_nested_lockfile_roots(dst):
         result.total += 1
         result.fixed.append(rel)
+    if _reconcile_reasoning_effort_helper(dst):
+        result.total += 1
+        result.fixed.append("nastech_cli/main.py")
     if _reconcile_skill_description_hardline(dst):
         result.total += 1
         result.fixed.append("skills/autonomous-ai-agents/nastech-agent/SKILL.md")
