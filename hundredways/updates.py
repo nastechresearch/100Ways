@@ -1103,6 +1103,108 @@ def _reconcile_cli_banner_identity(dst: str) -> list[str]:
     return fixed
 
 
+def _reconcile_reasoning_effort_helper(dst: str) -> int:
+    """Preserve the fork's legacy import path for the reasoning menu helper.
+
+    Upstream keeps the helper in ``main_provider_setup.py`` while the Nastech
+    fork's migrated setup flow imports it from ``main.py``. A small wrapper
+    avoids silently dropping the fork contract during branding.
+    """
+    main_path = os.path.join(dst, "nastech_cli", "main.py")
+    provider_path = os.path.join(dst, "nastech_cli", "main_provider_setup.py")
+    if not os.path.isfile(main_path) or not os.path.isfile(provider_path):
+        return 0
+    try:
+        main_text = open(main_path, encoding="utf-8").read()
+        provider_text = open(provider_path, encoding="utf-8").read()
+    except OSError:
+        return 0
+    if "def _prompt_reasoning_effort_selection(" in main_text:
+        return 0
+    if "def _prompt_reasoning_effort_selection(" not in provider_text:
+        return 0
+    wrapper = (
+        "\n\n"
+        "def _prompt_reasoning_effort_selection(efforts, current_effort=\"\"):\n"
+        "    \"\"\"Compatibility wrapper for the fork's migrated setup flow.\"\"\"\n"
+        "    from nastech_cli.main_provider_setup import (\n"
+        "        _prompt_reasoning_effort_selection as _upstream_prompt_reasoning_effort_selection,\n"
+        "    )\n"
+        "    return _upstream_prompt_reasoning_effort_selection(\n"
+        "        efforts, current_effort=current_effort\n"
+        "    )\n"
+    )
+    with open(main_path, "w", encoding="utf-8") as fh:
+        fh.write(main_text.rstrip() + wrapper)
+    return 1
+
+
+def _reconcile_telegram_test_entity_offsets(dst: str) -> int:
+    """Keep hard-coded Telegram entity lengths valid after branding."""
+    rel = "tests/gateway/test_telegram_mention_context.py"
+    path = os.path.join(dst, rel)
+    if not os.path.isfile(path):
+        return 0
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError:
+        return 0
+    old = 'text = "😀 @nastech_bot 2"\n            msg = _group_message('
+    if old not in text or "offset=3, length=12" in text:
+        return 0
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(
+            text.replace("offset=3, length=11", "offset=3, length=12", 1).replace(
+                "offset=0, length=15", "offset=0, length=16", 1
+            )
+        )
+    return 1
+
+
+def _reconcile_child_timeout_start_handshake(dst: str) -> int:
+    """Start the child worker before measuring its hard execution timeout."""
+    rel = "tools/delegate_tool_child_run.py"
+    path = os.path.join(dst, rel)
+    if not os.path.isfile(path):
+        return 0
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError:
+        return 0
+    marker = '        worker_thread_holder: Dict[str, Optional[threading.Thread]] = {"t": None}\n'
+    if marker not in text or "worker_entered.wait" in text:
+        return 0
+    text = text.replace(
+        marker,
+        marker + "        worker_entered = threading.Event()\n",
+        1,
+    )
+    text = text.replace(
+        '            worker_thread_holder["t"] = threading.current_thread()\n',
+        '            worker_thread_holder["t"] = threading.current_thread()\n'
+        '            worker_entered.set()\n',
+        1,
+    )
+    wait_marker = "        try:\n            return future.result(timeout=child_timeout), None, False\n"
+    if wait_marker not in text:
+        return 0
+    text = text.replace(
+        wait_marker,
+        "        # Do not charge executor startup against a configured child timeout.\n"
+        "        worker_started = worker_entered.wait(timeout=1.0)\n"
+        "        effective_timeout = None if not child_timeout else float(child_timeout)\n"
+        "        if not worker_started and effective_timeout is not None:\n"
+        "            effective_timeout += 1.0\n"
+        + wait_marker.replace(
+            "timeout=child_timeout", "timeout=effective_timeout",
+        ),
+        1,
+    )
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    return 1
+
+
 def _reconcile_skill_description_hardline(dst: str) -> int:
     """Trim the bundled ``nastech-agent`` skill description to the fork's.
 
@@ -1364,6 +1466,15 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     for rel in reconcile_nested_lockfile_roots(dst):
         result.total += 1
         result.fixed.append(rel)
+    if _reconcile_reasoning_effort_helper(dst):
+        result.total += 1
+        result.fixed.append("nastech_cli/main.py")
+    if _reconcile_telegram_test_entity_offsets(dst):
+        result.total += 1
+        result.fixed.append("tests/gateway/test_telegram_mention_context.py")
+    if _reconcile_child_timeout_start_handshake(dst):
+        result.total += 1
+        result.fixed.append("tools/delegate_tool_child_run.py")
     if _reconcile_skill_description_hardline(dst):
         result.total += 1
         result.fixed.append("skills/autonomous-ai-agents/nastech-agent/SKILL.md")
