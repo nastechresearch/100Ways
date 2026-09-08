@@ -1,0 +1,83 @@
+name: auto-durability
+
+on:
+  workflow_dispatch:
+  schedule:
+    # The worker wakes every 30 minutes, but runs the expensive sync only when
+    # the durable policy says the daily or burst threshold is due.
+    - cron: "*/30 * * * *"
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: auto-durability
+  cancel-in-progress: false
+
+jobs:
+  decide:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.policy.outputs.run }}
+      burst: ${{ steps.policy.outputs.burst }}
+      reason: ${{ steps.policy.outputs.reason }}
+      head_sha: ${{ steps.source.outputs.head_sha }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
+        with:
+          fetch-depth: 1
+      - name: Fetch upstream commit metadata
+        id: source
+        run: |
+          set -euo pipefail
+          git init -q upstream-agent
+          git -C upstream-agent remote add origin https://github.com/NousResearch/hermes-agent.git
+          git -C upstream-agent -c http.version=HTTP/1.1 fetch --quiet --filter=blob:none --no-tags origin main
+          HEAD_SHA=$(git -C upstream-agent rev-parse FETCH_HEAD)
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+      - name: Decide daily or burst run
+        id: policy
+        env:
+          BASE_SHA: ${{ vars.DURABILITY_BASE_SHA }}
+          LAST_CHECK: ${{ vars.DURABILITY_LAST_CHECK_EPOCH }}
+          BURST: ${{ vars.DURABILITY_BURST_MODE }}
+          HEAD_SHA: ${{ steps.source.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "${BASE_SHA:-}" ] && git -C upstream-agent cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            COMMITS=$(git -C upstream-agent rev-list --count "$BASE_SHA..$HEAD_SHA")
+          else
+            COMMITS=0
+          fi
+          NOW=$(date +%s)
+          ELAPSED=$(( NOW - ${LAST_CHECK:-0} ))
+          python3 -m hundredways.durability --commits "$COMMITS" --elapsed "$ELAPSED" --burst "${BURST:-0}" >> "$GITHUB_OUTPUT"
+          echo "Upstream commits since last durable baseline: $COMMITS"
+          echo "Elapsed since last daily check: ${ELAPSED}s"
+
+  sync:
+    needs: decide
+    if: needs.decide.outputs.run == 'true'
+    uses: ./.github/workflows/stage-pipeline.yml
+    with:
+      hermes_url: https://github.com/NousResearch/hermes-agent.git
+      project_name: nastech-agent
+    secrets: inherit
+
+  persist-state:
+    needs: [decide, sync]
+    if: needs.sync.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Persist successful durability baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.decide.outputs.head_sha }}
+          BURST: ${{ needs.decide.outputs.burst }}
+        run: |
+          set -euo pipefail
+          gh variable set DURABILITY_BASE_SHA --repo "$GITHUB_REPOSITORY" --body "$HEAD_SHA"
+          gh variable set DURABILITY_LAST_CHECK_EPOCH --repo "$GITHUB_REPOSITORY" --body "$(date +%s)"
+          gh variable set DURABILITY_BURST_MODE --repo "$GITHUB_REPOSITORY" --body "$BURST"
+          echo "Durability state persisted at $HEAD_SHA (burst=$BURST)."
