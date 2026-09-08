@@ -5,7 +5,7 @@ on:
     branches: [main]
   workflow_dispatch:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "0 0 * * *"
 
 permissions:
   contents: read
@@ -47,7 +47,7 @@ jobs:
             --upstream-repo upstream-agent \
             --nastech-repo nastech-agent \
             "${CANDIDATE_ARGS[@]}" \
-            --threshold 50 \
+            --threshold 500 \
             --output decision.json
           python3 scripts/build_pages_status.py \
             --decision decision.json \
