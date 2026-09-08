@@ -1190,11 +1190,13 @@ def _reconcile_child_timeout_start_handshake(dst: str) -> int:
         return 0
     text = text.replace(
         wait_marker,
-        "        # Do not charge executor startup against the child timeout.\n"
+        "        # Do not charge executor startup against a configured child timeout.\n"
         "        worker_started = worker_entered.wait(timeout=1.0)\n"
+        "        effective_timeout = None if not child_timeout else float(child_timeout)\n"
+        "        if not worker_started and effective_timeout is not None:\n"
+        "            effective_timeout += 1.0\n"
         + wait_marker.replace(
-            "timeout=child_timeout",
-            "timeout=(child_timeout or 0.0) + (0.0 if worker_started else 1.0)",
+            "timeout=child_timeout", "timeout=effective_timeout",
         ),
         1,
     )
