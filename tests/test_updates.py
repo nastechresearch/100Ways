@@ -14,6 +14,7 @@ from hundredways.updates import (
     UpdateManager,
     _reconcile_credential_display_test,
     _reconcile_desktop_export_order,
+    _reconcile_telegram_mention_fixture,
     brand_tree,
     compare_trees,
     fork_manifest_upstream_sha,
@@ -520,6 +521,9 @@ def _hermes_repo_with_reconcile_patterns(tmp_path):
         'name = "hermes-agent"\n'
         'version = "0.20.1"\n'
         'source = { editable = "." }\n'
+        'optional-dependencies = [\n'
+        '    { name = "hermes-agent", extras = ["all"] },\n'
+        ']\n'
         'dependencies = [\n'
         '    { name = "certifi" },\n'
         ']\n'
@@ -566,6 +570,10 @@ def test_reconcile_fixes_lockfile_roots_and_dockerfile_trigram(tmp_path):
     root_record = [l.strip() for l in open(os.path.join(res.dir, "uv.lock"), encoding="utf-8")
                    if l.strip().startswith("name =")]
     assert root_record[:1] == ['name = "nastech-agent"']
+    with open(os.path.join(res.dir, "uv.lock"), encoding="utf-8") as fh:
+        branded_lock = fh.read()
+    assert '{ name = "nastech-agent", extras = ["all"] }' in branded_lock
+    assert '"hermes-agent"' not in branded_lock
 
     with open(os.path.join(res.dir, "package-lock.json"), encoding="utf-8") as fh:
         plock = fh.read()
@@ -939,3 +947,69 @@ def test_reconcile_target_ci_compatibility_fixes_are_audited(tmp_path):
     assert "'perfectionist/sort-imports': [\n        'warn'," in lint_config
     assert "'perfectionist/sort-named-exports': ['warn'" in lint_config
     assert "'perfectionist/sort-named-imports': ['warn'" in lint_config
+
+
+def test_reconcile_fixes_branded_telegram_entity_length(tmp_path):
+    path = tmp_path / "tests" / "gateway" / "test_telegram_mention_context.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        'msg = "@nastech_bot"\n'
+        'entities = [SimpleNamespace(type="mention", offset=0, length=11)]\n'
+        'command = "/new@nastech_bot"\n'
+        'command_entity = SimpleNamespace(type="bot_command", offset=0, length=15)\n'
+    )
+
+    assert _reconcile_telegram_mention_fixture(str(tmp_path)) == 1
+    text = path.read_text()
+    assert "length=12" in text
+    assert "length=16" in text
+
+
+def test_reconcile_exports_setup_helper_from_main(tmp_path):
+    main = tmp_path / "nastech_cli" / "main.py"
+    main.parent.mkdir(parents=True)
+    main.write_text("# main\n")
+    (main.parent / "main_provider_setup.py").write_text("def _prompt_reasoning_effort_selection(): pass\n")
+
+    from hundredways.updates import _reconcile_setup_helper_export
+
+    assert _reconcile_setup_helper_export(str(tmp_path)) == 1
+    assert "_prompt_reasoning_effort_selection" in main.read_text()
+
+
+def test_reconcile_defers_timeout_child_close_unconditionally(tmp_path):
+    path = tmp_path / "tools" / "delegate_tool_child_run.py"
+    path.parent.mkdir(parents=True)
+    path.write_text("close_deferred = is_timeout and not future.done()\n")
+
+    from hundredways.updates import _reconcile_timeout_cleanup_ownership
+
+    assert _reconcile_timeout_cleanup_ownership(str(tmp_path)) == 1
+    assert "close_deferred = is_timeout\n" in path.read_text()
+
+
+def test_reconcile_adds_cron_timeout_tree_rescan(tmp_path):
+    path = tmp_path / "cron" / "scheduler_script.py"
+    path.parent.mkdir(parents=True)
+    path.write_text("""        if kill_process_tree(pid):
+            return
+""")
+
+    from hundredways.updates import _reconcile_cron_timeout_tree_rescan
+
+    assert _reconcile_cron_timeout_tree_rescan(str(tmp_path)) == 1
+    assert "for _ in range(3):" in path.read_text()
+
+
+def test_reconcile_adds_timeout_close_grace(tmp_path):
+    path = tmp_path / "tools" / "delegate_tool_child_run.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        'child_future.add_done_callback(lambda _done: _close_child(child, '
+        '"Failed to close timed-out child after worker exit"))\n'
+    )
+
+    from hundredways.updates import _reconcile_timeout_close_grace
+
+    assert _reconcile_timeout_close_grace(str(tmp_path)) == 1
+    assert "def _close_later(_done):" in path.read_text()

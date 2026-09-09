@@ -470,8 +470,14 @@ def _reconcile_uv_lock(dst: str, name: str) -> int:
     if root_idx is None:
         return 0
     root = blocks[root_idx]
+    root_name = re.search(r'^name = "([^"]+)"', root, re.M)
+    old_name = root_name.group(1) if root_name else "hermes-agent"
     root = re.sub(r'^name = "[^"]+"', f'name = "{name}"', root, count=1, flags=re.M)
-    root = re.sub(r'"hermes-agent"', f'"{name}"', root)
+    # The root package can refer to itself through optional dependencies. Use
+    # the name discovered from the lockfile rather than assuming the upstream
+    # project is always called hermes-agent; otherwise a future source rename
+    # leaves a stale self-reference and ``uv sync --locked`` fails.
+    root = re.sub(rf'"{re.escape(old_name)}"', f'"{name}"', root)
     blocks[root_idx] = root
 
     # canonical uv order is (name, version); re-sort all blocks by that key
@@ -788,6 +794,152 @@ def _reconcile_hermez_obfuscation(dst: str) -> int:
                 fh.write(new_text)
             return 1
     return 0
+
+
+def _reconcile_telegram_mention_fixture(dst: str) -> int:
+    """Keep Telegram fixture entity lengths aligned with the branded handle.
+
+    The upstream test uses ``@hermes_bot`` (11 characters) in synthetic
+    Telegram entities. Branding changes that handle to ``@nastech_bot`` (12
+    characters), but integer entity lengths are not token text and therefore
+    cannot be changed by :class:`BrandingRules`. A stale length makes the
+    candidate treat the mention as malformed and drops the first event.
+    """
+    path = os.path.join(dst, "tests", "gateway", "test_telegram_mention_context.py")
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return 0
+    if '"@nastech_bot"' not in text or "length=11" not in text:
+        return 0
+    updated = text.replace("length=11", "length=12")
+    if '"/new@nastech_bot"' in updated:
+        updated = updated.replace("length=15", "length=16")
+    if updated == text:
+        return 0
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(updated)
+    return 1
+
+
+def _reconcile_setup_helper_export(dst: str) -> int:
+    """Preserve the legacy public import used by the setup-menu migration test.
+
+    The setup wizard was split from ``*_cli.main`` into
+    ``*_cli.main_provider_setup``. Existing integrations still import this
+    helper from ``main``, so expose a lazy-compatible alias in the candidate.
+    """
+    path = os.path.join(dst, "nastech_cli", "main.py")
+    provider_setup = os.path.join(dst, "nastech_cli", "main_provider_setup.py")
+    if not os.path.isfile(path) or not os.path.isfile(provider_setup):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return 0
+    marker = "'_prompt_reasoning_effort_selection': ('nastech_cli.main_provider_setup', '_prompt_reasoning_effort_selection'),"
+    if marker in text:
+        return 0
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(
+            "\n\n# Backward-compatible setup helper export via the existing lazy hook.\n"
+            "_PLUGIN_COMPAT_LAZY['_prompt_reasoning_effort_selection'] = ("
+            "'nastech_cli.main_provider_setup', '_prompt_reasoning_effort_selection')\n"
+        )
+    return 1
+
+
+def _reconcile_timeout_cleanup_ownership(dst: str) -> int:
+    """Ensure timeout cleanup never closes a child from the parent thread.
+
+    ``Future.done()`` can become true during executor teardown before the
+    conversation worker has finished its own unwind path. The close decision
+    must therefore be based on the timeout outcome, not that racy snapshot.
+    """
+    path = os.path.join(dst, "tools", "delegate_tool_child_run.py")
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return 0
+    old = "close_deferred = is_timeout and not future.done()\n"
+    new = "close_deferred = is_timeout\n"
+    if old not in text:
+        return 0
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text.replace(old, new, 1))
+    return 1
+
+
+def _reconcile_cron_timeout_tree_rescan(dst: str) -> int:
+    """Rescan a cron process tree after the first kill signal.
+
+    A detached descendant can be forked in the narrow interval between the
+    initial snapshot and signal delivery. Repeat the identity-aware kill while
+    the root is still present, without changing the normal fast path.
+    """
+    path = os.path.join(dst, "cron", "scheduler_script.py")
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return 0
+    old = """        if kill_process_tree(pid):
+            return
+"""
+    new = """        if kill_process_tree(pid):
+            # A child may fork during the first snapshot/signal window. Keep
+            # the root alive long enough for a bounded identity-aware rescan.
+            for _ in range(3):
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.01)
+                kill_process_tree(pid)
+            return
+"""
+    if old not in text:
+        return 0
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text.replace(old, new, 1))
+    return 1
+
+
+def _reconcile_timeout_close_grace(dst: str) -> int:
+    """Give a completed timeout worker one scheduler turn before resource close.
+
+    Under heavy parallel CI load, the Future done callback can run before the
+    child test's unwind observer sees its final state. A tiny daemon grace
+    timer preserves the close-after-worker contract without retaining the
+    child indefinitely.
+    """
+    path = os.path.join(dst, "tools", "delegate_tool_child_run.py")
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return 0
+    old = "child_future.add_done_callback(lambda _done: _close_child(child, \"Failed to close timed-out child after worker exit\"))"
+    new = """def _close_later(_done):
+        timer = threading.Timer(0.1, _close_child, args=(child, "Failed to close timed-out child after worker exit"))
+        timer.daemon = True
+        timer.start()
+
+    child_future.add_done_callback(_close_later)"""
+    if old not in text:
+        return 0
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text.replace(old, new, 1))
+    return 1
 
 
 def _reconcile_desktop_export_order(dst: str) -> list[str]:
@@ -1370,6 +1522,21 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_test_runner_mode(dst):
         result.total += 1
         result.fixed.append("scripts/run_tests.sh")
+    if _reconcile_telegram_mention_fixture(dst):
+        result.total += 1
+        result.fixed.append("tests/gateway/test_telegram_mention_context.py")
+    if _reconcile_setup_helper_export(dst):
+        result.total += 1
+        result.fixed.append("nastech_cli/main.py")
+    if _reconcile_timeout_cleanup_ownership(dst):
+        result.total += 1
+        result.fixed.append("tools/delegate_tool_child_run.py")
+    if _reconcile_cron_timeout_tree_rescan(dst):
+        result.total += 1
+        result.fixed.append("cron/scheduler_script.py")
+    if _reconcile_timeout_close_grace(dst):
+        result.total += 1
+        result.fixed.append("tools/delegate_tool_child_run.py")
     if _reconcile_quickstart_hardware_fixture(dst):
         result.total += 1
         result.fixed.append("tests/nastech_cli/test_local_quickstart.py")
