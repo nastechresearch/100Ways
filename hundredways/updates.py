@@ -912,6 +912,36 @@ def _reconcile_cron_timeout_tree_rescan(dst: str) -> int:
     return 1
 
 
+def _reconcile_timeout_close_grace(dst: str) -> int:
+    """Give a completed timeout worker one scheduler turn before resource close.
+
+    Under heavy parallel CI load, the Future done callback can run before the
+    child test's unwind observer sees its final state. A tiny daemon grace
+    timer preserves the close-after-worker contract without retaining the
+    child indefinitely.
+    """
+    path = os.path.join(dst, "tools", "delegate_tool_child_run.py")
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return 0
+    old = "child_future.add_done_callback(lambda _done: _close_child(child, \"Failed to close timed-out child after worker exit\"))"
+    new = """def _close_later(_done):
+        timer = threading.Timer(0.1, _close_child, args=(child, "Failed to close timed-out child after worker exit"))
+        timer.daemon = True
+        timer.start()
+
+    child_future.add_done_callback(_close_later)"""
+    if old not in text:
+        return 0
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text.replace(old, new, 1))
+    return 1
+
+
 def _reconcile_desktop_export_order(dst: str) -> list[str]:
     """Preserve desktop export ordering after ``hermes`` becomes ``nastech``.
 
@@ -1504,6 +1534,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_cron_timeout_tree_rescan(dst):
         result.total += 1
         result.fixed.append("cron/scheduler_script.py")
+    if _reconcile_timeout_close_grace(dst):
+        result.total += 1
+        result.fixed.append("tools/delegate_tool_child_run.py")
     if _reconcile_quickstart_hardware_fixture(dst):
         result.total += 1
         result.fixed.append("tests/nastech_cli/test_local_quickstart.py")

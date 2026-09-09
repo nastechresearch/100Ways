@@ -999,3 +999,17 @@ def test_reconcile_adds_cron_timeout_tree_rescan(tmp_path):
 
     assert _reconcile_cron_timeout_tree_rescan(str(tmp_path)) == 1
     assert "for _ in range(3):" in path.read_text()
+
+
+def test_reconcile_adds_timeout_close_grace(tmp_path):
+    path = tmp_path / "tools" / "delegate_tool_child_run.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        'child_future.add_done_callback(lambda _done: _close_child(child, '
+        '"Failed to close timed-out child after worker exit"))\n'
+    )
+
+    from hundredways.updates import _reconcile_timeout_close_grace
+
+    assert _reconcile_timeout_close_grace(str(tmp_path)) == 1
+    assert "def _close_later(_done):" in path.read_text()
