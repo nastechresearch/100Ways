@@ -796,6 +796,35 @@ def _reconcile_hermez_obfuscation(dst: str) -> int:
     return 0
 
 
+def _reconcile_telegram_mention_fixture(dst: str) -> int:
+    """Keep Telegram fixture entity lengths aligned with the branded handle.
+
+    The upstream test uses ``@hermes_bot`` (11 characters) in synthetic
+    Telegram entities. Branding changes that handle to ``@nastech_bot`` (12
+    characters), but integer entity lengths are not token text and therefore
+    cannot be changed by :class:`BrandingRules`. A stale length makes the
+    candidate treat the mention as malformed and drops the first event.
+    """
+    path = os.path.join(dst, "tests", "gateway", "test_telegram_mention_context.py")
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return 0
+    if '"@nastech_bot"' not in text or "length=11" not in text:
+        return 0
+    updated = text.replace("length=11", "length=12")
+    if '"/new@nastech_bot"' in updated:
+        updated = updated.replace("length=15", "length=16")
+    if updated == text:
+        return 0
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(updated)
+    return 1
+
+
 def _reconcile_desktop_export_order(dst: str) -> list[str]:
     """Preserve desktop export ordering after ``hermes`` becomes ``nastech``.
 
@@ -1376,6 +1405,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_test_runner_mode(dst):
         result.total += 1
         result.fixed.append("scripts/run_tests.sh")
+    if _reconcile_telegram_mention_fixture(dst):
+        result.total += 1
+        result.fixed.append("tests/gateway/test_telegram_mention_context.py")
     if _reconcile_quickstart_hardware_fixture(dst):
         result.total += 1
         result.fixed.append("tests/nastech_cli/test_local_quickstart.py")

@@ -14,6 +14,7 @@ from hundredways.updates import (
     UpdateManager,
     _reconcile_credential_display_test,
     _reconcile_desktop_export_order,
+    _reconcile_telegram_mention_fixture,
     brand_tree,
     compare_trees,
     fork_manifest_upstream_sha,
@@ -946,3 +947,19 @@ def test_reconcile_target_ci_compatibility_fixes_are_audited(tmp_path):
     assert "'perfectionist/sort-imports': [\n        'warn'," in lint_config
     assert "'perfectionist/sort-named-exports': ['warn'" in lint_config
     assert "'perfectionist/sort-named-imports': ['warn'" in lint_config
+
+
+def test_reconcile_fixes_branded_telegram_entity_length(tmp_path):
+    path = tmp_path / "tests" / "gateway" / "test_telegram_mention_context.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        'msg = "@nastech_bot"\n'
+        'entities = [SimpleNamespace(type="mention", offset=0, length=11)]\n'
+        'command = "/new@nastech_bot"\n'
+        'command_entity = SimpleNamespace(type="bot_command", offset=0, length=15)\n'
+    )
+
+    assert _reconcile_telegram_mention_fixture(str(tmp_path)) == 1
+    text = path.read_text()
+    assert "length=12" in text
+    assert "length=16" in text
