@@ -986,3 +986,16 @@ def test_reconcile_defers_timeout_child_close_unconditionally(tmp_path):
 
     assert _reconcile_timeout_cleanup_ownership(str(tmp_path)) == 1
     assert "close_deferred = is_timeout\n" in path.read_text()
+
+
+def test_reconcile_adds_cron_timeout_tree_rescan(tmp_path):
+    path = tmp_path / "cron" / "scheduler_script.py"
+    path.parent.mkdir(parents=True)
+    path.write_text("""        if kill_process_tree(pid):
+            return
+""")
+
+    from hundredways.updates import _reconcile_cron_timeout_tree_rescan
+
+    assert _reconcile_cron_timeout_tree_rescan(str(tmp_path)) == 1
+    assert "for _ in range(3):" in path.read_text()

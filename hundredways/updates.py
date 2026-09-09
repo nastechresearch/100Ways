@@ -877,6 +877,41 @@ def _reconcile_timeout_cleanup_ownership(dst: str) -> int:
     return 1
 
 
+def _reconcile_cron_timeout_tree_rescan(dst: str) -> int:
+    """Rescan a cron process tree after the first kill signal.
+
+    A detached descendant can be forked in the narrow interval between the
+    initial snapshot and signal delivery. Repeat the identity-aware kill while
+    the root is still present, without changing the normal fast path.
+    """
+    path = os.path.join(dst, "cron", "scheduler_script.py")
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return 0
+    old = """        if kill_process_tree(pid):
+            return
+"""
+    new = """        if kill_process_tree(pid):
+            # A child may fork during the first snapshot/signal window. Keep
+            # the root alive long enough for a bounded identity-aware rescan.
+            for _ in range(3):
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.01)
+                kill_process_tree(pid)
+            return
+"""
+    if old not in text:
+        return 0
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text.replace(old, new, 1))
+    return 1
+
+
 def _reconcile_desktop_export_order(dst: str) -> list[str]:
     """Preserve desktop export ordering after ``hermes`` becomes ``nastech``.
 
@@ -1466,6 +1501,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_timeout_cleanup_ownership(dst):
         result.total += 1
         result.fixed.append("tools/delegate_tool_child_run.py")
+    if _reconcile_cron_timeout_tree_rescan(dst):
+        result.total += 1
+        result.fixed.append("cron/scheduler_script.py")
     if _reconcile_quickstart_hardware_fixture(dst):
         result.total += 1
         result.fixed.append("tests/nastech_cli/test_local_quickstart.py")
