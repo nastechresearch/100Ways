@@ -963,3 +963,15 @@ def test_reconcile_fixes_branded_telegram_entity_length(tmp_path):
     text = path.read_text()
     assert "length=12" in text
     assert "length=16" in text
+
+
+def test_reconcile_exports_setup_helper_from_main(tmp_path):
+    main = tmp_path / "nastech_cli" / "main.py"
+    main.parent.mkdir(parents=True)
+    main.write_text("# main\n")
+    (main.parent / "main_provider_setup.py").write_text("def _prompt_reasoning_effort_selection(): pass\n")
+
+    from hundredways.updates import _reconcile_setup_helper_export
+
+    assert _reconcile_setup_helper_export(str(tmp_path)) == 1
+    assert "_prompt_reasoning_effort_selection" in main.read_text()

@@ -825,6 +825,30 @@ def _reconcile_telegram_mention_fixture(dst: str) -> int:
     return 1
 
 
+def _reconcile_setup_helper_export(dst: str) -> int:
+    """Preserve the legacy public import used by the setup-menu migration test.
+
+    The setup wizard was split from ``*_cli.main`` into
+    ``*_cli.main_provider_setup``. Existing integrations still import this
+    helper from ``main``, so expose a lazy-compatible alias in the candidate.
+    """
+    path = os.path.join(dst, "nastech_cli", "main.py")
+    provider_setup = os.path.join(dst, "nastech_cli", "main_provider_setup.py")
+    if not os.path.isfile(path) or not os.path.isfile(provider_setup):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return 0
+    marker = "from nastech_cli.main_provider_setup import _prompt_reasoning_effort_selection"
+    if marker in text:
+        return 0
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write("\n\n# Backward-compatible setup helper export.\n" + marker + "\n")
+    return 1
+
+
 def _reconcile_desktop_export_order(dst: str) -> list[str]:
     """Preserve desktop export ordering after ``hermes`` becomes ``nastech``.
 
@@ -1408,6 +1432,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_telegram_mention_fixture(dst):
         result.total += 1
         result.fixed.append("tests/gateway/test_telegram_mention_context.py")
+    if _reconcile_setup_helper_export(dst):
+        result.total += 1
+        result.fixed.append("nastech_cli/main.py")
     if _reconcile_quickstart_hardware_fixture(dst):
         result.total += 1
         result.fixed.append("tests/nastech_cli/test_local_quickstart.py")
