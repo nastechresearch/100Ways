@@ -841,11 +841,15 @@ def _reconcile_setup_helper_export(dst: str) -> int:
             text = fh.read()
     except OSError:
         return 0
-    marker = "from nastech_cli.main_provider_setup import _prompt_reasoning_effort_selection"
+    marker = "'_prompt_reasoning_effort_selection': ('nastech_cli.main_provider_setup', '_prompt_reasoning_effort_selection'),"
     if marker in text:
         return 0
     with open(path, "a", encoding="utf-8") as fh:
-        fh.write("\n\n# Backward-compatible setup helper export.\n" + marker + "\n")
+        fh.write(
+            "\n\n# Backward-compatible setup helper export via the existing lazy hook.\n"
+            "_PLUGIN_COMPAT_LAZY['_prompt_reasoning_effort_selection'] = ("
+            "'nastech_cli.main_provider_setup', '_prompt_reasoning_effort_selection')\n"
+        )
     return 1
 
 
