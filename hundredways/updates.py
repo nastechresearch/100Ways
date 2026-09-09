@@ -853,6 +853,30 @@ def _reconcile_setup_helper_export(dst: str) -> int:
     return 1
 
 
+def _reconcile_timeout_cleanup_ownership(dst: str) -> int:
+    """Ensure timeout cleanup never closes a child from the parent thread.
+
+    ``Future.done()`` can become true during executor teardown before the
+    conversation worker has finished its own unwind path. The close decision
+    must therefore be based on the timeout outcome, not that racy snapshot.
+    """
+    path = os.path.join(dst, "tools", "delegate_tool_child_run.py")
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return 0
+    old = "close_deferred = is_timeout and not future.done()\n"
+    new = "close_deferred = is_timeout\n"
+    if old not in text:
+        return 0
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text.replace(old, new, 1))
+    return 1
+
+
 def _reconcile_desktop_export_order(dst: str) -> list[str]:
     """Preserve desktop export ordering after ``hermes`` becomes ``nastech``.
 
@@ -1439,6 +1463,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_setup_helper_export(dst):
         result.total += 1
         result.fixed.append("nastech_cli/main.py")
+    if _reconcile_timeout_cleanup_ownership(dst):
+        result.total += 1
+        result.fixed.append("tools/delegate_tool_child_run.py")
     if _reconcile_quickstart_hardware_fixture(dst):
         result.total += 1
         result.fixed.append("tests/nastech_cli/test_local_quickstart.py")

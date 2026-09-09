@@ -975,3 +975,14 @@ def test_reconcile_exports_setup_helper_from_main(tmp_path):
 
     assert _reconcile_setup_helper_export(str(tmp_path)) == 1
     assert "_prompt_reasoning_effort_selection" in main.read_text()
+
+
+def test_reconcile_defers_timeout_child_close_unconditionally(tmp_path):
+    path = tmp_path / "tools" / "delegate_tool_child_run.py"
+    path.parent.mkdir(parents=True)
+    path.write_text("close_deferred = is_timeout and not future.done()\n")
+
+    from hundredways.updates import _reconcile_timeout_cleanup_ownership
+
+    assert _reconcile_timeout_cleanup_ownership(str(tmp_path)) == 1
+    assert "close_deferred = is_timeout\n" in path.read_text()
