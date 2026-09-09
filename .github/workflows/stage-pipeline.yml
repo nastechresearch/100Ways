@@ -241,9 +241,19 @@ jobs:
           TEST_TREE="$RUNNER_TEMP/nastech-agent-candidate-test"
           rm -rf "$TEST_TREE"
           cp -a "$SNAPSHOT" "$TEST_TREE"
+          echo "Candidate snapshot: $SNAPSHOT"
+          find "$TEST_TREE" -maxdepth 2 -type f \( -name 'pyproject.toml' -o -name 'uv.lock' -o -name 'run_tests*.sh' \) -ls
+          test -f "$TEST_TREE/pyproject.toml"
+          test -f "$TEST_TREE/uv.lock"
           test -x "$TEST_TREE/scripts/run_tests.sh"
           (
             cd "$TEST_TREE"
+            echo "uv: $(uv --version)"
+            if grep -RniE '(^|[^a-z0-9])(hermes-agent|NousResearch)([^a-z0-9]|$)' pyproject.toml uv.lock; then
+              echo "stale upstream package identity remains in candidate metadata" >&2
+              exit 1
+            fi
+            uv lock --check
             git init -q
             git config user.email "100ways-candidate-test@invalid"
             git config user.name "100Ways Candidate Test"

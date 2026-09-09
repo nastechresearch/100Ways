@@ -470,8 +470,14 @@ def _reconcile_uv_lock(dst: str, name: str) -> int:
     if root_idx is None:
         return 0
     root = blocks[root_idx]
+    root_name = re.search(r'^name = "([^"]+)"', root, re.M)
+    old_name = root_name.group(1) if root_name else "hermes-agent"
     root = re.sub(r'^name = "[^"]+"', f'name = "{name}"', root, count=1, flags=re.M)
-    root = re.sub(r'"hermes-agent"', f'"{name}"', root)
+    # The root package can refer to itself through optional dependencies. Use
+    # the name discovered from the lockfile rather than assuming the upstream
+    # project is always called hermes-agent; otherwise a future source rename
+    # leaves a stale self-reference and ``uv sync --locked`` fails.
+    root = re.sub(rf'"{re.escape(old_name)}"', f'"{name}"', root)
     blocks[root_idx] = root
 
     # canonical uv order is (name, version); re-sort all blocks by that key

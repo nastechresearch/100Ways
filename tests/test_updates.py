@@ -520,6 +520,9 @@ def _hermes_repo_with_reconcile_patterns(tmp_path):
         'name = "hermes-agent"\n'
         'version = "0.20.1"\n'
         'source = { editable = "." }\n'
+        'optional-dependencies = [\n'
+        '    { name = "hermes-agent", extras = ["all"] },\n'
+        ']\n'
         'dependencies = [\n'
         '    { name = "certifi" },\n'
         ']\n'
@@ -566,6 +569,10 @@ def test_reconcile_fixes_lockfile_roots_and_dockerfile_trigram(tmp_path):
     root_record = [l.strip() for l in open(os.path.join(res.dir, "uv.lock"), encoding="utf-8")
                    if l.strip().startswith("name =")]
     assert root_record[:1] == ['name = "nastech-agent"']
+    with open(os.path.join(res.dir, "uv.lock"), encoding="utf-8") as fh:
+        branded_lock = fh.read()
+    assert '{ name = "nastech-agent", extras = ["all"] }' in branded_lock
+    assert '"hermes-agent"' not in branded_lock
 
     with open(os.path.join(res.dir, "package-lock.json"), encoding="utf-8") as fh:
         plock = fh.read()
