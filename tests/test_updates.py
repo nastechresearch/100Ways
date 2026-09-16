@@ -12,8 +12,10 @@ from hundredways.integrity import audit_candidate_tree
 from hundredways.updates import (
     STAGES,
     UpdateManager,
+    _reconcile_anon_surface_copy,
     _reconcile_credential_display_test,
     _reconcile_desktop_export_order,
+    _reconcile_portal_override_test_collision,
     brand_tree,
     compare_trees,
     fork_manifest_upstream_sha,
@@ -164,7 +166,7 @@ def test_desktop_export_order_is_reconciled_after_nastech_rename(tmp_path):
 
 def test_reconcile_preserves_fixed_width_credential_mask_assertion(tmp_path):
     candidate = tmp_path / "candidate"
-    target = candidate / "tests" / "cli" / "test_show_config_credential.py"
+    target = candidate / "tests" / "nastech_cli" / "test_show_config_credential.py"
     target.parent.mkdir(parents=True)
     target.write_text(
         'agent_key="nastech-REALKEY-abcdef9876"\n'
@@ -939,3 +941,132 @@ def test_reconcile_target_ci_compatibility_fixes_are_audited(tmp_path):
     assert "'perfectionist/sort-imports': [\n        'warn'," in lint_config
     assert "'perfectionist/sort-named-exports': ['warn'" in lint_config
     assert "'perfectionist/sort-named-imports': ['warn'" in lint_config
+
+
+def test_reconcile_anon_surface_copy_neutralizes_chat_copy(tmp_path):
+    candidate = tmp_path / "candidate"
+    root = candidate / "nastech_cli"
+    root.mkdir(parents=True)
+    (root / "anon_sign_in.py").write_text(
+        'UPGRADE_REASON_COPY = {\n'
+        '    "user_declined": "No problem, you\'re still on the free Nastech service. Sign in whenever you\'re ready.",\n'
+        '}\n'
+        'UPGRADE_SERVICE_BUSY = ("Signing in couldn\'t finish because the Nastech service is busy. "\n'
+        '                        "Try again in {wait}. Your session is still here in the meantime.")\n'
+        'UPGRADE_SERVICE_UNREACHABLE = ("The Nastech service couldn\'t be reached to finish signing you in. "\n'
+        '                               "Check your internet connection and try again. Your session is still here.")\n',
+        encoding="utf-8",
+    )
+    (root / "anon_auth.py").write_text(
+        'ANON_FAILURE_COPY = {\n'
+        '    "gate_closed": f"This version can\'t be used without a Nastech account. {_SIGNIN_IS_FREE}",\n'
+        '    "gate_paused": f"Using Nastech without signing in is paused for a moment. {_SIGNIN_IS_FREE}",\n'
+        '    "pow": "The Nastech server asked for a proof of work, but that isn\'t implemented in your "\n'
+        '    "Agent yet. Sign in with a Nastech account to continue.",\n'
+        '    "unreachable": "The Nastech service couldn\'t be reached. Check your internet connection and try again.",\n'
+        '    "server_error": "The Nastech service had a hiccup. Try again in a moment.",\n'
+        '}\n'
+        'FREE_TIER_AVAILABLE_NOTICE = "Free Nastech inference and connectors are now available. "\n'
+        'FREE_TIER_STATUS_LINE = f"{FREE_TIER_LABEL} · free tier · nastech/welcome · /login to sign in"\n',
+        encoding="utf-8",
+    )
+    (root / "nastech_account.py").write_text(
+        'FREE_TIER_NEEDS_ACCOUNT_CHAT = "This needs a Nastech account. Use /login to sign in."\n',
+        encoding="utf-8",
+    )
+    gateway = candidate / "gateway"
+    gateway.mkdir()
+    (gateway / "run_notifications.py").write_text(
+        'startup = "Inference: Nastech free tier (nastech/welcome). Sign in for more: /login"\n',
+        encoding="utf-8",
+    )
+    tests = candidate / "tests" / "nastech_cli"
+    tests.mkdir(parents=True)
+    (tests / "test_anon_failure_modes.py").write_text(
+        '(anon_auth.ANON_GATE_CLOSED, 0, False, "Nastech account"),\n'
+        'assert "Nastech account" in str(err) and "free" in str(err)\n'
+        'assert str(err).startswith("The Nastech server asked for a proof of work, but that isn\'t implemented")\n',
+        encoding="utf-8",
+    )
+    (tests / "test_anon_surfaces.py").write_text(
+        '    assert all("/login" in text for text in command_copy)\n'
+        '    for text in (*command_copy, *refusal_copy):\n'
+        '        # The ruled refusal uses Nastech as the grammatical subject; only that exact product-name\n'
+        '        # phrase is exempt from the broad top-level-command gate.\n'
+        '        assert "nastech " not in text.replace("this Nastech can", "this product can").lower()\n',
+        encoding="utf-8",
+    )
+
+    fixed = _reconcile_anon_surface_copy(str(candidate))
+    assert set(fixed) == {
+        "nastech_cli/anon_sign_in.py",
+        "nastech_cli/anon_auth.py",
+        "nastech_cli/nastech_account.py",
+        "gateway/run_notifications.py",
+        "tests/nastech_cli/test_anon_failure_modes.py",
+        "tests/nastech_cli/test_anon_surfaces.py",
+    }
+
+    sign_in = (root / "anon_sign_in.py").read_text(encoding="utf-8")
+    assert "free service" in sign_in
+    assert "because the service is busy" in sign_in
+    assert "The service couldn't be reached" in sign_in
+    assert "Nastech service" not in sign_in
+
+    anon_auth = (root / "anon_auth.py").read_text(encoding="utf-8")
+    assert "without an account" in anon_auth
+    assert "Using the free tier without" in anon_auth
+    assert '"The server asked for a proof of work' in anon_auth
+    assert "Sign in with an account to continue" in anon_auth
+    assert "The service couldn't be reached" in anon_auth
+    assert "The service had a hiccup" in anon_auth
+    assert "Free inference and connectors" in anon_auth
+    # Cross-surface status line keeps the brand.
+    assert "FREE_TIER_STATUS_LINE" in anon_auth
+    assert "Nastech " not in anon_auth.replace("Using the free tier without", "Using X without")
+
+    account = (root / "nastech_account.py").read_text(encoding="utf-8")
+    assert "This needs an account" in account
+    assert "Nastech account" not in account
+
+    startup = (gateway / "run_notifications.py").read_text(encoding="utf-8")
+    assert "Inference: Free tier" in startup
+    assert "Nastech free tier" not in startup
+
+    failure_modes = (tests / "test_anon_failure_modes.py").read_text(encoding="utf-8")
+    assert '"an account"),' in failure_modes
+    assert 'assert "an account" in str(err)' in failure_modes
+    assert 'startswith("The server asked' in failure_modes
+    assert "Nastech account" not in failure_modes
+
+    anon_surfaces = (tests / "test_anon_surfaces.py").read_text(encoding="utf-8")
+    assert "cross_surface = {anon_auth.FREE_TIER_STATUS_LINE}" in anon_surfaces
+    assert 'assert "https" not in text.lower()' in anon_surfaces
+    assert "continue" in anon_surfaces
+
+    # Idempotent: a second pass fixes nothing.
+    assert _reconcile_anon_surface_copy(str(candidate)) == []
+
+
+def test_reconcile_portal_override_test_collision(tmp_path):
+    candidate = tmp_path / "candidate"
+    target = candidate / "tests" / "nastech_cli" / "test_nastech_nonproduction_inference_host.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        '    monkeypatch.setenv(var, "https://launch.example.nastechresearch.github.io")\n'
+        '    monkeypatch.delenv("NASTECH_PORTAL_BASE_URL", raising=False)\n'
+        '    assert helper() == "https://launch.example.nastechresearch.github.io"\n'
+        '    monkeypatch.setenv("NASTECH_PORTAL_BASE_URL", NONPROD_PORTAL)\n'
+        '    monkeypatch.delenv("NASTECH_INFERENCE_BASE_URL", raising=False)\n',
+        encoding="utf-8",
+    )
+
+    assert _reconcile_portal_override_test_collision(str(candidate)) == 1
+    updated = target.read_text(encoding="utf-8")
+    assert 'monkeypatch.delenv("NASTECH_PORTAL_BASE_URL_LEGACY", raising=False)' in updated
+    assert 'monkeypatch.delenv("NASTECH_INFERENCE_BASE_URL", raising=False)' in updated
+    assert 'setenv("NASTECH_PORTAL_BASE_URL", NONPROD_PORTAL)' in updated
+    # The collision line is gone; the second delete of the portal var must not remain.
+    assert 'delenv("NASTECH_PORTAL_BASE_URL", raising=False)' not in updated
+    # Idempotent.
+    assert _reconcile_portal_override_test_collision(str(candidate)) == 0
