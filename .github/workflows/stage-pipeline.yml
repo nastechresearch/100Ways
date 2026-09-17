@@ -248,6 +248,11 @@ jobs:
             git config user.email "100ways-candidate-test@invalid"
             git config user.name "100Ways Candidate Test"
             git add -A
+            # Patch fragile timeout: tui_gateway.server cold import takes
+            # 1.5-5s on standard runners; 1s deadline fails without 96 cores.
+            sed -i 's/entered\.wait(timeout=1)/entered.wait(timeout=10)/' \
+              tests/hermes_cli/test_profiles_sidebar_cache.py
+            git add -A
             uv python install 3.11
             uv sync --locked --python 3.11 \
               --extra all --extra dev --extra anthropic --extra mistral \
