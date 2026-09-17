@@ -16,6 +16,8 @@ from hundredways.updates import (
     _reconcile_credential_display_test,
     _reconcile_desktop_export_order,
     _reconcile_portal_override_test_collision,
+    _reconcile_reasoning_effort_selection,
+    _reconcile_telegram_mention_context_lengths,
     brand_tree,
     compare_trees,
     fork_manifest_upstream_sha,
@@ -980,6 +982,13 @@ def test_reconcile_anon_surface_copy_neutralizes_chat_copy(tmp_path):
         'startup = "Inference: Nastech free tier (nastech/welcome). Sign in for more: /login"\n',
         encoding="utf-8",
     )
+    tests_gateway = candidate / "tests" / "gateway"
+    tests_gateway.mkdir(parents=True)
+    (tests_gateway / "test_free_tier_startup_notice.py").write_text(
+        'FREE_TIER_LINE = "Inference: Nastech free tier (nastech/welcome). Sign in for more: /login"\n'
+        'assert lines[1:] == [FREE_TIER_LINE]\n',
+        encoding="utf-8",
+    )
     tests = candidate / "tests" / "nastech_cli"
     tests.mkdir(parents=True)
     (tests / "test_anon_failure_modes.py").write_text(
@@ -1003,6 +1012,7 @@ def test_reconcile_anon_surface_copy_neutralizes_chat_copy(tmp_path):
         "nastech_cli/anon_auth.py",
         "nastech_cli/nastech_account.py",
         "gateway/run_notifications.py",
+        "tests/gateway/test_free_tier_startup_notice.py",
         "tests/nastech_cli/test_anon_failure_modes.py",
         "tests/nastech_cli/test_anon_surfaces.py",
     }
@@ -1032,6 +1042,10 @@ def test_reconcile_anon_surface_copy_neutralizes_chat_copy(tmp_path):
     startup = (gateway / "run_notifications.py").read_text(encoding="utf-8")
     assert "Inference: Free tier" in startup
     assert "Nastech free tier" not in startup
+
+    startup_test = (tests_gateway / "test_free_tier_startup_notice.py").read_text(encoding="utf-8")
+    assert 'FREE_TIER_LINE = "Inference: Free tier' in startup_test
+    assert "Nastech free tier" not in startup_test
 
     failure_modes = (tests / "test_anon_failure_modes.py").read_text(encoding="utf-8")
     assert '"an account"),' in failure_modes
@@ -1070,3 +1084,46 @@ def test_reconcile_portal_override_test_collision(tmp_path):
     assert 'delenv("NASTECH_PORTAL_BASE_URL", raising=False)' not in updated
     # Idempotent.
     assert _reconcile_portal_override_test_collision(str(candidate)) == 0
+
+
+def test_reconcile_telegram_mention_context_lengths(tmp_path):
+    candidate = tmp_path / "candidate"
+    target = candidate / "tests" / "gateway" / "test_telegram_mention_context.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        'def test_sole_addressee_text_stays_clean_and_prompt_is_session_stable():\n'
+        '    msg = _group_message("/new@nastech_bot", entities=[SimpleNamespace(type="bot_command", offset=0, length=15)])\n'
+        '    text = "😀 @nastech_bot 2"\n'
+        '    msg = _group_message(text, entities=[SimpleNamespace(type="mention", offset=3, length=11)])\n',
+        encoding="utf-8",
+    )
+
+    assert _reconcile_telegram_mention_context_lengths(str(candidate)) == 1
+    updated = target.read_text(encoding="utf-8")
+    assert 'type="bot_command", offset=0, length=16' in updated
+    assert 'type="mention", offset=3, length=12' in updated
+    assert 'length=15' not in updated
+    assert 'length=11' not in updated
+    # Idempotent.
+    assert _reconcile_telegram_mention_context_lengths(str(candidate)) == 0
+
+
+def test_reconcile_reasoning_effort_selection(tmp_path):
+    candidate = tmp_path / "candidate"
+    target = candidate / "nastech_cli" / "main.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        'def some_existing(): pass\n'
+        '# ---- END PLUGIN-COMPAT ----\n',
+        encoding="utf-8",
+    )
+
+    assert _reconcile_reasoning_effort_selection(str(candidate)) == 1
+    updated = target.read_text(encoding="utf-8")
+    assert 'def _prompt_reasoning_effort_selection(efforts, current_effort=""):' in updated
+    assert '# ---- END PLUGIN-COMPAT ----\n' in updated
+    assert updated.index("# ---- END PLUGIN-COMPAT ----") < updated.index(
+        "def _prompt_reasoning_effort_selection"
+    )
+    # Idempotent.
+    assert _reconcile_reasoning_effort_selection(str(candidate)) == 0

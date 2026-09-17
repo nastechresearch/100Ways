@@ -1450,6 +1450,26 @@ def _reconcile_anon_surface_copy(dst: str) -> list[str]:
                 fh.write(text)
             fixed.append("gateway/run_notifications.py")
 
+    # --- tests/gateway/test_free_tier_startup_notice.py: expected constant ---
+    # The sibling test asserts the home-channel startup line equals its own
+    # FREE_TIER_LINE constant; keep the branded expectation in sync with the
+    # now-neutralized production string above.
+    path = os.path.join(dst, "tests", "gateway", "test_free_tier_startup_notice.py")
+    if os.path.isfile(path):
+        try:
+            text = open(path, encoding="utf-8").read()
+        except OSError:
+            text = ""
+        original = text
+        text = text.replace(
+            'FREE_TIER_LINE = "Inference: Nastech free tier (nastech/welcome). Sign in for more: /login"',
+            'FREE_TIER_LINE = "Inference: Free tier (nastech/welcome). Sign in for more: /login"',
+        )
+        if text != original:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            fixed.append("tests/gateway/test_free_tier_startup_notice.py")
+
     # --- tests/nastech_cli/test_anon_failure_modes.py: needle + startswith -
     path = os.path.join(dst, "tests", "nastech_cli", "test_anon_failure_modes.py")
     if os.path.isfile(path):
@@ -1556,6 +1576,157 @@ def _reconcile_portal_override_test_collision(dst: str) -> int:
     return 1
 
 
+def _reconcile_telegram_mention_context_lengths(dst: str) -> int:
+    """Realign hand-written Telegram entity spans to the branded bot handle.
+
+    ``test_telegram_mention_context.py`` hand-codes UTF-16 entity geometry for
+    the upstream handle (:code:`hermes_bot`, 10 code units).  Token branding
+    rewrites the handle string to ``nastech_bot`` (11 code units) but leaves the
+    numeric ``offset``/``length`` values behind, so the entity span comes up one
+    unit short.  The mention/command paths then no longer look addressed to us,
+    the first turn is dropped, and ``assert len(events) == 2`` sees only the
+    follow-up.  Realign the two unit lengths used by the sole-addressee cases:
+    ``/new@nastech_bot`` (15 → 16) and ``😀 @nastech_bot`` (11 → 12 units).
+    """
+    rel = "tests/gateway/test_telegram_mention_context.py"
+    path = os.path.join(dst, rel)
+    if not os.path.isfile(path):
+        return 0
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError:
+        return 0
+    original = text
+    text = text.replace(
+        '/new@nastech_bot", entities=[SimpleNamespace(type="bot_command", offset=0, length=15)]',
+        '/new@nastech_bot", entities=[SimpleNamespace(type="bot_command", offset=0, length=16)]',
+    )
+    text = text.replace(
+        'text, entities=[SimpleNamespace(type="mention", offset=3, length=11)]',
+        'text, entities=[SimpleNamespace(type="mention", offset=3, length=12)]',
+    )
+    if text == original:
+        return 0
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    return 1
+
+
+# Grafted from the fork's ``nastech_cli/main.py`` (``_prompt_reasoning_effort_selection``):
+# the fork-owned regression test ``tests/nastech_cli/test_setup_menu_curses_migration.py``
+# imports it, but ``main.py`` itself is upstream-derived and the upstream project never
+# defined the symbol.  Body must match the fork byte-for-byte (minus its trailing blank
+# lines); module imports (``subprocess``) already exist at that point in main.py.
+_REASONING_EFFORT_FORK_BODY = '''def _prompt_reasoning_effort_selection(efforts, current_effort=""):
+    """Prompt for a reasoning effort. Returns effort, 'none', or None to keep current."""
+    deduped = list(
+        dict.fromkeys(
+            str(effort).strip().lower() for effort in efforts if str(effort).strip()
+        )
+    )
+    canonical_order = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+    ordered = [effort for effort in canonical_order if effort in deduped]
+    ordered.extend(effort for effort in deduped if effort not in canonical_order)
+    if not ordered:
+        return None
+
+    def _label(effort):
+        if effort == current_effort:
+            return f"{effort}  \u2190 currently in use"
+        return effort
+
+    disable_label = "Disable reasoning"
+    skip_label = "Skip (keep current)"
+
+    if current_effort == "none":
+        default_idx = len(ordered)
+    elif current_effort in ordered:
+        default_idx = ordered.index(current_effort)
+    elif "medium" in ordered:
+        default_idx = ordered.index("medium")
+    else:
+        default_idx = 0
+
+    try:
+        from nastech_cli.curses_ui import curses_radiolist
+
+        choices = [_label(effort) for effort in ordered]
+        choices.append(disable_label)
+        choices.append(skip_label)
+        idx = curses_radiolist(
+            "Select reasoning effort:",
+            choices,
+            selected=default_idx,
+            cancel_returns=-1,
+        )
+        if idx < 0:
+            return None
+        print()
+        if idx < len(ordered):
+            return ordered[idx]
+        if idx == len(ordered):
+            return "none"
+        return None
+    except (ImportError, NotImplementedError, OSError, subprocess.SubprocessError):
+        pass
+
+    print("Select reasoning effort:")
+    for i, effort in enumerate(ordered, 1):
+        print(f"  {i}. {_label(effort)}")
+    n = len(ordered)
+    print(f"  {n + 1}. {disable_label}")
+    print(f"  {n + 2}. {skip_label}")
+    print()
+
+    while True:
+        try:
+            choice = input(f"Choice [1-{n + 2}] (default: keep current): ").strip()
+            if not choice:
+                return None
+            idx = int(choice)
+            if 1 <= idx <= n:
+                return ordered[idx - 1]
+            if idx == n + 1:
+                return "none"
+            if idx == n + 2:
+                return None
+            print(f"Please enter 1-{n + 2}")
+        except ValueError:
+            print("Please enter a number")
+        except (KeyboardInterrupt, EOFError):
+            return None
+
+
+'''
+
+def _reconcile_reasoning_effort_selection(dst: str) -> int:
+    """Graft the fork's reasoning-effort picker into the branded main module.
+
+    The fork-owned ``tests/nastech_cli/test_setup_menu_curses_migration.py``
+    imports ``_prompt_reasoning_effort_selection`` from ``nastech_cli.main``,
+    but the module itself is upstream-derived and upstream never defined the
+    symbol — so the fork's preserved test raises ImportError at CI test time.
+    Patch main.py once to grow the fork-local function.
+    """
+    rel = "nastech_cli/main.py"
+    path = os.path.join(dst, rel)
+    if not os.path.isfile(path):
+        return 0
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError:
+        return 0
+    if "def _prompt_reasoning_effort_selection(" in text:
+        return 0
+    anchor = "# ---- END PLUGIN-COMPAT ----\n"
+    if anchor not in text:
+        return 0
+    text = text.replace(anchor, anchor + _REASONING_EFFORT_FORK_BODY, 1)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    return 1
+
+
 def reconcile_tree(dst: str) -> ReconcileResult:
     """Apply known post-brand fixes to the branded tree in place.
 
@@ -1616,6 +1787,12 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_portal_override_test_collision(dst):
         result.total += 1
         result.fixed.append("tests/nastech_cli/test_nastech_nonproduction_inference_host.py")
+    if _reconcile_telegram_mention_context_lengths(dst):
+        result.total += 1
+        result.fixed.append("tests/gateway/test_telegram_mention_context.py")
+    if _reconcile_reasoning_effort_selection(dst):
+        result.total += 1
+        result.fixed.append("nastech_cli/main.py")
     if _reconcile_project_identity_width(dst):
         result.total += 1
         result.fixed.append("ui-tui/src/domain/paths.ts")
