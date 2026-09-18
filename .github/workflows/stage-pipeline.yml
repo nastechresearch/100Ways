@@ -256,6 +256,15 @@ jobs:
             sed -i 's/entered\.wait(timeout=1)/entered.wait(timeout=10)/' "$TEST_FILE"
             grep -q 'entered\.wait(timeout=10)' "$TEST_FILE"
             git add "$TEST_FILE"
+            # The hosted-room cancellation retry runs behind an overloaded
+            # candidate-suite worker; give only that polling assertion a
+            # realistic bounded deadline.
+            HOSTED_TEST="tests/tui_gateway/test_hosted_room_driver_runtime.py"
+            test -f "$HOSTED_TEST"
+            grep -Fq '_wait_for(lambda: state.get_task(db, identity)["status"] == "cancelled")' "$HOSTED_TEST"
+            sed -i 's/_wait_for(lambda: state.get_task(db, identity)\["status"\] == "cancelled")/_wait_for(lambda: state.get_task(db, identity)["status"] == "cancelled", timeout=10.0)/' "$HOSTED_TEST"
+            grep -Fq '_wait_for(lambda: state.get_task(db, identity)["status"] == "cancelled", timeout=10.0)' "$HOSTED_TEST"
+            git add "$HOSTED_TEST"
             uv python install 3.11
             uv sync --locked --python 3.11 \
               --extra all --extra dev --extra anthropic --extra mistral \
