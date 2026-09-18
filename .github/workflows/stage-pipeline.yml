@@ -248,6 +248,9 @@ jobs:
             git config user.email "100ways-candidate-test@invalid"
             git config user.name "100Ways Candidate Test"
             git add -A
+            # Candidate snapshots are validated on standard GitHub runners, not the
+            # high-core upstream fleet.  Keep concurrency deliberately low so
+            # scheduling-sensitive async assertions receive CPU time.
             # A cold profile-tree scan can exceed one second on standard
             # GitHub-hosted runners; apply the bounded wait to the actual test.
             TEST_FILE="tests/nastech_cli/test_profiles_sidebar_cache.py"
@@ -271,7 +274,7 @@ jobs:
               --extra fal --extra modal --extra daytona --extra hindsight \
               --extra parallel-web
             source .venv/bin/activate
-            NASTECH_TEST_FILE_RETRIES="2" OPENROUTER_API_KEY="" OPENAI_API_KEY="" NASTECH_API_KEY="" \
+            NASTECH_TEST_WORKERS="2" NASTECH_TEST_FILE_RETRIES="2" OPENROUTER_API_KEY="" OPENAI_API_KEY="" NASTECH_API_KEY="" \
               ./scripts/run_tests.sh
           )
           python3 - <<'PYEOF'
@@ -435,4 +438,5 @@ jobs:
             ${{ runner.temp }}/gate_receipt.json
             ${{ runner.temp }}/SYNC-SUMMARY.md
           if-no-files-found: error
+
 
