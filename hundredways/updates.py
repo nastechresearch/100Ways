@@ -1727,6 +1727,191 @@ def _reconcile_reasoning_effort_selection(dst: str) -> int:
     return 1
 
 
+# Upstream added ``scripts/check_no_tmp_literals.py`` (hermes-agent ``b905042d``,
+# 2026-09-21): a first-party gate that fails on any literal ``/tmp`` path in
+# production code, skills, docs or prompts outside a one-entry baseline.  The
+# gate scans the *candidate*, and the fork's own skills/docs predate it, so a
+# candidate that is otherwise perfect still fails the branded suite.
+#
+# The brander cannot see this: it transforms the freshly pulled upstream tree,
+# which is faithful to the rule, and ``preserve`` then re-adds the fork-local
+# files verbatim *after* branding.  Routing scratch space through the portable
+# tempdir idiom is also the real fix for the bug the gate exists to prevent:
+# a literal ``/tmp`` in a skill becomes a literal ``/tmp`` in the model's shell
+# commands on Termux (no ``/tmp`` at all) and native Windows.
+_TMP_HYGIENE: tuple[tuple[str, str, str], ...] = (
+    # --- Blender MCP skill (fork-only; upstream ships no blender skill) -----
+    (
+        "optional-skills/creative/blender-mcp/SKILL.md",
+        'bpy.context.scene.render.filepath = "/tmp/render.png"',
+        'bpy.context.scene.render.filepath = os.path.join(tempfile.gettempdir(), "render.png")',
+    ),
+    (
+        "optional-skills/creative/blender-mcp/SKILL.md",
+        "- Render output paths must be absolute (`/tmp/render.png`), not relative —",
+        "- Render output paths must be absolute (build them from "
+        "`tempfile.gettempdir()`), not relative —",
+    ),
+    (
+        "optional-skills/creative/blender-mcp/references/bpy-api.md",
+        "scene.render.filepath = '/tmp/render.png'",
+        "scene.render.filepath = os.path.join(tempfile.gettempdir(), 'render.png')",
+    ),
+    (
+        "optional-skills/creative/blender-mcp/references/bpy-api.md",
+        "scene.render.filepath = '/tmp/anim_'",
+        "scene.render.filepath = os.path.join(tempfile.gettempdir(), 'anim_')",
+    ),
+    (
+        "optional-skills/creative/blender-mcp/references/pitfalls.md",
+        "open('/tmp/result.json', 'w').write(json.dumps([o.name for o in bpy.data.objects]))",
+        "open(os.path.join(tempfile.gettempdir(), 'result.json'), 'w')"
+        ".write(json.dumps([o.name for o in bpy.data.objects]))",
+    ),
+    (
+        "optional-skills/creative/blender-mcp/references/pitfalls.md",
+        "open('/tmp/engines.json', 'w').write(json.dumps(",
+        "open(os.path.join(tempfile.gettempdir(), 'engines.json'), 'w').write(json.dumps(",
+    ),
+    (
+        "optional-skills/creative/blender-mcp/references/recipes.md",
+        "scene.render.filepath = '/tmp/turntable_'",
+        "scene.render.filepath = os.path.join(tempfile.gettempdir(), 'turntable_')",
+    ),
+    (
+        "optional-skills/creative/blender-mcp/references/recipes.md",
+        "scene.render.filepath = '/tmp/blender_render.png'",
+        "scene.render.filepath = os.path.join(tempfile.gettempdir(), 'blender_render.png')",
+    ),
+    (
+        "optional-skills/creative/blender-mcp/references/recipes.md",
+        "result = os.path.exists('/tmp/blender_render.png')",
+        "result = os.path.exists(os.path.join(tempfile.gettempdir(), 'blender_render.png'))",
+    ),
+    (
+        "optional-skills/creative/blender-mcp/references/recipes.md",
+        'terminal("ls -la /tmp/blender_render.png")',
+        'terminal("ls -la " + os.path.join(tempfile.gettempdir(), "blender_render.png"))',
+    ),
+    # --- the Blender skill's published documentation mirror ------------------
+    (
+        "website/docs/user-guide/skills/optional/creative/creative-blender-mcp.md",
+        'bpy.context.scene.render.filepath = "/tmp/render.png"',
+        'bpy.context.scene.render.filepath = os.path.join(tempfile.gettempdir(), "render.png")',
+    ),
+    (
+        "website/docs/user-guide/skills/optional/creative/creative-blender-mcp.md",
+        "- Render output paths must be absolute (`/tmp/render.png`), not relative —",
+        "- Render output paths must be absolute (build them from "
+        "`tempfile.gettempdir()`), not relative —",
+    ),
+    # --- bundled skill docs (fork-local copies upstream no longer ships) -----
+    (
+        "website/docs/user-guide/skills/bundled/creative/creative-ascii-art.md",
+        "curl -s 'https://ascii.co.uk/art/cat' -o /tmp/ascii_art.html",
+        "curl -s 'https://ascii.co.uk/art/cat' -o \"${TMPDIR:-/tmp}/ascii_art.html\"",
+    ),
+    (
+        "website/docs/user-guide/skills/bundled/creative/creative-ascii-art.md",
+        "with open('/tmp/ascii_art.html') as f:",
+        "with open(os.path.join(tempfile.gettempdir(), 'ascii_art.html')) as f:",
+    ),
+    (
+        "website/docs/user-guide/skills/bundled/creative/creative-pretext.md",
+        "   - `write_file` to a new `.html` in `/tmp/` or the user's workspace.",
+        "   - `write_file` to a new `.html` in the scratch directory (`$TMPDIR`) or the "
+        "user's workspace.",
+    ),
+    (
+        "website/docs/user-guide/skills/bundled/github/github-github-pr-workflow.md",
+        "  -o /tmp/ci-logs.zip",
+        "  -o \"${TMPDIR:-/tmp}/ci-logs.zip\"",
+    ),
+    (
+        "website/docs/user-guide/skills/bundled/github/github-github-pr-workflow.md",
+        "cd /tmp && unzip -o ci-logs.zip -d ci-logs && cat ci-logs/*.txt",
+        "cd \"${TMPDIR:-/tmp}\" && unzip -o ci-logs.zip -d ci-logs && cat ci-logs/*.txt",
+    ),
+    (
+        "website/docs/user-guide/skills/bundled/github/github-github-repo-management.md",
+        "  -o /tmp/ci-logs.zip",
+        "  -o \"${TMPDIR:-/tmp}/ci-logs.zip\"",
+    ),
+    (
+        "website/docs/user-guide/skills/bundled/github/github-github-repo-management.md",
+        "cd /tmp && unzip -o ci-logs.zip -d ci-logs",
+        "cd \"${TMPDIR:-/tmp}\" && unzip -o ci-logs.zip -d ci-logs",
+    ),
+    (
+        "website/docs/user-guide/skills/bundled/productivity/productivity-ocr-and-documents.md",
+        "`pdftoppm -jpeg -r 150 -f N -l N file.pdf /tmp/page`",
+        "`pdftoppm -jpeg -r 150 -f N -l N file.pdf \"${TMPDIR:-/tmp}/page\"`",
+    ),
+    (
+        "website/docs/user-guide/skills/bundled/research/research-blocked-page-recovery.md",
+        '  curl -sL --max-time 20 "https://$d/newest/{URL}" -o /tmp/page.html \\',
+        '  curl -sL --max-time 20 "https://$d/newest/{URL}" -o "${TMPDIR:-/tmp}/page.html" \\',
+    ),
+    (
+        "website/docs/user-guide/skills/bundled/smart-home/smart-home-openhue.md",
+        "  | tar -xz -C /tmp openhue \\",
+        "  | tar -xz -C \"${TMPDIR:-/tmp}\" openhue \\",
+    ),
+    (
+        "website/docs/user-guide/skills/bundled/smart-home/smart-home-openhue.md",
+        "  && install -m 0755 /tmp/openhue ~/.local/bin/openhue",
+        "  && install -m 0755 \"${TMPDIR:-/tmp}/openhue\" ~/.local/bin/openhue",
+    ),
+)
+
+
+# The upstream gate that defines the rule; when it is absent the rule does not
+# exist in this generation and the fork's preserved text is left untouched.
+_TMP_HYGIENE_GATE = os.path.join("scripts", "check_no_tmp_literals.py")
+
+
+def _reconcile_tmp_literal_hygiene(dst: str) -> list[str]:
+    """Port the fork's preserved literal ``/tmp`` scratch paths after `preserve`.
+
+    ``preserve`` copies fork-local files (skills, docs, owned assets) into the
+    snapshot *after* ``brand``/``reconcile`` ran, so this pass is the only point
+    where fork-local content can be reconciled at all.  Upstream's
+    ``scripts/check_no_tmp_literals.py`` gate then scans those files in the
+    branded candidate test suite and fails on every literal ``/tmp``.
+
+    Each entry routes scratch space through the portable tempdir idiom
+    (``${TMPDIR:-/tmp}`` in shell, ``tempfile.gettempdir()`` in Python) instead
+    of a bare ``/tmp``.  That is upstream's own recommendation, and it is what
+    keeps the documented commands working on Termux and native Windows.
+
+    Proves:
+      - source/provenance: the unmodified fork still carries literal ``/tmp``,
+        so the candidate cannot pass the gate by accident
+      - candidate behaviour: after this pass every listed path is portable and
+        ``scripts/check_no_tmp_literals.py`` exits 0 with no baseline entry
+      - downstream expected behaviour: the branded candidate suite's
+        ``test_repo_tree_has_no_hits_outside_the_baseline`` passes
+    """
+    if not os.path.isfile(os.path.join(dst, _TMP_HYGIENE_GATE)):
+        return []
+    fixed: list[str] = []
+    for rel, old, new in _TMP_HYGIENE:
+        path = os.path.join(dst, rel)
+        if not os.path.isfile(path):
+            continue
+        try:
+            text = open(path, encoding="utf-8").read()
+        except OSError:
+            continue
+        if old not in text:
+            continue
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text.replace(old, new, 1))
+        if rel not in fixed:
+            fixed.append(rel)
+    return fixed
+
+
 def reconcile_tree(dst: str) -> ReconcileResult:
     """Apply known post-brand fixes to the branded tree in place.
 
@@ -2304,7 +2489,7 @@ class UpdateManager:
             if self.owned and self.owned.count and os.path.isdir(self.owned.root):
                 registry_dest = os.path.join(dest, "config", "owned-assets")
                 shutil.copytree(self.owned.root, registry_dest, dirs_exist_ok=True)
-            return preserve_fork_files(
+            preserved = preserve_fork_files(
                 self.fork_root,
                 dest,
                 src,
@@ -2313,10 +2498,21 @@ class UpdateManager:
                 owned_paths=set(self.owned.mapping) if self.owned else set(),
                 allow_unclassified_fork_files=bool(baseline_sha),
             )
+            # Runs inside `preserve`, immediately after the copy, because this is
+            # the stage that re-introduces fork-local files (fork-only skills and
+            # bundled skill docs) into the snapshot.  Upstream's literal-/tmp gate
+            # scans those files in the branded candidate suite, so they must be
+            # ported here — `brand`/`reconcile` already ran and cannot see
+            # fork-only content.  Recorded like every other reconciliation.
+            for rel in _reconcile_tmp_literal_hygiene(dest):
+                if rel not in reconcile.fixed:
+                    reconcile.fixed.append(rel)
+                    reconcile.total += 1
+            return preserved
         stage(
             "preserve",
             _preserve,
-            "carry explicit fork-owned files while rejecting retired upstream paths",
+            "carry explicit fork-owned files, then port preserved scratch paths",
         )
 
         scan = stage("scan", lambda: scan_tree(dest), "classify every branded file")
