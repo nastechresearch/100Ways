@@ -34,10 +34,68 @@ from .rules import (
     collision_safe_path_map,
     is_immutable_path,
     is_locked_path,
+    neutralize_scratch_literals,
     transform_contributor_email_path,
     transform_contributor_email_text,
 )
 from .scanner import is_text
+
+
+# Fork-owned documentation has no upstream source, so ``preserve_fork_files``
+# copies it into every candidate snapshot verbatim and no upstream burn-down can
+# ever cover it.  When such a file steers the model at a literal ``/tmp``
+# scratch path, the candidate's own lint gate
+# (``scripts/check_no_tmp_literals.py``, run by
+# ``tests/scripts/test_check_no_tmp_literals.py``) fails the whole candidate
+# suite, because ``/tmp`` is not portable: Termux and native Windows have no
+# such directory and macOS aliases it to ``/private/tmp``.  These files are
+# rewritten onto the scratch placeholder the runtime resolves, which is what the
+# gate asks for and what the skill should have taught in the first place.
+_SCRATCH_DOC_SUFFIXES = (".md", ".mdx")
+_SCRATCH_GUIDANCE_ANCHOR = "optional-skills/creative/blender-mcp/SKILL.md"
+_SCRATCH_GUIDANCE = (
+    "\n- Resolve render and scratch output through the agent's scratch directory\n"
+    "  (`nastech_constants.get_scratch_dir()`, also exported as `$TMPDIR`), never a\n"
+    "  hard-coded POSIX temp root: Termux and native Windows have none, and macOS\n"
+    "  aliases it to `/private/tmp`, which breaks naive path comparisons.\n"
+)
+
+
+def reconcile_scratch_path_literals(branded_root: str, paths: list[str]) -> list[str]:
+    """Move preserved fork-owned docs off literal ``/tmp`` scratch paths.
+
+    ``paths`` are the fork-local files just carried over by
+    ``preserve_fork_files``.  Only Markdown that actually contains a bare
+    ``/tmp`` token is rewritten, and the SKILL.md that owns the render examples
+    additionally gains the line telling the model *why* the scratch directory is
+    the right target.  The branded file then differs from the fork copy, which
+    ``fork_consistency`` records as ``updated`` (an accepted status) rather than
+    a drop.  Returns the paths that changed so the caller can report them.
+    """
+    changed: list[str] = []
+    for rel in paths:
+        if not rel.endswith(_SCRATCH_DOC_SUFFIXES):
+            continue
+        path = os.path.join(branded_root, rel)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        new_text = neutralize_scratch_literals(text, "<scratch>")
+        if rel == _SCRATCH_GUIDANCE_ANCHOR and "get_scratch_dir" not in new_text:
+            new_text = new_text.rstrip("\n") + "\n" + _SCRATCH_GUIDANCE
+        if new_text == text:
+            continue
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(new_text)
+        except OSError:
+            continue
+        changed.append(rel)
+    return changed
 
 
 @dataclass
@@ -438,6 +496,10 @@ def preserve_fork_files(
         except OSError:
             pass
         preserved.append(rel)
+    # Fork-owned docs are the only files the candidate lint gate cannot exempt
+    # through an upstream baseline, so scrub their scratch paths here, while the
+    # preserved list is still to hand.
+    reconcile_scratch_path_literals(branded_root, preserved)
     return preserved
 
 
