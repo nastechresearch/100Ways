@@ -1869,6 +1869,28 @@ _TMP_HYGIENE: tuple[tuple[str, str, str], ...] = (
 # exist in this generation and the fork's preserved text is left untouched.
 _TMP_HYGIENE_GATE = os.path.join("scripts", "check_no_tmp_literals.py")
 
+# Upstream's docs-link checker; absent before that rule landed.
+_DOC_LINK_HYGIENE_GATE = os.path.join("website", "scripts", "check_doc_links.py")
+
+# Route-style doc links in fork-preserved pages, paired with the relative form
+# upstream itself ships.  The identical link appears in the English page and in
+# its zh-Hans translation, so one (old, new) pair covers both.  The link is
+# matched without any surrounding branded words so the rule is indifferent to
+# how the page names the project.
+_DOC_LINK_HYGIENE: tuple[tuple[str, str, str], ...] = (
+    (
+        "website/docs/integrations/nastech-portal.md",
+        "](/user-guide/profiles)",
+        "](../user-guide/profiles.md)",
+    ),
+    (
+        "website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/integrations/"
+        "nastech-portal.md",
+        "](/user-guide/profiles)",
+        "](../user-guide/profiles.md)",
+    ),
+)
+
 
 def _reconcile_tmp_literal_hygiene(dst: str) -> list[str]:
     """Port the fork's preserved literal ``/tmp`` scratch paths after `preserve`.
@@ -1907,6 +1929,56 @@ def _reconcile_tmp_literal_hygiene(dst: str) -> list[str]:
             continue
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(text.replace(old, new, 1))
+        if rel not in fixed:
+            fixed.append(rel)
+    return fixed
+
+
+def _reconcile_doc_link_hygiene(dst: str) -> list[str]:
+    """Rewrite fork-preserved route-style doc links the docs-link checker rejects.
+
+    ``website/scripts/check_doc_links.py`` refuses a site-route link such as
+    ``/user-guide/profiles`` inside a hand-authored page: the route 404s on
+    GitHub's file viewer, so the checker wants a relative Markdown path.  A
+    fork-local docs revert restored exactly such a link in the Portal page, and
+    upstream repaired it upstream-side in commit ``4b8a8134`` ("docs(portal):
+    relative profiles link so the docs link check passes on main").
+
+    The fork's Portal page is *not* an upstream path -- upstream ships
+    ``nous-portal.md`` as a branded-name collision, so ``preserve`` re-adds the
+    fork page verbatim into every snapshot.  That re-introduces the rejected
+    link after ``brand``/``reconcile`` have already run, and the branded
+    candidate suite runs
+    ``tests/website/test_check_doc_links.py::test_hand_authored_docs_have_no_route_style_links``
+    against the whole tree, so the candidate fails on fork content.
+
+    The replacement is byte-identical to what upstream's own
+    ``check_doc_links.py --fix`` writes, so the snapshot matches the form
+    upstream ships rather than a hand-rolled rewrite.
+
+    Proves:
+      - source/provenance: the unmodified fork still carries the route-style
+        link, so the candidate cannot pass this check by accident
+      - candidate behaviour: after this pass ``check_doc_links.py --en-only``
+        exits 0 and the full run reports no route-style links
+      - downstream expected behaviour: the candidate suite's
+        ``test_hand_authored_docs_have_no_route_style_links`` passes
+    """
+    if not os.path.isfile(os.path.join(dst, _DOC_LINK_HYGIENE_GATE)):
+        return []
+    fixed: list[str] = []
+    for rel, old, new in _DOC_LINK_HYGIENE:
+        path = os.path.join(dst, rel)
+        if not os.path.isfile(path):
+            continue
+        try:
+            text = open(path, encoding="utf-8").read()
+        except OSError:
+            continue
+        if old not in text:
+            continue
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text.replace(old, new))
         if rel not in fixed:
             fixed.append(rel)
     return fixed
@@ -2508,11 +2580,18 @@ class UpdateManager:
                 if rel not in reconcile.fixed:
                     reconcile.fixed.append(rel)
                     reconcile.total += 1
+            # Same reason: the Portal doc link checker runs over the whole
+            # candidate tree, and the fork's Portal page only enters here.
+            for rel in _reconcile_doc_link_hygiene(dest):
+                if rel not in reconcile.fixed:
+                    reconcile.fixed.append(rel)
+                    reconcile.total += 1
             return preserved
         stage(
             "preserve",
             _preserve,
-            "carry explicit fork-owned files, then port preserved scratch paths",
+            "carry explicit fork-owned files, then port preserved scratch paths "
+            "and route-style doc links",
         )
 
         scan = stage("scan", lambda: scan_tree(dest), "classify every branded file")
