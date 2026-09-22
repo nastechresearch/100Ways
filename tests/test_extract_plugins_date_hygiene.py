@@ -6,8 +6,11 @@
     git log --format=%x00%cI --name-status --relative -M -- .
 
 and stores the resulting committer date verbatim.  ``%cI`` is *strict* ISO-8601,
-which renders UTC as a numeric offset: ``2026-01-01T00:00:00+00:00``.  It never
-emits the ``Z`` designator.
+which renders a zero UTC offset either as numeric ``+00:00`` (git 2.39, the
+development sandbox) or as the ``Z`` designator (the newer git on GitHub's
+``ubuntu-latest`` runner).  Which one appears is a property of the local git
+version, so the catalog's timestamp format was not deterministic across the
+environments that run this pipeline.
 
 The extractor's own consumer test disagrees:
 ``tests/website/test_extract_plugins.py``
@@ -302,11 +305,19 @@ def test_live_fork_extractor_normalizes_to_z(tmp_path: Path) -> None:
     }
 
 
-def test_git_log_cI_never_emits_z(tmp_path: Path) -> None:
-    """Upstream's premise: ``%cI`` alone cannot produce the asserted ``Z`` form.
+def test_git_log_cI_carries_an_explicit_utc_designator(tmp_path: Path) -> None:
+    """Upstream's premise: ``%cI`` always carries an explicit UTC designator.
 
-    This is the evidence the port table exists at all, pinned so the table is
-    not "simplified away" on the assumption that ``%cI`` already yields ``Z``.
+    ``+00:00`` and ``Z`` are both valid strict ISO-8601 for a zero offset, and
+    which one git prints is a property of the local git version -- 2.39 (the
+    development sandbox) prints ``+00:00``, the newer git on GitHub's
+    ``ubuntu-latest`` runner prints ``Z``.  The port table exists because the
+    extractor stored whichever designator the local git produced, so the catalog
+    format varied by environment.  The invariant worth pinning is therefore the
+    designator being *explicit* -- a naive stamp would defeat
+    ``fromisoformat``-based consumers -- not one git's cosmetic choice.  An
+    earlier revision of this test asserted ``+00:00`` outright and so failed
+    only on CI.
     """
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -328,5 +339,58 @@ def test_git_log_cI_never_emits_z(tmp_path: Path) -> None:
 
     stamp = run("log", "-1", "--format=%cI").stdout.strip()
 
-    assert stamp == "2026-01-01T00:00:00+00:00"
-    assert not stamp.endswith("Z"), "if %cI ever gains Z the port table is obsolete"
+    assert stamp.startswith("2026-01-01T00:00:00")
+    assert stamp.endswith(("Z", "+00:00")), (
+        "%cI must carry an explicit UTC designator so the extractor never stores "
+        f"a naive timestamp; got {stamp!r}"
+    )
+
+
+def _normalise_stamp_via_table(stamp: str) -> str:
+    """Run the port table's replacement over one ``%cI`` stamp, standalone.
+
+    The anchor is taken from the shipped table -- so it cannot drift from the
+    real fix -- and executed on its own, which keeps this check independent of
+    the upstream extractor's ``yaml`` import that the module-level probes need
+    (CI installs no ``yaml``, so those probes skip there and only this shape of
+    check can regress-proof the normalisation on the runner).
+    """
+    _, _, new = _entry()
+    body = new.replace("continue", "return when", 1)
+    src = (
+        "from datetime import datetime, timezone\n"
+        "\n"
+        "\n"
+        "def normalise(line):\n"
+        '    when = ""\n'
+        "    for _line in (line,):\n"
+        "        line = _line\n"
+        + body
+        + "    return when\n"
+    )
+    namespace: dict[str, object] = {}
+    exec(compile(src, "<anchor>", "exec"), namespace)
+    return namespace["normalise"]("\x00" + stamp)  # type: ignore[operator]
+
+
+@pytest.mark.parametrize(
+    ("stamp", "expected"),
+    [
+        ("2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00Z"),
+        ("2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+        ("2026-01-01T00:00:00-07:00", "2026-01-01T07:00:00Z"),
+        ("not-a-date", "not-a-date"),
+    ],
+)
+def test_table_normalises_every_git_zero_offset_rendering(
+    stamp: str, expected: str
+) -> None:
+    """Whichever designator the local git printed, the pass yields ``Z``.
+
+    ``+00:00`` (git 2.39) and ``Z`` (newer git on ``ubuntu-latest``) must both
+    come out as ``Z``.  That equivalence is exactly what an earlier revision of
+    this file missed when it asserted ``+00:00`` outright: the check passed
+    locally and failed on CI.  A non-UTC offset must keep its instant, and
+    unparseable input must survive verbatim rather than be dropped.
+    """
+    assert _normalise_stamp_via_table(stamp) == expected
