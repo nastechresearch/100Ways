@@ -1984,6 +1984,106 @@ def _reconcile_doc_link_hygiene(dst: str) -> list[str]:
     return fixed
 
 
+# The script itself is the rule: when upstream ships no extractor there is no
+# date format to normalize and this pass is a no-op.
+_EXTRACT_PLUGINS_DATE_HYGIENE_GATE = os.path.join(
+    "website", "scripts", "extract-plugins.py"
+)
+
+# ``website/scripts/extract-plugins.py`` stamps every plugin-catalog entry from
+# git history.  Its own consumer test pins the ``Z`` form:
+#
+#     assert dates["alpha.yaml"] == {"addedAt": "2026-01-01T00:00:00Z", ...}
+#
+# but the extractor stores ``git log --format=%cI`` verbatim, and ``%cI`` is
+# strict ISO-8601 with a numeric offset -- it emits ``+00:00``, never ``Z``.  So
+# ``tests/website/test_extract_plugins.py`` has failed on every pristine upstream
+# commit (``dbaec6a2`` and still on ``main``), and the branded candidate inherits
+# it verbatim: the file is upstream-owned, so ``brand`` copies upstream's content
+# over the fork's copy and no fork-local edit can reach it.  One entry, one site.
+_EXTRACT_PLUGINS_DATE_HYGIENE: tuple[tuple[str, str, str], ...] = (
+    (
+        "website/scripts/extract-plugins.py",
+        '        if line.startswith("\\x00"):\n'
+        "            when = line[1:].strip()\n"
+        "            continue\n",
+        '        if line.startswith("\\x00"):\n'
+        "            stamp = line[1:].strip()\n"
+        "            try:\n"
+        "                parsed = datetime.fromisoformat(stamp)\n"
+        "            except ValueError:\n"
+        "                # Not ISO-8601: keep the stamp verbatim rather than\n"
+        "                # drop it, because dropping it would mis-date every\n"
+        "                # later file in the newest-first walk.\n"
+        "                when = stamp\n"
+        "            else:\n"
+        "                if parsed.tzinfo is None:\n"
+        "                    when = stamp\n"
+        "                else:\n"
+        "                    when = (\n"
+        "                        parsed.astimezone(timezone.utc)\n"
+        "                        .isoformat()\n"
+        '                        .replace("+00:00", "Z")\n'
+        "                    )\n"
+        "            continue\n",
+    ),
+)
+
+
+def _reconcile_extract_plugins_date_hygiene(dst: str) -> list[str]:
+    """Normalize the plugin-catalog extractor's git dates to the ``Z`` form.
+
+    ``website/scripts/extract-plugins.py`` builds ``addedAt``/``updatedAt`` for
+    every plugin-catalog entry out of ``git log --format=%cI``.  ``%cI`` is
+    strict ISO-8601 with a numeric UTC offset, so a UTC committer date arrives
+    as ``2026-01-01T00:00:00+00:00`` while
+    ``tests/website/test_extract_plugins.py``
+    (``test_git_dates_added_is_first_commit_updated_is_last_and_renames_keep_added``)
+    asserts the ``Z`` form the catalog schema documents.
+
+    That test fails in well under a second on a pristine upstream checkout -- it
+    is a genuine upstream defect, not fork drift -- and ``tests/website/`` sits
+    inside the candidate suite's discovery roots
+    (``run_tests_parallel._DEFAULT_ROOTS = ["tests"]``, which skips only
+    ``integration``/``e2e``/``docker``).  The file is upstream-owned, so
+    ``brand`` copies upstream's content over the fork's copy and the snapshot
+    carries the defect into the ``pipeline`` job's "Run final branded candidate
+    test suite" step.
+
+    The normalization converts the parsed instant to UTC and re-renders the
+    offset as ``Z``.  That cannot change any instant -- ``astimezone`` preserves
+    the moment exactly -- and it makes every published timestamp uniform, so the
+    docs site stops mixing ``+00:00`` and ``Z`` records.
+
+    Proves:
+      - source/provenance: pristine upstream ``dbaec6a2`` fails the same test, so
+        the candidate cannot pass by accident and this is not fork drift
+      - candidate behaviour: after this pass ``load_git_dates`` emits ``Z`` for a
+        ``+00:00`` committer date and the consumer test passes
+      - downstream expected behaviour: the branded candidate suite's
+        ``test_git_dates_added_is_first_commit_updated_is_last_and_renames_keep_added``
+        passes
+    """
+    if not os.path.isfile(os.path.join(dst, _EXTRACT_PLUGINS_DATE_HYGIENE_GATE)):
+        return []
+    fixed: list[str] = []
+    for rel, old, new in _EXTRACT_PLUGINS_DATE_HYGIENE:
+        path = os.path.join(dst, rel)
+        if not os.path.isfile(path):
+            continue
+        try:
+            text = open(path, encoding="utf-8").read()
+        except OSError:
+            continue
+        if old not in text:
+            continue
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text.replace(old, new))
+        if rel not in fixed:
+            fixed.append(rel)
+    return fixed
+
+
 def reconcile_tree(dst: str) -> ReconcileResult:
     """Apply known post-brand fixes to the branded tree in place.
 
@@ -2586,12 +2686,19 @@ class UpdateManager:
                 if rel not in reconcile.fixed:
                     reconcile.fixed.append(rel)
                     reconcile.total += 1
+            # Same reason again: the extractor's consumer test runs over the
+            # whole candidate tree, and `brand` is what copies upstream's copy
+            # of the extractor over the fork's.
+            for rel in _reconcile_extract_plugins_date_hygiene(dest):
+                if rel not in reconcile.fixed:
+                    reconcile.fixed.append(rel)
+                    reconcile.total += 1
             return preserved
         stage(
             "preserve",
             _preserve,
-            "carry explicit fork-owned files, then port preserved scratch paths "
-            "and route-style doc links",
+            "carry explicit fork-owned files, then port preserved scratch paths, "
+            "route-style doc links, and the extractor's git date format",
         )
 
         scan = stage("scan", lambda: scan_tree(dest), "classify every branded file")
