@@ -46,6 +46,7 @@ import pytest
 from hundredways.updates import (
     _EXTRACT_PLUGINS_DATE_HYGIENE,
     _reconcile_extract_plugins_date_hygiene,
+    reconcile_tree,
 )
 
 _EXTRACTOR_REL = "website/scripts/extract-plugins.py"
@@ -394,3 +395,97 @@ def test_table_normalises_every_git_zero_offset_rendering(
     unparseable input must survive verbatim rather than be dropped.
     """
     assert _normalise_stamp_via_table(stamp) == expected
+
+
+# ---------------------------------------------------------------------------
+# Stage placement: an upstream-owned rewrite must be recorded before `compare`
+# ---------------------------------------------------------------------------
+
+def _reconciled_map_from(result, dest: Path) -> dict[str, bytes]:
+    """The map the pipeline snapshots from ``ReconcileResult.fixed``.
+
+    ``UpdateManager.run`` builds ``reconciled_map`` straight after the
+    ``reconcile`` stage and before ``preserve``, and ``compare_trees`` /
+    ``verify_branded`` treat only the paths in that map as byte-faithful.
+    Mirroring that two-line contract here keeps the check fast and
+    dependency-free while still pinning the ordering the real run depends on.
+    """
+    return {
+        rel: (dest / rel).read_bytes()
+        for rel in result.fixed
+        if (dest / rel).is_file()
+    }
+
+
+def test_extractor_rewrite_is_recorded_in_the_reconciled_map(tmp_path: Path) -> None:
+    """The port must land in `reconcile`, i.e. inside ``ReconcileResult.fixed``.
+
+    ``compare_trees``/``verify_branded`` accept a text file as byte-faithful only
+    when its mapped path is in ``reconciled_map``; anything else is reported as
+    unexplained drift.  ``website/scripts/extract-plugins.py`` is UPSTREAM-owned
+    (``brand`` writes upstream's copy), so this rewrite has to be recorded.  An
+    earlier revision ran the pass inside ``preserve`` — after the map was
+    snapshotted — which left the rewrite unrecorded and made the ``compare`` /
+    ``verify`` stages abort the whole pipeline with no explanation in the step
+    summary.
+    """
+    from hundredways.updates import reconcile_tree
+
+    dest = tmp_path / "cand"
+    (dest / os.path.dirname(_EXTRACTOR_REL)).mkdir(parents=True, exist_ok=True)
+    (dest / _EXTRACTOR_REL).write_text(_UNNORMALIZED_SOURCE, encoding="utf-8")
+
+    result = reconcile_tree(str(dest))
+
+    assert _EXTRACTOR_REL in result.fixed, (
+        "the extractor port must be registered in ReconcileResult.fixed so the "
+        "pipeline snapshots it into reconciled_map before compare/verify"
+    )
+    assert _EXTRACTOR_REL in _reconciled_map_from(result, dest)
+    # And the recorded bytes must be the post-port content, not upstream's.
+    assert _UNNORMALIZED_READ not in (dest / _EXTRACTOR_REL).read_text(
+        encoding="utf-8"
+    )
+
+
+def test_preserve_stage_no_longer_carries_the_extractor_port() -> None:
+    """The upstream-owned rewrite must not be re-registered from `preserve`.
+
+    The two fork-local passes (``/tmp`` literals, route-style doc links) belong
+    in ``preserve`` because only that stage introduces fork-only files.  The
+    extractor port is the opposite case -- it targets an upstream-owned file --
+    so keeping it out of ``preserve`` is what makes the map complete rather than
+    merely duplicated.
+    """
+    src = _updates_source()
+    # The `_preserve` stage callback body, up to the `stage("preserve", ...)`
+    # registration that follows it.
+    preserve_body = src.split("def _preserve() -> list[str]:", 1)[1].split(
+        'stage(\n            "preserve"', 1
+    )[0]
+    assert "_reconcile_extract_plugins_date_hygiene(dest)" not in preserve_body, (
+        "the extractor port must run from reconcile_tree, not from the preserve stage"
+    )
+    assert "_reconcile_tmp_literal_hygiene(dest)" in preserve_body
+    assert "_reconcile_doc_link_hygiene(dest)" in preserve_body
+
+
+def _updates_source() -> str:
+    """The shipped ``hundredways/updates.py`` text, located via its module file."""
+    from hundredways import updates
+
+    return Path(updates.__file__).read_text(encoding="utf-8")
+
+
+_UNNORMALIZED_SOURCE = (
+    "from pathlib import Path\n"
+    "\n"
+    "\n"
+    "def load_git_dates(repo: Path):\n"
+    "    when = \"\"\n"
+    "    for line in _git_log(repo):\n"
+    '        if line.startswith("\\x00"):\n'
+    "            when = line[1:].strip()\n"
+    "            continue\n"
+    "    return when\n"
+)

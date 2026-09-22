@@ -2055,6 +2055,15 @@ def _reconcile_extract_plugins_date_hygiene(dst: str) -> list[str]:
     the moment exactly -- and it makes every published timestamp uniform, so the
     docs site stops mixing ``+00:00`` and ``Z`` records.
 
+    This pass rewrites an UPSTREAM-owned file, so it must run from
+    :func:`reconcile_tree` (not from the later ``preserve`` stage): the pipeline
+    snapshots ``reconciled_map`` straight after ``reconcile``, and only paths in
+    that map are accepted as byte-faithful by ``compare_trees`` /
+    ``verify_branded``.  Running here is also the earliest possible point --
+    ``brand`` is what overwrites the tree with upstream's copy -- so the snapshot
+    is already correctly dated before ``preserve``, ``scan``, ``compare`` and
+    ``verify`` run.
+
     Proves:
       - source/provenance: pristine upstream ``dbaec6a2`` fails the same test, so
         the candidate cannot pass by accident and this is not fork drift
@@ -2165,6 +2174,19 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_pages_deploy_workflow(dst):
         result.total += 1
         result.fixed.append(".github/workflows/deploy-site.yml")
+    # ``website/scripts/extract-plugins.py`` is UPSTREAM-owned, so ``brand``
+    # writes upstream's copy and this pass rewrites it.  It therefore has to run
+    # HERE, in `reconcile`, and be recorded in ``result.fixed``: the caller
+    # snapshots ``reconciled_map`` from that list immediately after this stage,
+    # and ``compare_trees``/``verify_branded`` accept a text file byte-for-byte
+    # only when its mapped path is in that map.  Rewriting an upstream-owned
+    # file later (inside `preserve`, which runs after the snapshot) leaves the
+    # change unrecorded, so the `compare` and `verify` stages see unexplained
+    # drift and the pipeline aborts with no explanation in the step summary.
+    for rel in _reconcile_extract_plugins_date_hygiene(dst):
+        result.total += 1
+        if rel not in result.fixed:
+            result.fixed.append(rel)
     result.fixed.sort()
     return result
 
@@ -2686,19 +2708,12 @@ class UpdateManager:
                 if rel not in reconcile.fixed:
                     reconcile.fixed.append(rel)
                     reconcile.total += 1
-            # Same reason again: the extractor's consumer test runs over the
-            # whole candidate tree, and `brand` is what copies upstream's copy
-            # of the extractor over the fork's.
-            for rel in _reconcile_extract_plugins_date_hygiene(dest):
-                if rel not in reconcile.fixed:
-                    reconcile.fixed.append(rel)
-                    reconcile.total += 1
             return preserved
         stage(
             "preserve",
             _preserve,
-            "carry explicit fork-owned files, then port preserved scratch paths, "
-            "route-style doc links, and the extractor's git date format",
+            "carry explicit fork-owned files, then port preserved scratch paths "
+            "and route-style doc links",
         )
 
         scan = stage("scan", lambda: scan_tree(dest), "classify every branded file")
