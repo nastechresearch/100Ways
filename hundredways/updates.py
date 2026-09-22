@@ -1727,6 +1727,372 @@ def _reconcile_reasoning_effort_selection(dst: str) -> int:
     return 1
 
 
+# Upstream added ``scripts/check_no_tmp_literals.py`` (hermes-agent ``b905042d``,
+# 2026-09-21): a first-party gate that fails on any literal ``/tmp`` path in
+# production code, skills, docs or prompts outside a one-entry baseline.  The
+# gate scans the *candidate*, and the fork's own skills/docs predate it, so a
+# candidate that is otherwise perfect still fails the branded suite.
+#
+# The brander cannot see this: it transforms the freshly pulled upstream tree,
+# which is faithful to the rule, and ``preserve`` then re-adds the fork-local
+# files verbatim *after* branding.  Routing scratch space through the portable
+# tempdir idiom is also the real fix for the bug the gate exists to prevent:
+# a literal ``/tmp`` in a skill becomes a literal ``/tmp`` in the model's shell
+# commands on Termux (no ``/tmp`` at all) and native Windows.
+_TMP_HYGIENE: tuple[tuple[str, str, str], ...] = (
+    # --- Blender MCP skill (fork-only; upstream ships no blender skill) -----
+    (
+        "optional-skills/creative/blender-mcp/SKILL.md",
+        'bpy.context.scene.render.filepath = "/tmp/render.png"',
+        'bpy.context.scene.render.filepath = os.path.join(tempfile.gettempdir(), "render.png")',
+    ),
+    (
+        "optional-skills/creative/blender-mcp/SKILL.md",
+        "- Render output paths must be absolute (`/tmp/render.png`), not relative —",
+        "- Render output paths must be absolute (build them from "
+        "`tempfile.gettempdir()`), not relative —",
+    ),
+    (
+        "optional-skills/creative/blender-mcp/references/bpy-api.md",
+        "scene.render.filepath = '/tmp/render.png'",
+        "scene.render.filepath = os.path.join(tempfile.gettempdir(), 'render.png')",
+    ),
+    (
+        "optional-skills/creative/blender-mcp/references/bpy-api.md",
+        "scene.render.filepath = '/tmp/anim_'",
+        "scene.render.filepath = os.path.join(tempfile.gettempdir(), 'anim_')",
+    ),
+    (
+        "optional-skills/creative/blender-mcp/references/pitfalls.md",
+        "open('/tmp/result.json', 'w').write(json.dumps([o.name for o in bpy.data.objects]))",
+        "open(os.path.join(tempfile.gettempdir(), 'result.json'), 'w')"
+        ".write(json.dumps([o.name for o in bpy.data.objects]))",
+    ),
+    (
+        "optional-skills/creative/blender-mcp/references/pitfalls.md",
+        "open('/tmp/engines.json', 'w').write(json.dumps(",
+        "open(os.path.join(tempfile.gettempdir(), 'engines.json'), 'w').write(json.dumps(",
+    ),
+    (
+        "optional-skills/creative/blender-mcp/references/recipes.md",
+        "scene.render.filepath = '/tmp/turntable_'",
+        "scene.render.filepath = os.path.join(tempfile.gettempdir(), 'turntable_')",
+    ),
+    (
+        "optional-skills/creative/blender-mcp/references/recipes.md",
+        "scene.render.filepath = '/tmp/blender_render.png'",
+        "scene.render.filepath = os.path.join(tempfile.gettempdir(), 'blender_render.png')",
+    ),
+    (
+        "optional-skills/creative/blender-mcp/references/recipes.md",
+        "result = os.path.exists('/tmp/blender_render.png')",
+        "result = os.path.exists(os.path.join(tempfile.gettempdir(), 'blender_render.png'))",
+    ),
+    (
+        "optional-skills/creative/blender-mcp/references/recipes.md",
+        'terminal("ls -la /tmp/blender_render.png")',
+        'terminal("ls -la " + os.path.join(tempfile.gettempdir(), "blender_render.png"))',
+    ),
+    # --- the Blender skill's published documentation mirror ------------------
+    (
+        "website/docs/user-guide/skills/optional/creative/creative-blender-mcp.md",
+        'bpy.context.scene.render.filepath = "/tmp/render.png"',
+        'bpy.context.scene.render.filepath = os.path.join(tempfile.gettempdir(), "render.png")',
+    ),
+    (
+        "website/docs/user-guide/skills/optional/creative/creative-blender-mcp.md",
+        "- Render output paths must be absolute (`/tmp/render.png`), not relative —",
+        "- Render output paths must be absolute (build them from "
+        "`tempfile.gettempdir()`), not relative —",
+    ),
+    # --- bundled skill docs (fork-local copies upstream no longer ships) -----
+    (
+        "website/docs/user-guide/skills/bundled/creative/creative-ascii-art.md",
+        "curl -s 'https://ascii.co.uk/art/cat' -o /tmp/ascii_art.html",
+        "curl -s 'https://ascii.co.uk/art/cat' -o \"${TMPDIR:-/tmp}/ascii_art.html\"",
+    ),
+    (
+        "website/docs/user-guide/skills/bundled/creative/creative-ascii-art.md",
+        "with open('/tmp/ascii_art.html') as f:",
+        "with open(os.path.join(tempfile.gettempdir(), 'ascii_art.html')) as f:",
+    ),
+    (
+        "website/docs/user-guide/skills/bundled/creative/creative-pretext.md",
+        "   - `write_file` to a new `.html` in `/tmp/` or the user's workspace.",
+        "   - `write_file` to a new `.html` in the scratch directory (`$TMPDIR`) or the "
+        "user's workspace.",
+    ),
+    (
+        "website/docs/user-guide/skills/bundled/github/github-github-pr-workflow.md",
+        "  -o /tmp/ci-logs.zip",
+        "  -o \"${TMPDIR:-/tmp}/ci-logs.zip\"",
+    ),
+    (
+        "website/docs/user-guide/skills/bundled/github/github-github-pr-workflow.md",
+        "cd /tmp && unzip -o ci-logs.zip -d ci-logs && cat ci-logs/*.txt",
+        "cd \"${TMPDIR:-/tmp}\" && unzip -o ci-logs.zip -d ci-logs && cat ci-logs/*.txt",
+    ),
+    (
+        "website/docs/user-guide/skills/bundled/github/github-github-repo-management.md",
+        "  -o /tmp/ci-logs.zip",
+        "  -o \"${TMPDIR:-/tmp}/ci-logs.zip\"",
+    ),
+    (
+        "website/docs/user-guide/skills/bundled/github/github-github-repo-management.md",
+        "cd /tmp && unzip -o ci-logs.zip -d ci-logs",
+        "cd \"${TMPDIR:-/tmp}\" && unzip -o ci-logs.zip -d ci-logs",
+    ),
+    (
+        "website/docs/user-guide/skills/bundled/productivity/productivity-ocr-and-documents.md",
+        "`pdftoppm -jpeg -r 150 -f N -l N file.pdf /tmp/page`",
+        "`pdftoppm -jpeg -r 150 -f N -l N file.pdf \"${TMPDIR:-/tmp}/page\"`",
+    ),
+    (
+        "website/docs/user-guide/skills/bundled/research/research-blocked-page-recovery.md",
+        '  curl -sL --max-time 20 "https://$d/newest/{URL}" -o /tmp/page.html \\',
+        '  curl -sL --max-time 20 "https://$d/newest/{URL}" -o "${TMPDIR:-/tmp}/page.html" \\',
+    ),
+    (
+        "website/docs/user-guide/skills/bundled/smart-home/smart-home-openhue.md",
+        "  | tar -xz -C /tmp openhue \\",
+        "  | tar -xz -C \"${TMPDIR:-/tmp}\" openhue \\",
+    ),
+    (
+        "website/docs/user-guide/skills/bundled/smart-home/smart-home-openhue.md",
+        "  && install -m 0755 /tmp/openhue ~/.local/bin/openhue",
+        "  && install -m 0755 \"${TMPDIR:-/tmp}/openhue\" ~/.local/bin/openhue",
+    ),
+)
+
+
+# The upstream gate that defines the rule; when it is absent the rule does not
+# exist in this generation and the fork's preserved text is left untouched.
+_TMP_HYGIENE_GATE = os.path.join("scripts", "check_no_tmp_literals.py")
+
+# Upstream's docs-link checker; absent before that rule landed.
+_DOC_LINK_HYGIENE_GATE = os.path.join("website", "scripts", "check_doc_links.py")
+
+# Route-style doc links in fork-preserved pages, paired with the relative form
+# upstream itself ships.  The identical link appears in the English page and in
+# its zh-Hans translation, so one (old, new) pair covers both.  The link is
+# matched without any surrounding branded words so the rule is indifferent to
+# how the page names the project.
+_DOC_LINK_HYGIENE: tuple[tuple[str, str, str], ...] = (
+    (
+        "website/docs/integrations/nastech-portal.md",
+        "](/user-guide/profiles)",
+        "](../user-guide/profiles.md)",
+    ),
+    (
+        "website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/integrations/"
+        "nastech-portal.md",
+        "](/user-guide/profiles)",
+        "](../user-guide/profiles.md)",
+    ),
+)
+
+
+def _reconcile_tmp_literal_hygiene(dst: str) -> list[str]:
+    """Port the fork's preserved literal ``/tmp`` scratch paths after `preserve`.
+
+    ``preserve`` copies fork-local files (skills, docs, owned assets) into the
+    snapshot *after* ``brand``/``reconcile`` ran, so this pass is the only point
+    where fork-local content can be reconciled at all.  Upstream's
+    ``scripts/check_no_tmp_literals.py`` gate then scans those files in the
+    branded candidate test suite and fails on every literal ``/tmp``.
+
+    Each entry routes scratch space through the portable tempdir idiom
+    (``${TMPDIR:-/tmp}`` in shell, ``tempfile.gettempdir()`` in Python) instead
+    of a bare ``/tmp``.  That is upstream's own recommendation, and it is what
+    keeps the documented commands working on Termux and native Windows.
+
+    Proves:
+      - source/provenance: the unmodified fork still carries literal ``/tmp``,
+        so the candidate cannot pass the gate by accident
+      - candidate behaviour: after this pass every listed path is portable and
+        ``scripts/check_no_tmp_literals.py`` exits 0 with no baseline entry
+      - downstream expected behaviour: the branded candidate suite's
+        ``test_repo_tree_has_no_hits_outside_the_baseline`` passes
+    """
+    if not os.path.isfile(os.path.join(dst, _TMP_HYGIENE_GATE)):
+        return []
+    fixed: list[str] = []
+    for rel, old, new in _TMP_HYGIENE:
+        path = os.path.join(dst, rel)
+        if not os.path.isfile(path):
+            continue
+        try:
+            text = open(path, encoding="utf-8").read()
+        except OSError:
+            continue
+        if old not in text:
+            continue
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text.replace(old, new, 1))
+        if rel not in fixed:
+            fixed.append(rel)
+    return fixed
+
+
+def _reconcile_doc_link_hygiene(dst: str) -> list[str]:
+    """Rewrite fork-preserved route-style doc links the docs-link checker rejects.
+
+    ``website/scripts/check_doc_links.py`` refuses a site-route link such as
+    ``/user-guide/profiles`` inside a hand-authored page: the route 404s on
+    GitHub's file viewer, so the checker wants a relative Markdown path.  A
+    fork-local docs revert restored exactly such a link in the Portal page, and
+    upstream repaired it upstream-side in commit ``4b8a8134`` ("docs(portal):
+    relative profiles link so the docs link check passes on main").
+
+    The fork's Portal page is *not* an upstream path -- upstream ships
+    ``nous-portal.md`` as a branded-name collision, so ``preserve`` re-adds the
+    fork page verbatim into every snapshot.  That re-introduces the rejected
+    link after ``brand``/``reconcile`` have already run, and the branded
+    candidate suite runs
+    ``tests/website/test_check_doc_links.py::test_hand_authored_docs_have_no_route_style_links``
+    against the whole tree, so the candidate fails on fork content.
+
+    The replacement is byte-identical to what upstream's own
+    ``check_doc_links.py --fix`` writes, so the snapshot matches the form
+    upstream ships rather than a hand-rolled rewrite.
+
+    Proves:
+      - source/provenance: the unmodified fork still carries the route-style
+        link, so the candidate cannot pass this check by accident
+      - candidate behaviour: after this pass ``check_doc_links.py --en-only``
+        exits 0 and the full run reports no route-style links
+      - downstream expected behaviour: the candidate suite's
+        ``test_hand_authored_docs_have_no_route_style_links`` passes
+    """
+    if not os.path.isfile(os.path.join(dst, _DOC_LINK_HYGIENE_GATE)):
+        return []
+    fixed: list[str] = []
+    for rel, old, new in _DOC_LINK_HYGIENE:
+        path = os.path.join(dst, rel)
+        if not os.path.isfile(path):
+            continue
+        try:
+            text = open(path, encoding="utf-8").read()
+        except OSError:
+            continue
+        if old not in text:
+            continue
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text.replace(old, new))
+        if rel not in fixed:
+            fixed.append(rel)
+    return fixed
+
+
+# The script itself is the rule: when upstream ships no extractor there is no
+# date format to normalize and this pass is a no-op.
+_EXTRACT_PLUGINS_DATE_HYGIENE_GATE = os.path.join(
+    "website", "scripts", "extract-plugins.py"
+)
+
+# ``website/scripts/extract-plugins.py`` stamps every plugin-catalog entry from
+# git history.  Its own consumer test pins the ``Z`` form:
+#
+#     assert dates["alpha.yaml"] == {"addedAt": "2026-01-01T00:00:00Z", ...}
+#
+# but the extractor stores ``git log --format=%cI`` verbatim, and ``%cI`` is
+# strict ISO-8601 with a numeric offset -- it emits ``+00:00``, never ``Z``.  So
+# ``tests/website/test_extract_plugins.py`` has failed on every pristine upstream
+# commit (``dbaec6a2`` and still on ``main``), and the branded candidate inherits
+# it verbatim: the file is upstream-owned, so ``brand`` copies upstream's content
+# over the fork's copy and no fork-local edit can reach it.  One entry, one site.
+_EXTRACT_PLUGINS_DATE_HYGIENE: tuple[tuple[str, str, str], ...] = (
+    (
+        "website/scripts/extract-plugins.py",
+        '        if line.startswith("\\x00"):\n'
+        "            when = line[1:].strip()\n"
+        "            continue\n",
+        '        if line.startswith("\\x00"):\n'
+        "            stamp = line[1:].strip()\n"
+        "            try:\n"
+        "                parsed = datetime.fromisoformat(stamp)\n"
+        "            except ValueError:\n"
+        "                # Not ISO-8601: keep the stamp verbatim rather than\n"
+        "                # drop it, because dropping it would mis-date every\n"
+        "                # later file in the newest-first walk.\n"
+        "                when = stamp\n"
+        "            else:\n"
+        "                if parsed.tzinfo is None:\n"
+        "                    when = stamp\n"
+        "                else:\n"
+        "                    when = (\n"
+        "                        parsed.astimezone(timezone.utc)\n"
+        "                        .isoformat()\n"
+        '                        .replace("+00:00", "Z")\n'
+        "                    )\n"
+        "            continue\n",
+    ),
+)
+
+
+def _reconcile_extract_plugins_date_hygiene(dst: str) -> list[str]:
+    """Normalize the plugin-catalog extractor's git dates to the ``Z`` form.
+
+    ``website/scripts/extract-plugins.py`` builds ``addedAt``/``updatedAt`` for
+    every plugin-catalog entry out of ``git log --format=%cI``.  ``%cI`` is
+    strict ISO-8601 with a numeric UTC offset, so a UTC committer date arrives
+    as ``2026-01-01T00:00:00+00:00`` while
+    ``tests/website/test_extract_plugins.py``
+    (``test_git_dates_added_is_first_commit_updated_is_last_and_renames_keep_added``)
+    asserts the ``Z`` form the catalog schema documents.
+
+    That test fails in well under a second on a pristine upstream checkout -- it
+    is a genuine upstream defect, not fork drift -- and ``tests/website/`` sits
+    inside the candidate suite's discovery roots
+    (``run_tests_parallel._DEFAULT_ROOTS = ["tests"]``, which skips only
+    ``integration``/``e2e``/``docker``).  The file is upstream-owned, so
+    ``brand`` copies upstream's content over the fork's copy and the snapshot
+    carries the defect into the ``pipeline`` job's "Run final branded candidate
+    test suite" step.
+
+    The normalization converts the parsed instant to UTC and re-renders the
+    offset as ``Z``.  That cannot change any instant -- ``astimezone`` preserves
+    the moment exactly -- and it makes every published timestamp uniform, so the
+    docs site stops mixing ``+00:00`` and ``Z`` records.
+
+    This pass rewrites an UPSTREAM-owned file, so it must run from
+    :func:`reconcile_tree` (not from the later ``preserve`` stage): the pipeline
+    snapshots ``reconciled_map`` straight after ``reconcile``, and only paths in
+    that map are accepted as byte-faithful by ``compare_trees`` /
+    ``verify_branded``.  Running here is also the earliest possible point --
+    ``brand`` is what overwrites the tree with upstream's copy -- so the snapshot
+    is already correctly dated before ``preserve``, ``scan``, ``compare`` and
+    ``verify`` run.
+
+    Proves:
+      - source/provenance: pristine upstream ``dbaec6a2`` fails the same test, so
+        the candidate cannot pass by accident and this is not fork drift
+      - candidate behaviour: after this pass ``load_git_dates`` emits ``Z`` for a
+        ``+00:00`` committer date and the consumer test passes
+      - downstream expected behaviour: the branded candidate suite's
+        ``test_git_dates_added_is_first_commit_updated_is_last_and_renames_keep_added``
+        passes
+    """
+    if not os.path.isfile(os.path.join(dst, _EXTRACT_PLUGINS_DATE_HYGIENE_GATE)):
+        return []
+    fixed: list[str] = []
+    for rel, old, new in _EXTRACT_PLUGINS_DATE_HYGIENE:
+        path = os.path.join(dst, rel)
+        if not os.path.isfile(path):
+            continue
+        try:
+            text = open(path, encoding="utf-8").read()
+        except OSError:
+            continue
+        if old not in text:
+            continue
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text.replace(old, new))
+        if rel not in fixed:
+            fixed.append(rel)
+    return fixed
+
+
 def reconcile_tree(dst: str) -> ReconcileResult:
     """Apply known post-brand fixes to the branded tree in place.
 
@@ -1808,6 +2174,19 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_pages_deploy_workflow(dst):
         result.total += 1
         result.fixed.append(".github/workflows/deploy-site.yml")
+    # ``website/scripts/extract-plugins.py`` is UPSTREAM-owned, so ``brand``
+    # writes upstream's copy and this pass rewrites it.  It therefore has to run
+    # HERE, in `reconcile`, and be recorded in ``result.fixed``: the caller
+    # snapshots ``reconciled_map`` from that list immediately after this stage,
+    # and ``compare_trees``/``verify_branded`` accept a text file byte-for-byte
+    # only when its mapped path is in that map.  Rewriting an upstream-owned
+    # file later (inside `preserve`, which runs after the snapshot) leaves the
+    # change unrecorded, so the `compare` and `verify` stages see unexplained
+    # drift and the pipeline aborts with no explanation in the step summary.
+    for rel in _reconcile_extract_plugins_date_hygiene(dst):
+        result.total += 1
+        if rel not in result.fixed:
+            result.fixed.append(rel)
     result.fixed.sort()
     return result
 
@@ -2304,7 +2683,7 @@ class UpdateManager:
             if self.owned and self.owned.count and os.path.isdir(self.owned.root):
                 registry_dest = os.path.join(dest, "config", "owned-assets")
                 shutil.copytree(self.owned.root, registry_dest, dirs_exist_ok=True)
-            return preserve_fork_files(
+            preserved = preserve_fork_files(
                 self.fork_root,
                 dest,
                 src,
@@ -2313,10 +2692,28 @@ class UpdateManager:
                 owned_paths=set(self.owned.mapping) if self.owned else set(),
                 allow_unclassified_fork_files=bool(baseline_sha),
             )
+            # Runs inside `preserve`, immediately after the copy, because this is
+            # the stage that re-introduces fork-local files (fork-only skills and
+            # bundled skill docs) into the snapshot.  Upstream's literal-/tmp gate
+            # scans those files in the branded candidate suite, so they must be
+            # ported here — `brand`/`reconcile` already ran and cannot see
+            # fork-only content.  Recorded like every other reconciliation.
+            for rel in _reconcile_tmp_literal_hygiene(dest):
+                if rel not in reconcile.fixed:
+                    reconcile.fixed.append(rel)
+                    reconcile.total += 1
+            # Same reason: the Portal doc link checker runs over the whole
+            # candidate tree, and the fork's Portal page only enters here.
+            for rel in _reconcile_doc_link_hygiene(dest):
+                if rel not in reconcile.fixed:
+                    reconcile.fixed.append(rel)
+                    reconcile.total += 1
+            return preserved
         stage(
             "preserve",
             _preserve,
-            "carry explicit fork-owned files while rejecting retired upstream paths",
+            "carry explicit fork-owned files, then port preserved scratch paths "
+            "and route-style doc links",
         )
 
         scan = stage("scan", lambda: scan_tree(dest), "classify every branded file")
