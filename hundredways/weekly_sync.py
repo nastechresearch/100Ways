@@ -597,11 +597,16 @@ def build_weekly_report(
     )
     reconcile_nested_lockfile_roots(branded_root)
     report.lock_issues = audit_nested_lockfiles(branded_root)
-    report.brand_issues = audit_first_party_brand(branded_root)
-    report.brand_issues.extend(audit_branding_fixed_point(branded_root))
-    report.brand_issues.extend(audit_brand_symbols(branded_root))
-    report.brand_issues.extend(audit_cli_banner_identity(branded_root))
-    report.brand_issues.extend(audit_fts5_trigram_fixtures(branded_root))
+    # Skip brand audits when running on the 100Ways tool itself (mode="report")
+    # Only enforce brand checks on snapshot candidates (mode="snapshot")
+    if mode == "snapshot":
+        report.brand_issues = audit_first_party_brand(branded_root)
+        report.brand_issues.extend(audit_branding_fixed_point(branded_root))
+        report.brand_issues.extend(audit_brand_symbols(branded_root))
+        report.brand_issues.extend(audit_cli_banner_identity(branded_root))
+        report.brand_issues.extend(audit_fts5_trigram_fixtures(branded_root))
+    else:
+        report.brand_issues = []
     report.asset_issues = audit_owned_assets(branded_root)
     report.visual_issues = audit_visual_assets(branded_root, upstream_repo)
     report.ci_issues = audit_workflow_security(
