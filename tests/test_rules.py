@@ -68,6 +68,13 @@ def test_compact_python_module_flags_are_branded():
         "python3 -mnastech_cli.main gateway"
 
 
+def test_third_party_misaki_git_url_is_branded_to_the_fork():
+    rules = BrandingRules()
+    text = '"misaki[en] @ git+https://github.com/NousResearch/misaki.git@abc"'
+    assert rules.transform_text(text) == \
+        '"misaki[en] @ git+https://github.com/NastechResearch/misaki.git@abc"'
+
+
 def test_path_transforms():
     rules = BrandingRules()
     assert "nastech" in rules.transform_path("tools/hermes_runner.py").lower()
