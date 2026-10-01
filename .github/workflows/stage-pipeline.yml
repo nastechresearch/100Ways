@@ -244,6 +244,20 @@ jobs:
           test -x "$TEST_TREE/scripts/run_tests.sh"
           (
             cd "$TEST_TREE"
+            # Run the candidate suite exactly the way upstream Hermes runs its own
+            # tests: with NO real state home on the runner. Earlier stages of this
+            # job populate the operator's real ~/.nastech (installs/, tools/, ...);
+            # upstream's home-io guard (tests/home_io_guard.py) refuses any test
+            # file I/O that lands in the REAL root, so a pre-existing real home
+            # turns ~90 otherwise-passing tests into "TEST BUG: file I/O against
+            # the REAL nastech home" failures. Isolate this suite to a fresh HOME
+            # so the guard is inert, exactly as it is on upstream CI.
+            # This is test-runner hermeticity only - NOT a branding or integrity
+            # relaxation. The hardened weekly decision gate, the prepublish scans,
+            # and the post-test conformance re-attestation are untouched, and the
+            # suite below must still exit 0 for this step to report PASS.
+            mkdir -p "$RUNNER_TEMP/candidate-home"
+            export HOME="$RUNNER_TEMP/candidate-home"
             git init -q
             git config user.email "100ways-candidate-test@invalid"
             git config user.name "100Ways Candidate Test"
