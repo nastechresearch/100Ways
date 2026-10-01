@@ -32,6 +32,7 @@ import time
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 
 from .assets import OwnedAssets
 from .forkcheck import (
@@ -429,7 +430,7 @@ def _root_package_name(dst: str, manifest: str, lockfile: str) -> str | None:
     return None
 
 
-def _reconcile_uv_lock(dst: str, name: str) -> int:
+def _reconcile_uv_lock_file(path: str, name: str) -> int:
     """Rename the root editable package record in ``uv.lock`` AND move it to
     its sorted position.
 
@@ -440,7 +441,6 @@ def _reconcile_uv_lock(dst: str, name: str) -> int:
     lockfile as out of sync even though every dependency is unchanged.
     Leave every dependency record untouched; just rename + re-sort.
     """
-    path = os.path.join(dst, "uv.lock")
     if not os.path.isfile(path):
         return 0
     try:
@@ -464,14 +464,16 @@ def _reconcile_uv_lock(dst: str, name: str) -> int:
     root_idx = None
     for i, block in enumerate(blocks):
         src = re.search(r"^source = \{(.+)\}", block, re.M)
-        if src and "editable" in src.group(1):
+        if src and ("editable" in src.group(1) or "virtual" in src.group(1)):
             root_idx = i
             break
     if root_idx is None:
         return 0
     root = blocks[root_idx]
+    root_name = re.search(r'^name = "([^"]+)"', root, re.M)
+    old_name = root_name.group(1) if root_name else "hermes-agent"
     root = re.sub(r'^name = "[^"]+"', f'name = "{name}"', root, count=1, flags=re.M)
-    root = re.sub(r'"hermes-agent"', f'"{name}"', root)
+    root = re.sub(rf'"{re.escape(old_name)}"', f'"{name}"', root)
     blocks[root_idx] = root
 
     # canonical uv order is (name, version); re-sort all blocks by that key
@@ -486,6 +488,32 @@ def _reconcile_uv_lock(dst: str, name: str) -> int:
             fh.write(header + "".join(ordered))
         return 1
     return 0
+
+
+def _reconcile_uv_lock(dst: str, name: str) -> int:
+    """Reconcile the root project's uv lockfile."""
+    return _reconcile_uv_lock_file(os.path.join(dst, "uv.lock"), name)
+
+
+def _reconcile_nested_uv_lock_roots(dst: str) -> list[str]:
+    """Reconcile uv lock roots for nested Python projects as well."""
+    fixed: list[str] = []
+    root_lock = Path(dst) / "uv.lock"
+    for pyproject in Path(dst).rglob("pyproject.toml"):
+        lock = pyproject.with_name("uv.lock")
+        if lock == root_lock or not lock.is_file():
+            continue
+        name = None
+        try:
+            for line in pyproject.read_text(encoding="utf-8").splitlines():
+                if line.strip().startswith("name = "):
+                    name = line.split("=", 1)[1].strip().strip('"')
+                    break
+        except OSError:
+            continue
+        if name and _reconcile_uv_lock_file(str(lock), name):
+            fixed.append(str(lock.relative_to(dst)))
+    return fixed
 
 
 # Exact package-name renames for package-lock.json.  Token branding renames
@@ -1740,6 +1768,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
         if _reconcile_uv_lock(dst, name):
             result.total += 1
             result.fixed.append("uv.lock")
+        for rel in _reconcile_nested_uv_lock_roots(dst):
+            result.total += 1
+            result.fixed.append(rel)
         if _reconcile_package_lock(dst, name):
             result.total += 1
             result.fixed.append("package-lock.json")
@@ -2548,7 +2579,10 @@ class UpdateManager:
         result.manifest_path = os.path.join(dest, "manifest.json")
         try:
             with open(result.manifest_path, "w", encoding="utf-8") as fh:
-                json.dump(manifest, fh, indent=2)
+                # Manifest values include upstream commit subjects and changed
+                # paths. Apply the canonical text normalizer to the serialized
+                # metadata too, so generated output remains a fixed point.
+                fh.write(self.rules.transform_text(json.dumps(manifest, indent=2)))
             manifest_stage.status = "ok"
         except OSError as exc:
             manifest_stage.status = "fail"
