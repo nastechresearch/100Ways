@@ -195,7 +195,7 @@ jobs:
         run: |
           # Keep this list aligned with the fork's declared extras. Do not
           # request optional integrations absent from pyproject.toml.
-          uv sync --locked --python 3.11 --extra all --extra dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web
+          uv sync --locked --python 3.11 --extra all --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web
 
       - name: Prompt-resume compatibility gate
         if: matrix.slice.index == 1
@@ -300,7 +300,7 @@ jobs:
         run: |
           # Keep this list aligned with the fork's declared extras. Do not
           # request optional integrations absent from pyproject.toml.
-          uv sync --locked --python 3.11 --extra all --extra dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web
+          uv sync --locked --python 3.11 --extra all --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web
 
       - name: Boot the branded CLI and read its logs
         working-directory: tree/nastech-agent
