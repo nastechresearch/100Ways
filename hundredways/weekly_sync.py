@@ -300,6 +300,13 @@ def _allowed_brand_occurrence(token: str, line: str, path: str) -> bool:
         return "hermes-parser" in lower or "hermes-estree" in lower
     if path in {"website/package-lock.json", "website/.npmrc"} and token in {"nous", "nousresearch"}:
         return "@nous-research/image-size" in lower
+    if path.endswith("uv.lock") and token in {"nous", "nousresearch"}:
+        # Locked dependency metadata must preserve the upstream Git source for
+        # the third-party misaki package; changing that URL would invalidate
+        # the lockfile rather than branding our own project.
+        return "misaki" in lower
+    if path.endswith("pyproject.toml") and token in {"nous", "nousresearch"}:
+        return "misaki" in lower and "github.com/nousresearch/misaki" in lower
     if path == "reports/SYNC-SUMMARY.md" and token in {"nous", "nousresearch"}:
         return line.strip() == "> powered by nousresearch"
     return False

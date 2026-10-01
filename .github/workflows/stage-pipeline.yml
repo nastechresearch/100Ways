@@ -268,10 +268,12 @@ jobs:
             sed -i 's/_wait_for(lambda: state.get_task(db, identity)\["status"\] == "cancelled")/_wait_for(lambda: state.get_task(db, identity)["status"] == "cancelled", timeout=10.0)/' "$HOSTED_TEST"
             grep -Fq '_wait_for(lambda: state.get_task(db, identity)["status"] == "cancelled", timeout=10.0)' "$HOSTED_TEST"
             git add "$HOSTED_TEST"
-            uv python install 3.11
-            uv sync --locked --python 3.11 \
-              --extra all --extra dev --extra anthropic --extra mistral \
-              --extra fal --extra modal --extra daytona --extra hindsight \
+            uv python install 3.14
+            # Keep this list aligned with the fork's declared extras. Do not
+            # request optional integrations absent from pyproject.toml.
+            uv sync --locked --python 3.14 \
+              --extra all --extra anthropic --extra mistral \
+              --extra fal --extra modal --extra daytona \
               --extra parallel-web
             source .venv/bin/activate
             NASTECH_TEST_WORKERS="2" NASTECH_TEST_FILE_RETRIES="2" OPENROUTER_API_KEY="" OPENAI_API_KEY="" NASTECH_API_KEY="" \
@@ -438,5 +440,3 @@ jobs:
             ${{ runner.temp }}/gate_receipt.json
             ${{ runner.temp }}/SYNC-SUMMARY.md
           if-no-files-found: error
-
-

@@ -90,12 +90,33 @@ def _normalize_test_workers(text: str) -> str:
 # Standard runners need a little more wall-clock allowance for the complete
 # Python suite, while the smaller auxiliary jobs retain their upstream limits.
 _FULL_TEST_TIMEOUT_RE = re.compile(
-    r"(?ms)(^\s*name:\s*Run tests\s*$.*?^\s*timeout-minutes:\s*)30(\s*$)"
+    r"(?ms)(^[ \t]*name:[ \t]*Run tests[ \t]*$\n"
+    r"(?:(?!^[ \t]*(?:name|timeout-minutes):).*\n)*?"
+    r"^[ \t]*timeout-minutes:[ \t]*)30([ \t]*$)"
 )
 
 
 def _normalize_test_timeout(text: str) -> str:
-    return _FULL_TEST_TIMEOUT_RE.sub(r"\g<1>40\g<2>", text, count=1)
+    # Upstream can define multiple jobs named "Run tests" (for example the
+    # regular and e2e lanes). Normalize every matching 30-minute job so the
+    # branded result is a true transform fixed point.
+    lines = text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        if line.strip() != "name: Run tests":
+            continue
+        name_indent = len(line) - len(line.lstrip(" \t"))
+        for candidate in range(index + 1, len(lines)):
+            current = lines[candidate]
+            stripped = current.strip()
+            indent = len(current) - len(current.lstrip(" \t"))
+            if indent <= name_indent and stripped.startswith("name:"):
+                break
+            if indent <= name_indent and stripped.startswith("timeout-minutes:"):
+                lines[candidate] = re.sub(
+                    r"(timeout-minutes:[ \t]*)30\b", r"\g<1>40", current
+                )
+                break
+    return "".join(lines)
 
 
 def _normalize_runner(match_obj: re.Match) -> str:
@@ -195,6 +216,13 @@ class BrandingRules:
                 branded,
                 flags=re.IGNORECASE,
             )
+        # misaki is a third-party Git dependency. Keep its canonical upstream
+        # repository URL in project metadata; branding that URL points uv at a
+        # private/nonexistent fork and makes locked candidate installation fail.
+        branded = branded.replace(
+            "github.com/NastechResearch/misaki",
+            "github.com/NousResearch/misaki",
+        )
         branded = _RUNNER_LABEL_RE.sub(_normalize_runner, branded)
         branded = _normalize_test_workers(branded)
         return _normalize_test_timeout(branded)

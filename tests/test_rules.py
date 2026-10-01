@@ -68,6 +68,12 @@ def test_compact_python_module_flags_are_branded():
         "python3 -mnastech_cli.main gateway"
 
 
+def test_third_party_misaki_git_url_is_not_rebranded():
+    rules = BrandingRules()
+    text = '"misaki[en] @ git+https://github.com/NousResearch/misaki.git@abc"'
+    assert rules.transform_text(text) == text
+
+
 def test_path_transforms():
     rules = BrandingRules()
     assert "nastech" in rules.transform_path("tools/hermes_runner.py").lower()
@@ -223,11 +229,16 @@ def test_full_python_test_timeout_normalizes_to_40_minutes_only():
         "    runs-on: ubuntu-latest-96-core\n"
         "    timeout-minutes: 30\n"
         "  e2e:\n"
+        "    name: Run tests\n"
+        "    timeout-minutes: 30\n"
+        "  unrelated:\n"
         "    name: e2e\n"
         "    timeout-minutes: 30\n"
     )
     out = rules.transform_text(text)
     assert "name: Run tests\n    runs-on: ubuntu-latest\n    timeout-minutes: 40" in out
+    assert out.count("name: Run tests\n") == 2
+    assert out.count("timeout-minutes: 40") == 2
     assert "name: e2e\n    timeout-minutes: 30" in out
 
 
