@@ -272,7 +272,7 @@ jobs:
             # Keep this list aligned with the fork's declared extras. Do not
             # request optional integrations absent from pyproject.toml.
             uv sync --locked --python 3.11 \
-              --extra all --extra dev --extra anthropic --extra mistral \
+              --extra all --extra anthropic --extra mistral \
               --extra fal --extra modal --extra daytona \
               --extra parallel-web
             source .venv/bin/activate
@@ -440,4 +440,3 @@ jobs:
             ${{ runner.temp }}/gate_receipt.json
             ${{ runner.temp }}/SYNC-SUMMARY.md
           if-no-files-found: error
-
