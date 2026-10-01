@@ -59,6 +59,14 @@ def test_brand_audit_allows_third_party_misaki_source_in_uv_lock(tmp_path):
     assert audit_first_party_brand(str(tmp_path)) == []
 
 
+def test_brand_audit_allows_third_party_misaki_source_in_pyproject(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        'dependencies = ["misaki @ git+https://github.com/NousResearch/misaki.git@abc"]\n'
+    )
+
+    assert audit_first_party_brand(str(tmp_path)) == []
+
+
 def test_brand_fixed_point_audit_blocks_transformable_text_and_paths(tmp_path):
     root = Path(tmp_path)
     (root / "hermes-notes.md").write_text("Launch Hermes with ⚕ support.\n")

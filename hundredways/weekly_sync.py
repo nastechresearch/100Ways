@@ -305,6 +305,8 @@ def _allowed_brand_occurrence(token: str, line: str, path: str) -> bool:
         # the third-party misaki package; changing that URL would invalidate
         # the lockfile rather than branding our own project.
         return "misaki" in lower
+    if path.endswith("pyproject.toml") and token in {"nous", "nousresearch"}:
+        return "misaki" in lower and "github.com/nousresearch/misaki" in lower
     if path == "reports/SYNC-SUMMARY.md" and token in {"nous", "nousresearch"}:
         return line.strip() == "> powered by nousresearch"
     return False

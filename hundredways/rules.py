@@ -216,6 +216,13 @@ class BrandingRules:
                 branded,
                 flags=re.IGNORECASE,
             )
+        # misaki is a third-party Git dependency. Keep its canonical upstream
+        # repository URL in project metadata; branding that URL points uv at a
+        # private/nonexistent fork and makes locked candidate installation fail.
+        branded = branded.replace(
+            "github.com/NastechResearch/misaki",
+            "github.com/NousResearch/misaki",
+        )
         branded = _RUNNER_LABEL_RE.sub(_normalize_runner, branded)
         branded = _normalize_test_workers(branded)
         return _normalize_test_timeout(branded)
