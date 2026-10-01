@@ -109,7 +109,8 @@ def test_stage_pipeline_requires_final_conformance_and_candidate_tests_before_re
     assert first_conformance < candidate_tests < post_test_conformance < receipt
     assert "./scripts/run_tests.sh" in workflow
     assert 'cp -a "$SNAPSHOT" "$TEST_TREE"' in workflow
-    assert "uv sync --locked --python 3.11" in workflow
+    assert "uv sync --locked --python 3.14" in workflow
+    assert "uv sync --locked --python 3.11" not in workflow
     assert "--extra hindsight" not in workflow
     assert "--extra dev" not in workflow
     assert "astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39" in workflow

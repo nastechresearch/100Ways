@@ -268,10 +268,10 @@ jobs:
             sed -i 's/_wait_for(lambda: state.get_task(db, identity)\["status"\] == "cancelled")/_wait_for(lambda: state.get_task(db, identity)["status"] == "cancelled", timeout=10.0)/' "$HOSTED_TEST"
             grep -Fq '_wait_for(lambda: state.get_task(db, identity)["status"] == "cancelled", timeout=10.0)' "$HOSTED_TEST"
             git add "$HOSTED_TEST"
-            uv python install 3.11
+            uv python install 3.14
             # Keep this list aligned with the fork's declared extras. Do not
             # request optional integrations absent from pyproject.toml.
-            uv sync --locked --python 3.11 \
+            uv sync --locked --python 3.14 \
               --extra all --extra anthropic --extra mistral \
               --extra fal --extra modal --extra daytona \
               --extra parallel-web
