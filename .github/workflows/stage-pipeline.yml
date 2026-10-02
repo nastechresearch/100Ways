@@ -282,13 +282,15 @@ jobs:
             sed -i 's/_wait_for(lambda: state.get_task(db, identity)\["status"\] == "cancelled")/_wait_for(lambda: state.get_task(db, identity)["status"] == "cancelled", timeout=10.0)/' "$HOSTED_TEST"
             grep -Fq '_wait_for(lambda: state.get_task(db, identity)["status"] == "cancelled", timeout=10.0)' "$HOSTED_TEST"
             git add "$HOSTED_TEST"
-            # pyproject.toml declares requires-python = ">=3.11,<3.14".
-            # Use the newest supported interpreter so the locked candidate
-            # environment can be created on the GitHub runner.
-            uv python install 3.13
+            # The snapshot's uv.lock is regenerated against Python 3.14 by the
+            # upstream Hermes `uv lock --upgrade` flow, and pinning a 3.13
+            # interpreter makes `uv sync --locked` reject the lockfile as
+            # `python_full_version >= '3.14'`. Keep the interpreter at 3.14 to
+            # match the snapshot and the upstream Hermes CI.
+            uv python install 3.14
             # Keep this list aligned with the fork's declared extras. Do not
             # request optional integrations absent from pyproject.toml.
-            uv sync --locked --python 3.13 \
+            uv sync --locked --python 3.14 \
               --extra all --extra anthropic --extra mistral \
               --extra fal --extra modal --extra daytona \
               --extra parallel-web
