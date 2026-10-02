@@ -244,6 +244,20 @@ jobs:
           test -x "$TEST_TREE/scripts/run_tests.sh"
           (
             cd "$TEST_TREE"
+            # Run the candidate suite exactly the way upstream Hermes runs its own
+            # tests: with NO real state home on the runner. Earlier stages of this
+            # job populate the operator's real ~/.nastech (installs/, tools/, ...);
+            # upstream's home-io guard (tests/home_io_guard.py) refuses any test
+            # file I/O that lands in the REAL root, so a pre-existing real home
+            # turns ~90 otherwise-passing tests into "TEST BUG: file I/O against
+            # the REAL nastech home" failures. Isolate this suite to a fresh HOME
+            # so the guard is inert, exactly as it is on upstream CI.
+            # This is test-runner hermeticity only - NOT a branding or integrity
+            # relaxation. The hardened weekly decision gate, the prepublish scans,
+            # and the post-test conformance re-attestation are untouched, and the
+            # suite below must still exit 0 for this step to report PASS.
+            mkdir -p "$RUNNER_TEMP/candidate-home"
+            export HOME="$RUNNER_TEMP/candidate-home"
             git init -q
             git config user.email "100ways-candidate-test@invalid"
             git config user.name "100Ways Candidate Test"
@@ -268,10 +282,12 @@ jobs:
             sed -i 's/_wait_for(lambda: state.get_task(db, identity)\["status"\] == "cancelled")/_wait_for(lambda: state.get_task(db, identity)["status"] == "cancelled", timeout=10.0)/' "$HOSTED_TEST"
             grep -Fq '_wait_for(lambda: state.get_task(db, identity)["status"] == "cancelled", timeout=10.0)' "$HOSTED_TEST"
             git add "$HOSTED_TEST"
-            uv python install 3.11
-            uv sync --locked --python 3.11 \
-              --extra all --extra dev --extra anthropic --extra mistral \
-              --extra fal --extra modal --extra daytona --extra hindsight \
+            uv python install 3.14
+            # Keep this list aligned with the fork's declared extras. Do not
+            # request optional integrations absent from pyproject.toml.
+            uv sync --locked --python 3.14 \
+              --extra all --extra anthropic --extra mistral \
+              --extra fal --extra modal --extra daytona \
               --extra parallel-web
             source .venv/bin/activate
             NASTECH_TEST_WORKERS="2" NASTECH_TEST_FILE_RETRIES="2" OPENROUTER_API_KEY="" OPENAI_API_KEY="" NASTECH_API_KEY="" \
@@ -438,5 +454,3 @@ jobs:
             ${{ runner.temp }}/gate_receipt.json
             ${{ runner.temp }}/SYNC-SUMMARY.md
           if-no-files-found: error
-
-

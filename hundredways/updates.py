@@ -22,7 +22,10 @@ pipeline is testable against a fake "Hermes" repo.
 
 from __future__ import annotations
 
+import ast
 import difflib
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -32,6 +35,7 @@ import time
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 
 from .assets import OwnedAssets
 from .forkcheck import (
@@ -429,7 +433,7 @@ def _root_package_name(dst: str, manifest: str, lockfile: str) -> str | None:
     return None
 
 
-def _reconcile_uv_lock(dst: str, name: str) -> int:
+def _reconcile_uv_lock_file(path: str, name: str) -> int:
     """Rename the root editable package record in ``uv.lock`` AND move it to
     its sorted position.
 
@@ -439,18 +443,33 @@ def _reconcile_uv_lock(dst: str, name: str) -> int:
     mid-alphabet at the wrong index, so ``uv lock --check`` reports the
     lockfile as out of sync even though every dependency is unchanged.
     Leave every dependency record untouched; just rename + re-sort.
+
+    The third-party ``misaki`` Git source is ALSO rebranded here.  uv.lock is
+    a locked path (byte-copied, never token-branded), so the audit would keep
+    flagging the upstream ``NousResearch`` URL forever.  The fork serves the
+    same pinned rev/hash, so rewriting just the host keeps the lockfile valid
+    AND consistent with the branded pyproject under ``uv sync --locked``.
+    The ``?rev=...#sha`` pin is preserved untouched.
     """
-    path = os.path.join(dst, "uv.lock")
     if not os.path.isfile(path):
         return 0
     try:
         with open(path, encoding="utf-8") as fh:
-            text = fh.read()
+            original = fh.read()
     except OSError:
         return 0
+    text = original.replace(
+        "https://github.com/NousResearch/misaki.git",
+        "https://github.com/NastechResearch/misaki.git",
+    )
     lines = text.splitlines(keepends=True)
     first_pkg = next((i for i, l in enumerate(lines) if l.startswith("[[package]]")), None)
     if first_pkg is None:
+        # nothing to rename/sort, but the misaki URL rewrite may still apply
+        if text != original:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            return 1
         return 0
     # split into header + package blocks (each from [[package]] to the next)
     idxs = [i for i, l in enumerate(lines) if l.startswith("[[package]]")]
@@ -464,14 +483,21 @@ def _reconcile_uv_lock(dst: str, name: str) -> int:
     root_idx = None
     for i, block in enumerate(blocks):
         src = re.search(r"^source = \{(.+)\}", block, re.M)
-        if src and "editable" in src.group(1):
+        if src and ("editable" in src.group(1) or "virtual" in src.group(1)):
             root_idx = i
             break
     if root_idx is None:
+        # no root record to rename, but the misaki URL rewrite may still apply
+        if text != original:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            return 1
         return 0
     root = blocks[root_idx]
+    root_name = re.search(r'^name = "([^"]+)"', root, re.M)
+    old_name = root_name.group(1) if root_name else "hermes-agent"
     root = re.sub(r'^name = "[^"]+"', f'name = "{name}"', root, count=1, flags=re.M)
-    root = re.sub(r'"hermes-agent"', f'"{name}"', root)
+    root = re.sub(rf'"{re.escape(old_name)}"', f'"{name}"', root)
     blocks[root_idx] = root
 
     # canonical uv order is (name, version); re-sort all blocks by that key
@@ -481,11 +507,38 @@ def _reconcile_uv_lock(dst: str, name: str) -> int:
         return (m.group(1) if m else "", v.group(1) if v else "", 0)
 
     ordered = sorted(blocks, key=_key)
-    if "".join(ordered) != text:
+    rebuilt = header + "".join(ordered)
+    if rebuilt != original:
         with open(path, "w", encoding="utf-8") as fh:
-            fh.write(header + "".join(ordered))
+            fh.write(rebuilt)
         return 1
     return 0
+
+
+def _reconcile_uv_lock(dst: str, name: str) -> int:
+    """Reconcile the root project's uv lockfile."""
+    return _reconcile_uv_lock_file(os.path.join(dst, "uv.lock"), name)
+
+
+def _reconcile_nested_uv_lock_roots(dst: str) -> list[str]:
+    """Reconcile uv lock roots for nested Python projects as well."""
+    fixed: list[str] = []
+    root_lock = Path(dst) / "uv.lock"
+    for pyproject in Path(dst).rglob("pyproject.toml"):
+        lock = pyproject.with_name("uv.lock")
+        if lock == root_lock or not lock.is_file():
+            continue
+        name = None
+        try:
+            for line in pyproject.read_text(encoding="utf-8").splitlines():
+                if line.strip().startswith("name = "):
+                    name = line.split("=", 1)[1].strip().strip('"')
+                    break
+        except OSError:
+            continue
+        if name and _reconcile_uv_lock_file(str(lock), name):
+            fixed.append(str(lock.relative_to(dst)))
+    return fixed
 
 
 # Exact package-name renames for package-lock.json.  Token branding renames
@@ -1727,6 +1780,238 @@ def _reconcile_reasoning_effort_selection(dst: str) -> int:
     return 1
 
 
+# ---------------------------------------------------------------------------
+# SigV4 vector reconcile (tests/scripts/test_release_r2.py)
+# ---------------------------------------------------------------------------
+# The upstream repo pins its R2 SigV4 signer against botocore-generated
+# vectors in tests/scripts/test_release_r2.py: a parametrize block whose rows
+# carry precomputed ``signature`` hexes for fixed credentials/timestamps.  The
+# path and query strings in those rows are brand tokens (``/hermes-releases``,
+# ``HermesBundled-...``), so branding rewrites them but leaves the hex
+# constants stale — the branded test then fails 3 of its 4 vectors.
+#
+# The fork's pendant script ``scripts/releases/r2.py`` is signed with the same
+# algorithm, so the correct fix is to RECOMPUTE each row's signature over the
+# already-branded path/query and replace the stored hex when it differs.  The
+# port below mirrors upstream r2.py's SigV4 chain exactly (rfc3986_encode,
+# canonical_query, canonical_request, string_to_sign, signature); the unit
+# tests pin it against all four upstream vectors, so the recompute is only
+# ever applied to real drift, and a second pass is a no-op (fixed point).
+
+_SIGV4_UNRESERVED = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~"
+)
+
+
+def _sigv4_rfc3986_encode(value: str) -> str:
+    """RFC3986 encode: everything except unreserved [A-Za-z0-9-_.~]."""
+    out = []
+    for char in value:
+        if char in _SIGV4_UNRESERVED:
+            out.append(char)
+        else:
+            out.extend("%{:02X}".format(b) for b in char.encode("utf-8"))
+    return "".join(out)
+
+
+def _sigv4_canonical_query(params: dict) -> str:
+    """Canonical query string: params sorted by encoded key (then value)."""
+    pairs = sorted(
+        (_sigv4_rfc3986_encode(k), _sigv4_rfc3986_encode(str(v)))
+        for k, v in params.items()
+    )
+    return "&".join(f"{k}={v}" for k, v in pairs)
+
+
+def _sigv4_header_value(headers: dict, name: str) -> str:
+    for key, value in headers.items():
+        if key.lower() == name:
+            return str(value)
+    raise KeyError(name)
+
+
+def _sigv4_canonical_request(
+    method: str,
+    path: str,
+    query: str,
+    headers: dict,
+    payload_hash: str,
+) -> str:
+    names = sorted(k.lower() for k in headers)
+    whitespace = re.compile(r"\s+")
+
+    def _collapsed(name: str) -> str:
+        return whitespace.sub(" ", _sigv4_header_value(headers, name).strip())
+
+    canonical_headers = "\n".join(f"{n}:{_collapsed(n)}" for n in names)
+    return "\n".join(
+        [method, path, query, canonical_headers, "", ";".join(names), payload_hash]
+    )
+
+
+def _sigv4_string_to_sign(canonical: str, date: str, scope: str) -> str:
+    sts_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return "\n".join(["AWS4-HMAC-SHA256", date, scope, sts_hash])
+
+
+def _sigv4_hmac(key: bytes, msg: str) -> bytes:
+    return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
+
+
+def _sigv4_signature(sts_text: str, secret_key: str, date: str, region: str, service: str) -> str:
+    k_date = _sigv4_hmac(f"AWS4{secret_key}".encode("utf-8"), date)
+    k_region = _sigv4_hmac(k_date, region)
+    k_service = _sigv4_hmac(k_region, service)
+    k_signing = _sigv4_hmac(k_service, "aws4_request")
+    return hmac.new(k_signing, sts_text.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _sigv4_auth_header(
+    *,
+    method: str,
+    host: str,
+    path: str,
+    query: str,
+    headers: dict,
+    payload_hash: str,
+    access_key_id: str,
+    secret_key: str,
+    now: str,
+    region: str,
+    service: str,
+) -> str:
+    """Full Authorization header, mirroring upstream scripts/releases/r2.py."""
+    date = now[:8]
+    canonical = _sigv4_canonical_request(method, path, query, headers, payload_hash)
+    sts = _sigv4_string_to_sign(canonical, now, f"{date}/{region}/{service}/aws4_request")
+    sig = _sigv4_signature(sts, secret_key, date, region, service)
+    signed_headers = ";".join(sorted(k.lower() for k in headers))
+    return (
+        f"AWS4-HMAC-SHA256 Credential={access_key_id}/{date}/{region}/{service}/aws4_request, "
+        f"SignedHeaders={signed_headers}, Signature={sig}"
+    )
+
+
+# Fixed test vector credentials — for recompute we only need to reproduce
+# upstream's own values, and they are constants in the test file.
+_SIGV4_VECTOR_CREDS = {
+    "access_key_id": "AKIDEXAMPLE",
+    "secret_key": "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+    "now": "20150830T123600Z",
+}
+_SIGV4_VECTOR_EMPTY_SHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+_SIGV4_TABLE_RE = re.compile(
+    r"@pytest\.mark\.parametrize\('method,path,query,payload,scope,signature',\s*\[(.*?)\]\s*\)",
+    re.DOTALL,
+)
+
+
+def _sigv4_vector_signature(method: str, path: str, query: dict, payload: str, scope: str) -> str:
+    """Recompute one signature exactly as the branded test's _auth() does."""
+    host = (
+        "example.com" if scope == "us-east-1/service" else "abc123.r2.cloudflarestorage.com"
+    )
+    headers = {"host": host, "x-amz-date": _SIGV4_VECTOR_CREDS["now"]}
+    if scope == "auto/s3":
+        headers["x-amz-content-sha256"] = payload
+    encoded = _sigv4_canonical_query(query)
+    region, service = scope.split("/")
+    auth = _sigv4_auth_header(
+        method=method,
+        host=host,
+        path=path,
+        query=encoded,
+        headers=headers,
+        payload_hash=payload,
+        region=region,
+        service=service,
+        **_SIGV4_VECTOR_CREDS,
+    )
+    return auth.rsplit("Signature=", 1)[1]
+
+
+def _reconcile_sigv4_vectors(dst: str) -> bool:
+    """Recompute the pinned SigV4 vector signatures over skewed brand paths.
+
+    Finds the parametrize table in ``tests/scripts/test_release_r2.py``,
+    reparses every row (single-quoted tuples, ``EMPTY_SHA`` constant, dict
+    query literals), recomputes the signature for each, and replaces the
+    stored hex only when the stored value != the recomputed value.  Returns
+    True iff any hex changed.  A second call is a no-op (fixed point).
+    """
+    rel = "tests/scripts/test_release_r2.py"
+    path = os.path.join(dst, rel)
+    if not os.path.isfile(path):
+        return False
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError:
+        return False
+    table = _SIGV4_TABLE_RE.search(text)
+    if not table:
+        return False
+    body = table.group(1)
+    rows = _split_sigv4_rows(body)
+    changed = False
+    for row in rows:
+        sig = _recompute_sigv4_row(row)
+        if sig is None:
+            continue
+        stored, recomputed = sig
+        if stored != recomputed:
+            text = text.replace(f"'{stored}'", f"'{recomputed}'", 1)
+            changed = True
+    if changed:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    return changed
+
+
+def _split_sigv4_rows(body: str) -> list[str]:
+    """Split a parametrize table body into individual ``(...)`` row strings.
+
+    Rows are single-quoted tuples that may span lines, embed a ``{...}`` dict
+    literal for ``query``, and reference the bare ``EMPTY_SHA`` constant.
+    """
+    rows = []
+    start = None
+    depth = 0
+    for i, ch in enumerate(body):
+        if ch == "(":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0 and start is not None:
+                rows.append(body[start : i + 1])
+                start = None
+    return rows
+
+
+def _recompute_sigv4_row(row: str) -> tuple[str, str] | None:
+    """Return (stored_hex, recomputed_hex) for one vector row, or None."""
+    try:
+        code = row.replace("EMPTY_SHA", f'"{_SIGV4_VECTOR_EMPTY_SHA}"')
+        values = ast.literal_eval(code)
+    except (SyntaxError, ValueError):
+        return None
+    if not isinstance(values, (tuple, list)) or len(values) != 6:
+        return None
+    method, path, query, payload, scope, stored = values
+    if not isinstance(method, str) or not isinstance(path, str) or not isinstance(scope, str):
+        return None
+    if not isinstance(query, dict) or not isinstance(payload, str) or not isinstance(stored, str):
+        return None
+    try:
+        recomputed = _sigv4_vector_signature(method, path, query, payload, scope)
+    except (KeyError, ValueError):
+        return None
+    if len(stored) != 64:
+        return None
+    return stored, recomputed
+
+
 def reconcile_tree(dst: str) -> ReconcileResult:
     """Apply known post-brand fixes to the branded tree in place.
 
@@ -1740,9 +2025,15 @@ def reconcile_tree(dst: str) -> ReconcileResult:
         if _reconcile_uv_lock(dst, name):
             result.total += 1
             result.fixed.append("uv.lock")
+        for rel in _reconcile_nested_uv_lock_roots(dst):
+            result.total += 1
+            result.fixed.append(rel)
         if _reconcile_package_lock(dst, name):
             result.total += 1
             result.fixed.append("package-lock.json")
+    if _reconcile_sigv4_vectors(dst):
+        result.total += 1
+        result.fixed.append("tests/scripts/test_release_r2.py")
     fts5_fixed = _reconcile_fts5_trigram(dst)
     if fts5_fixed:
         result.total += len(fts5_fixed)
@@ -2548,7 +2839,10 @@ class UpdateManager:
         result.manifest_path = os.path.join(dest, "manifest.json")
         try:
             with open(result.manifest_path, "w", encoding="utf-8") as fh:
-                json.dump(manifest, fh, indent=2)
+                # Manifest values include upstream commit subjects and changed
+                # paths. Apply the canonical text normalizer to the serialized
+                # metadata too, so generated output remains a fixed point.
+                fh.write(self.rules.transform_text(json.dumps(manifest, indent=2)))
             manifest_stage.status = "ok"
         except OSError as exc:
             manifest_stage.status = "fail"

@@ -17,7 +17,10 @@ from hundredways.updates import (
     _reconcile_desktop_export_order,
     _reconcile_portal_override_test_collision,
     _reconcile_reasoning_effort_selection,
+    _reconcile_sigv4_vectors,
     _reconcile_telegram_mention_context_lengths,
+    _reconcile_uv_lock_file,
+    _sigv4_vector_signature,
     brand_tree,
     compare_trees,
     fork_manifest_upstream_sha,
@@ -1127,3 +1130,139 @@ def test_reconcile_reasoning_effort_selection(tmp_path):
     )
     # Idempotent.
     assert _reconcile_reasoning_effort_selection(str(candidate)) == 0
+
+
+def test_reconcile_uv_lock_rewrites_misaki_source_to_the_fork(tmp_path):
+    """uv.lock's third-party misaki Git source is rebranded to the fork.
+
+    The lock is a LOCKED path (byte-copied, never token-branded), so the
+    upstream ``NousResearch`` URL would survive branding and trip the audit.
+    The fork serves the same pinned rev/hash, so reconcile rebrands just the
+    host and preserves ``?rev=...`` + ``#sha`` exactly.
+    """
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    lock = candidate / "uv.lock"
+    lock.write_text(
+        'version = 1\n'
+        '[[package]]\n'
+        'name = "nastech-agent"\n'
+        'version = "0.28.0"\n'
+        'source = { editable = "." }\n'
+        'dependencies = [\n'
+        "{ name = \"misaki\", extras = [\"en\"], marker = \"sys_platform != 'win32'\", "
+        'git = "https://github.com/NousResearch/misaki.git?rev=f03fd2be7346952a83d3d4845c217fc7667f322d" },\n'
+        ']\n'
+        '[[package]]\n'
+        'name = "misaki"\n'
+        'version = "0.5.4"\n'
+        'source = { git = "https://github.com/NousResearch/misaki.git?rev=f03fd2be7346952a83d3d4845c217fc7667f322d#f03fd2be7346952a83d3d4845c217fc7667f322d" }\n'
+    )
+
+    assert _reconcile_uv_lock_file(str(lock), "nastech-agent") == 1
+
+    text = lock.read_text(encoding="utf-8")
+    assert "github.com/NastechResearch/misaki.git" in text
+    assert "github.com/NousResearch/misaki.git" not in text
+    # rev + sha untouched
+    assert "?rev=f03fd2be7346952a83d3d4845c217fc7667f322d" in text
+    assert "#f03fd2be7346952a83d3d4845c217fc7667f322d" in text
+
+    # Idempotent fixed point.
+    assert _reconcile_uv_lock_file(str(lock), "nastech-agent") == 0
+
+
+def test_sigv4_vector_signature_port_matches_upstream_vectors():
+    """The pure SigV4 port reproduces upstream's botocore-pinned vectors.
+
+    These are external fixed-point fixtures (botocore 1.43.81 at a pinned
+    timestamp/creds), so this asserts the fork's recompute path signs
+    identically to the candidate's r2.py — the property that makes the
+    vector reconcile safe to run on every branded tree.
+    """
+    vectors = [
+        ("GET", "/", {}, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+         "us-east-1/service", "33399fd3d4a9d6104710c7c04005f7c959f8b1f8bf41b823587ed36b079e453f"),
+        ("PUT", "/hermes-releases/HermesBundled-0.28.0-win-x64.msix", {},
+         "44ce7dd67c959e0d3524ffac1771dfbba87d2b6b4b4e99e42034a8b803f8b072", "auto/s3",
+         "05ba50acfb54042fac330848af50877e5fb477c4f2063c2f77f9cc80855eb1e9"),
+        ("GET", "/hermes-releases",
+         {"list-type": "2", "prefix": "HermesBundled-0.28.0-", "max-keys": "1000"},
+         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "auto/s3",
+         "3ec423c452a318664c85fbcc25667ad07201aedce688e3bb6b345b4baaa39d90"),
+        ("DELETE", "/hermes-releases/HermesBundled-0.28.0+canary.20260818T000000Z-win-arm64.msix", {},
+         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "auto/s3",
+         "40dba7bf7356837cf496d950605dfc2c62d82ca2b30aa45c8c0dc8dab7bc1bd1"),
+    ]
+    for method, path, query, payload, scope, expected in vectors:
+        assert _sigv4_vector_signature(method, path, query, payload, scope) == expected
+
+
+def test_reconcile_sigv4_vectors_recomputes_branded_hexes(tmp_path):
+    """Branded r2 vector rows get their signature hex recomputed in place.
+
+    Branding rewrites the path/query literals (``/hermes-releases`` ->
+    ``/nastech-releases``) but hex constants are not brand tokens, so the
+    precomputed signatures go stale.  Reconcile recomputes each row's
+    signature from the branded inputs; rows with no brand tokens are
+    unchanged, and a second pass is a no-op.
+    """
+    candidate = tmp_path / "candidate"
+    target = candidate / "tests" / "scripts" / "test_release_r2.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        'EMPTY_SHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"\n'
+        "AKID = \"AKIDEXAMPLE\"\n"
+        "SECRET = \"wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY\"\n"
+        "NOW = \"20150830T123600Z\"\n"
+        "@pytest.mark.parametrize('method,path,query,payload,scope,signature', [\n"
+        "    ('GET', '/', {}, EMPTY_SHA, 'us-east-1/service',\n"
+        "     '33399fd3d4a9d6104710c7c04005f7c959f8b1f8bf41b823587ed36b079e453f'),\n"
+        "    ('PUT', '/nastech-releases/NastechBundled-0.28.0-win-x64.msix', {},\n"
+        "     '44ce7dd67c959e0d3524ffac1771dfbba87d2b6b4b4e99e42034a8b803f8b072', 'auto/s3',\n"
+        "     '05ba50acfb54042fac330848af50877e5fb477c4f2063c2f77f9cc80855eb1e9'),\n"
+        "    ('GET', '/nastech-releases', {'list-type': '2', 'prefix': 'NastechBundled-0.28.0-', 'max-keys': '1000'},\n"
+        "     EMPTY_SHA, 'auto/s3', '3ec423c452a318664c85fbcc25667ad07201aedce688e3bb6b345b4baaa39d90'),\n"
+        "    ('DELETE', '/nastech-releases/NastechBundled-0.28.0+canary.20260818T000000Z-win-arm64.msix', {},\n"
+        "     EMPTY_SHA, 'auto/s3', '40dba7bf7356837cf496d950605dfc2c62d82ca2b30aa45c8c0dc8dab7bc1bd1'),\n"
+        "])\n"
+    )
+
+    assert _reconcile_sigv4_vectors(str(candidate)) is True
+    text = target.read_text(encoding="utf-8")
+
+    # GET '/' row has no brand tokens -> stored hex stays valid
+    assert "33399fd3d4a9d6104710c7c04005f7c959f8b1f8bf41b823587ed36b079e453f" in text
+    # branded rows recomputed: PUT / list / DELETE
+    assert "2781cf57ac770a3175ba199468d272af2e0ad1d86ed150fae52cdb04cbd5ef22" in text
+    assert "567516db50bdfecc6b7d2ce91fa5d18be90116a235663f58b313eeaf79314c58" in text
+    assert "257071a42395280668f771db569fafc88aa65b63b16e5e44acc2c4c337d897a1" in text
+    # stale hexes gone
+    assert "05ba50acfb54042fac330848af50877e5fb477c4f2063c2f77f9cc80855eb1e9" not in text
+    assert "3ec423c452a318664c85fbcc25667ad07201aedce688e3bb6b345b4baaa39d90" not in text
+    assert "40dba7bf7356837cf496d950605dfc2c62d82ca2b30aa45c8c0dc8dab7bc1bd1" not in text
+
+    # Idempotent fixed point.
+    assert _reconcile_sigv4_vectors(str(candidate)) is False
+
+
+def test_reconcile_sigv4_vectors_upstream_rows_are_a_noop(tmp_path):
+    """An unskewed (upstream) vector table is already a fixed point."""
+    candidate = tmp_path / "candidate"
+    target = candidate / "tests" / "scripts" / "test_release_r2.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        'EMPTY_SHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"\n'
+        "@pytest.mark.parametrize('method,path,query,payload,scope,signature', [\n"
+        "    ('GET', '/', {}, EMPTY_SHA, 'us-east-1/service',\n"
+        "     '33399fd3d4a9d6104710c7c04005f7c959f8b1f8bf41b823587ed36b079e453f'),\n"
+        "    ('PUT', '/hermes-releases/HermesBundled-0.28.0-win-x64.msix', {},\n"
+        "     '44ce7dd67c959e0d3524ffac1771dfbba87d2b6b4b4e99e42034a8b803f8b072', 'auto/s3',\n"
+        "     '05ba50acfb54042fac330848af50877e5fb477c4f2063c2f77f9cc80855eb1e9'),\n"
+        "])\n"
+    )
+
+    assert _reconcile_sigv4_vectors(str(candidate)) is False
+    text = target.read_text(encoding="utf-8")
+    assert "/hermes-releases/HermesBundled-0.28.0-win-x64.msix" in text
+    assert "05ba50acfb54042fac330848af50877e5fb477c4f2063c2f77f9cc80855eb1e9" in text
