@@ -1772,12 +1772,222 @@ def _reconcile_reasoning_effort_selection(dst: str) -> int:
     if "def _prompt_reasoning_effort_selection(" in text:
         return 0
     anchor = "# ---- END PLUGIN-COMPAT ----\n"
-    if anchor not in text:
-        return 0
-    text = text.replace(anchor, anchor + _REASONING_EFFORT_FORK_BODY, 1)
+    if anchor in text:
+        text = text.replace(anchor, anchor + _REASONING_EFFORT_FORK_BODY, 1)
+    else:
+        # Upstream dropped the PLUGIN-COMPAT anchor; fall back to inserting
+        # the fork-local function at module scope right before ``def main():``
+        # so the preserved fork test can still import the symbol.
+        main_match = re.search(r"(?m)^def main\(", text)
+        if not main_match:
+            return 0
+        body = _REASONING_EFFORT_FORK_BODY
+        if not body.endswith("\n"):
+            body += "\n"
+        text = text[: main_match.start()] + body + text[main_match.start():]
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(text)
     return 1
+
+
+def _reconcile_apt_pool_first_char(dst: str) -> bool:
+    """Fix hardcoded pool first-char dirs left stale by deb-name branding.
+
+    ``scripts/termux/stage_apt_repo.py`` derives a package's pool directory
+    from the first character of the deb filename (``deb.name[0].lower()``).
+    Branding renames the fixture deb names in
+    ``tests/scripts/test_stage_apt_repo.py`` (``hermes-agent_...deb`` ->
+    branded), but the double-quoted single-letter segments in the expected
+    paths (``"h"``) are bare letters and survive branding unchanged.  The
+    branded test then asserts pool paths the script no longer writes.
+
+    Rewrite those literal segments to the first character of the branded deb
+    name they precede (mirroring the runtime derivation), so the tests again
+    assert the layout the script actually produces.  No-op when already
+    consistent, and the result is a fixed point (idempotent).
+    """
+    rel = "tests/scripts/test_stage_apt_repo.py"
+    path = os.path.join(dst, rel)
+    if not os.path.isfile(path):
+        return False
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError:
+        return False
+    deb = r"[A-Za-z0-9][A-Za-z0-9.~+_-]*_[A-Za-z0-9.~+_-]*\.deb"
+
+    def _fix_chain(m: re.Match) -> str:
+        # Path-chain shape:  out / "pool" / "rc.2-v0.21.5" / "h" / "nastech...deb"
+        letter, name = m.group(2), m.group(4)
+        want = name[0].lower()
+        if letter == want:
+            return m.group(0)
+        return f'{m.group(1)}"{want}"{m.group(3)}{m.group(4)}{m.group(5)}'
+
+    def _fix_literal(m: re.Match) -> str:
+        # String-literal shape:  "pool/rc.2-v0.21.5/h/nastech-agent_...deb".
+        # NOTE: no literal slash after "pool" -- the pool first-char segment
+        # may be the FIRST slash after the name ("pool/h/..."), so the single
+        # ``/`` after ``[^"]*`` must be the one that separatesthe letter.
+        letter, name = m.group(2), m.group(3)
+        want = name[1].lower()
+        if letter == want:
+            return m.group(0)
+        return f"{m.group(1)}{want}{m.group(3)}{m.group(4)}"
+
+    changed = re.sub(r'(/ )"([a-z])"( / ")(' + deb + r')(")', _fix_chain, text)
+    changed = re.sub(r'("pool[^"]*/)([a-z])(/' + deb + r')(")', _fix_literal, changed)
+    if changed == text:
+        return False
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(changed)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Fork-preserved skill catalog sync (website/docs/reference/*-catalog.md)
+# ---------------------------------------------------------------------------
+# Upstream's tests/skills/test_skill_docs_contract.py requires every SKILL.md
+# shipped in the tree to have a row in the generated skills catalog and every
+# catalog link to resolve to a real page.  ``preserve_fork_files`` carries
+# fork-only skills (e.g. ``optional-skills/creative/blender-mcp``) into the
+# branded tree, but the catalogs themselves are upstream-owned and know
+# nothing about them.  These helpers add the missing rows + docs pages the way
+# upstream's website/scripts/generate-skill-docs.py would, and return the
+# changed rels so the parity gates treat them as reconciled content.
+
+_FORK_SKILL_MD_RE = re.compile(r"^(skills|optional-skills)/([^/]+)/([^/]+)/SKILL\.md$")
+_CATALOG_ROW_RE = re.compile(
+    r"^\|\s*\[(?:\*\*)?`?([^`*\]]+)`?(?:\*\*)?\]\(([^)]+)\)", re.MULTILINE
+)
+
+
+def _fork_skill_frontmatter(skill_md: str) -> dict:
+    """Read the SKILL.md frontmatter fields we need, stdlib-only."""
+    try:
+        with open(skill_md, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return {}
+    if not lines or lines[0].strip() != "---":
+        return {}
+    out: dict = {}
+    for ln in lines[1:]:
+        if ln.strip() == "---":
+            break
+        key, sep, value = ln.partition(":")
+        if sep:
+            out[key.strip()] = value.strip().strip("'\"")
+    return out
+
+
+def _fork_skill_page_text(skill_md: str) -> str:
+    """Minimal Docusaurus page for a fork skill that ships no docs page."""
+    fm = _fork_skill_frontmatter(skill_md)
+    title = (fm.get("name") or os.path.basename(os.path.dirname(skill_md))).replace('"', "'")
+    description = (fm.get("description") or "").replace('"', "'")
+    return (
+        "---\n"
+        f'title: "{title}"\n'
+        f'description: "{description}"\n'
+        "---\n"
+        "\n"
+        "{/* This page is auto-generated from the skill's SKILL.md by the 100Ways catalog sync. Edit the source SKILL.md, not this page. */}\n"
+        "\n"
+        f"# {title}\n"
+        "\n"
+        f"{description}\n"
+        "\n"
+        "## Reference: full SKILL.md\n"
+        "\n"
+        "The complete skill definition ships in the repository under the skill's directory.\n"
+    )
+
+
+def _insert_catalog_section_row(text: str, category: str, row: str) -> str:
+    """Insert one catalog row into the matching ``## <category>`` table."""
+    lines = text.split("\n")
+    header = f"## {category}"
+    for i, ln in enumerate(lines):
+        if ln.rstrip() == header:
+            for j in range(i + 1, len(lines)):
+                if lines[j].lstrip().startswith("|") and re.fullmatch(
+                    r"\|\s*[-:]+\s*(\|\s*[-:]+\s*)*\|?", lines[j].strip()
+                ):
+                    lines.insert(j + 1, row)
+                    return "\n".join(lines)
+                if lines[j].startswith("## "):
+                    break
+            # Header without a table: create one right below it.
+            lines[i + 1:i + 1] = ["", "| Skill | Description |", "|-------|-------------|", row, ""]
+            return "\n".join(lines)
+    block = [header, "", "| Skill | Description |", "|-------|-------------|", row, ""]
+    contrib = next((k for k, ln in enumerate(lines) if ln.startswith("## Contributing")), None)
+    if contrib is not None:
+        lines[contrib:contrib] = block + [""]
+        return "\n".join(lines)
+    return "\n".join(lines).rstrip("\n") + "\n" + "\n".join(block) + "\n"
+
+
+def _reconcile_fork_skill_catalogs(dst: str, preserved: list[str]) -> list[str]:
+    """Add catalog rows (and pages, when missing) for fork-preserved skills.
+
+    Returns the repo-relative paths changed, so the caller can register them
+    with ``verify_branded`` / ``compare_trees`` as reconciled content.
+    """
+    changed: list[str] = []
+    for rel in preserved or []:
+        m = _FORK_SKILL_MD_RE.match(rel)
+        if not m:
+            continue
+        kind, category, slug = m.group(1), m.group(2), m.group(3)
+        bundle = "bundled" if kind == "skills" else "optional"
+        catalog_rel = f"website/docs/reference/{kind}-catalog.md"
+        catalog_path = os.path.join(dst, catalog_rel)
+        if not os.path.isfile(catalog_path):
+            continue
+        try:
+            text = open(catalog_path, encoding="utf-8").read()
+        except OSError:
+            continue
+        if slug in dict(_CATALOG_ROW_RE.findall(text)):
+            continue
+        page_id = f"{category}-{slug}"
+        page_dir = os.path.join(dst, "website", "docs", "user-guide",
+                                "skills", bundle, category)
+        canonical = os.path.join(page_dir, f"{page_id}.md")
+        if os.path.isfile(canonical):
+            page_name = f"{page_id}.md"
+        else:
+            page_name = ""
+            if os.path.isdir(page_dir):
+                for name in sorted(os.listdir(page_dir)):
+                    if name.endswith(".md") and name.rsplit(".", 1)[0] == page_id:
+                        page_name = name
+                        break
+        if page_name:
+            link = f"../user-guide/skills/{bundle}/{category}/{page_name}"
+        else:
+            # The fork ships no docs page for this skill; create the
+            # generator-convention page from the SKILL.md frontmatter.
+            os.makedirs(page_dir, exist_ok=True)
+            with open(canonical, "w", encoding="utf-8") as fh:
+                fh.write(_fork_skill_page_text(os.path.join(dst, rel)))
+            page_rel = f"website/docs/user-guide/skills/{bundle}/{category}/{page_id}.md"
+            if page_rel not in changed:
+                changed.append(page_rel)
+            link = f"../user-guide/skills/{bundle}/{category}/{page_id}.md"
+        desc = (_fork_skill_frontmatter(os.path.join(dst, rel)).get("description") or "").strip()
+        if len(desc) > 240:
+            desc = desc[:237].rstrip() + "..."
+        desc_esc = desc.replace("|", "\\|").replace("\n", " ")
+        row = f"| [**{slug}**]({link}) | {desc_esc} |"
+        text = _insert_catalog_section_row(text, category, row)
+        with open(catalog_path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        if catalog_rel not in changed:
+            changed.append(catalog_rel)
+    return changed
 
 
 # ---------------------------------------------------------------------------
@@ -2084,6 +2294,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_reasoning_effort_selection(dst):
         result.total += 1
         result.fixed.append("nastech_cli/main.py")
+    if _reconcile_apt_pool_first_char(dst):
+        result.total += 1
+        result.fixed.append("tests/scripts/test_stage_apt_repo.py")
     if _reconcile_project_identity_width(dst):
         result.total += 1
         result.fixed.append("ui-tui/src/domain/paths.ts")
@@ -2595,7 +2808,7 @@ class UpdateManager:
             if self.owned and self.owned.count and os.path.isdir(self.owned.root):
                 registry_dest = os.path.join(dest, "config", "owned-assets")
                 shutil.copytree(self.owned.root, registry_dest, dirs_exist_ok=True)
-            return preserve_fork_files(
+            preserved = preserve_fork_files(
                 self.fork_root,
                 dest,
                 src,
@@ -2604,6 +2817,19 @@ class UpdateManager:
                 owned_paths=set(self.owned.mapping) if self.owned else set(),
                 allow_unclassified_fork_files=bool(baseline_sha),
             )
+            # Fork-preserved skills are invisible to the upstream-derived skill
+            # catalogs; re-sync the catalogs so the docs-contract tests pass,
+            # and register the changed files with the parity gates so they are
+            # compared against this reconciled content, not the raw transform.
+            for rel in _reconcile_fork_skill_catalogs(dest, preserved):
+                rel_path = os.path.join(dest, rel)
+                if os.path.isfile(rel_path):
+                    try:
+                        with open(rel_path, "rb") as fh:
+                            reconciled_map[rel] = fh.read()
+                    except OSError:
+                        pass
+            return preserved
         stage(
             "preserve",
             _preserve,
