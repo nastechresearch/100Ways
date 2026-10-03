@@ -2,9 +2,11 @@
 
 Every way is a real, named approach to one of the ten problems the sync
 engine must solve.  The engine picks one active way per category; the CLI
-(``100ways ways list|show|pick``) explores them and lets you switch strategy
-without changing code.  The count is a product promise, not a gimmick: each
-entry names a genuinely different method with its own tradeoffs.
+(``100ways ways list|show|count|defaults|coverage``) explores them, and
+``ways coverage`` resolves each way's ``uses=`` against the live engine so
+the catalog can never claim more than the engine really implements.  The
+count is a product promise, not a gimmick: each entry names a genuinely
+different method with its own tradeoffs.
 """
 
 from __future__ import annotations
@@ -18,13 +20,13 @@ class Way:
     name: str
     category: str      # detect | diff | brand | scan | verify | port | research | notify | gate | watch
     description: str
-    uses: str = ""     # what engine function consumes this way
+    uses: str = ""     # engine symbol that implements this way (checked by `ways coverage`)
     default: bool = False
 
 
 WAYS: list[Way] = [
     # ---- detect: how we know upstream moved --------------------------------
-    Way("detect.poll", "Polling loop", "detect", "git fetch upstream && rev-parse HEAD every cycle", uses="Watcher.cycle", default=True),
+    Way("detect.poll", "Polling loop", "detect", "git fetch upstream && rev-parse HEAD every cycle", uses="watcher.Watcher.cycle", default=True),
     Way("detect.webhook", "Push webhook", "detect", "upstream push event hits a local endpoint, triggers one cycle"),
     Way("detect.ssh-hook", "Remote post-merge hook", "detect", "post-merge hook in the upstream checkout fires the check"),
     Way("detect.crontab", "System crontab", "detect", "cron line runs the one-shot check on a schedule"),
@@ -46,16 +48,16 @@ WAYS: list[Way] = [
     Way("diff.first-parent", "First-parent walk", "diff", "step along the first-parent chain, diffing each hop"),
     Way("diff.cat-file", "Batch blob read", "diff", "git cat-file --batch for fast raw byte reads", uses="verify._blob"),
     # ---- brand: how we rewrite hermes into nastech --------------------------
-    Way("brand.token-regex", "Anchored token regex", "brand", "word-boundary anchored token replacement", uses="rules.transform_text", default=True),
+    Way("brand.token-regex", "Anchored token regex", "brand", "word-boundary anchored token replacement", uses="rules.BrandingRules.transform_text", default=True),
     Way("brand.compound-first", "Compounds before short forms", "brand", "longest match tokens listed first so hermes-agent beats hermes", uses="rules.DEFAULT_TOKENS"),
-    Way("brand.path-mapper", "Path remapping", "brand", "transform tree paths separately from file content", uses="rules.transform_path"),
+    Way("brand.path-mapper", "Path remapping", "brand", "transform tree paths separately from file content", uses="rules.BrandingRules.transform_path"),
     Way("brand.locked-assets", "Rename-only assets", "brand", "binary/lockfile paths renamed but never content-rewritten", uses="rules.is_locked_path"),
     Way("brand.gitattributes", "Git rename detection", "brand", "let git detect renames; brand only the content side"),
-    Way("brand.template-graft", "Template graft", "brand", "swap in whole nastech templates for known upstream files"),
+    Way("brand.template-graft", "Template graft", "brand", "swap in whole nastech templates for known upstream files", uses="updates.apply_owned_assets"),
     Way("brand.sed-port", "Stream-edit patch", "brand", "rewrite patch text before applying", uses="port._rebrand_patch"),
     Way("brand.symlink-shim", "Legacy symlinks", "brand", "keep branded names, symlink old names for compat"),
     Way("brand.import-only", "Namespace import rewrite", "brand", "rewrite import statements only, leave prose alone"),
-    Way("brand.resource-map", "Resource swap table", "brand", "map upstream icons/labels/frames to nastech equivalents"),
+    Way("brand.resource-map", "Resource swap table", "brand", "map upstream icons/labels/frames to nastech equivalents", uses="updates.apply_owned_assets"),
     # ---- scan: how we identify file types -----------------------------------
     Way("scan.magic-bytes", "Magic-byte signatures", "scan", "identify format from leading bytes, not extension", uses="scanner.detect", default=True),
     Way("scan.extension-hint", "Extension fallback", "scan", "use the extension when magic bytes are ambiguous", uses="scanner.classify_path"),
@@ -90,7 +92,7 @@ WAYS: list[Way] = [
     Way("port.merge-overlay", "Merge + branded overlay", "port", "merge upstream, keep a branded overlay branch on top"),
     Way("port.prune-empty", "Prune empty ports", "port", "drop commits with no net change after branding"),
     # ---- research: how we find open-source ideas ------------------------------
-    Way("research.github-code", "GitHub code search", "research", "search upstream code for hermes token usage", uses="research.search_repos", default=True),
+    Way("research.github-code", "GitHub code search", "research", "search upstream code for hermes token usage", uses="research.search_github", default=True),
     Way("research.topics", "GitHub topic search", "research", "search fork-sync and rebrand topics"),
     Way("research.npm-search", "npm registry search", "research", "find JS-side tooling alternatives"),
     Way("research.pypi-search", "PyPI search", "research", "find Python sync/rebrand libraries"),
@@ -101,8 +103,8 @@ WAYS: list[Way] = [
     Way("research.history-archaeology", "Commit archaeology", "research", "upstream history reveals the rename patterns they used"),
     Way("research.issue-mine", "Issue mining", "research", "GitHub issues mentioning the fork or rebrand"),
     # ---- notify: how we surface events ----------------------------------------
-    Way("notify.telegram", "Telegram bot", "notify", "sendMessage to a chat via bot token", uses="notifier._telegram", default=True),
-    Way("notify.agent", "Agent prompt hook", "notify", "pipe a prompt to the opencode agent", uses="notifier._agent"),
+    Way("notify.telegram", "Telegram bot", "notify", "sendMessage to a chat via bot token", uses="notifier.Notifier._telegram", default=True),
+    Way("notify.agent", "Agent prompt hook", "notify", "pipe a prompt to the opencode agent", uses="notifier.Notifier._agent"),
     Way("notify.desktop", "Desktop notification", "notify", "notify-send / osascript alert"),
     Way("notify.bell", "Terminal cue", "notify", "visual/audible bell in the terminal"),
     Way("notify.markdown-file", "Markdown report", "notify", "append a report to a docs file"),
@@ -110,10 +112,10 @@ WAYS: list[Way] = [
     Way("notify.email", "SMTP digest", "notify", "send an email summary"),
     Way("notify.chat-hook", "Chat webhook", "notify", "matrix/discord/slack webhook with markdown"),
     Way("notify.exec", "User command", "notify", "exec a user-provided command with the event in argv/stdin"),
-    Way("notify.log", "JSONL event log", "notify", "append structured events to a JSONL file", uses="watcher._save_state"),
+    Way("notify.log", "JSONL event log", "notify", "append structured events to a JSONL file", uses="watcher.Watcher._save_state"),
     # ---- gate: how we decide a port ships --------------------------------------
     Way("gate.threshold", "Parity threshold", "gate", "pass_ratio must exceed N (0.99)", uses="verify.gate_passes", default=True),
-    Way("gate.zero-fail", "Zero hard failures", "gate", "no failed files regardless of ratio"),
+    Way("gate.zero-fail", "Zero hard failures", "gate", "no failed files regardless of ratio", uses="verify.gate_passes"),
     Way("gate.locked-review", "Locked-file sign-off", "gate", "every locked-file diff needs explicit operator review"),
     Way("gate.violation-block", "Violation block", "gate", "any brand violation blocks the port"),
     Way("gate.dry-run", "Report only", "gate", "never write; produce the plan", uses="port.port_commits.dry_run"),
@@ -123,14 +125,14 @@ WAYS: list[Way] = [
     Way("gate.cache-guard", "Prompt-cache guard", "gate", "block ports that would break conversation prompt caching"),
     Way("gate.rollback-ready", "Rollback ref", "gate", "keep last_good so any gate failure reverts cleanly", uses="port._port_one"),
     # ---- watch: how we run the loop --------------------------------------------
-    Way("watch.loop", "Sleep loop", "watch", "poll, sleep interval, repeat", uses="watcher.watch", default=True),
+    Way("watch.loop", "Sleep loop", "watch", "poll, sleep interval, repeat", uses="watcher.Watcher.watch", default=True),
     Way("watch.callback", "Event callbacks", "watch", "fire a callback per event, no polling"),
-    Way("watch.batch", "Bounded cycles", "watch", "run N cycles then exit (tests, ci)", uses="watcher.watch.max_cycles"),
+    Way("watch.batch", "Bounded cycles", "watch", "run N cycles then exit (tests, ci)", uses="watcher.Watcher.watch.max_cycles"),
     Way("watch.supervisor", "Supervised process", "watch", "run under a supervisor that restarts on crash"),
     Way("watch.daemon", "Pidfile daemon", "watch", "long-lived process with a pidfile and signal handling"),
-    Way("watch.one-shot", "Single check", "watch", "check once and exit (cron, hooks)", uses="watcher.check_once"),
+    Way("watch.one-shot", "Single check", "watch", "check once and exit (cron, hooks)", uses="watcher.Watcher.check_once"),
     Way("watch.cadence", "Adaptive cadence", "watch", "interval grows when idle, shrinks right after a change"),
-    Way("watch.stateful", "Stateful resume", "watch", "persist last-seen heads so restarts don't re-notify", uses="watcher._save_state"),
+    Way("watch.stateful", "Stateful resume", "watch", "persist last-seen heads so restarts don't re-notify", uses="watcher.Watcher._save_state"),
     Way("watch.fanout", "Multi-repo fan-out", "watch", "run cycles in parallel across many repos"),
     Way("watch.maintenance", "Self-maintaining", "watch", "prune state and logs each cycle"),
     # ---- detect (second decade): how we know upstream moved --------------------
@@ -156,16 +158,16 @@ WAYS: list[Way] = [
     Way("diff.renames-only", "Rename-only diff", "diff", "diff with -M to surface pure renames before content edits"),
     Way("diff.binary-skip", "Binary-safe diff", "diff", "skip binary paths when computing numeric diffs"),
     # ---- brand (second decade): how we rewrite hermes into nastech -------------
-    Way("brand.case-first", "Case-preserving cascade", "brand", "try compound, then title, then lowercase per token"),
-    Way("brand.regex-catalog", "Regex catalog", "brand", "hand-written regexes for tricky context-dependent tokens"),
-    Way("brand.dotenv-map", "Dotenv key map", "brand", "rename HERMES_* env keys and their default-value mirrors"),
-    Way("brand.json-config", "Config-file rewrite", "brand", "walk JSON/YAML config and rename keys + string values"),
-    Way("brand.cli-name", "CLI argv rebrand", "brand", "rewrite subcommand/flag strings inside code and docs"),
-    Way("brand.url-sweep", "URL/domain sweep", "brand", "rebrand all https links and repo paths in text"),
+    Way("brand.case-first", "Case-preserving cascade", "brand", "try compound, then title, then lowercase per token", uses="rules.DEFAULT_TOKENS"),
+    Way("brand.regex-catalog", "Regex catalog", "brand", "hand-written regexes for tricky context-dependent tokens", uses="rules.BrandingRules.transform_text"),
+    Way("brand.dotenv-map", "Dotenv key map", "brand", "rename HERMES_* env keys and their default-value mirrors", uses="rules.BrandingRules.transform_text"),
+    Way("brand.json-config", "Config-file rewrite", "brand", "walk JSON/YAML config and rename keys + string values", uses="rules.BrandingRules.transform_text"),
+    Way("brand.cli-name", "CLI argv rebrand", "brand", "rewrite subcommand/flag strings inside code and docs", uses="rules.BrandingRules.transform_text"),
+    Way("brand.url-sweep", "URL/domain sweep", "brand", "rebrand all https links and repo paths in text", uses="rules.BrandingRules.transform_text"),
     Way("brand.shell-alias", "Shell alias shim", "brand", "install nastech aliases that still resolve hermes names"),
-    Way("brand.pkg-meta", "Package metadata rebrand", "brand", "rewrite pyproject/package.json name, desc, URLs"),
-    Way("brand.banner-text", "Banner/branding text", "brand", "swap terminal banner art and product string literals"),
-    Way("brand.logo-copy", "Logo byte copy", "brand", "copy the canonical nastech logo over upstream art files"),
+    Way("brand.pkg-meta", "Package metadata rebrand", "brand", "rewrite pyproject/package.json name, desc, URLs", uses="rules.transform_strict_metadata_text"),
+    Way("brand.banner-text", "Banner/branding text", "brand", "swap terminal banner art and product string literals", uses="rules.BrandingRules.transform_text"),
+    Way("brand.logo-copy", "Logo byte copy", "brand", "copy the canonical nastech logo over upstream art files", uses="updates.apply_owned_assets"),
     # ---- scan (second decade): how we identify file types ----------------------
     Way("scan.xml-hint", "XML prolog probe", "scan", "recognize XML docs via the <?xml prolog before extension"),
     Way("scan.json-decode", "Strict JSON probe", "scan", "try json.loads to confirm a text file is JSON"),
@@ -222,7 +224,7 @@ WAYS: list[Way] = [
     Way("notify.tail", "Tail recap", "notify", "append a short recap line to a running log stream"),
     Way("notify.atom", "Atom feed publish", "notify", "emit the report as a new entry in a local atom feed"),
     # ---- gate (second decade): how we decide a port ships ------------------------
-    Way("gate.everything-green", "All-green gate", "gate", "every file must pass before anything ships"),
+    Way("gate.everything-green", "All-green gate", "gate", "every file must pass before anything ships", uses="verify.gate_passes"),
     Way("gate.ratio-only", "Ratio-only gate", "gate", "gate on the parity ratio alone, tolerate small drift"),
     Way("gate.since-birth", "Birth-commit gate", "gate", "prove parity against the birth commit each cycle"),
     Way("gate.locked-unchanged", "Locked immutable", "gate", "locked files must be byte-identical to their twin"),
