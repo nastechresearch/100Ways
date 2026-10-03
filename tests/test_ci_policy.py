@@ -109,13 +109,18 @@ def test_stage_pipeline_requires_final_conformance_and_candidate_tests_before_re
     assert first_conformance < candidate_tests < post_test_conformance < receipt
     assert "./scripts/run_tests.sh" in workflow
     assert 'cp -a "$SNAPSHOT" "$TEST_TREE"' in workflow
-    assert "uv sync --locked --python 3.14" in workflow
-    assert "uv sync --locked --python 3.11" not in workflow
+    # The candidate suite must run under the fork's own pm test environment -
+    # the same harness upstream CI runs its suite under - and never through a
+    # checkout-local re-exec: a locked, pinned toolchain via the tree's
+    # stdlib-only setup script, a locked test environment with a fixed extras
+    # list, and NASTECH_PYTHON so run_tests.sh honors the pm interpreter
+    # directly.
+    assert "scripts/ci/setup_toolchain.py" in workflow
+    assert "--test-environment" in workflow
+    assert "NASTECH_PYTHON" in workflow
     assert "--extra hindsight" not in workflow
     assert "--extra dev" not in workflow
-    assert "astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39" in workflow
     assert "RG_SHA256=1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599" in workflow
-    assert "source .venv/bin/activate" in workflow
 
 
 def test_weekly_gate_uses_immutable_update_source_sha():

@@ -13,8 +13,11 @@ from hundredways.updates import (
     STAGES,
     UpdateManager,
     _reconcile_anon_surface_copy,
+    _reconcile_apt_pool_first_char,
     _reconcile_credential_display_test,
     _reconcile_desktop_export_order,
+    _reconcile_docs_posix_separators,
+    _reconcile_fork_skill_catalogs,
     _reconcile_portal_override_test_collision,
     _reconcile_reasoning_effort_selection,
     _reconcile_sigv4_vectors,
@@ -1130,6 +1133,268 @@ def test_reconcile_reasoning_effort_selection(tmp_path):
     )
     # Idempotent.
     assert _reconcile_reasoning_effort_selection(str(candidate)) == 0
+
+
+def test_reconcile_reasoning_effort_selection_falls_back_before_main_def(tmp_path):
+    """When the PLUGIN-COMPAT anchor is gone, graft before ``def main():``.
+
+    Upstream dropped the anchor that the graft used to key on, so the fork's
+    preserved curses-migration test could no longer import the symbol.  The
+    fallback inserts the module-scope function right before ``def main():``.
+    """
+    candidate = tmp_path / "candidate"
+    target = candidate / "nastech_cli" / "main.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        'import sys\n\n'
+        'CONST = 1\n\n\n'
+        'def helper():\n'
+        '    return 2\n\n\n'
+        'def main():\n'
+        '    print("hi")\n',
+        encoding="utf-8",
+    )
+
+    assert _reconcile_reasoning_effort_selection(str(candidate)) == 1
+    updated = target.read_text(encoding="utf-8")
+    assert 'def _prompt_reasoning_effort_selection(efforts, current_effort=""):' in updated
+    # The graft lands at module scope, before main, not inside helper().
+    assert updated.index("def _prompt_reasoning_effort_selection(") > updated.index("def helper()")
+    assert updated.index("def _prompt_reasoning_effort_selection(") < updated.index("def main():")
+    # Idempotent.
+    assert _reconcile_reasoning_effort_selection(str(candidate)) == 0
+
+
+def test_reconcile_apt_pool_first_char_rewrites_stale_pool_dirs(tmp_path):
+    """Branded deb names leave the test's hardcoded first-char pool dir stale.
+
+    ``scripts/termux/stage_apt_repo.py`` derives the pool directory from
+    ``deb.name[0].lower()``; branding renames the fixture deb but not the
+    single-letter ``"h"`` literal in the expected paths.  The reconcile
+    rewrites those literals to the branded package's first character, exactly
+    mirroring the runtime derivation, and never touches consistent rows.
+    """
+    candidate = tmp_path / "candidate"
+    target = candidate / "tests" / "scripts" / "test_stage_apt_repo.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        'def _stage(pool, out, suite, pool_subdir=""):\n'
+        '    return 3\n'
+        '\n'
+        'def _pool_keys(out, suite):\n'
+        '    return set()\n'
+        '\n'
+        'def test_pool_subdir_is_in_the_path_and_the_index(tmp_path):\n'
+        '    make_deb(pool / "nastech-agent_0.21.5_aarch64.deb", "nastech-agent", "0.21.5-1")\n'
+        '    assert _stage(pool, out, "nastech-stable", pool_subdir="rc.2-v0.21.5") == 3\n'
+        '    deb = out / "pool" / "rc.2-v0.21.5" / "h" / "nastech-agent_0.21.5_aarch64.deb"\n'
+        '    assert deb.is_file()\n'
+        '    assert _pool_keys(out, "nastech-stable") == {"pool/rc.2-v0.21.5/h/nastech-agent_0.21.5_aarch64.deb"}\n'
+        '\n'
+        'def test_no_pool_subdir_keeps_the_plain_layout(tmp_path):\n'
+        '    make_deb(pool / "nastech-agent_1.2.3_aarch64.deb", "nastech-agent", "1.2.3-1")\n'
+        '    assert (out / "pool" / "h" / "nastech-agent_1.2.3_aarch64.deb").is_file()\n'
+        '    assert _pool_keys(out, "nastech-canary") == {"pool/h/nastech-agent_1.2.3_aarch64.deb"}\n'
+        '\n'
+        'def test_two_attempts_of_one_version_use_different_pool_keys(tmp_path):\n'
+        '    keys = {"pool/rc.1-v0.21.5/h/nastech-agent_0.21.5_aarch64.deb",\n'
+        '            "pool/rc.2-v0.21.5/h/nastech-agent_0.21.5_aarch64.deb"}\n'
+        '    assert {k.split("/")[1] for k in keys} == {"rc.1-v0.21.5", "rc.2-v0.21.5"}\n',
+        encoding="utf-8",
+    )
+
+    assert _reconcile_apt_pool_first_char(str(candidate)) is True
+    updated = target.read_text(encoding="utf-8")
+    # The stale "h" literals all become the branded package's first char.
+    assert 'out / "pool" / "rc.2-v0.21.5" / "n" / "nastech-agent_0.21.5_aarch64.deb"' in updated
+    assert '{"pool/rc.2-v0.21.5/n/nastech-agent_0.21.5_aarch64.deb"}' in updated
+    assert '(out / "pool" / "n" / "nastech-agent_1.2.3_aarch64.deb").is_file()' in updated
+    assert '{"pool/n/nastech-agent_1.2.3_aarch64.deb"}' in updated
+    # The attempt-ref test only reads index 1, so its subdir literals stand.
+    assert 'k.split("/")[1]' in updated
+    # Idempotent: the second call is a fixed-point no-op.
+    assert _reconcile_apt_pool_first_char(str(candidate)) is False
+
+
+def test_reconcile_apt_pool_first_char_noops_on_consistent_rows(tmp_path):
+    """Files whose pool dir already matches the deb's first char stay untouched."""
+    candidate = tmp_path / "candidate"
+    target = candidate / "tests" / "scripts" / "test_stage_apt_repo.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        '    deb = out / "pool" / "rc.2-v0.21.5" / "n" / "nastech-agent_0.21.5_aarch64.deb"\n'
+        '    assert _pool_keys(out, "nastech-stable") == {"pool/rc.2-v0.21.5/n/nastech-agent_0.21.5_aarch64.deb"}\n'
+        '    make_deb(pool / "a.deb", "alpha", "1.0-1")\n'
+        '    copied = out / "pool" / "a" / "a.deb"\n',
+        encoding="utf-8",
+    )
+    before = target.read_text(encoding="utf-8")
+    assert _reconcile_apt_pool_first_char(str(candidate)) is False
+    assert target.read_text(encoding="utf-8") == before
+
+
+def test_reconcile_fork_skill_catalogs_adds_row_and_resolves_link(tmp_path):
+    """Fork-preserved skills invisible to the upstream catalog get a row.
+
+    The upstream docs-contract test requires every shipped SKILL.md to have a
+    catalog row whose link resolves.  A fork-only optional skill (blender-mcp)
+    is preserved into the tree but absent from the upstream-derived catalog;
+    the reconcile appends its row and links to the fork's existing docs page.
+    """
+    candidate = tmp_path / "candidate"
+    cat = candidate / "website" / "docs" / "reference" / "optional-skills-catalog.md"
+    cat.parent.mkdir(parents=True)
+    cat.write_text(
+        "---\n"
+        "title: Optional Skills Catalog\n"
+        "---\n"
+        "\n"
+        "# Optional Skills Catalog\n"
+        "\n"
+        "## creative\n"
+        "\n"
+        "| Skill | Description |\n"
+        "|-------|-------------|\n"
+        "| [**canvas-design**](../user-guide/skills/optional/creative/creative-canvas-design.md) | Design art. |\n",
+        encoding="utf-8",
+    )
+    skill = candidate / "optional-skills" / "creative" / "blender-mcp" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\n"
+        "name: blender-mcp\n"
+        "description: Drive Blender via the catalog blender MCP, with bpy recipes.\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    fork_page = (
+        candidate / "website" / "docs" / "user-guide" / "skills" / "optional" / "creative"
+        / "creative-blender-mcp.md"
+    )
+    fork_page.parent.mkdir(parents=True)
+    fork_page.write_text("# Blender MCP\n", encoding="utf-8")
+
+    changed = _reconcile_fork_skill_catalogs(
+        str(candidate), ["optional-skills/creative/blender-mcp/SKILL.md"]
+    )
+    assert changed == ["website/docs/reference/optional-skills-catalog.md"]
+    updated = cat.read_text(encoding="utf-8")
+    assert "| [**blender-mcp**](../user-guide/skills/optional/creative/creative-blender-mcp.md) | Drive Blender via the catalog blender MCP, with bpy recipes. |" in updated
+    # Existing rows stay in place.
+    assert "| [**canvas-design**]" in updated
+    # New rows land inside the matching ## creative section.
+    assert updated.index("## creative") < updated.index("blender-mcp")
+    # Idempotent.
+    assert (
+        _reconcile_fork_skill_catalogs(
+            str(candidate), ["optional-skills/creative/blender-mcp/SKILL.md"]
+        )
+        == []
+    )
+
+
+def test_reconcile_fork_skill_catalogs_creates_missing_page(tmp_path):
+    """A fork skill with no docs page gets the generator-convention page."""
+    candidate = tmp_path / "candidate"
+    cat = candidate / "website" / "docs" / "reference" / "optional-skills-catalog.md"
+    cat.parent.mkdir(parents=True)
+    cat.write_text(
+        "# Optional Skills Catalog\n\n## tts\n\n| Skill | Description |\n|-------|-------------|\n",
+        encoding="utf-8",
+    )
+    skill = candidate / "optional-skills" / "tts" / "nastech-voice" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nname: nastech-voice\ndescription: Voice output for agents.\n---\n",
+        encoding="utf-8",
+    )
+
+    changed = _reconcile_fork_skill_catalogs(str(candidate), ["optional-skills/tts/nastech-voice/SKILL.md"])
+    page = candidate / "website" / "docs" / "user-guide" / "skills" / "optional" / "tts" / "tts-nastech-voice.md"
+    assert page.is_file()
+    assert "website/docs/user-guide/skills/optional/tts/tts-nastech-voice.md" in changed
+    updated = cat.read_text(encoding="utf-8")
+    assert "tts-nastech-voice.md" in updated
+    assert "Voice output for agents." in updated
+    # Links resolve relative to the catalog file.
+    assert (
+        "| [**nastech-voice**](../user-guide/skills/optional/tts/tts-nastech-voice.md)" in updated
+    )
+
+
+def test_reconcile_docs_posix_separators_normalizes_preserved_pages_and_catalogs(tmp_path):
+    """A fork-preserved Windows-generated docs page is normalized in place.
+
+    The docs-contract suite fails any generated page or catalog whose ``Path``
+    row or relative ``.md`` link carries a backslash -- the signature of an
+    artifact committed from a Windows host.  The fork preserves such a page
+    byte-for-byte; the reconcile rewrites only the two flagged contexts and
+    leaves every other byte (including literal ``\\n`` escapes in prose)
+    untouched, and a second pass is a no-op.
+    """
+    candidate = tmp_path / "candidate"
+    page_rel = (
+        "website/docs/user-guide/skills/bundled/autonomous-ai-agents/"
+        "autonomous-ai-agents-merge-reconciler.md"
+    )
+    page = candidate / page_rel
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        "| Path | `skills/autonomous-ai-agents\\merge-reconciler` |\n"
+        "- [blender](../user-guide/skills/optional/creative\\creative-blender-mcp.md)\n"
+        "# prose keeping a literal escape \\n must survive untouched\n",
+        encoding="utf-8",
+    )
+    catalog_rel = "website/docs/reference/optional-skills-catalog.md"
+    catalog = candidate / catalog_rel
+    catalog.parent.mkdir(parents=True)
+    catalog.write_text(
+        "## creative\n\n"
+        "| Skill | Description |\n"
+        "|-------|-------------|\n"
+        "| [**x**](../user-guide/skills/optional/creative\\x.md) | a |\n"
+        "| Path | `skills/optional/creative\\x` |\n",
+        encoding="utf-8",
+    )
+
+    changed = _reconcile_docs_posix_separators(str(candidate), [page_rel])
+
+    assert sorted(changed) == sorted([page_rel, catalog_rel])
+    page_text = page.read_text(encoding="utf-8")
+    assert "skills/autonomous-ai-agents/merge-reconciler" in page_text
+    assert "optional/creative/creative-blender-mcp.md" in page_text
+    assert "skills/autonomous-ai-agents\\merge-reconciler" not in page_text
+    assert "creative\\creative-blender-mcp.md" not in page_text
+    # A literal escape in prose is not a flagged context and must survive.
+    assert "# prose keeping a literal escape \\n must survive untouched" in page_text
+    catalog_text = catalog.read_text(encoding="utf-8")
+    assert "optional/creative/x.md" in catalog_text
+    assert "skills/optional/creative/x" in catalog_text
+    assert "\\" not in catalog_text
+    # Idempotent.
+    assert _reconcile_docs_posix_separators(str(candidate), [page_rel]) == []
+
+
+def test_reconcile_docs_posix_separators_scopes_to_preserved_pages_and_catalogs(tmp_path):
+    """Upstream-branded pages are never rewritten; catalogs always are.
+
+    Preserved pages are the drift source (a fork inherits stale Windows
+    artifacts); an upstream page is regenerated by upstream CI on Linux and is
+    already clean.  Only preserved skill pages and the two reference catalogs
+    are in scope.
+    """
+    candidate = tmp_path / "candidate"
+    stale_upstream = (
+        candidate
+        / "website" / "docs" / "user-guide" / "skills" / "bundled" / "other" / "other.md"
+    )
+    stale_upstream.parent.mkdir(parents=True)
+    stale_upstream.write_text("| Path | `skills/other\\stale` |\n", encoding="utf-8")
+
+    changed = _reconcile_docs_posix_separators(str(candidate), [])
+
+    assert changed == []
+    assert "skills/other\\stale" in stale_upstream.read_text(encoding="utf-8")
 
 
 def test_reconcile_uv_lock_rewrites_misaki_source_to_the_fork(tmp_path):
