@@ -220,6 +220,7 @@ jobs:
             --source "$HUNDREDWAYS_UPDATES_DIR/hermes-agent" \
             --candidate "$SNAPSHOT" \
             --owned-assets-root "$GITHUB_WORKSPACE/config/owned-assets" \
+            --fork-root nastech-agent \
             --output "$HUNDREDWAYS_CONFORMANCE"
           echo "conformance=PASS" >> "$GITHUB_OUTPUT"
           echo "- Final branded-tree conformance: **PASS**" >> "$GITHUB_STEP_SUMMARY"
@@ -545,6 +546,7 @@ jobs:
             --source "$HUNDREDWAYS_UPDATES_DIR/hermes-agent" \
             --candidate "$SNAPSHOT" \
             --owned-assets-root "$GITHUB_WORKSPACE/config/owned-assets" \
+            --fork-root nastech-agent \
             --output "$HUNDREDWAYS_POST_TEST_CONFORMANCE"
           echo "- Post-test candidate conformance: **PASS**" >> "$GITHUB_STEP_SUMMARY"
 

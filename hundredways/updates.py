@@ -1991,6 +1991,68 @@ def _reconcile_fork_skill_catalogs(dst: str, preserved: list[str]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Generated-docs POSIX separator reconcile (test_skill_docs_contract.py)
+# ---------------------------------------------------------------------------
+# The docs contract fails any generated page or catalog whose ``Path`` row or
+# relative ``.md`` link carries a Windows backslash -- the signature of an
+# artifact committed from a Windows host instead of regenerated.  A fork that
+# inherited such a page preserves it byte-for-byte into the candidate, so the
+# suite would flag the branded run.  Regexes mirror the contract test exactly;
+# only the two flagged contexts are rewritten, every other byte is untouched,
+# and a second pass is a no-op.
+
+_DOCS_CATALOG_RELS = (
+    "website/docs/reference/skills-catalog.md",
+    "website/docs/reference/optional-skills-catalog.md",
+)
+_DOCS_PATH_ROW_RE = re.compile(r"^\|\s*Path\s*\|\s*`([^`]+)`", re.MULTILINE)
+_DOCS_MD_LINK_RE = re.compile(r"\]\((\.[^)]+\.md)(?:#[^)]*)?\)")
+
+
+def _posix_normalize_doc_text(text: str) -> str:
+    """Rewrite Windows separators inside the flagged doc contexts only."""
+    def _to_posix(match: re.Match) -> str:
+        return match.group(0).replace("\\", "/")
+    text = _DOCS_PATH_ROW_RE.sub(_to_posix, text)
+    return _DOCS_MD_LINK_RE.sub(_to_posix, text)
+
+
+def _reconcile_docs_posix_separators(dst: str, preserved: list[str]) -> list[str]:
+    """Normalize Windows separators in preserved skill docs and both catalogs.
+
+    Returns the repo-relative paths changed, so the caller can register them
+    with ``verify_branded`` / ``compare_trees`` as reconciled content.
+    """
+    changed: list[str] = []
+    targets: list[str] = []
+    for rel in preserved or []:
+        if rel.startswith("website/docs/user-guide/skills/") and rel.endswith(".md"):
+            targets.append(rel)
+    for catalog in _DOCS_CATALOG_RELS:
+        if catalog not in targets:
+            targets.append(catalog)
+    for rel in sorted(targets):
+        path = os.path.join(dst, rel)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        fixed = _posix_normalize_doc_text(text)
+        if fixed == text:
+            continue
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(fixed)
+        except OSError:
+            continue
+        changed.append(rel)
+    return changed
+
+
+# ---------------------------------------------------------------------------
 # SigV4 vector reconcile (tests/scripts/test_release_r2.py)
 # ---------------------------------------------------------------------------
 # The upstream repo pins its R2 SigV4 signer against botocore-generated
@@ -2822,6 +2884,18 @@ class UpdateManager:
             # and register the changed files with the parity gates so they are
             # compared against this reconciled content, not the raw transform.
             for rel in _reconcile_fork_skill_catalogs(dest, preserved):
+                rel_path = os.path.join(dest, rel)
+                if os.path.isfile(rel_path):
+                    try:
+                        with open(rel_path, "rb") as fh:
+                            reconciled_map[rel] = fh.read()
+                    except OSError:
+                        pass
+            # A fork-preserved generated-docs page committed from a Windows host
+            # carries backslash separators in its ``Path`` row / blob links;
+            # normalize only the contract-flagged contexts, then register the
+            # changed files so the parity gates compare reconciled content.
+            for rel in _reconcile_docs_posix_separators(dest, preserved):
                 rel_path = os.path.join(dest, rel)
                 if os.path.isfile(rel_path):
                     try:
