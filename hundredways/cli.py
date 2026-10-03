@@ -378,6 +378,37 @@ class Cli:
             for category, way_id in registry.defaults().items():
                 print(f"{category:<8} {way_id}")
             return
+        if action == "coverage":
+            self._print_coverage(registry)
+            return
+
+    def _print_coverage(self, registry) -> None:
+        """Truth-table: which ways have a live engine consumer."""
+        from .coverage import by_category, coverage, summary
+
+        rows = coverage(registry)
+        mark = {"built": "✓", "dangling": "✗", "catalog-only": "·"}
+        for category, cat_rows in by_category(rows).items():
+            built = sum(1 for r in cat_rows if r.status == "built")
+            print(f"[{category}] {built}/{len(cat_rows)} built")
+            for row in cat_rows:
+                if row.status == "built":
+                    print(
+                        f"  {mark[row.status]} {row.way.way_id:<24} "
+                        f"{row.way.name:<28} -> {row.way.uses} [{row.resolution.kind}]"
+                    )
+                elif row.status == "dangling":
+                    print(
+                        f"  {mark[row.status]} {row.way.way_id:<24} "
+                        f"{row.way.name:<28} -> {row.way.uses} [DANGLING]"
+                    )
+                else:
+                    print(f"  {mark[row.status]} {row.way.way_id:<24} {row.way.name:<28} (catalog-only)")
+        counts = summary(rows)
+        tail = f"{counts['built']} built, {counts['catalog-only']} catalog-only"
+        if counts["dangling"]:
+            tail += f", {counts['dangling']} DANGLING"
+        print(f"\n{tail}  ({len(rows)} ways total)")
 
     def cmd_research(self) -> None:
         ideas = run_research(self.args.query, live=self.args.live)
@@ -591,7 +622,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func="cmd_analyze")
 
     p = sub.add_parser("ways", help="browse the 200 ways")
-    p.add_argument("way_action", nargs="?", default="list", choices=["list", "show", "count", "defaults"])
+    p.add_argument("way_action", nargs="?", default="list", choices=["list", "show", "count", "defaults", "coverage"])
     p.add_argument("way_id", nargs="?", default="", help="way id for 'show', e.g. brand.token-regex")
     p.set_defaults(func="cmd_ways")
 
