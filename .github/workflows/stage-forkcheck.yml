@@ -2,10 +2,11 @@ name: stage-forkcheck
 
 # Stage 6: prove the freshly-branded tree installs and PASSES the nastech-agent
 # fork's own test suite — before it is pushed as a PR.  The zip artifact is the
-# branded Hermes tree; we extract it, `uv sync --locked` exactly as the fork's
-# CI does (so a stale/mis-reconciled uv.lock fails here, not on the PR), boot
-# `nastech` and run `nastech logs` against a temp NASTECH_HOME, then run the
-# fork's real slice matrix.  Green here == the PR to the fork is green.
+# branded Hermes tree; we extract it, `uv sync --locked` exactly as the
+# candidate's OWN CI does (a stale/mis-reconciled uv.lock fails here, not on
+# the PR), boot `nastech` and run `nastech logs` against a temp NASTECH_HOME,
+# then run the fork's real slice matrix.  Green here == the PR to the fork is
+# green.
 #
 # This is the "it will pass when pushed" guarantee: the fork's own CI
 # (tests.yml) is mirrored, so a passing run means the update-pr PR cannot be
@@ -190,17 +191,35 @@ jobs:
       - name: Set up Python 3.14
         run: uv python install 3.14
 
-      - name: Install dependencies (mirrors the fork's tests.yml)
+      - name: Install dependencies (mirrors the candidate's tests.yml)
         working-directory: tree/nastech-agent
         run: |
-          # Keep this list aligned with the fork's declared extras. Do not
-          # request optional integrations absent from pyproject.toml.
-          uv sync --locked --python 3.14 --extra all --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web
+          # The candidate is the branded Hermes tree. Mirror its own
+          # tests.yml recipe (the unit job's setup-pm test-environment:
+          # dev + test groups, and the full extras list).
+          #
+          # dev is a PEP 735 dependency-group, and this pyproject sets
+          # [tool.uv] default-groups = [], so `uv sync` installs NO group
+          # implicitly - pytest lives in dev, and without --group dev slice 1
+          # dies with "pytest: command not found".
+          #
+          # The extras list (bedrock included) is upstream's exact set:
+          # without it the parallel-web / fal / bedrock SDK probes
+          # (`pm.extras.available` is an import probe) fail.
+          uv sync --locked --python 3.14 --extra all --group dev --extra anthropic --extra bedrock --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web
 
       - name: Prompt-resume compatibility gate
         if: matrix.slice.index == 1
         working-directory: tree/nastech-agent
         run: |
+          # Isolate the test home exactly as the pipeline step does. The
+          # suite's home-io guard (tests/home_io_guard.py) refuses any test
+          # file I/O that lands in the REAL root, and run_tests.sh re-execs
+          # through the tree's pm machinery, which builds its test
+          # environment under $HOME/.nastech. Pointed at the real
+          # /home/runner that trips the guard; a fresh HOME keeps it inert.
+          mkdir -p "$RUNNER_TEMP/forkcheck-home"
+          export HOME="$RUNNER_TEMP/forkcheck-home"
           source .venv/bin/activate
           pytest -q tests/agent/test_plugin_prompt_sections.py
         env:
@@ -211,6 +230,8 @@ jobs:
       - name: Run tests (slice ${{ matrix.slice.index }}/${{ inputs.slice_count }})
         working-directory: tree/nastech-agent
         run: |
+          mkdir -p "$RUNNER_TEMP/forkcheck-home"
+          export HOME="$RUNNER_TEMP/forkcheck-home"
           source .venv/bin/activate
           scripts/run_tests.sh --files '${{ matrix.slice.files }}'
         env:
@@ -295,12 +316,12 @@ jobs:
       - name: Set up Python 3.14
         run: uv python install 3.14
 
-      - name: Install dependencies (mirrors the fork's tests.yml)
+      - name: Install dependencies (mirrors the candidate's tests.yml)
         working-directory: tree/nastech-agent
         run: |
-          # Keep this list aligned with the fork's declared extras. Do not
-          # request optional integrations absent from pyproject.toml.
-          uv sync --locked --python 3.14 --extra all --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web
+          # Same mirror as the slice job: dev group + full extras list so the
+          # boot path and pm import probes see the same env as upstream CI.
+          uv sync --locked --python 3.14 --extra all --group dev --extra anthropic --extra bedrock --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web
 
       - name: Boot the branded CLI and read its logs
         working-directory: tree/nastech-agent

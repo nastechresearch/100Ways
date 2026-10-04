@@ -129,3 +129,63 @@ def test_weekly_gate_uses_immutable_update_source_sha():
 
     assert "HUNDREDWAYS_UPSTREAM_SHA: ${{ steps.update.outputs.upstream_sha }}" in workflow
     assert 'ref=os.environ["HUNDREDWAYS_UPSTREAM_SHA"] or "origin/main"' in workflow
+
+
+def test_stage_forkcheck_syncs_mirror_the_candidate_tests_yml_recipe():
+    """Every candidate-tree `uv sync` must mirror the candidate's OWN CI
+    (tests.yml), not the fork's legacy recipe.
+
+    The candidate pyproject declares `[tool.uv] default-groups = []` (dev is a
+    PEP 735 dependency-group, not an extra), so a sync without `--group dev`
+    leaves pytest uninstalled and slice 1 fails with ``pytest: command not
+    found``. The extras list (bedrock included) is upstream's exact set;
+    omitting it breaks the parallel-web/fal/bedrock import probes
+    (`pm.extras.available`). The fork's old recipe (`--extra dev`,
+    `--extra hindsight`, python 3.11) is a pre-guard-era mirror and must not
+    come back.
+    """
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github" / "workflows" / "stage-forkcheck.yml").read_text()
+
+    syncs = [
+        line.strip()
+        for line in workflow.splitlines()
+        if line.strip().startswith("uv sync --locked")
+    ]
+    assert syncs, "stage-forkcheck.yml must contain candidate-tree uv syncs"
+
+    expected_parts = [
+        "--python 3.14",
+        "--group dev",
+        "--extra all",
+        "--extra anthropic",
+        "--extra bedrock",
+        "--extra mistral",
+        "--extra fal",
+        "--extra modal",
+        "--extra daytona",
+        "--extra parallel-web",
+    ]
+    for sync in syncs:
+        for part in expected_parts:
+            assert part in sync, f"candidate sync missing {part!r}: {sync}"
+        assert "--extra dev" not in sync
+        assert "--extra hindsight" not in sync
+
+
+def test_stage_forkcheck_isolates_slice_home_before_tests():
+    """The slice gate and test steps must run against a fresh HOME.
+
+    The suite's home-io guard (tests/home_io_guard.py) refuses any test file
+    I/O that lands in the REAL root, and run_tests.sh re-execs through the
+    tree's pm machinery, which builds its test environment under
+    $HOME/.nastech. With HOME pointed at the real /home/runner the guard
+    trips (and the pm store pollutes the runner); a fresh HOME keeps it inert,
+    exactly as the pipeline's candidate step does.
+    """
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github" / "workflows" / "stage-forkcheck.yml").read_text()
+
+    assert 'export HOME="$RUNNER_TEMP/forkcheck-home"' in workflow
+    # Both the prompt-resume gate and the slice run step must isolate.
+    assert workflow.count('mkdir -p "$RUNNER_TEMP/forkcheck-home"') >= 2
