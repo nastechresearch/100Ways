@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from hundredways.ci_policy import audit_workflow_security
@@ -129,3 +130,72 @@ def test_weekly_gate_uses_immutable_update_source_sha():
 
     assert "HUNDREDWAYS_UPSTREAM_SHA: ${{ steps.update.outputs.upstream_sha }}" in workflow
     assert 'ref=os.environ["HUNDREDWAYS_UPSTREAM_SHA"] or "origin/main"' in workflow
+
+
+def test_stage_forkcheck_mirrors_the_candidate_tests_yml_recipe():
+    """The forkcheck slice and smoke jobs must provision the candidate's pm
+    test-environment exactly as stage-pipeline.yml does: the tree's own
+    stdlib-only scripts/ci/setup_toolchain.py locked install into a sibling
+    forkcheck-pm-home, then a locked `dependencies --test-environment` build
+    with the full extras list, and the suite is driven through NASTECH_PYTHON.
+
+    The candidate pyproject declares `[tool.uv] default-groups = []` (dev is a
+    PEP 735 dependency-group, not an extra), so the pm test-environment must
+    carry the dev+test groups - a plain sync leaves pytest uninstalled and
+    slice 1 fails with ``pytest: command not found``. The extras list (bedrock
+    included) is upstream's exact set; omitting it breaks the
+    parallel-web/fal/bedrock import probes (`pm.extras.available`). The fork's
+    old recipe (`--extra dev`, `--extra hindsight`, python 3.11) is a
+    pre-guard-era mirror and must not come back. A checkout-local `uv sync`
+    into `.venv` is forbidden: without NASTECH_PYTHON, run_tests.sh re-execs
+    pm machinery into the guarded home and trips tests/home_io_guard.py.
+    """
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github" / "workflows" / "stage-forkcheck.yml").read_text()
+
+    # The provisioning recipe, exactly as the pipeline mirrors it (a stale
+    # uv.lock fails here on the frozen pm sync, not on the PR).
+    assert "scripts/ci/setup_toolchain.py\" install" in workflow
+    assert "--toolchain python --home \"$RUNNER_TEMP/forkcheck-pm-home\"" in workflow
+
+    steps = re.split(r"\n(?=      - name:)", workflow)
+    dependency_steps = [
+        step for step in steps
+        if "setup_toolchain.py\" dependencies" in step
+    ]
+    assert dependency_steps, "stage-forkcheck.yml must provision the pm test environment"
+    for step in dependency_steps:
+        assert "--toolchain python" in step
+        assert "'[\"all\", \"anthropic\", \"bedrock\", \"mistral\", \"fal\", \"modal\", \"daytona\", \"parallel-web\"]'" in step
+        assert "--home \"$RUNNER_TEMP/forkcheck-pm-home\"" in step
+        assert "--test-environment" in step
+
+    # No checkout-local uv sync: the env comes from the pm test-environment,
+    # and no legacy extras/group flags or pre-guard-era python pin sneak back.
+    assert "uv sync --locked" not in workflow
+    assert "source .venv/bin/activate" not in workflow
+    assert "--extra dev" not in workflow
+    assert "--extra hindsight" not in workflow
+
+
+def test_stage_forkcheck_isolates_slice_home_before_tests():
+    """The slice gate and test steps must run through NASTECH_PYTHON against a
+    fresh, empty HOME.
+
+    run_tests.sh honors NASTECH_PYTHON directly and never re-execs, so no pm
+    or machine state is ever built into $HOME/.nastech. The suite's home-io
+    guard (tests/home_io_guard.py) refuses any test file I/O that lands in the
+    REAL nastech home - with HOME pointed at the empty guarded root and
+    NASTECH_PYTHON driving the interpreter, the guard stays inert, exactly as
+    the pipeline's candidate step does.
+    """
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github" / "workflows" / "stage-forkcheck.yml").read_text()
+
+    assert 'export HOME="$RUNNER_TEMP/forkcheck-home"' in workflow
+    assert "NASTECH_PYTHON" in workflow
+    # Both the prompt-resume gate and the slice run step must isolate.
+    assert workflow.count('mkdir -p "$RUNNER_TEMP/forkcheck-home"') >= 2
+    # Everything that drives the pm interpreter is re-exec-safe by contract:
+    # run_tests.sh consumes NASTECH_PYTHON, never the checkout .venv.
+    assert "run_tests.sh" in workflow
