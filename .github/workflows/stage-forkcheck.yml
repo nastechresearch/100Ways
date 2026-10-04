@@ -2,15 +2,27 @@ name: stage-forkcheck
 
 # Stage 6: prove the freshly-branded tree installs and PASSES the nastech-agent
 # fork's own test suite — before it is pushed as a PR.  The zip artifact is the
-# branded Hermes tree; we extract it, `uv sync --locked` exactly as the
-# candidate's OWN CI does (a stale/mis-reconciled uv.lock fails here, not on
-# the PR), boot `nastech` and run `nastech logs` against a temp NASTECH_HOME,
-# then run the fork's real slice matrix.  Green here == the PR to the fork is
-# green.
+# branded Hermes tree; we extract it and provision the candidate's pm
+# toolchain + test environment exactly as the candidate's OWN CI (tests.yml ->
+# setup-pm) does — the tree's stdlib-only scripts/ci/setup_toolchain.py locked
+# install into a sibling forkcheck-pm-home, then a locked --test-environment
+# build with the full extras list.  A stale/mis-reconciled uv.lock fails here
+# (frozen pm sync), not on the PR.  We boot `nastech` and run `nastech logs`
+# against a temp NASTECH_HOME, then run the fork's real slice matrix.  Green
+# here == the PR to the fork is green.
 #
 # This is the "it will pass when pushed" guarantee: the fork's own CI
 # (tests.yml) is mirrored, so a passing run means the update-pr PR cannot be
 # blocked on Python tests or lockfile reconcile.
+#
+# The suite is driven through NASTECH_PYTHON (the pm test-environment venv
+# python exported by the Build step) with HOME pointed at an EMPTY guarded
+# root.  run_tests.sh honors NASTECH_PYTHON directly and never re-execs, so no
+# pm or machine state is ever built into the guarded home and the candidate's
+# own tests/home_io_guard.py stays inert.  A checkout-local `uv sync` + .venv
+# would defeat this: without NASTECH_PYTHON, run_tests.sh re-execs through the
+# tree's pm machinery, which builds its test environment under $HOME/.nastech
+# — exactly the real-home I/O the guard refuses.
 
 on:
   workflow_call:
@@ -179,65 +191,67 @@ jobs:
           rm -rf "$RG_TARBALL" "ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl"
           rg --version
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
-        with:
-          version: "0.9.28"
-          enable-cache: true
-          cache-dependency-glob: |
-            tree/nastech-agent/pyproject.toml
-            tree/nastech-agent/uv.lock
+      - name: Provision forkcheck PM toolchain
+        run: |
+          # The tree's own scripts/ci/setup_toolchain.py is the stdlib-only PM
+          # bootstrap that upstream's setup-pm action drives; this installs the
+          # locked python/uv toolchain into --home (forkcheck-pm-home) and
+          # exports NASTECH_PYTHON (the bare command interpreter) plus the tool
+          # bins on PATH for the steps below.
+          set -euo pipefail
+          test -f "$GITHUB_WORKSPACE/tree/nastech-agent/scripts/ci/setup_toolchain.py"
+          python3 -S "$GITHUB_WORKSPACE/tree/nastech-agent/scripts/ci/setup_toolchain.py" install \
+            --toolchain python --home "$RUNNER_TEMP/forkcheck-pm-home"
 
-      - name: Set up Python 3.14
-        run: uv python install 3.14
-
-      - name: Install dependencies (mirrors the candidate's tests.yml)
+      - name: Build forkcheck PM test environment
         working-directory: tree/nastech-agent
         run: |
-          # The candidate is the branded Hermes tree. Mirror its own
-          # tests.yml recipe (the unit job's setup-pm test-environment:
-          # dev + test groups, and the full extras list).
-          #
-          # dev is a PEP 735 dependency-group, and this pyproject sets
-          # [tool.uv] default-groups = [], so `uv sync` installs NO group
-          # implicitly - pytest lives in dev, and without --group dev slice 1
-          # dies with "pytest: command not found".
-          #
-          # The extras list (bedrock included) is upstream's exact set:
-          # without it the parallel-web / fal / bedrock SDK probes
-          # (`pm.extras.available` is an import probe) fail.
-          uv sync --locked --python 3.14 --extra all --group dev --extra anthropic --extra bedrock --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web
+          # Mirror of upstream CI (tests.yml -> setup-pm): build the pm
+          # test-environment with the dev+test groups AND the full extras list,
+          # then run the suite at it through NASTECH_PYTHON. run_tests.sh
+          # honors NASTECH_PYTHON directly and never re-execs, so no pm or
+          # machine state is ever built into the guarded forkcheck home. The
+          # extras list is the candidate's exact set; without it the
+          # parallel-web / fal / bedrock SDK probes (`pm.extras.available` is
+          # an import probe in the running interpreter) fail.
+          set -euo pipefail
+          "$NASTECH_PYTHON" -S "$GITHUB_WORKSPACE/tree/nastech-agent/scripts/ci/setup_toolchain.py" dependencies \
+            --toolchain python \
+            --extras '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web"]' \
+            --home "$RUNNER_TEMP/forkcheck-pm-home" \
+            --test-environment
 
       - name: Prompt-resume compatibility gate
         if: matrix.slice.index == 1
         working-directory: tree/nastech-agent
         run: |
-          # Isolate the test home exactly as the pipeline step does. The
-          # suite's home-io guard (tests/home_io_guard.py) refuses any test
-          # file I/O that lands in the REAL root, and run_tests.sh re-execs
-          # through the tree's pm machinery, which builds its test
-          # environment under $HOME/.nastech. Pointed at the real
-          # /home/runner that trips the guard; a fresh HOME keeps it inert.
+          # The suite's home-io guard (tests/home_io_guard.py) refuses any test
+          # file I/O that lands in the REAL nastech home. NASTECH_PYTHON (from
+          # the Build step) makes run_tests.sh run this file under the pm
+          # test-environment directly - no pm re-exec - so a fresh HOME stays
+          # empty and the guard stays inert.
           mkdir -p "$RUNNER_TEMP/forkcheck-home"
           export HOME="$RUNNER_TEMP/forkcheck-home"
-          source .venv/bin/activate
-          pytest -q tests/agent/test_plugin_prompt_sections.py
+          ./scripts/run_tests.sh tests/agent/test_plugin_prompt_sections.py
         env:
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
           NASTECH_API_KEY: ""
+          NASTECH_TEST_WORKERS: "2"
+          NASTECH_TEST_FILE_RETRIES: "2"
 
       - name: Run tests (slice ${{ matrix.slice.index }}/${{ inputs.slice_count }})
         working-directory: tree/nastech-agent
         run: |
           mkdir -p "$RUNNER_TEMP/forkcheck-home"
           export HOME="$RUNNER_TEMP/forkcheck-home"
-          source .venv/bin/activate
-          scripts/run_tests.sh --files '${{ matrix.slice.files }}'
+          ./scripts/run_tests.sh --files '${{ matrix.slice.files }}'
         env:
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
           NASTECH_API_KEY: ""
+          NASTECH_TEST_WORKERS: "2"
+          NASTECH_TEST_FILE_RETRIES: "2"
 
       - name: Upload per-slice durations
         continue-on-error: true
@@ -304,29 +318,29 @@ jobs:
                   )
           EOF
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
-        with:
-          version: "0.9.28"
-          enable-cache: true
-          cache-dependency-glob: |
-            tree/nastech-agent/pyproject.toml
-            tree/nastech-agent/uv.lock
+      - name: Provision forkcheck PM toolchain
+        run: |
+          set -euo pipefail
+          test -f "$GITHUB_WORKSPACE/tree/nastech-agent/scripts/ci/setup_toolchain.py"
+          python3 -S "$GITHUB_WORKSPACE/tree/nastech-agent/scripts/ci/setup_toolchain.py" install \
+            --toolchain python --home "$RUNNER_TEMP/forkcheck-pm-home"
 
-      - name: Set up Python 3.14
-        run: uv python install 3.14
-
-      - name: Install dependencies (mirrors the candidate's tests.yml)
+      - name: Build forkcheck PM test environment
         working-directory: tree/nastech-agent
         run: |
-          # Same mirror as the slice job: dev group + full extras list so the
-          # boot path and pm import probes see the same env as upstream CI.
-          uv sync --locked --python 3.14 --extra all --group dev --extra anthropic --extra bedrock --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web
+          set -euo pipefail
+          "$NASTECH_PYTHON" -S "$GITHUB_WORKSPACE/tree/nastech-agent/scripts/ci/setup_toolchain.py" dependencies \
+            --toolchain python \
+            --extras '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web"]' \
+            --home "$RUNNER_TEMP/forkcheck-pm-home" \
+            --test-environment
 
       - name: Boot the branded CLI and read its logs
         working-directory: tree/nastech-agent
         run: |
-          source .venv/bin/activate
+          # NASTECH_PYTHON and the pm tool bins are on PATH from the Build
+          # step, so `nastech` (a /usr/bin/env python3 launcher) resolves to
+          # the pm test-environment interpreter with the full runtime deps.
           # Python's zipfile.extractall drops exec bits; restore the launcher's.
           chmod +x nastech
           export NASTECH_HOME="$RUNNER_TEMP/nastech-home"
