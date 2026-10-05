@@ -768,7 +768,7 @@ def test_reconcile_migrates_com_domains_to_github_io(tmp_path):
     assert "https://portal.nastech-agent.nastechresearch.workers.dev" in text
     assert "https://inference-api.nastech-agent.nastechresearch.workers.dev/v1" in text
     # email address follows the same migration
-    assert "nastech@nastechresearch.github.io" in text
+    assert "nastech@nastech-agent.nastechresearch.workers.dev" in text
     # regex-escaped hostnames follow the same migration as literal URLs.
     assert r"ares-3009\.agents\.nastechresearch\.github\.io" in text
     assert r"ares-3009\.agents\.nastechresearch\.com" not in text
