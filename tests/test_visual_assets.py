@@ -40,6 +40,23 @@ def test_owned_bootstrap_icons_are_normalized_to_tauri_rgba_dimensions(tmp_path)
             assert image.size == expected_size
 
 
+def test_registry_covers_current_nastech_main_brand_icons():
+    root = Path(__file__).resolve().parents[1]
+    owned = OwnedAssets(repo=str(root))
+    required = {
+        "apps/desktop/assets/icon-dark.png",
+        "apps/desktop/assets/icon-mac.png",
+        "apps/desktop/public/nastech-bantu-dark.png",
+        "apps/desktop/public/nastech-bantu.png",
+        "assets/icon-master.svg",
+        "assets/icon-master-dark.svg",
+        "website/static/img/logo-dark.png",
+        "website/static/img/nastech-logo-dark.png",
+    }
+    assert required <= set(owned.mapping)
+    assert all(owned.asset_bytes(path) for path in required)
+
+
 def test_visual_inventory_records_raster_identity(tmp_path):
     image = tmp_path / "logo.png"
     make_image(image, (20, 40, 60))
