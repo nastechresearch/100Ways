@@ -764,9 +764,9 @@ def test_reconcile_migrates_com_domains_to_github_io(tmp_path):
 
     # docs compound (org/repo path style, not a subdomain)
     assert "https://nastech-agent.nastechresearch.workers.dev/docs" in text
-    # subdomain forms keep their prefix on github.io
-    assert "https://portal.nastechresearch.github.io" in text
-    assert "https://inference-api.nastechresearch.github.io/v1" in text
+    # subdomain forms also migrate to Worker host
+    assert "https://portal.nastech-agent.nastechresearch.workers.dev" in text
+    assert "https://inference-api.nastech-agent.nastechresearch.workers.dev/v1" in text
     # email address follows the same migration
     assert "nastech@nastechresearch.github.io" in text
     # regex-escaped hostnames follow the same migration as literal URLs.
@@ -942,7 +942,7 @@ def test_reconcile_target_ci_compatibility_fixes_are_audited(tmp_path):
         "eslint.config.shared.mjs",
     }
     assert os.stat(runner).st_mode & 0o111
-    assert "url: 'https://nastechresearch.github.io'," in (website / "docusaurus.config.ts").read_text()
+    assert "url: 'https://nastechresearch.github.io/nastech-agent'," in (website / "docusaurus.config.ts").read_text()
     assert "baseUrl: '/nastech-agent/docs/'," in (website / "docusaurus.config.ts").read_text()
     assert "return project" in (paths / "paths.ts").read_text()
     lint_config = (root / "eslint.config.shared.mjs").read_text()
