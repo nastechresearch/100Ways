@@ -763,7 +763,7 @@ def test_reconcile_migrates_com_domains_to_github_io(tmp_path):
     assert "NastechResearch.com" not in text
 
     # docs compound (org/repo path style, not a subdomain)
-    assert "https://nastechresearch.github.io/nastech-agent/docs" in text
+    assert "https://nastech-agent.nastechresearch.workers.dev/docs" in text
     # subdomain forms keep their prefix on github.io
     assert "https://portal.nastechresearch.github.io" in text
     assert "https://inference-api.nastechresearch.github.io/v1" in text
