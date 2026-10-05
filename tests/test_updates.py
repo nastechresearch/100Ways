@@ -773,7 +773,7 @@ def test_reconcile_migrates_com_domains_to_github_io(tmp_path):
     assert r"ares-3009\.agents\.nastechresearch\.github\.io" in text
     assert r"ares-3009\.agents\.nastechresearch\.com" not in text
     # lookalike fixture keeps its attacker suffix and stays a different host
-    assert "https://inference-api.nastechresearch.github.io.attacker.test/v1" in text
+    assert "https://inference-api.nastech-agent.nastechresearch.workers.dev.attacker.test/v1" in text
 
     assert all(s.status in {"ok", "skip"} for s in res.stages)
     by_name = {s.name: s for s in res.stages}
