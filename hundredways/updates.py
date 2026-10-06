@@ -708,8 +708,8 @@ def _reconcile_package_lock(dst: str, name: str) -> int:
 # of the compound would already be gone when the compound rule runs.
 _DOMAIN_FIXES: list[tuple[str, str]] = [
     # Plain URLs and hostnames.
-    ("nastech-agent.nastechresearch.com", "nastechresearch.github.io/nastech-agent"),
-    ("nastechresearch.com", "nastechresearch.github.io"),
+    ("nastech-agent.nastechresearch.com", "nastech-agent.nastechresearch.workers.dev"),
+    ("nastechresearch.com", "nastech-agent.nastechresearch.workers.dev"),
     ("NastechResearch.com", "NastechResearch.github.io"),
     ("NASTECHRESEARCH.COM", "NASTECHRESEARCH.GITHUB.IO"),
     # The same domains as written inside regex literals (for example,
@@ -1268,8 +1268,8 @@ def _reconcile_docusaurus_site_config(dst: str) -> int:
     except OSError:
         return 0
     updated = text.replace(
-        "url: 'https://nastechresearch.github.io/nastech-agent',",
-        "url: 'https://nastechresearch.github.io',",
+        "url: 'https://nastech-agent.nastechresearch.workers.dev',",
+        "url: 'https://nastech-agent.nastechresearch.workers.dev',",
     ).replace(
         "baseUrl: '/docs/',",
         "baseUrl: '/nastech-agent/docs/',",
