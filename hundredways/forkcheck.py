@@ -393,7 +393,8 @@ def preserve_fork_files(
     Fork files whose path no upstream path maps to are fork-only content
     (owned-assets registry, contributor emails, fork-added skills/tests).
     Branding upstream alone would silently drop them from the PR; this
-    carries them over verbatim so nothing is lost.
+    carries them over verbatim so nothing is lost. When an engine-owned asset
+    registry is present, its mapped target paths remain authoritative too.
     """
     if not fork_root or not os.path.isdir(fork_root):
         return []
@@ -424,10 +425,14 @@ def preserve_fork_files(
         dst = os.path.join(branded_root, rel)
         src = os.path.join(fork_root, rel)
         # A 100Ways-owned registry is an explicit, reviewable visual identity
-        # overlay.  Preserve the fork's registry only when no engine-owned
-        # replacement already exists; otherwise a stale fork asset would
-        # overwrite the verified white NasTech asset pack.
-        if rel.startswith("config/owned-assets/") and engine_registry:
+        # overlay. Preserve neither an old fork registry nor its mapped target
+        # files when that authoritative registry is already in the candidate;
+        # otherwise stale fork bytes can overwrite the freshly materialized
+        # owned assets. The fallback below still preserves explicit assets when
+        # no engine-owned registry is available.
+        if engine_registry and (
+            rel in owned_paths or rel.startswith("config/owned-assets/")
+        ):
             continue
         if os.path.abspath(dst) == os.path.abspath(src):
             continue
