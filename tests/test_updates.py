@@ -742,6 +742,8 @@ def _hermes_repo_with_domains(tmp_path):
         "Inference: https://inference-api.nousresearch.com/v1\n"
         "Email: hermes@nousresearch.com\n"
         "Cloud regex: /ares-3009\\.agents\\.nastechresearch\\.com/i\n"
+        "Assets: https://hermes-assets.nousresearch.com/upstream/sha256/abc\n"
+        "Legacy assets: https://nastech-assets.nastechresearch.github.io/releases/x\n"
         "Lookalike: https://inference-api.nousresearch.com.attacker.test/v1\n"
     )
     subprocess.run(["git", "-C", hermes, "add", "-A"], check=True)
@@ -772,6 +774,11 @@ def test_reconcile_migrates_com_domains_to_github_io(tmp_path):
     # regex-escaped hostnames follow the same migration as literal URLs.
     assert r"ares-3009\.agents\.nastechresearch\.github\.io" in text
     assert r"ares-3009\.agents\.nastechresearch\.com" not in text
+    # assets compound migrates to the R2-backed worker, never to github.io
+    # (the Pages assets subdomain is a dead TLS origin)
+    assert "https://nastech-assets.nastechresearch.workers.dev/upstream/sha256/abc" in text
+    assert "nastech-assets.nastechresearch.com" not in text
+    assert "nastech-assets.nastechresearch.github.io" not in text
     # lookalike fixture keeps its attacker suffix and stays a different host
     assert "https://inference-api.nastechresearch.github.io.attacker.test/v1" in text
 

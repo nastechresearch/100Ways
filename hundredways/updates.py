@@ -703,12 +703,28 @@ def _reconcile_package_lock(dst: str, name: str) -> int:
 # commit used nastechresearch.com URLs.  But nastechresearch.com is NOT
 # registered - the fork lives on GitHub Pages - so every .com domain is a
 # 404 in the deployed tree.  Reconcile migrates them to github.io after
-# branding.  Order matters: the docs compound (org/repo path style) must be
-# rewritten BEFORE the bare-domain form, otherwise the `.com` in the middle
-# of the compound would already be gone when the compound rule runs.
+# branding.  Two exceptions keep their own hosts: the docs compound
+# (org/repo path style) migrates to the github.io repo path, and the
+# assets compound migrates to the R2-backed worker (the
+# `nastech-assets` GitHub Pages subdomain was never a real origin - it
+# fails TLS).  Order matters for both: each compound must be rewritten
+# BEFORE the bare-domain form, otherwise the `.com` in the middle of the
+# compound would already be gone when the compound rule runs.
 _DOMAIN_FIXES: list[tuple[str, str]] = [
     # Plain URLs and hostnames.
     ("nastech-agent.nastechresearch.com", "nastechresearch.github.io/nastech-agent"),
+    # Assets go to the live worker host, not github.io (the bare-domain
+    # rule below would otherwise produce the dead
+    # `nastech-assets.nastechresearch.github.io` origin).
+    (
+        "nastech-assets.nastechresearch.com",
+        "nastech-assets.nastechresearch.workers.dev",
+    ),
+    # Already-branded dead origin left behind by earlier reconcile cycles.
+    (
+        "nastech-assets.nastechresearch.github.io",
+        "nastech-assets.nastechresearch.workers.dev",
+    ),
     ("nastechresearch.com", "nastechresearch.github.io"),
     ("NastechResearch.com", "NastechResearch.github.io"),
     ("NASTECHRESEARCH.COM", "NASTECHRESEARCH.GITHUB.IO"),
@@ -718,6 +734,14 @@ _DOMAIN_FIXES: list[tuple[str, str]] = [
     (
         "nastech-agent\\.nastechresearch\\.com",
         "nastechresearch\\.github\\.io/nastech-agent",
+    ),
+    (
+        "nastech-assets\\.nastechresearch\\.com",
+        "nastech-assets\\.nastechresearch\\.workers\\.dev",
+    ),
+    (
+        "nastech-assets\\.nastechresearch\\.github\\.io",
+        "nastech-assets\\.nastechresearch\\.workers\\.dev",
     ),
     ("nastechresearch\\.com", "nastechresearch\\.github\\.io"),
     ("NastechResearch\\.com", "NastechResearch\\.github\\.io"),
