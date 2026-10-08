@@ -2,18 +2,17 @@ name: CI
 
 # Orchestrator.  Runs the 100Ways validation in STAGES:
 #
-#   lint  -> tests  -> ways  -> rules  -> pipeline  -> forkcheck  -> readme  -> upload  -> all-checks-pass  -> #344 Push PR to NasTech
+#   lint  -> tests  -> ways  -> rules  -> pipeline  -> readme  -> upload  -> all-checks-pass  -> #344 Push PR to NasTech
 #
 # On a schedule, the commit stream runs first.  It compares the upstream
 # history with the merged NasTech baseline and enables the full chain only at
 # the configured commit threshold.  Pull-request and manual validation remain
 # complete so changes to 100Ways are always tested before review.
 #
-# ``pipeline`` brands the upstream tree and runs the 18-stage update pipeline
-# (including the fork-consistency diff against the real nastech-agent fork).
-# ``forkcheck`` then installs the branded zip, boots `nastech`, and runs the
-# fork's own test suite.  Publication is deliberately deferred until every
-# remaining repository verification has completed; #344 is the final action.
+# ``pipeline`` brands the upstream tree, checks brand/rule and fork consistency,
+# and packages the candidate. Tests are limited to this 100Ways repository;
+# the Nastech-agent application suite is not part of this CI. Publication is
+# deferred until every repository verification has completed; #344 is final.
 
 on:
   push:
@@ -61,14 +60,8 @@ jobs:
     secrets:
       OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
 
-  forkcheck:
-    needs: pipeline
-    uses: ./.github/workflows/stage-forkcheck.yml
-    with:
-      slice_count: 4
-
   readme:
-    needs: forkcheck
+    needs: pipeline
     uses: ./.github/workflows/stage-readme.yml
 
   upload:
@@ -92,7 +85,7 @@ jobs:
 
   update-pr:
     name: "#344 — Push PR to NasTech"
-    needs: [pipeline, forkcheck, all-checks-pass]
+    needs: [pipeline, all-checks-pass]
     permissions:
       contents: read
     uses: ./.github/workflows/stage-update-pr.yml
