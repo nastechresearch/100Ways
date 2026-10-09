@@ -209,15 +209,24 @@ def test_runner_prose_is_untouched():
 
 def test_large_runner_test_workers_normalize_to_standard_runner_fanout():
     rules = BrandingRules()
-    text = "          NASTECH_TEST_WORKERS: 96  # upstream larger runner\n"
+    text = (
+        "          NASTECH_TEST_WORKERS: 96  # upstream larger runner\n"
+        "          NASTECH_TEST_WORKERS: 32  # upstream later moved to 32-core\n"
+    )
     out = rules.transform_text(text)
-    assert out == "          NASTECH_TEST_WORKERS: 8  # upstream larger runner\n"
+    assert out == (
+        "          NASTECH_TEST_WORKERS: 8  # upstream larger runner\n"
+        "          NASTECH_TEST_WORKERS: 8  # upstream later moved to 32-core\n"
+    )
     assert rules.transform_text(out) == out
 
 
 def test_unrelated_worker_values_are_untouched():
     rules = BrandingRules()
-    text = "NASTECH_TEST_WORKERS: 16\nOTHER_WORKERS: 96\n"
+    # At-or-below the standard-runner ceiling stays put; other variables are
+    # never touched.  (Quoted / expression worker counts are likewise left
+    # alone; see test_large_runner_test_workers_normalize_to_standard_runner_fanout.)
+    text = "NASTECH_TEST_WORKERS: 6\nOTHER_WORKERS: 96\n"
     assert rules.transform_text(text) == text
 
 

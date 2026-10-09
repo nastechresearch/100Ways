@@ -24,6 +24,8 @@ from .rules import BrandingRules
 from .updates import (
     _reconcile_docs_posix_separators,
     _reconcile_fork_skill_catalogs,
+    _reconcile_fork_skill_sidebars,
+    _reconcile_skill_docs_order,
     apply_owned_assets,
     brand_tree,
     fork_manifest_upstream_sha,
@@ -185,6 +187,14 @@ def verify_final_candidate(
             if expected_path.is_file():
                 reconciled_bytes[relative] = expected_path.read_bytes()
         for relative in _reconcile_docs_posix_separators(str(expected), preserved):
+            expected_path = expected / relative
+            if expected_path.is_file():
+                reconciled_bytes[relative] = expected_path.read_bytes()
+        for relative in _reconcile_fork_skill_sidebars(str(expected), preserved):
+            expected_path = expected / relative
+            if expected_path.is_file():
+                reconciled_bytes[relative] = expected_path.read_bytes()
+        for relative in _reconcile_skill_docs_order(str(expected)):
             expected_path = expected / relative
             if expected_path.is_file():
                 reconciled_bytes[relative] = expected_path.read_bytes()

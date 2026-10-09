@@ -1180,8 +1180,23 @@ def _reconcile_cli_banner_identity(dst: str) -> list[str]:
     return fixed
 
 
-def _reconcile_skill_description_hardline(dst: str) -> int:
-    """Trim the bundled ``nastech-agent`` skill description to the fork's.
+# The bundled nastech-agent skill description before/after the fork's
+# authoring-standards trim.  The same description is embedded in generated
+# documentation that upstream's ``website/scripts/generate-skill-docs.py``
+# rebuilds from the SKILL.md frontmatter: the bundled skills-catalog row and
+# the generated page's title, frontmatter ``description`` and intro line.
+# Trimming the SKILL.md alone leaves that generated tree stale.
+_SKILL_DESC_FULL_OLD = "Use, configure, theme, extend, and orchestrate Nastech Agent"
+_SKILL_DESC_FULL_NEW = "Configure, theme, extend, and orchestrate Nastech Agent"
+_SKILL_AGENT_CATALOG_REL = "website/docs/reference/skills-catalog.md"
+_SKILL_AGENT_PAGE_REL = (
+    "website/docs/user-guide/skills/bundled/autonomous-ai-agents/"
+    "autonomous-ai-agents-nastech-agent.md"
+)
+
+
+def _reconcile_skill_description_hardline(dst: str) -> list[str]:
+    """Trim the bundled ``nastech-agent`` skill description and its generated docs.
 
     Upstream's description (``"Use, configure, theme, extend, and
     orchestrate Hermes Agent."``) is exactly 60 characters — the fork's
@@ -1190,29 +1205,49 @@ def _reconcile_skill_description_hardline(dst: str) -> int:
     and failing the fork's ``test_authoring_standards.py``
     ``test_description_hardline``.  The fork trimmed the leading ``Use, ``
     to keep its own copy at 56; reconcile applies the same trim so the
-    branded tree matches the fork's bytes.
+    branded tree matches the fork's bytes.  Because the generated docs are a
+    pure function of the frontmatter, the trim is propagated to the catalog
+    row and the per-skill page so ``docs-site-checks`` does not regenerate
+    and diff a stale tree.  Returns the repo-relative paths changed.
     """
+    changed: list[str] = []
     if not os.path.isdir(dst):
-        return 0
-    rel = "skills/autonomous-ai-agents/nastech-agent/SKILL.md"
-    path = os.path.join(dst, rel)
-    if not os.path.isfile(path):
-        return 0
+        return changed
+    skill_rel = "skills/autonomous-ai-agents/nastech-agent/SKILL.md"
+    skill_path = os.path.join(dst, skill_rel)
+    if not os.path.isfile(skill_path):
+        return changed
     try:
-        with open(path, encoding="utf-8") as fh:
+        with open(skill_path, encoding="utf-8") as fh:
             text = fh.read()
     except OSError:
-        return 0
-    needle = 'description: "Use, configure, theme, extend, and orchestrate Nastech Agent."'
-    if needle not in text:
-        return 0
-    new_text = text.replace(
-        needle,
-        'description: "Configure, theme, extend, and orchestrate Nastech Agent."',
-    )
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(new_text)
-    return 1
+        return changed
+    needle = f'description: "{_SKILL_DESC_FULL_OLD}."'
+    if needle in text:
+        with open(skill_path, "w", encoding="utf-8") as fh:
+            fh.write(text.replace(needle, f'description: "{_SKILL_DESC_FULL_NEW}."'))
+        changed.append(skill_rel)
+    # The generated docs are a pure function of the frontmatter, so the trim
+    # must reach them even when an earlier sync already trimmed the SKILL.md
+    # (the block above only covers the source file).  The replace is a no-op
+    # once the generated docs carry the short form, so this stays idempotent.
+    # The short form (no trailing period) also appears in the page title.
+    for rel in (_SKILL_AGENT_CATALOG_REL, _SKILL_AGENT_PAGE_REL):
+        path = os.path.join(dst, rel)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                doc = fh.read()
+        except OSError:
+            continue
+        fixed = doc.replace(_SKILL_DESC_FULL_OLD, _SKILL_DESC_FULL_NEW)
+        if fixed == doc:
+            continue
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(fixed)
+        changed.append(rel)
+    return changed
 
 
 def _reconcile_test_runner_mode(dst: str) -> int:
@@ -2077,6 +2112,254 @@ def _reconcile_docs_posix_separators(dst: str, preserved: list[str]) -> list[str
 
 
 # ---------------------------------------------------------------------------
+# Generated skill-docs ordering (website/scripts/generate-skill-docs.py)
+# ---------------------------------------------------------------------------
+# Upstream's generator rebuilds the two skills catalogs and the Skills sidebar
+# from the shipped SKILL.md files, sorting each catalog section and each sidebar
+# category by skill slug.  Branding renames change slugs
+# (hermes-agent-skill-authoring -> nastech-agent-skill-authoring), so inherited
+# upstream-sorted files drift out of order, and a fork-preserved skill
+# (blender-mcp) must appear in the sidebar too.  docs-site-checks reruns the
+# generator and fails on any diff, so the reconciled tree must match its order
+# exactly.  These helpers reproduce only ordering (and a missing sidebar entry);
+# every other byte of the upstream-derived files is preserved.
+
+_CATALOG_DATA_ROW_RE = re.compile(r"^\|\s*\[")
+_CATALOG_PATH_COL_RE = re.compile(r"\|\s*`(?P<path>[^`]+)`\s*\|\s*$")
+_CATALOG_LINK_RE = re.compile(r"\]\((?P<link>[^)]+)\)")
+_SIDEBAR_DOCID_RE = re.compile(
+    r"^(?P<indent>\s*)'(?P<docid>user-guide/skills/"
+    r"(?P<bundle>[^/']+)/(?P<category>[^/']+)/(?P<page>[^']+))',\s*$"
+)
+_SIDEBAR_CATEGORY_KEY_RE = re.compile(
+    r"key: 'skills-(?P<bundle>bundled|optional)-(?P<category>[^']+)',"
+)
+
+
+def _skill_slug_index(dst: str) -> dict[tuple[str, str, str], str]:
+    """Map ``(bundle, category, page_id)`` to the skill's directory slug.
+
+    ``generate-skill-docs.py`` sorts by the slug (a skill's directory name),
+    which is not recoverable from the page id alone when a category nests a
+    sub-category (``optional-skills/mlops/training/axolotl`` ->
+    ``mlops-training-axolotl``).  Scan the shipped ``SKILL.md`` tree exactly the
+    way the generator's ``derive_skill_meta`` / ``page_id`` do.
+    """
+    index: dict[tuple[str, str, str], str] = {}
+    for bundle, source in (("bundled", "skills"), ("optional", "optional-skills")):
+        root = os.path.join(dst, source)
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _dirs, filenames in os.walk(root):
+            if "SKILL.md" not in filenames:
+                continue
+            parts = os.path.relpath(dirpath, root).split(os.sep)
+            if len(parts) == 1:
+                category, sub, slug = parts[0], None, parts[0]
+            else:
+                category, slug = parts[0], parts[-1]
+                sub = parts[1] if len(parts) == 3 else None
+            page_id = f"{category}-{sub}-{slug}" if sub else f"{category}-{slug}"
+            index[(bundle, category, page_id)] = slug
+    return index
+
+
+def _catalog_row_slug(
+    line: str, category: str, bundle: str, index: dict[tuple[str, str, str], str]
+) -> str:
+    """Sort key for a generated catalog row: the skill's directory slug.
+
+    Bundled rows carry a trailing ``| `category/slug` |`` path column; optional
+    rows are resolved through the ``SKILL.md`` scan (``index``).  Both match the
+    generator's ``sort(key=slug)``.
+    """
+    path_col = _CATALOG_PATH_COL_RE.search(line)
+    if path_col:
+        return path_col.group("path").rstrip("/").rsplit("/", 1)[-1]
+    link = _CATALOG_LINK_RE.search(line)
+    if link:
+        page_id = link.group("link").rsplit("/", 1)[-1]
+        if page_id.endswith(".md"):
+            page_id = page_id[:-3]
+        return index.get((bundle, category, page_id), page_id)
+    return line
+
+
+def _sort_catalog_rows(
+    text: str, bundle: str, index: dict[tuple[str, str, str], str]
+) -> str:
+    """Re-sort data rows within each ``## <category>`` section by slug."""
+    lines = text.split("\n")
+    category = ""
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("## "):
+            category = line[3:].strip()
+            i += 1
+            continue
+        if _CATALOG_DATA_ROW_RE.match(line):
+            j = i
+            while j < len(lines) and _CATALOG_DATA_ROW_RE.match(lines[j]):
+                j += 1
+            lines[i:j] = sorted(
+                lines[i:j],
+                key=lambda row: _catalog_row_slug(row, category, bundle, index),
+            )
+            i = j
+            continue
+        i += 1
+    return "\n".join(lines)
+
+
+def _sort_sidebar_docids(
+    text: str, index: dict[tuple[str, str, str], str]
+) -> str:
+    """Re-sort contiguous sidebar doc-id runs by slug (the generator's order)."""
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        match = _SIDEBAR_DOCID_RE.match(lines[i])
+        if not match:
+            i += 1
+            continue
+        indent = match.group("indent")
+        j = i
+        while j < len(lines):
+            nxt = _SIDEBAR_DOCID_RE.match(lines[j])
+            if not nxt or nxt.group("indent") != indent:
+                break
+            j += 1
+
+        def _key(line: str) -> str:
+            m = _SIDEBAR_DOCID_RE.match(line)
+            key = (m.group("bundle"), m.group("category"), m.group("page"))
+            return index.get(key, m.group("page"))
+
+        lines[i:j] = sorted(lines[i:j], key=_key)
+        i = j
+    return "\n".join(lines)
+
+
+def _reconcile_skill_docs_order(dst: str) -> list[str]:
+    """Match the generator's slug ordering for the catalogs and Skills sidebar.
+
+    ``docs-site-checks`` reruns ``generate-skill-docs.py`` and fails on any
+    diff.  Branding renames change slugs, so the inherited, upstream-sorted
+    catalogs and sidebar drift out of order.  This reconcile sorts only existing
+    generated structure (no renames, no content edits) and is idempotent.
+    Returns the changed paths.
+    """
+    changed: list[str] = []
+    index = _skill_slug_index(dst)
+    bundles = {
+        "website/docs/reference/skills-catalog.md": "bundled",
+        "website/docs/reference/optional-skills-catalog.md": "optional",
+    }
+    for rel in _DOCS_CATALOG_RELS:
+        path = os.path.join(dst, rel)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        fixed = _sort_catalog_rows(text, bundles[rel], index)
+        if fixed == text:
+            continue
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(fixed)
+        changed.append(rel)
+    rel = "website/sidebars.ts"
+    path = os.path.join(dst, rel)
+    if os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError:
+            text = ""
+        fixed = _sort_sidebar_docids(text, index)
+        if fixed != text:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(fixed)
+            changed.append(rel)
+    return changed
+
+
+def _reconcile_fork_skill_sidebars(dst: str, preserved: list[str]) -> list[str]:
+    """Add missing Skills-sidebar doc-ids for fork-preserved skills.
+
+    The Skills sidebar is upstream-derived, so a fork-only skill (for example
+    ``optional-skills/creative/blender-mcp``) has no entry and the generated
+    sidebar would disagree with the generator.  Insert the missing doc-id into
+    its category's ``items`` array; ordering is fixed afterwards by
+    ``_reconcile_skill_docs_order``.  Returns the changed paths.
+    """
+    changed: list[str] = []
+    rel = "website/sidebars.ts"
+    path = os.path.join(dst, rel)
+    if not os.path.isfile(path):
+        return changed
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return changed
+    modified = text
+    for preserved_rel in preserved or []:
+        match = _FORK_SKILL_MD_RE.match(preserved_rel)
+        if not match:
+            continue
+        kind, category, slug = match.group(1), match.group(2), match.group(3)
+        bundle = "bundled" if kind == "skills" else "optional"
+        doc_id = f"user-guide/skills/{bundle}/{category}/{category}-{slug}"
+        if f"'{doc_id}'" in modified:
+            continue
+        key_index = -1
+        for candidate in _SIDEBAR_CATEGORY_KEY_RE.finditer(modified):
+            if candidate.group("bundle") == bundle and candidate.group("category") == category:
+                key_index = candidate.start()
+                break
+        if key_index == -1:
+            continue
+        items_index = modified.find("items: [", key_index)
+        if items_index == -1:
+            continue
+        bracket = modified.index("[", items_index)
+        depth = 0
+        end = -1
+        for pos in range(bracket, len(modified)):
+            ch = modified[pos]
+            if ch == "[":
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+                if depth == 0:
+                    end = pos
+                    break
+        if end == -1:  # pragma: no cover - malformed sidebar
+            continue
+        inner_indent = "                    "
+        indent_match = re.search(r"(?m)^( +)'user-guide/skills/", modified[bracket:end])
+        if indent_match:
+            inner_indent = indent_match.group(1)
+        # Insert as a new item line before the closing bracket's own line, not
+        # before the bracket character (which would land inside its indent).
+        line_start = modified.rfind("\n", bracket, end) + 1
+        modified = (
+            modified[:line_start]
+            + f"{inner_indent}'{doc_id}',\n"
+            + modified[line_start:]
+        )
+    if modified != text:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(modified)
+        changed.append(rel)
+    return changed
+
+
+# ---------------------------------------------------------------------------
 # SigV4 vector reconcile (tests/scripts/test_release_r2.py)
 # ---------------------------------------------------------------------------
 # The upstream repo pins its R2 SigV4 signer against botocore-generated
@@ -2308,6 +2591,103 @@ def _recompute_sigv4_row(row: str) -> tuple[str, str] | None:
     return stored, recomputed
 
 
+# ---------------------------------------------------------------------------
+# Vercel ``prepare`` hardening (``Vercel – nastech-agent`` deployments)
+# ---------------------------------------------------------------------------
+# The upstream root ``package.json`` installs git hooks from ``prepare``:
+#
+#   node -e "...if(existsSync('.git'))process.exit(spawnSync('lefthook',...
+#
+# Vercel clones the repo *with* ``.git`` and installs with
+# ``NODE_ENV=production`` (devDependencies skipped), so ``lefthook`` is absent
+# and the hook install exits 127 -- failing the deployment before the build
+# starts.  The fork's Vercel projects install from the repo root, so they hit
+# this; upstream does not run a production root install on Vercel, so it never
+# sees it.  Harden the script to probe ``lefthook`` and no-op only when it is
+# genuinely unavailable; a present-but-failing ``lefthook install`` still
+# propagates its non-zero status, and local/dev machines still install hooks.
+
+_UPSTREAM_PREPARE_SCRIPT = (
+    "const {existsSync}=require('fs');const {spawnSync}=require('child_process');"
+    "if(existsSync('.git'))process.exit(spawnSync('lefthook',['install'],"
+    "{stdio:'inherit',shell:true}).status??1)"
+)
+_HARDENED_PREPARE_SCRIPT = (
+    "const{existsSync}=require('fs');const{spawnSync}=require('child_process');"
+    "if(!existsSync('.git'))process.exit(0);"
+    "const probe=spawnSync('lefthook',['--version'],{stdio:'ignore',shell:true});"
+    "if(probe.error||probe.status!==0)process.exit(0);"
+    "process.exit(spawnSync('lefthook',['install'],{stdio:'inherit',shell:true}).status??0)"
+)
+
+
+def _reconcile_vercel_prepare(dst: str) -> bool:
+    """Make the root ``prepare`` hook install survive a hook-less Vercel clone.
+
+    Rewrites only the exact upstream script literal, so it is a no-op once
+    hardened and never touches a fork-authored variant.  Returns ``True`` when
+    the file changed.
+    """
+    path = os.path.join(dst, "package.json")
+    if not os.path.isfile(path):
+        return False
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return False
+    if _UPSTREAM_PREPARE_SCRIPT not in text:
+        return False
+    fixed = text.replace(_UPSTREAM_PREPARE_SCRIPT, _HARDENED_PREPARE_SCRIPT)
+    if fixed == text:
+        return False
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(fixed)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Portable Bash shebang reconcile (``Python lints / Windows footguns``)
+# ---------------------------------------------------------------------------
+# ``scripts/check_bash_shebangs.py`` (``lint.yml``: "Require portable Bash
+# shebangs") scans tracked text files -- including embedded shell payloads
+# inside TS/JS -- for the fixed ``#!/bin/bash`` form and requires the portable
+# ``#!/usr/bin/env bash``, because Nix/Termux have no ``/bin/bash``.  A file the
+# engine retained after upstream deleted it (or any generated payload) can carry
+# the non-portable form; rewriting the literal is the corrective fix the guard
+# asks for, not a bypass.
+
+_PORTABLE_BASH_RE = re.compile(rb"#![ \t]*/(?:usr/)?bin/bash\b")
+_SHEBANG_TEXT_EXTS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".sh", ".py")
+
+
+def _reconcile_portable_shebang(dst: str) -> list[str]:
+    """Rewrite a fixed ``#!/bin/bash`` payload to ``#!/usr/bin/env bash``.
+
+    Only the offending literal is rewritten; a second pass is a no-op.  Returns
+    the changed paths.
+    """
+    changed: list[str] = []
+    for rel in _walk_files(dst):
+        if not rel.endswith(_SHEBANG_TEXT_EXTS):
+            continue
+        path = os.path.join(dst, rel)
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            continue
+        if b"\0" in data:
+            continue
+        fixed = _PORTABLE_BASH_RE.sub(b"#!/usr/bin/env bash", data)
+        if fixed == data:
+            continue
+        with open(path, "wb") as fh:
+            fh.write(fixed)
+        changed.append(rel)
+    return changed
+
+
 def reconcile_tree(dst: str) -> ReconcileResult:
     """Apply known post-brand fixes to the branded tree in place.
 
@@ -2330,6 +2710,12 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_sigv4_vectors(dst):
         result.total += 1
         result.fixed.append("tests/scripts/test_release_r2.py")
+    if _reconcile_vercel_prepare(dst):
+        result.total += 1
+        result.fixed.append("package.json")
+    for rel in _reconcile_portable_shebang(dst):
+        result.total += 1
+        result.fixed.append(rel)
     fts5_fixed = _reconcile_fts5_trigram(dst)
     if fts5_fixed:
         result.total += len(fts5_fixed)
@@ -2359,9 +2745,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     for rel in reconcile_nested_lockfile_roots(dst):
         result.total += 1
         result.fixed.append(rel)
-    if _reconcile_skill_description_hardline(dst):
+    for rel in _reconcile_skill_description_hardline(dst):
         result.total += 1
-        result.fixed.append("skills/autonomous-ai-agents/nastech-agent/SKILL.md")
+        result.fixed.append(rel)
     if _reconcile_test_runner_mode(dst):
         result.total += 1
         result.fixed.append("scripts/run_tests.sh")
@@ -2920,6 +3306,25 @@ class UpdateManager:
             # normalize only the contract-flagged contexts, then register the
             # changed files so the parity gates compare reconciled content.
             for rel in _reconcile_docs_posix_separators(dest, preserved):
+                rel_path = os.path.join(dest, rel)
+                if os.path.isfile(rel_path):
+                    try:
+                        with open(rel_path, "rb") as fh:
+                            reconciled_map[rel] = fh.read()
+                    except OSError:
+                        pass
+            # Fork-preserved skills are also absent from the upstream-derived
+            # Skills sidebar; add them, then re-sort the catalogs and sidebar to
+            # the generator's slug order so docs-site-checks is a fixed point.
+            for rel in _reconcile_fork_skill_sidebars(dest, preserved):
+                rel_path = os.path.join(dest, rel)
+                if os.path.isfile(rel_path):
+                    try:
+                        with open(rel_path, "rb") as fh:
+                            reconciled_map[rel] = fh.read()
+                    except OSError:
+                        pass
+            for rel in _reconcile_skill_docs_order(dest):
                 rel_path = os.path.join(dest, rel)
                 if os.path.isfile(rel_path):
                     try:
