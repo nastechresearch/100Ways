@@ -274,6 +274,35 @@ def test_preserve_keeps_explicitly_owned_asset_after_upstream_deletion(tmp_path)
     assert (tmp_path / "branded" / "assets" / "logo.png").read_text() == "nastech asset\n"
 
 
+def test_preserve_does_not_overwrite_owned_targets_when_registry_exists(tmp_path):
+    rules = BrandingRules()
+    targets = {
+        "apps/bootstrap-installer/public/nastech-bantu.jpg",
+        "apps/desktop/public/nastech-bantu.jpg",
+    }
+    upstream = _tree(tmp_path / "upstream", {})
+    fork = _tree(tmp_path / "fork", {target: "older fork image\n" for target in targets})
+    branded = _tree(tmp_path / "branded", {
+        **{target: f"current owned image: {target}\n" for target in targets},
+        "config/owned-assets/manifest.json": (
+            '{"apps/bootstrap-installer/public/nastech-bantu.jpg": '
+            '"installer/nastech-bantu.jpg", '
+            '"apps/desktop/public/nastech-bantu.jpg": '
+            '"desktop/nastech-bantu.jpg"}\n'
+        ),
+        "config/owned-assets/installer/nastech-bantu.jpg": "current installer image\n",
+        "config/owned-assets/desktop/nastech-bantu.jpg": "current desktop image\n",
+    })
+
+    preserved = preserve_fork_files(
+        str(fork), str(branded), str(upstream), rules, owned_paths=targets
+    )
+
+    assert preserved == []
+    for target in targets:
+        assert (tmp_path / "branded" / target).read_text() == f"current owned image: {target}\n"
+
+
 def test_preserve_fork_files_keeps_existing_engine_owned_registry(tmp_path):
     rules = BrandingRules()
     upstream = _tree(tmp_path / "upstream", {})
