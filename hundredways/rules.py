@@ -75,16 +75,26 @@ _RUNNER_LABEL_RE = re.compile(
     r"core\b"
 )
 
-# The upstream test workflow is tuned for a 96-core larger runner.  The
-# Nastech organization uses standard GitHub-hosted runners, where that fan-out
-# causes timing-sensitive subprocess, SQLite, and gateway tests to contend.
+# The upstream test workflow is tuned for paid larger runners (initially
+# ``ubuntu-latest-96-core``; later ``ubuntu-latest-32-core``).  The Nastech
+# organization uses standard GitHub-hosted runners, where that fan-out causes
+# timing-sensitive subprocess, SQLite, and gateway tests to contend.  Cap every
+# bare integer worker count above the standard-runner ceiling (``96`` -> ``8``
+# and ``32`` -> ``8``); quoted counts and expression-valued counts (the fork's
+# own ``"3"``/``"6"`` and the OS-matrix expressions) are left untouched.
+_TEST_WORKERS_CAP = 8
 _TEST_WORKERS_RE = re.compile(
-    r"(?m)^(?P<prefix>\s*NASTECH_TEST_WORKERS:\s*)96(?P<suffix>\s*(?:#.*)?)$"
+    r"(?m)^(?P<prefix>\s*NASTECH_TEST_WORKERS:\s*)(?P<value>\d+)(?P<suffix>\s*(?:#.*)?)$"
 )
 
 
 def _normalize_test_workers(text: str) -> str:
-    return _TEST_WORKERS_RE.sub(r"\g<prefix>8\g<suffix>", text)
+    def _cap(match_obj: re.Match) -> str:
+        if int(match_obj.group("value")) <= _TEST_WORKERS_CAP:
+            return match_obj.group(0)
+        return f"{match_obj.group('prefix')}{_TEST_WORKERS_CAP}{match_obj.group('suffix')}"
+
+    return _TEST_WORKERS_RE.sub(_cap, text)
 
 
 # Standard runners need a little more wall-clock allowance for the complete

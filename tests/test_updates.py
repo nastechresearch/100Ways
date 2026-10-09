@@ -3,26 +3,36 @@ release zip layout, sequential numbering, and reports."""
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import zipfile
+
+import pytest
 
 from hundredways.assets import OwnedAssets
 from hundredways.integrity import audit_candidate_tree
 from hundredways.updates import (
     STAGES,
     UpdateManager,
+    _HARDENED_PREPARE_SCRIPT,
+    _UPSTREAM_PREPARE_SCRIPT,
     _reconcile_anon_surface_copy,
     _reconcile_apt_pool_first_char,
     _reconcile_credential_display_test,
     _reconcile_desktop_export_order,
     _reconcile_docs_posix_separators,
     _reconcile_fork_skill_catalogs,
+    _reconcile_fork_skill_sidebars,
+    _reconcile_portable_shebang,
     _reconcile_portal_override_test_collision,
     _reconcile_reasoning_effort_selection,
     _reconcile_sigv4_vectors,
+    _reconcile_skill_description_hardline,
+    _reconcile_skill_docs_order,
     _reconcile_telegram_mention_context_lengths,
     _reconcile_uv_lock_file,
+    _reconcile_vercel_prepare,
     _sigv4_vector_signature,
     brand_tree,
     compare_trees,
@@ -1538,3 +1548,261 @@ def test_reconcile_sigv4_vectors_upstream_rows_are_a_noop(tmp_path):
     text = target.read_text(encoding="utf-8")
     assert "/hermes-releases/HermesBundled-0.28.0-win-x64.msix" in text
     assert "05ba50acfb54042fac330848af50877e5fb477c4f2063c2f77f9cc80855eb1e9" in text
+
+
+def test_reconcile_skill_description_hardline_propagates_to_generated_docs(tmp_path):
+    """The trim reaches every generated artifact the docs generator derives.
+
+    docs-site-checks reruns website/scripts/generate-skill-docs.py and diffs;
+    the catalog row and per-skill page embed the SKILL.md description, so
+    trimming only the SKILL.md leaves the generated tree stale.
+    """
+    candidate = tmp_path / "candidate"
+    old = "Use, configure, theme, extend, and orchestrate Nastech Agent"
+    new = "Configure, theme, extend, and orchestrate Nastech Agent"
+
+    skill = candidate / "skills" / "autonomous-ai-agents" / "nastech-agent" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(f'name: nastech-agent\ndescription: "{old}."\n', encoding="utf-8")
+
+    catalog = candidate / "website" / "docs" / "reference" / "skills-catalog.md"
+    catalog.parent.mkdir(parents=True)
+    catalog.write_text(
+        f"| [`nastech-agent`](x) | {old}. | `autonomous-ai-agents/nastech-agent` |\n",
+        encoding="utf-8",
+    )
+
+    page = (
+        candidate
+        / "website"
+        / "docs"
+        / "user-guide"
+        / "skills"
+        / "bundled"
+        / "autonomous-ai-agents"
+        / "autonomous-ai-agents-nastech-agent.md"
+    )
+    page.parent.mkdir(parents=True)
+    page.write_text(f'title: "Nastech Agent — {old}"\n\n{old}.\n', encoding="utf-8")
+
+    changed = _reconcile_skill_description_hardline(str(candidate))
+    assert "skills/autonomous-ai-agents/nastech-agent/SKILL.md" in changed
+    assert "website/docs/reference/skills-catalog.md" in changed
+    assert (
+        "website/docs/user-guide/skills/bundled/autonomous-ai-agents/"
+        "autonomous-ai-agents-nastech-agent.md" in changed
+    )
+    for path in (skill, catalog, page):
+        text = path.read_text(encoding="utf-8")
+        assert old not in text
+        assert new in text
+    assert _reconcile_skill_description_hardline(str(candidate)) == []
+
+
+def test_reconcile_skill_docs_order_sorts_rows_and_sidebar_by_slug(tmp_path):
+    """Branding renames change slugs, so the inherited order drifts.
+
+    The generator sorts catalog sections and sidebar arrays by slug; this
+    reconcile reproduces only that order and is idempotent.
+    """
+    candidate = tmp_path / "candidate"
+    for slug in ("nastech-agent-skill-authoring", "inspecting-nastech-desktop-dom"):
+        p = candidate / "skills" / "software-development" / slug / "SKILL.md"
+        p.parent.mkdir(parents=True)
+        p.write_text("name: x\n", encoding="utf-8")
+
+    catalog = candidate / "website" / "docs" / "reference" / "skills-catalog.md"
+    catalog.parent.mkdir(parents=True)
+    catalog.write_text(
+        "## software-development\n\n"
+        "| Skill | Description | Path |\n"
+        "|-------|-------------|------|\n"
+        "| [`nastech-agent-skill-authoring`](x) | a | "
+        "`software-development/nastech-agent-skill-authoring` |\n"
+        "| [`inspecting-nastech-desktop-dom`](x) | b | "
+        "`software-development/inspecting-nastech-desktop-dom` |\n",
+        encoding="utf-8",
+    )
+
+    sidebar = candidate / "website" / "sidebars.ts"
+    sidebar.parent.mkdir(parents=True, exist_ok=True)
+    sidebar.write_text(
+        "        {\n"
+        "          type: 'category',\n"
+        "          label: 'software-development',\n"
+        "          key: 'skills-bundled-software-development',\n"
+        "          items: [\n"
+        "            'user-guide/skills/bundled/software-development/"
+        "software-development-nastech-agent-skill-authoring',\n"
+        "            'user-guide/skills/bundled/software-development/"
+        "software-development-inspecting-nastech-desktop-dom',\n"
+        "          ],\n"
+        "        },\n",
+        encoding="utf-8",
+    )
+
+    changed = _reconcile_skill_docs_order(str(candidate))
+    assert "website/docs/reference/skills-catalog.md" in changed
+    assert "website/sidebars.ts" in changed
+
+    rows = [ln for ln in catalog.read_text().splitlines() if ln.startswith("| [`")]
+    assert rows[0].startswith("| [`inspecting-nastech-desktop-dom`")
+    assert rows[1].startswith("| [`nastech-agent-skill-authoring`")
+
+    ids = [
+        ln.strip().strip(",").strip("'")
+        for ln in sidebar.read_text().splitlines()
+        if "user-guide/skills" in ln
+    ]
+    assert ids[0].endswith("software-development-inspecting-nastech-desktop-dom")
+    assert _reconcile_skill_docs_order(str(candidate)) == []
+
+
+def test_reconcile_skill_docs_order_resolves_nested_optional_slugs(tmp_path):
+    """A nested optional category (mlops/training/axolotl) sorts by slug.
+
+    The page id is ``mlops-training-axolotl``; the sort key is the directory
+    slug ``axolotl``, so the SKILL.md tree must be scanned, not string-split.
+    """
+    candidate = tmp_path / "candidate"
+    for sub, slug in (("training", "axolotl"), ("research", "dspy")):
+        p = candidate / "optional-skills" / "mlops" / sub / slug / "SKILL.md"
+        p.parent.mkdir(parents=True)
+        p.write_text("name: x\n", encoding="utf-8")
+
+    catalog = candidate / "website" / "docs" / "reference" / "optional-skills-catalog.md"
+    catalog.parent.mkdir(parents=True)
+    catalog.write_text(
+        "## mlops\n\n"
+        "| Skill | Description |\n"
+        "|-------|-------------|\n"
+        "| [**dspy**](../user-guide/skills/optional/mlops/mlops-research-dspy.md) | d. |\n"
+        "| [**axolotl**](../user-guide/skills/optional/mlops/mlops-training-axolotl.md) | a. |\n",
+        encoding="utf-8",
+    )
+
+    changed = _reconcile_skill_docs_order(str(candidate))
+    assert changed == ["website/docs/reference/optional-skills-catalog.md"]
+    rows = [ln for ln in catalog.read_text().splitlines() if ln.startswith("| [**")]
+    assert "axolotl" in rows[0]
+    assert "dspy" in rows[1]
+    assert _reconcile_skill_docs_order(str(candidate)) == []
+
+
+def test_reconcile_fork_skill_sidebars_adds_missing_category_entry(tmp_path):
+    """A fork-only skill preserved into the tree needs a sidebar doc id.
+
+    The Skills sidebar is upstream-derived and lacks the entry; insert it as
+    its own item line inside the category's items array (idempotent).
+    """
+    candidate = tmp_path / "candidate"
+    skill = candidate / "optional-skills" / "creative" / "blender-mcp" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("name: blender-mcp\n", encoding="utf-8")
+
+    sidebar = candidate / "website" / "sidebars.ts"
+    sidebar.parent.mkdir(parents=True, exist_ok=True)
+    sidebar.write_text(
+        "        {\n"
+        "          type: 'category',\n"
+        "          label: 'creative',\n"
+        "          key: 'skills-optional-creative',\n"
+        "          items: [\n"
+        "            'user-guide/skills/optional/creative/creative-archify',\n"
+        "          ],\n"
+        "        },\n",
+        encoding="utf-8",
+    )
+
+    preserved = ["optional-skills/creative/blender-mcp/SKILL.md"]
+    assert _reconcile_fork_skill_sidebars(str(candidate), preserved) == [
+        "website/sidebars.ts"
+    ]
+    text = sidebar.read_text(encoding="utf-8")
+    assert (
+        "creative-archify',\n"
+        "            'user-guide/skills/optional/creative/creative-blender-mcp',\n"
+        "          ]," in text
+    )
+    assert _reconcile_fork_skill_sidebars(str(candidate), preserved) == []
+
+
+def _upstream_prepare_package_json() -> str:
+    payload = {"scripts": {"prepare": f'node -e "{_UPSTREAM_PREPARE_SCRIPT}"'}}
+    return json.dumps(payload, indent=2) + "\n"
+
+
+def test_reconcile_vercel_prepare_hardens_hook_install(tmp_path):
+    """Vercel installs with .git present but no devDeps -> lefthook absent.
+
+    The upstream ``prepare`` then exits 127 and fails the deployment before the
+    build.  Harden it to probe lefthook, and remain idempotent.
+    """
+    candidate = tmp_path / "candidate"
+    pkg = candidate / "package.json"
+    pkg.parent.mkdir(parents=True)
+    pkg.write_text(_upstream_prepare_package_json(), encoding="utf-8")
+
+    assert _reconcile_vercel_prepare(str(candidate)) is True
+    assert _reconcile_vercel_prepare(str(candidate)) is False
+    script = json.loads(pkg.read_text(encoding="utf-8"))["scripts"]["prepare"]
+    assert script == f'node -e "{_HARDENED_PREPARE_SCRIPT}"'
+    assert "!existsSync('.git')" in script
+    assert "['--version']" in script
+
+
+def test_reconcile_vercel_prepare_leaves_fork_variant_untouched(tmp_path):
+    """A fork-authored prepare script is never rewritten."""
+    candidate = tmp_path / "candidate"
+    pkg = candidate / "package.json"
+    pkg.parent.mkdir(parents=True)
+    pkg.write_text(
+        json.dumps({"scripts": {"prepare": "echo fork-owned"}}), encoding="utf-8"
+    )
+    assert _reconcile_vercel_prepare(str(candidate)) is False
+    assert json.loads(pkg.read_text(encoding="utf-8"))["scripts"]["prepare"] == "echo fork-owned"
+
+
+def test_reconcile_vercel_prepare_exits_zero_without_lefthook(tmp_path):
+    """Behaviour: with .git but no lefthook on PATH, prepare must exit 0."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not available")
+
+    candidate = tmp_path / "candidate"
+    pkg = candidate / "package.json"
+    pkg.parent.mkdir(parents=True)
+    pkg.write_text(_upstream_prepare_package_json(), encoding="utf-8")
+    assert _reconcile_vercel_prepare(str(candidate)) is True
+
+    (candidate / ".git").mkdir()
+    prepare = json.loads(pkg.read_text(encoding="utf-8"))["scripts"]["prepare"]
+    inner = prepare[len('node -e "') : -1]
+    result = subprocess.run(
+        [node, "-e", inner],
+        cwd=candidate,
+        env={**os.environ, "PATH": str(candidate)},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_reconcile_portable_shebang_rewrites_embedded_bash_payload(tmp_path):
+    """An embedded ``#!/bin/bash`` in a TS payload is a Windows footgun.
+
+    lint.yml's "Require portable Bash shebangs" step fails it; the corrective
+    rewrite is ``#!/usr/bin/env bash`` and must be idempotent.
+    """
+    candidate = tmp_path / "candidate"
+    script = candidate / "scripts" / "gen.ts"
+    script.parent.mkdir(parents=True)
+    script.write_bytes(b'return `#!/bin/bash\nset -u\n')
+    stray = candidate / "src" / "ok.py"
+    stray.parent.mkdir(parents=True)
+    stray.write_bytes(b'#!/usr/bin/env bash\n#!/bin/sh\n')
+
+    assert _reconcile_portable_shebang(str(candidate)) == ["scripts/gen.ts"]
+    assert b"#!/usr/bin/env bash" in script.read_bytes()
+    assert stray.read_bytes() == b'#!/usr/bin/env bash\n#!/bin/sh\n'
+    assert _reconcile_portable_shebang(str(candidate)) == []
