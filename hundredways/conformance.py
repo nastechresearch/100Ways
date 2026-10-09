@@ -190,11 +190,11 @@ def verify_final_candidate(
             expected_path = expected / relative
             if expected_path.is_file():
                 reconciled_bytes[relative] = expected_path.read_bytes()
-        for relative in _reconcile_skill_docs_order(str(expected)):
+        for relative in _reconcile_fork_skill_sidebars(str(expected), preserved):
             expected_path = expected / relative
             if expected_path.is_file():
                 reconciled_bytes[relative] = expected_path.read_bytes()
-        for relative in _reconcile_fork_skill_sidebars(str(expected), preserved):
+        for relative in _reconcile_skill_docs_order(str(expected)):
             expected_path = expected / relative
             if expected_path.is_file():
                 reconciled_bytes[relative] = expected_path.read_bytes()

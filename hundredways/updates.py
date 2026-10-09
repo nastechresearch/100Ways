@@ -1223,11 +1223,14 @@ def _reconcile_skill_description_hardline(dst: str) -> list[str]:
     except OSError:
         return changed
     needle = f'description: "{_SKILL_DESC_FULL_OLD}."'
-    if needle not in text:
-        return changed
-    with open(skill_path, "w", encoding="utf-8") as fh:
-        fh.write(text.replace(needle, f'description: "{_SKILL_DESC_FULL_NEW}."'))
-    changed.append(skill_rel)
+    if needle in text:
+        with open(skill_path, "w", encoding="utf-8") as fh:
+            fh.write(text.replace(needle, f'description: "{_SKILL_DESC_FULL_NEW}."'))
+        changed.append(skill_rel)
+    # The generated docs are a pure function of the frontmatter, so the trim
+    # must reach them even when an earlier sync already trimmed the SKILL.md
+    # (the block above only covers the source file).  The replace is a no-op
+    # once the generated docs carry the short form, so this stays idempotent.
     # The short form (no trailing period) also appears in the page title.
     for rel in (_SKILL_AGENT_CATALOG_REL, _SKILL_AGENT_PAGE_REL):
         path = os.path.join(dst, rel)

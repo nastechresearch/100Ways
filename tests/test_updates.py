@@ -16,6 +16,8 @@ from hundredways.updates import (
     STAGES,
     UpdateManager,
     _HARDENED_PREPARE_SCRIPT,
+    _SKILL_DESC_FULL_NEW,
+    _SKILL_DESC_FULL_OLD,
     _UPSTREAM_PREPARE_SCRIPT,
     _reconcile_anon_surface_copy,
     _reconcile_apt_pool_first_char,
@@ -1596,6 +1598,57 @@ def test_reconcile_skill_description_hardline_propagates_to_generated_docs(tmp_p
         text = path.read_text(encoding="utf-8")
         assert old not in text
         assert new in text
+    assert _reconcile_skill_description_hardline(str(candidate)) == []
+
+
+def test_reconcile_skill_description_hardline_propagates_after_source_trim(tmp_path):
+    """The trim reaches the generated docs even once the SKILL.md is trimmed.
+
+    An earlier sync trims the SKILL.md, so the source-side guard no longer
+    fires; nesting the generated-docs propagation behind it made the reconcile
+    silently stop propagating after the first sync — leaving a stale catalog
+    row and page that fail docs-site-checks.
+    """
+    candidate = tmp_path / "candidate"
+    old = _SKILL_DESC_FULL_OLD
+    new = _SKILL_DESC_FULL_NEW
+
+    skill = candidate / "skills" / "autonomous-ai-agents" / "nastech-agent" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(f'name: nastech-agent\ndescription: "{new}."\n', encoding="utf-8")
+
+    catalog = candidate / "website" / "docs" / "reference" / "skills-catalog.md"
+    catalog.parent.mkdir(parents=True)
+    catalog.write_text(
+        f"| [`nastech-agent`](x) | {old}. | `autonomous-ai-agents/nastech-agent` |\n",
+        encoding="utf-8",
+    )
+
+    page = (
+        candidate
+        / "website"
+        / "docs"
+        / "user-guide"
+        / "skills"
+        / "bundled"
+        / "autonomous-ai-agents"
+        / "autonomous-ai-agents-nastech-agent.md"
+    )
+    page.parent.mkdir(parents=True)
+    page.write_text(f'title: "Nastech Agent — {old}"\n\n{old}.\n', encoding="utf-8")
+
+    changed = _reconcile_skill_description_hardline(str(candidate))
+    assert "skills/autonomous-ai-agents/nastech-agent/SKILL.md" not in changed
+    assert "website/docs/reference/skills-catalog.md" in changed
+    assert (
+        "website/docs/user-guide/skills/bundled/autonomous-ai-agents/"
+        "autonomous-ai-agents-nastech-agent.md" in changed
+    )
+    for path in (catalog, page):
+        text = path.read_text(encoding="utf-8")
+        assert old not in text
+        assert new in text
+    # Idempotent: the trimmed SKILL.md is left untouched, nothing changes.
     assert _reconcile_skill_description_hardline(str(candidate)) == []
 
 
