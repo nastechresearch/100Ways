@@ -2786,8 +2786,8 @@ def _reconcile_ci_runner_budgets(dst: str) -> list[str]:
             "    # A typical run is ~17 min; one slow runner took 28 min for the same work "
             "(run 36295230146).\n"
             "    timeout-minutes: 75\n",
-            "    # Hermes runs this on a 32-core windows-latest image (~17 min). This repo\n"
-            "    # only has the free 4-core windows-latest, where the per-install Node\n"
+            "    # Upstream runs this on a 32-core windows-latest image (~17 min). This\n"
+            "    # repo only has the free 4-core windows-latest, where the per-install Node\n"
             "    # dependency build is the long pole (one install already exceeded 25 min\n"
             "    # at 6-way worker contention). The lane needs both a lower worker count\n"
             "    # and a larger wall-clock budget than upstream's comment assumes.\n"
@@ -2798,7 +2798,7 @@ def _reconcile_ci_runner_budgets(dst: str) -> list[str]:
             "wait).\n"
             "          NASTECH_TEST_WORKERS: '6'\n",
             "          # One journey per file, in parallel (each is mostly network +\n"
-            "          # subprocess wait). Hermes runs 6 on a 32-core host; on the free\n"
+            "          # subprocess wait). Upstream runs 6 on a 32-core host; on the free\n"
             "          # 4-core windows-latest 6 concurrent installs starve each other's\n"
             "          # npm ci / native build. Match the runner's core count.\n"
             "          NASTECH_TEST_WORKERS: '4'\n",

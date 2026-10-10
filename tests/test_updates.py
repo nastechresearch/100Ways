@@ -289,10 +289,22 @@ def test_ci_runner_budgets_normalize_free_runner_timeouts(tmp_path):
     install = (wf / "windows-install-update-e2e.yml").read_text(encoding="utf-8")
     assert "    timeout-minutes: 120\n" in install
     assert "          NASTECH_TEST_WORKERS: '4'\n" in install
+    # The injected fork-authored comments must not carry the upstream brand:
+    # the hardened weekly gate (``audit_first_party_brand`` +
+    # ``audit_branding_fixed_point``) rejects any leftover ``hermes``/``nous``
+    # token, so the reconciler injects "Upstream ..." prose instead.
+    lowered = install.lower()
+    assert "hermes" not in install.lower()
+    assert "nousresearch" not in lowered
+    assert "Upstream runs this on a 32-core windows-latest image" in install
+    assert "Upstream runs 6 on a 32-core host" in install
     assert "INSTALL_TIMEOUT = 2400.0\nUPDATE_TIMEOUT = 1800.0\n" in machine.read_text(
         encoding="utf-8"
     )
-    # Every edit is a fixed point.
+    # Every edit is a fixed point, and the rendered workflow is a canonical
+    # brand fixed point (no residual upstream token the weekly gate would flag).
+    rules = BrandingRules()
+    assert rules.transform_text(install) == install
     assert _reconcile_ci_runner_budgets(str(candidate)) == []
 
 
