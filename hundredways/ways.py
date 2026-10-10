@@ -211,7 +211,7 @@ WAYS: list[Way] = [
     Way("research.docs-mine", "Docs mining", "research", "scan docs for hermes references a rename would miss"),
     Way("research.config-schema", "Config schema dump", "research", "extract the upstream config schema to map keys 1:1"),
     Way("research.ci-mine", "CI workflow mining", "research", "copy upstream CI patterns that protect parity"),
-    Way("research.asset-inventory", "Asset inventory", "research", "enumerate all images/frames so rename-only is exhaustive"),
+    Way("research.asset-inventory", "Asset inventory", "research", "enumerate all images/frames so rename-only is exhaustive", uses="brandassets.registered_sources"),
     # ---- notify (second decade): how we surface events --------------------------
     Way("notify.slack", "Slack webhook", "notify", "POST a markdown message to a Slack incoming webhook"),
     Way("notify.discord", "Discord webhook", "notify", "POST an embed to a Discord webhook URL"),
@@ -229,7 +229,7 @@ WAYS: list[Way] = [
     Way("gate.since-birth", "Birth-commit gate", "gate", "prove parity against the birth commit each cycle"),
     Way("gate.locked-unchanged", "Locked immutable", "gate", "locked files must be byte-identical to their twin"),
     Way("gate.violation-zero", "Zero-violation gate", "gate", "any brand-rule violation fails the gate"),
-    Way("gate.asset-ok", "Asset gate", "gate", "every image/binary must exist; content free to differ"),
+    Way("gate.asset-ok", "Asset gate", "gate", "every image/binary must exist; content free to differ", uses="brandassets.audit_brand_assets"),
     Way("gate.test-suite", "Test suite gate", "gate", "run the repo's own tests; failures block the port"),
     Way("gate.gen-ai", "AI review gate", "gate", "an LLM reviews the diff and vetoes suspicious hunks"),
     Way("gate.lockfile-pinned", "Lockfile pinned", "gate", "dependency lockfiles must match the expected hashes"),
