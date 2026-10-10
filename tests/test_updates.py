@@ -29,6 +29,7 @@ from hundredways.updates import (
     _reconcile_install_ps1_store_guard_test,
     _reconcile_locale_key_order,
     _reconcile_python_test_timeout,
+    _reconcile_preserved_brand_text,
     _reconcile_windows_boot_lifecycle_race,
     _reconcile_docs_posix_separators,
     _reconcile_fork_skill_catalogs,
@@ -1687,6 +1688,52 @@ def test_reconcile_docs_posix_separators_scopes_to_preserved_pages_and_catalogs(
 
     assert changed == []
     assert "skills/other\\stale" in stale_upstream.read_text(encoding="utf-8")
+
+
+def test_reconcile_preserved_brand_text_brands_fork_only_text(tmp_path):
+    """A fork-only text file preserved verbatim is branded to a fixed point.
+
+    ``preserve_fork_files`` copies fork-only files byte-for-byte, so a
+    fork-authored workflow comment that says ``# Hermes runs this ...`` trips
+    both ``first-party-brand`` and ``brand-text-not-fixed-point`` on the
+    candidate.  The reconcile applies the canonical transform, leaves an
+    already-clean file untouched, and skips locked/immutable paths.
+    """
+    candidate = tmp_path / "candidate"
+    workflow_rel = ".github/workflows/windows-install-update-e2e.yml"
+    workflow = candidate / workflow_rel
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text(
+        "# Hermes runs this on a 32-core windows-latest image (~17 min).\n"
+        "name: windows-install-update-e2e\n",
+        encoding="utf-8",
+    )
+    clean_rel = ".github/workflows/tests-os.yml"
+    clean = candidate / clean_rel
+    clean.write_text("name: tests-os\n", encoding="utf-8")
+    locked_rel = "uv.lock"
+    locked = candidate / locked_rel
+    locked.write_text("source = 'NousResearch/misaki'\n", encoding="utf-8")
+
+    changed = _reconcile_preserved_brand_text(
+        str(candidate), [workflow_rel, clean_rel, locked_rel]
+    )
+
+    assert changed == [workflow_rel]
+    branded = workflow.read_text(encoding="utf-8")
+    assert "Hermes" not in branded
+    assert "Nastech runs this" in branded
+    # The rewritten file is a canonical fixed point, and locked files are
+    # left byte-for-byte (the audit covers their residue with an allow-list).
+    assert BrandingRules().transform_text(branded) == branded
+    assert "NousResearch" in locked.read_text(encoding="utf-8")
+    # Idempotent.
+    assert (
+        _reconcile_preserved_brand_text(
+            str(candidate), [workflow_rel, clean_rel, locked_rel]
+        )
+        == []
+    )
 
 
 def test_reconcile_uv_lock_rewrites_misaki_source_to_the_fork(tmp_path):

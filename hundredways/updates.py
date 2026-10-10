@@ -2090,6 +2090,48 @@ def _reconcile_docs_posix_separators(dst: str, preserved: list[str]) -> list[str
     return changed
 
 
+def _reconcile_preserved_brand_text(dst: str, preserved: list[str]) -> list[str]:
+    """Brand fork-local preserved text so the candidate is a fixed point.
+
+    ``preserve_fork_files`` carries fork-only files over verbatim.  A fork
+    file that still names the upstream brand -- e.g. a fork-authored workflow
+    comment reading ``# Hermes runs this on ...`` -- is copied unchanged, so
+    the candidate trips both ``first-party-brand`` and
+    ``brand-text-not-fixed-point``.  Running the same canonical transform the
+    brand stage uses makes the file transform-stable while keeping every
+    fork-authored byte that is not an upstream token.  Locked/immutable files
+    are left byte-for-byte: their brand residue is covered by the audit's
+    explicit allow-list, not by rewriting.
+
+    Returns the repo-relative paths changed, so the caller can register them
+    with ``verify_branded`` / ``compare_trees`` as reconciled content.
+    """
+    rules = BrandingRules()
+    changed: list[str] = []
+    for rel in preserved or []:
+        if is_locked_path(rel) or is_immutable_path(rel):
+            continue
+        path = os.path.join(dst, rel)
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            continue
+        if not is_text(data):
+            continue
+        text = data.decode("utf-8")
+        branded = _candidate_text_for(rel, text, rules)
+        if branded == text:
+            continue
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(branded)
+        except OSError:
+            continue
+        changed.append(rel)
+    return changed
+
+
 # ---------------------------------------------------------------------------
 # Generated skill-docs ordering (website/scripts/generate-skill-docs.py)
 # ---------------------------------------------------------------------------
@@ -3696,6 +3738,20 @@ class UpdateManager:
                     except OSError:
                         pass
             for rel in _reconcile_skill_docs_order(dest):
+                rel_path = os.path.join(dest, rel)
+                if os.path.isfile(rel_path):
+                    try:
+                        with open(rel_path, "rb") as fh:
+                            reconciled_map[rel] = fh.read()
+                    except OSError:
+                        pass
+            # A fork-local file is preserved verbatim, so any upstream brand
+            # run left in fork-authored text (e.g. a workflow comment reading
+            # "# Hermes runs this on ...") would trip first-party-brand and
+            # brand-text-not-fixed-point on the candidate.  Apply the same
+            # canonical transform the brand stage uses so preserved text is a
+            # fixed point too, and register the changed files as reconciled.
+            for rel in _reconcile_preserved_brand_text(dest, preserved):
                 rel_path = os.path.join(dest, rel)
                 if os.path.isfile(rel_path):
                     try:
