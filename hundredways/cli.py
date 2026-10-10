@@ -43,6 +43,7 @@ from .achievements import Achievements
 from .ai import AIEngine
 from .analyzer import analyze
 from .assets import OwnedAssets
+from .brandaudit import create_issues, plan_issues, render_issues_markdown, run_audit, write_json
 from .codes import CODE_DETAILS, code_name
 from .dashboard import serve as serve_dashboard
 from .git_ops import ensure_branch
@@ -161,6 +162,37 @@ class Cli:
         if self.args.ai:
             print("\n--- AI gap review ---")
             print(ai.review_gap(report, self.repo))
+
+    def cmd_audit(self) -> None:
+        """Brand-coverage audit: discover new brand spellings, residue, and secrets.
+
+        Read-only by default.  ``--apply`` is the only path that opens issues, and
+        it is never wired into a workflow: opening issues is a human decision.
+        """
+        source = self.args.source or self.args.candidate or self.repo
+        audit = run_audit(
+            source,
+            self.args.candidate,
+            self.rules,
+            max_samples=self.args.max_samples,
+            assets_root=self.args.assets_root,
+        )
+        print(audit.render_markdown())
+        if self.args.json:
+            write_json(audit, self.args.json)
+            print(f"wrote {self.args.json}")
+        drafts = plan_issues(audit, self.repo)
+        if self.args.issues:
+            with open(self.args.issues, "w", encoding="utf-8") as fh:
+                fh.write(render_issues_markdown(drafts))
+            print(f"wrote {self.args.issues} ({len(drafts)} draft(s))")
+        if drafts and self.args.apply:
+            for result in create_issues(self.repo, drafts, apply=True):
+                print(result)
+        elif drafts:
+            print(f"{len(drafts)} issue draft(s) prepared; re-run with --apply to open them.")
+        if self.args.require_clean and not audit.clean:
+            sys.exit(1)
 
     def cmd_scan(self) -> None:
         paths = self.args.paths
@@ -620,6 +652,26 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("analyze", help="file-to-file gap analysis")
     p.add_argument("--ai", action="store_true", help="include LLM review")
     p.set_defaults(func="cmd_analyze")
+
+    p = sub.add_parser(
+        "audit",
+        help="brand-coverage audit: discover future brand spellings, residue, and secrets",
+    )
+    p.add_argument("--source", default="", help="upstream tree to discover future brand spellings")
+    p.add_argument("--candidate", default="", help="branded tree to check for residue + secrets")
+    p.add_argument("--max-samples", type=int, default=8, help="sample paths kept per new spelling")
+    p.add_argument(
+        "--assets-root",
+        default="",
+        help="owned-assets registry dir (default: <audited>/config/owned-assets)",
+    )
+    p.add_argument("--json", default="", help="write the audit result to this JSON path")
+    p.add_argument("--issues", default="", help="write GitHub-issue drafts to this markdown path")
+    p.add_argument(
+        "--apply", action="store_true", help="open the drafts as issues (default: dry run)"
+    )
+    p.add_argument("--require-clean", action="store_true", help="exit 1 when any finding remains")
+    p.set_defaults(func="cmd_audit")
 
     p = sub.add_parser("ways", help="browse the 200 ways")
     p.add_argument("way_action", nargs="?", default="list", choices=["list", "show", "count", "defaults", "coverage"])
