@@ -23,7 +23,7 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-  "pillow>=10,<12",
+  "pillow>=12.3.0,<13",
 ]
 
 [project.urls]
