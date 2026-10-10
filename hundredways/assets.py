@@ -44,9 +44,19 @@ _TAURI_BOOTSTRAP_ICON_SIZES: dict[str, tuple[int, int]] = {
 
 
 def _normalized_tauri_icon_bytes(path: str, size: tuple[int, int]) -> bytes | None:
-    """Return a deterministic RGBA PNG for a declared bootstrap icon."""
+    """Return a deterministic RGBA PNG for a declared bootstrap icon.
+
+    A source that is already the required RGBA PNG at the required size is
+    returned byte-for-byte: the fork's icon generator writes exactly that, and
+    re-encoding it here would break the fixed point that
+    ``scripts/generate_icons.py --check`` verifies on every release. Only
+    non-compliant sources (wrong mode or dimensions) are re-encoded.
+    """
     try:
         with Image.open(path) as image:
+            if image.mode == "RGBA" and image.size == size:
+                with open(path, "rb") as handle:
+                    return handle.read()
             rgba = image.convert("RGBA")
             if rgba.size != size:
                 rgba = rgba.resize(size, Image.Resampling.LANCZOS)
