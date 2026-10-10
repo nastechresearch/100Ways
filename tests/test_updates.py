@@ -21,8 +21,15 @@ from hundredways.updates import (
     _UPSTREAM_PREPARE_SCRIPT,
     _reconcile_anon_surface_copy,
     _reconcile_apt_pool_first_char,
+    _reconcile_ci_runner_budgets,
     _reconcile_credential_display_test,
     _reconcile_desktop_export_order,
+    _reconcile_desktop_path_fixtures,
+    _reconcile_desktop_skin_alias,
+    _reconcile_install_ps1_store_guard_test,
+    _reconcile_locale_key_order,
+    _reconcile_python_test_timeout,
+    _reconcile_windows_boot_lifecycle_race,
     _reconcile_docs_posix_separators,
     _reconcile_fork_skill_catalogs,
     _reconcile_fork_skill_sidebars,
@@ -182,6 +189,272 @@ def test_desktop_export_order_is_reconciled_after_nastech_rename(tmp_path):
     assert sdk_text.index("@/lib/budgeted-loop") < sdk_text.index("@/nastech")
     assert sdk_text.index("@/lib/format") < sdk_text.index("@/nastech")
     assert sdk_text.index("@/lib/utils") < sdk_text.index("@/nastech")
+
+
+def test_desktop_export_order_moves_branded_statements_to_sorted_position(tmp_path):
+    candidate = tmp_path / "candidate"
+    sdk = candidate / "apps" / "desktop" / "src" / "sdk" / "index.ts"
+    sdk.parent.mkdir(parents=True)
+    sdk.write_text(
+        "export { pluginSettingsHref } from '@/contrib/settings-pages'\n"
+        "/** The live gateway instance type — for typing the `gateway` prop `ConnectorsTab`\n"
+        " *  takes; obtain the instance from `host.getGateway()`. */\n"
+        "export type { NastechGateway } from '@/nastech'\n"
+        "export { type GrabScroll, useGrabScroll } from '@/hooks/use-grab-scroll'\n"
+        "export { triggerHaptic as haptic } from '@/lib/haptics'\n"
+        "export { completeMcpDesktopOAuth } from '@/lib/mcp-dashboard-oauth'\n"
+        "export * as icons from '@/lib/icons'\n"
+        "export type { NastechOpenTarget } from '@/lib/nastech-open-target'\n"
+        "export { isSubmitEnter } from '@/lib/ime'\n"
+        "export { LruCache } from '@/lib/lru-cache'\n"
+        "export { catalogProviderMatches } from '@/lib/model-options'\n"
+        "export { cn } from '@/lib/utils'\n"
+        "export type { StatusResponse } from '@/types/nastech'\n"
+        "export { useStore as useValue } from '@nanostores/react'\n"
+        "export { retintTheme, themeHue } from '@/themes/retint'\n"
+        "export type { DesktopTheme } from '@/themes/types'\n"
+        "export { compactNumber } from '@nastech/shared'\n",
+        encoding="utf-8",
+    )
+
+    changed = _reconcile_desktop_export_order(str(candidate))
+    assert changed == ["apps/desktop/src/sdk/index.ts"]
+    text = sdk.read_text(encoding="utf-8")
+    assert text.index("'@/lib/utils'") < text.index("'@/nastech'")
+    assert text.index("'@/nastech'") < text.index("'@/themes/retint'")
+    assert text.index("'@/lib/ime'") < text.index("'@/lib/nastech-open-target'")
+    assert text.index("'@/lib/model-options'") < text.index("'@/lib/nastech-open-target'")
+    assert text.index("'@nanostores/react'") < text.index("'@nastech/shared'")
+    # The JSDoc travels with its statement instead of being orphaned.
+    assert (
+        "/** The live gateway instance type" in text
+        and text.index("/** The live gateway instance type")
+        < text.index("export type { NastechGateway }")
+    )
+
+
+def test_ci_runner_budgets_normalize_free_runner_timeouts(tmp_path):
+    candidate = tmp_path / "candidate"
+    wf = candidate / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / "tests-os.yml").write_text(
+        "jobs:\n"
+        "    env:\n"
+        "          NASTECH_TEST_WORKERS: ${{ matrix.marker == 'windows' && '16' || '' }}\n"
+        "          NASTECH_TEST_SLICE: ${{ matrix.slice || '' }}\n"
+        "        include:\n"
+        "          - name: Windows-only tests\n"
+        "            runner: windows-latest\n"
+        "            marker: windows\n"
+        "          - name: Windows-only tests (arm64)\n"
+        "            runner: windows-latest\n"
+        "            marker: windows\n"
+        "            timeout: 60\n",
+        encoding="utf-8",
+    )
+    (wf / "windows-install-update-e2e.yml").write_text(
+        "jobs:\n"
+        "  install-update:\n"
+        "    # A typical run is ~17 min; one slow runner took 28 min for the same work "
+        "(run 36295230146).\n"
+        "    timeout-minutes: 75\n"
+        "    steps:\n"
+        "      - uses: x\n"
+        "          # One journey per file, all in parallel (each is mostly network + subprocess "
+        "wait).\n"
+        "          NASTECH_TEST_WORKERS: '6'\n",
+        encoding="utf-8",
+    )
+    machine = candidate / "tests" / "e2e" / "core" / "windows_update" / "_machine.py"
+    machine.parent.mkdir(parents=True)
+    machine.write_text(
+        'OPT_IN_ENV = "NASTECH_E2E_WINDOWS_INSTALL"\n'
+        "INSTALL_TIMEOUT = 1500.0\n"
+        "UPDATE_TIMEOUT = 1200.0\n"
+        "CMD_TIMEOUT = 300.0\n",
+        encoding="utf-8",
+    )
+
+    changed = _reconcile_ci_runner_budgets(str(candidate))
+    assert set(changed) == {
+        ".github/workflows/tests-os.yml",
+        ".github/workflows/windows-install-update-e2e.yml",
+        "tests/e2e/core/windows_update/_machine.py",
+    }
+    os_yml = (wf / "tests-os.yml").read_text(encoding="utf-8")
+    assert "            timeout: 45\n" in os_yml
+    assert "            timeout: 60\n" in os_yml  # arm64 row untouched
+    assert "          NASTECH_TEST_FILE_TIMEOUT: '900'\n" in os_yml
+    install = (wf / "windows-install-update-e2e.yml").read_text(encoding="utf-8")
+    assert "    timeout-minutes: 120\n" in install
+    assert "          NASTECH_TEST_WORKERS: '4'\n" in install
+    assert "INSTALL_TIMEOUT = 2400.0\nUPDATE_TIMEOUT = 1800.0\n" in machine.read_text(
+        encoding="utf-8"
+    )
+    # Every edit is a fixed point.
+    assert _reconcile_ci_runner_budgets(str(candidate)) == []
+
+
+def test_python_test_timeout_reconcile_widens_templated_and_e2e_jobs(tmp_path):
+    candidate = tmp_path / "candidate"
+    wf = candidate / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    path = wf / "tests.yml"
+    path.write_text(
+        "jobs:\n"
+        "  test:\n"
+        "    name: Run tests (${{ matrix.slice }}/2)\n"
+        "    runs-on: ubuntu-latest\n"
+        "    timeout-minutes: 30\n"
+        "  e2e:\n"
+        "    if: inputs.e2e\n"
+        "    timeout-minutes: 30\n"
+        "  e2e-upgrade-plan:\n"
+        "    timeout-minutes: 5\n"
+        "  e2e-upgrade:\n"
+        "    timeout-minutes: 60\n"
+        "  unrelated:\n"
+        "    name: e2e\n"
+        "    timeout-minutes: 30\n",
+        encoding="utf-8",
+    )
+
+    changed = _reconcile_python_test_timeout(str(candidate))
+    assert changed == [".github/workflows/tests.yml"]
+    text = path.read_text(encoding="utf-8")
+    assert (
+        "    name: Run tests (${{ matrix.slice }}/2)\n"
+        "    runs-on: ubuntu-latest\n"
+        "    timeout-minutes: 75\n"
+    ) in text
+    assert text.count("timeout-minutes: 75") == 2
+    # A job whose *name* is ``e2e`` keeps its budget; only the ``e2e`` key moves.
+    assert "name: e2e\n    timeout-minutes: 30\n" in text
+    # The auxiliary e2e upgrade lanes keep their own budgets.
+    assert "timeout-minutes: 5\n" in text
+    assert "timeout-minutes: 60\n" in text
+    # Fixed point.
+    assert _reconcile_python_test_timeout(str(candidate)) == []
+    # A file without the target jobs is a no-op.
+    path.write_text("jobs:\n  other:\n    timeout-minutes: 30\n", encoding="utf-8")
+    assert _reconcile_python_test_timeout(str(candidate)) == []
+
+
+def test_windows_boot_lifecycle_accepts_already_gone_taskkill(tmp_path):
+    candidate = tmp_path / "candidate"
+    path = candidate / "tests" / "e2e" / "core" / "windows" / "test_boot_lifecycle.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "import subprocess\n\n\n"
+        "def pump() -> None:\n"
+        "    return None\n\n\n"
+        "def test_serve_tree_kill_leaves_no_orphans_and_reboots(tmp_path: Path) -> None:\n"
+        "    for _ in range(1):\n"
+        "        if True:\n"
+        "            killed = taskkill_tree(first.pid)\n"
+        "            assert killed.returncode == 0, killed.stderr\n",
+        encoding="utf-8",
+    )
+    assert _reconcile_windows_boot_lifecycle_race(str(candidate)) is True
+    text = path.read_text(encoding="utf-8")
+    assert "def _kill_raced_its_target(" in text
+    assert "killed.returncode == 0 or _kill_raced_its_target(killed)" in text
+    assert _reconcile_windows_boot_lifecycle_race(str(candidate)) is False
+
+
+def test_install_ps1_store_guard_test_collapses_host_wrapping(tmp_path):
+    candidate = tmp_path / "candidate"
+    path = candidate / "scripts" / "tests" / "test-install-ps1-store-guard.ps1"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "try {\n"
+        "    Assert-True ($r.All -match 'tool store would land inside the checkout') "
+        "'refusal names the tool-store cause'\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    assert _reconcile_install_ps1_store_guard_test(str(candidate)) is True
+    text = path.read_text(encoding="utf-8")
+    assert "($r.All -replace '\\s+', ' ') -match" in text
+    assert _reconcile_install_ps1_store_guard_test(str(candidate)) is False
+
+
+def test_desktop_skin_alias_resolves_by_theme_name(tmp_path):
+    candidate = tmp_path / "candidate"
+    path = candidate / "apps" / "desktop" / "src" / "themes" / "use-skin-command.ts"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "const ALIASES = { default: 'nastech', nastech: 'classic' }\n"
+        "export function useSkinCommand() {\n"
+        "  return (rawArg: string) => {\n"
+        "      const arg = rawArg.trim()\n"
+        "      const normalized = arg.toLowerCase()\n"
+        "      const targetName = ALIASES[normalized] || normalized\n"
+        "\n"
+        "      const target = availableThemes.find(\n"
+        "        t => t.name.toLowerCase() === targetName || t.label.toLowerCase() === normalized\n"
+        "      )\n"
+        "      return target\n"
+        "  }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    assert _reconcile_desktop_skin_alias(str(candidate)) is True
+    text = path.read_text(encoding="utf-8")
+    assert "const alias = ALIASES[normalized]" in text
+    assert "(!alias && t.label" in text
+    assert _reconcile_desktop_skin_alias(str(candidate)) is False
+
+
+def test_desktop_path_fixtures_use_branded_suffix(tmp_path):
+    candidate = tmp_path / "candidate"
+    electron = candidate / "apps" / "desktop" / "electron"
+    scripts = candidate / "apps" / "desktop" / "scripts"
+    electron.mkdir(parents=True)
+    scripts.mkdir(parents=True)
+    data_paths = electron / "data-paths.test.ts"
+    data_paths.write_text("const expected = 'hermesmagic-test'\n", encoding="utf-8")
+    bundle_env = scripts / "bundle-env.test.mjs"
+    bundle_env.write_text("child: 'hermesmagic-test'\n", encoding="utf-8")
+
+    changed = _reconcile_desktop_path_fixtures(str(candidate))
+    assert set(changed) == {
+        "apps/desktop/electron/data-paths.test.ts",
+        "apps/desktop/scripts/bundle-env.test.mjs",
+    }
+    assert "hermesmagic-test" not in data_paths.read_text(encoding="utf-8")
+    assert "nastechmagic-test" in data_paths.read_text(encoding="utf-8")
+    assert "nastechmagic-test" in bundle_env.read_text(encoding="utf-8")
+    assert _reconcile_desktop_path_fixtures(str(candidate)) == []
+
+
+def test_locale_key_order_restores_generated_sort(tmp_path):
+    candidate = tmp_path / "candidate"
+    locales = candidate / "locales"
+    locales.mkdir(parents=True)
+    tui_keys = ["slashCmd.usage.old", "composer.hermesBalance", "settings.ares"]
+    (locales / "_keys.tui.json").write_text(
+        json.dumps(tui_keys, indent=2) + "\n", encoding="utf-8"
+    )
+    desktop_keys = ["skills.nastech_not_connected", "composer.missing_app"]
+    (locales / "_keys.desktop.json").write_text(
+        json.dumps({"surface": "desktop", "keys": desktop_keys}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    changed = _reconcile_locale_key_order(str(candidate))
+    assert changed == [
+        "locales/_keys.desktop.json",
+        "locales/_keys.tui.json",
+    ]
+    assert json.loads((locales / "_keys.tui.json").read_text(encoding="utf-8")) == sorted(
+        tui_keys
+    )
+    assert json.loads((locales / "_keys.desktop.json").read_text(encoding="utf-8")) == {
+        "surface": "desktop",
+        "keys": sorted(desktop_keys),
+    }
+    assert _reconcile_locale_key_order(str(candidate)) == []
 
 
 def test_reconcile_preserves_fixed_width_credential_mask_assertion(tmp_path):
