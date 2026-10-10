@@ -1310,13 +1310,24 @@ def _reconcile_quickstart_hardware_fixture(dst: str) -> int:
     return 1
 
 
-def _reconcile_docusaurus_site_config(dst: str) -> int:
-    """Normalize the project-pages URL after domain branding.
+# Public origin that fronts the docs, mirroring upstream's custom domain.
+# Upstream serves one public site: the landing at ``/`` and the Docusaurus docs
+# at ``/docs/`` (``baseUrl: '/docs/'``), with the docs artifact (published to
+# GitHub Pages) fronted by that origin -- Vercel serves ``/`` and rewrites
+# ``/docs/*`` to Pages.  The fork keeps the same shape, so the build must keep
+# ``baseUrl: '/docs/'`` and point ``url`` at this public origin (not at the
+# Pages storage origin, whose ``/docs/`` path does not exist).
+_DOCS_PUBLIC_ORIGIN = "https://nastechresearch.com"
 
-    Docusaurus requires ``url`` to be an origin only; a repository path belongs
-    in ``baseUrl``.  Domain reconciliation turns the fork site into a GitHub
-    Pages project URL, so split that URL deterministically before the docs
-    build sees it.
+
+def _reconcile_docusaurus_site_config(dst: str) -> int:
+    """Match the docs build to the public landing origin, as upstream does.
+
+    A project-pages baseUrl (``/nastech-agent/docs/``) does not match the
+    public ``/docs`` route the landing exposes, so the Docusaurus router
+    renders "Page Not Found" once the client hydrates.  Restore the upstream
+    contract -- ``url`` == public origin, ``baseUrl: '/docs/'`` -- so the
+    landing's ``/docs/*`` external rewrite serves the docs cleanly.
     """
     path = os.path.join(dst, "website", "docusaurus.config.ts")
     if not os.path.isfile(path):
@@ -1326,12 +1337,18 @@ def _reconcile_docusaurus_site_config(dst: str) -> int:
             text = fh.read()
     except OSError:
         return 0
-    updated = text.replace(
-        "url: 'https://nastechresearch.github.io/nastech-agent',",
-        "url: 'https://nastechresearch.github.io',",
-    ).replace(
-        "baseUrl: '/docs/',",
+    updated = text
+    for origin in (
+        "https://nastechresearch.github.io/nastech-agent",
+        "https://nastechresearch.github.io",
+    ):
+        updated = updated.replace(
+            f"url: '{origin}',",
+            f"url: '{_DOCS_PUBLIC_ORIGIN}',",
+        )
+    updated = updated.replace(
         "baseUrl: '/nastech-agent/docs/',",
+        "baseUrl: '/docs/',",
     )
     if updated == text:
         return 0

@@ -15,6 +15,7 @@ from hundredways.integrity import audit_candidate_tree
 from hundredways.updates import (
     STAGES,
     UpdateManager,
+    _DOCS_PUBLIC_ORIGIN,
     _HARDENED_PREPARE_SCRIPT,
     _SKILL_DESC_FULL_NEW,
     _SKILL_DESC_FULL_OLD,
@@ -961,8 +962,11 @@ def test_reconcile_target_ci_compatibility_fixes_are_audited(tmp_path):
         "eslint.config.shared.mjs",
     }
     assert os.stat(runner).st_mode & 0o111
-    assert "url: 'https://nastechresearch.github.io'," in (website / "docusaurus.config.ts").read_text()
-    assert "baseUrl: '/nastech-agent/docs/'," in (website / "docusaurus.config.ts").read_text()
+    assert "url: 'https://nastechresearch.github.io'," not in (website / "docusaurus.config.ts").read_text()
+    docs_config = (website / "docusaurus.config.ts").read_text()
+    assert f"url: '{_DOCS_PUBLIC_ORIGIN}'," in docs_config
+    assert "baseUrl: '/docs/'," in docs_config
+    assert "/nastech-agent/docs/" not in docs_config
     assert "return project" in (paths / "paths.ts").read_text()
     lint_config = (root / "eslint.config.shared.mjs").read_text()
     assert "'perfectionist/sort-imports': [\n        'warn'," in lint_config
