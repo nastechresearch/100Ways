@@ -867,6 +867,33 @@ def _reconcile_hermez_obfuscation(dst: str) -> int:
     return 0
 
 
+def _move_export_block(text: str, export_line: str, anchor_line: str) -> str:
+    """Move one ``export`` statement to sit right after ``anchor_line``.
+
+    The statement's immediately-preceding JSDoc block (if any) travels with it,
+    so the move stays correct across the comment-text drift that branding and
+    upstream edits introduce.  Returns ``text`` unchanged when either marker is
+    missing, and is a fixed point once the statement already follows the anchor.
+    """
+    needle = export_line + "\n"
+    index = text.find(needle)
+    if index < 0:
+        return text
+    anchor = anchor_line + "\n"
+    if anchor not in text:
+        return text
+    start = index
+    doc = re.search(r"/\*\*(?:[^*]|\*(?!/))*\*/\n$", text[:start], re.S)
+    if doc:
+        start = doc.start()
+    end = index + len(needle)
+    block = text[start:end]
+    rest = text[:start] + text[end:]
+    anchor_index = rest.find(anchor)
+    insert_at = anchor_index + len(anchor)
+    return rest[:insert_at] + block + rest[insert_at:]
+
+
 def _reconcile_desktop_export_order(dst: str) -> list[str]:
     """Preserve desktop export ordering after ``hermes`` becomes ``nastech``.
 
@@ -896,70 +923,22 @@ def _reconcile_desktop_export_order(dst: str) -> list[str]:
     sdk = os.path.join(dst, "apps", "desktop", "src", "sdk", "index.ts")
     if os.path.isfile(sdk):
         text = open(sdk, encoding="utf-8").read()
-        gateway_block = (
-            "/** The live gateway instance type — for typing the `gateway` prop `McpTab`\n"
-            " *  takes; obtain the instance from `host.getGateway()`. */\n"
-            "export type { NastechGateway } from '@/nastech'\n"
-        )
-        grab_block = (
-            "/** Grab-to-pan for overflow containers (boards, timelines, wide tables) —\n"
-            " *  the shared scrub primitive; don't hand-roll drag-to-scroll. */\n"
-            "export { type GrabScroll, useGrabScroll } from '@/hooks/use-grab-scroll'\n"
-        )
-        i18n_block = (
-            "/** Localized copy. `useI18n` reuses the app's strings; `usePluginI18n(id)` +\n"
-            " *  `ctx.i18n.register` let a plugin ship its OWN locale bundles, scoped like\n"
-            " *  `ctx.storage` and resolved against the app's active locale — no core edit. */\n"
-            "export {\n"
-            "  type Locale,\n"
-            "  type PluginI18n,\n"
-            "  type PluginLocaleBundles,\n"
-            "  type PluginMessages,\n"
-            "  type PluginMessageValue,\n"
-            "  type PluginTranslate,\n"
-            "  useI18n,\n"
-            "  usePluginI18n\n"
-            "} from '@/i18n'\n"
-        )
-        budgeted_loop_block = (
-            "/** THE way to run a decorative rAF animation (avatars, shimmer, sprites):\n"
-            " *  fps budget + hidden/minimized/unfocused pause + idle dormancy + teardown.\n"
-            " *  Plugins must route animation clocks through this instead of raw rAF loops\n"
-            " *  so a disabled plugin or an empty roster costs zero frames. */\n"
-            "export { type BudgetedLoop, type BudgetedLoopOptions, createBudgetedLoop } from '@/lib/budgeted-loop'\n"
-        )
-        icons_block = (
-            "/** The app's lucide icon set (RefreshCw, LayoutDashboard, Activity, …). */\n"
-            "export * as icons from '@/lib/icons'\n"
-        )
-        keybind_blocks = (
-            "export { type KeybindContribution, KEYBINDS_AREA } from '@/lib/keybinds/actions'\n"
-            "export { formatModifierToken } from '@/lib/keybinds/combo'\n"
-        )
-        open_target = "export type { NastechOpenTarget } from '@/lib/nastech-open-target'\n"
         updated = text
-        if gateway_block + grab_block in updated:
-            updated = updated.replace(gateway_block + grab_block, grab_block + gateway_block)
-        if grab_block + gateway_block + i18n_block in updated:
-            updated = updated.replace(grab_block + gateway_block + i18n_block, grab_block + i18n_block + gateway_block)
-        if gateway_block + budgeted_loop_block in updated:
-            updated = updated.replace(gateway_block + budgeted_loop_block, budgeted_loop_block + gateway_block)
-        lib_tail = "export { cn } from '@/lib/utils'\n"
-        gateway_index = updated.find(gateway_block)
-        lib_tail_index = updated.find(lib_tail, gateway_index + len(gateway_block))
-        if gateway_index >= 0 and lib_tail_index >= 0:
-            lib_run = updated[gateway_index + len(gateway_block) : lib_tail_index + len(lib_tail)]
-            if "from '@/lib/" in lib_run and "from '@/themes/" not in lib_run:
-                updated = (
-                    updated[:gateway_index]
-                    + lib_run
-                    + gateway_block
-                    + updated[lib_tail_index + len(lib_tail) :]
-                )
-        if open_target + icons_block in updated:
-            updated = updated.replace(open_target + icons_block, icons_block + open_target)
-        if icons_block + open_target + keybind_blocks in updated:
-            updated = updated.replace(icons_block + open_target + keybind_blocks, icons_block + keybind_blocks + open_target)
+        updated = _move_export_block(
+            updated,
+            "export type { NastechGateway } from '@/nastech'",
+            "export { cn } from '@/lib/utils'",
+        )
+        updated = _move_export_block(
+            updated,
+            "export type { NastechOpenTarget } from '@/lib/nastech-open-target'",
+            "export { catalogProviderMatches } from '@/lib/model-options'",
+        )
+        updated = _move_export_block(
+            updated,
+            "export { useStore as useValue } from '@nanostores/react'",
+            "export type { StatusResponse } from '@/types/nastech'",
+        )
         if updated != text:
             with open(sdk, "w", encoding="utf-8") as fh:
                 fh.write(updated)
@@ -2111,6 +2090,48 @@ def _reconcile_docs_posix_separators(dst: str, preserved: list[str]) -> list[str
     return changed
 
 
+def _reconcile_preserved_brand_text(dst: str, preserved: list[str]) -> list[str]:
+    """Brand fork-local preserved text so the candidate is a fixed point.
+
+    ``preserve_fork_files`` carries fork-only files over verbatim.  A fork
+    file that still names the upstream brand -- e.g. a fork-authored workflow
+    comment reading ``# Hermes runs this on ...`` -- is copied unchanged, so
+    the candidate trips both ``first-party-brand`` and
+    ``brand-text-not-fixed-point``.  Running the same canonical transform the
+    brand stage uses makes the file transform-stable while keeping every
+    fork-authored byte that is not an upstream token.  Locked/immutable files
+    are left byte-for-byte: their brand residue is covered by the audit's
+    explicit allow-list, not by rewriting.
+
+    Returns the repo-relative paths changed, so the caller can register them
+    with ``verify_branded`` / ``compare_trees`` as reconciled content.
+    """
+    rules = BrandingRules()
+    changed: list[str] = []
+    for rel in preserved or []:
+        if is_locked_path(rel) or is_immutable_path(rel):
+            continue
+        path = os.path.join(dst, rel)
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            continue
+        if not is_text(data):
+            continue
+        text = data.decode("utf-8")
+        branded = _candidate_text_for(rel, text, rules)
+        if branded == text:
+            continue
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(branded)
+        except OSError:
+            continue
+        changed.append(rel)
+    return changed
+
+
 # ---------------------------------------------------------------------------
 # Generated skill-docs ordering (website/scripts/generate-skill-docs.py)
 # ---------------------------------------------------------------------------
@@ -2688,6 +2709,377 @@ def _reconcile_portable_shebang(dst: str) -> list[str]:
     return changed
 
 
+# ---------------------------------------------------------------------------
+# CI runner budgets (Python-test wall clock + Windows test lanes)
+# ---------------------------------------------------------------------------
+# The branded repository runs on the free 4-core GitHub runners, while upstream
+# pays for 32/96-core larger runners.  Branding alone cannot change a workflow
+# budget, so the transform would carry upstream's too-tight timeouts into a
+# slower lane and cancel the job with every test still passing.  These
+# reconciles rewrite only the exact upstream literals, so each is a no-op once
+# normalized and never touches a fork-authored variant.
+
+
+def _reconcile_budget_read(dst: str, rel: str) -> str | None:
+    """Read ``rel`` from the branded tree, or ``None`` when it is absent."""
+    try:
+        with open(os.path.join(dst, *rel.split("/")), encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def _reconcile_budget_write(dst: str, rel: str, text: str) -> None:
+    with open(os.path.join(dst, *rel.split("/")), "w", encoding="utf-8") as fh:
+        fh.write(text)
+
+
+def _reconcile_ci_runner_budgets(dst: str) -> list[str]:
+    """Give the branded Windows/Python lanes a free-runner wall-clock budget.
+
+    Upstream's ``tests-os.yml`` Windows matrix row inherits the job's 30-minute
+    default (``timeout-minutes: ${{ matrix.timeout || 30 }}``) and its
+    ``windows-install-update-e2e.yml`` lane assumes a 32-core host.  On the free
+    4-core runners the per-file cap and the lane timeout must both grow, or a
+    lane that has already proven the behaviour is cancelled mid-run.  The
+    matching Russian-doll limits in the harness (``_machine.py``) grow with it.
+    """
+    fixed: list[str] = []
+
+    rel = ".github/workflows/tests-os.yml"
+    text = _reconcile_budget_read(dst, rel)
+    if text is not None:
+        updated = text.replace(
+            "          - name: Windows-only tests\n"
+            "            runner: windows-latest\n"
+            "            marker: windows\n"
+            "          - name: Windows-only tests (arm64)\n",
+            "          - name: Windows-only tests\n"
+            "            runner: windows-latest\n"
+            "            marker: windows\n"
+            "            # The Windows row shares the 4-core runner with 4 workers; a file\n"
+            "            # that drives the desktop-update hand-off spawns PowerShell trees\n"
+            "            # and can exceed the 300 s default. 45 min leaves room for one\n"
+            "            # 900 s per-file cap (plus the default single retry).\n"
+            "            timeout: 45\n"
+            "          - name: Windows-only tests (arm64)\n",
+        )
+        slice_env = "          NASTECH_TEST_SLICE: ${{ matrix.slice || '' }}\n"
+        if "NASTECH_TEST_FILE_TIMEOUT:" not in updated and slice_env in updated:
+            updated = updated.replace(
+                slice_env,
+                slice_env
+                + "          # e2e-windows already runs NASTECH_TEST_FILE_TIMEOUT=900 on the\n"
+                "          # same 4-core image; the Windows-only row needs the same headroom\n"
+                "          # (its desktop-update hand-off file was killed at the 300 s\n"
+                "          # default). Harmless for the macOS rows.\n"
+                "          NASTECH_TEST_FILE_TIMEOUT: '900'\n",
+            )
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+
+    rel = ".github/workflows/windows-install-update-e2e.yml"
+    text = _reconcile_budget_read(dst, rel)
+    if text is not None:
+        updated = text.replace(
+            "    # A typical run is ~17 min; one slow runner took 28 min for the same work "
+            "(run 36295230146).\n"
+            "    timeout-minutes: 75\n",
+            "    # Upstream runs this on a 32-core windows-latest image (~17 min). This\n"
+            "    # repo only has the free 4-core windows-latest, where the per-install Node\n"
+            "    # dependency build is the long pole (one install already exceeded 25 min\n"
+            "    # at 6-way worker contention). The lane needs both a lower worker count\n"
+            "    # and a larger wall-clock budget than upstream's comment assumes.\n"
+            "    timeout-minutes: 120\n",
+        )
+        updated = updated.replace(
+            "          # One journey per file, all in parallel (each is mostly network + subprocess "
+            "wait).\n"
+            "          NASTECH_TEST_WORKERS: '6'\n",
+            "          # One journey per file, in parallel (each is mostly network +\n"
+            "          # subprocess wait). Upstream runs 6 on a 32-core host; on the free\n"
+            "          # 4-core windows-latest 6 concurrent installs starve each other's\n"
+            "          # npm ci / native build. Match the runner's core count.\n"
+            "          NASTECH_TEST_WORKERS: '4'\n",
+        )
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+
+    rel = "tests/e2e/core/windows_update/_machine.py"
+    text = _reconcile_budget_read(dst, rel)
+    if text is not None:
+        updated = text.replace(
+            "INSTALL_TIMEOUT = 1500.0\nUPDATE_TIMEOUT = 1200.0\n",
+            "# Upstream's 1500 s install / 1200 s update budgets assume a 32-core Windows\n"
+            "# runner. On the free 4-core windows-latest the fresh install's Node\n"
+            "# dependency build alone runs past 25 min at 6-way worker contention (run\n"
+            "# 37822129210), so widen the harness budgets for the smaller image.\n"
+            "INSTALL_TIMEOUT = 2400.0\n"
+            "UPDATE_TIMEOUT = 1800.0\n",
+        )
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+
+    return fixed
+
+
+# The branded Python lane's slice job name is templated
+# (``Run tests (${{ matrix.slice }}/2)``) and the e2e lane is unnamed (its job
+# key is ``e2e``), so the rules' literal ``name: Run tests`` pass never fires
+# for them.  Their real budgets are raised out of band (the birth-parity drift
+# monitor pins the rules output to the fork-birth commit).
+_TEST_JOB_TIMEOUT_MINUTES = 75
+_JOB_KEY_RE = re.compile(r"^  (?P<key>[A-Za-z0-9_-]+):[ \t]*(?:#.*)?$")
+_JOB_NAME_RE = re.compile(r"^    name:[ \t]*(?P<name>.+?)[ \t]*$")
+_JOB_TIMEOUT_RE = re.compile(r"^    timeout-minutes:[ \t]*(?P<value>\d+)[ \t]*$")
+
+
+def _reconcile_python_test_timeout(dst: str) -> list[str]:
+    """Widen the branded Python suite's job budgets in ``.github/workflows/tests.yml``.
+
+    The slice job is templated (``Run tests (${{ matrix.slice }}/2)``) and the
+    e2e lane is unnamed, so the branding rules' literal ``name: Run tests`` pass
+    never fires for them -- and the rules stage's birth-parity drift monitor
+    pins that output to the fork-birth commit, so the raise must be out of band.
+    Without it the two-slice suite is cancelled at its upstream 30-minute cap
+    (run 37952690432 reached 98.7% at 50 minutes with zero test failures).
+    """
+    rel = ".github/workflows/tests.yml"
+    text = _reconcile_budget_read(dst, rel)
+    if text is None:
+        return []
+    lines = text.splitlines(keepends=True)
+    in_jobs = False
+    job_key = ""
+    job_name = ""
+    changed = False
+    for index, line in enumerate(lines):
+        if not in_jobs:
+            if line.startswith("jobs:"):
+                in_jobs = True
+            continue
+        key = _JOB_KEY_RE.match(line)
+        if key:
+            job_key = key.group("key")
+            job_name = ""
+            continue
+        name = _JOB_NAME_RE.match(line)
+        if name:
+            job_name = name.group("name")
+            continue
+        timeout = _JOB_TIMEOUT_RE.match(line)
+        if (
+            timeout
+            and (job_name.startswith("Run tests") or job_key == "e2e")
+            and int(timeout.group("value")) < _TEST_JOB_TIMEOUT_MINUTES
+        ):
+            lines[index] = re.sub(
+                r"(timeout-minutes:[ \t]*)\d+",
+                rf"\g<1>{_TEST_JOB_TIMEOUT_MINUTES}",
+                line,
+            )
+            changed = True
+    if not changed:
+        return []
+    _reconcile_budget_write(dst, rel, "".join(lines))
+    return [rel]
+
+
+def _reconcile_windows_boot_lifecycle_race(dst: str) -> bool:
+    """Accept an already-gone ``taskkill`` target as success on Windows.
+
+    ``taskkill /T /F`` reports an already-exited target as a non-zero code (128
+    not found; 255 "no running instance" when it races).  The fixture's target
+    can exit on its own while the tree walk runs, so treat that as "nothing left
+    to kill" instead of a failure -- the ownership and port assertions that
+    follow are what actually prove the tree left nothing behind.
+    """
+    rel = "tests/e2e/core/windows/test_boot_lifecycle.py"
+    text = _reconcile_budget_read(dst, rel)
+    if text is None:
+        return False
+    helper = (
+        'def _kill_raced_its_target(killed: subprocess.CompletedProcess) -> bool:\n'
+        '    """taskkill reports an already-exited target as failure (128 not found; 255\n'
+        '    raced "no running instance"). That is not a failure: nothing was left to kill."""\n'
+        '    err = (killed.stderr or b"").decode("utf-8", "replace").lower()\n'
+        '    return killed.returncode in (128, 255) and (\n'
+        '        "no running instance" in err or "not found" in err or "could not be terminated" '
+        'in err)\n'
+    )
+    bench = "def test_serve_tree_kill_leaves_no_orphans_and_reboots(tmp_path: Path) -> None:\n"
+    updated = text
+    if helper not in updated and bench in updated:
+        updated = updated.replace(bench, helper + "\n\n" + bench, 1)
+    updated = updated.replace(
+        "            killed = taskkill_tree(first.pid)\n"
+        "            assert killed.returncode == 0, killed.stderr\n",
+        "            killed = taskkill_tree(first.pid)\n"
+        "            # The target may exit on its own while taskkill /T /F walks the tree,\n"
+        "            # so the parent leg can come back already-gone. Accept that.\n"
+        "            assert killed.returncode == 0 or _kill_raced_its_target(killed), "
+        "killed.stderr\n",
+    )
+    if updated == text:
+        return False
+    _reconcile_budget_write(dst, rel, updated)
+    return True
+
+
+def _reconcile_install_ps1_store_guard_test(dst: str) -> bool:
+    """Collapse host-wrap whitespace before matching the install refusal.
+
+    Windows PowerShell 5.1 wraps the thrown refusal at an 80-column host width,
+    splitting the phrase across lines, while PowerShell 7 uses 120 and keeps it
+    whole.  Collapsing whitespace first lets both hosts pass the same assertion.
+    """
+    rel = "scripts/tests/test-install-ps1-store-guard.ps1"
+    text = _reconcile_budget_read(dst, rel)
+    if text is None:
+        return False
+    needle = (
+        "    Assert-True ($r.All -match 'tool store would land inside the checkout') "
+        "'refusal names the tool-store cause'\n"
+    )
+    updated = text.replace(
+        needle,
+        "    # Collapse whitespace first: Windows PowerShell 5.1 wraps the thrown refusal\n"
+        "    # at an 80-column host width, splitting the phrase across lines, while\n"
+        "    # PowerShell 7 uses 120 and keeps it whole. Both must pass.\n"
+        "    Assert-True (($r.All -replace '\\s+', ' ') -match 'tool store would land inside the "
+        "checkout') 'refusal names the tool-store cause'\n",
+    )
+    if updated == text:
+        return False
+    _reconcile_budget_write(dst, rel, updated)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Locale key ordering (Desktop + TUI generated key lists)
+# ---------------------------------------------------------------------------
+# ``locales/_keys.*.json`` are generated by sorting the flattened English
+# catalog.  Token branding renames leaves (``hermesActiveSessions`` ->
+# ``nastechActiveSessions``), which moves them within the sorted list, so the
+# carried-over upstream file is no longer ordered and the freshness check
+# (``npm run i18n:keys``) fails.  Re-sorting the committed keys reproduces the
+# generator's byte output without running Node.
+
+
+def _reconcile_locale_key_order(dst: str) -> list[str]:
+    """Re-sort the committed Desktop/TUI locale key lists in place.
+
+    The generators emit ``JSON.stringify(sorted(keys), null, 2) + "\\n"``; every
+    key is ASCII, so Python's ``sorted`` matches JavaScript's default
+    code-unit sort exactly.
+    """
+    fixed: list[str] = []
+
+    rel = "locales/_keys.desktop.json"
+    text = _reconcile_budget_read(dst, rel)
+    if text is not None:
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = None
+        if isinstance(data, dict) and isinstance(data.get("keys"), list):
+            rendered = (
+                json.dumps(
+                    {"surface": data.get("surface", "desktop"), "keys": sorted(data["keys"])},
+                    indent=2,
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+            if rendered != text:
+                _reconcile_budget_write(dst, rel, rendered)
+                fixed.append(rel)
+
+    rel = "locales/_keys.tui.json"
+    text = _reconcile_budget_read(dst, rel)
+    if text is not None:
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = None
+        if isinstance(data, list):
+            rendered = json.dumps(sorted(data), indent=2, ensure_ascii=False) + "\n"
+            if rendered != text:
+                _reconcile_budget_write(dst, rel, rendered)
+                fixed.append(rel)
+
+    return fixed
+
+
+# ---------------------------------------------------------------------------
+# Desktop branding fixtures (skin alias + Windows magic-test path)
+# ---------------------------------------------------------------------------
+
+
+def _reconcile_desktop_skin_alias(dst: str) -> bool:
+    """Resolve a ``/skin`` alias by theme *name*, not a label substring.
+
+    ``ALIASES['nastech'] = 'classic'`` predates branding: the stock Desktop
+    theme's label is now also ``Nastech``, so the old "name OR label" match
+    returns whichever theme comes first and ``/skin nastech`` lands on the stock
+    pick instead of Classic.  An alias must win on name.
+    """
+    rel = "apps/desktop/src/themes/use-skin-command.ts"
+    text = _reconcile_budget_read(dst, rel)
+    if text is None:
+        return False
+    needle = (
+        "      const normalized = arg.toLowerCase()\n"
+        "      const targetName = ALIASES[normalized] || normalized\n"
+        "\n"
+        "      const target = availableThemes.find(\n"
+        "        t => t.name.toLowerCase() === targetName || t.label.toLowerCase() === normalized\n"
+        "      )\n"
+    )
+    replacement = (
+        "      const normalized = arg.toLowerCase()\n"
+        "      const alias = ALIASES[normalized]\n"
+        "\n"
+        "      // An alias resolves by theme name before a label match: `/skin nastech`\n"
+        "      // is the Classic pick, not the stock theme whose label merely contains\n"
+        "      // the brand.\n"
+        "      const target = availableThemes.find(\n"
+        "        t => t.name.toLowerCase() === (alias || normalized) || "
+        "(!alias && t.label.toLowerCase() === normalized)\n"
+        "      )\n"
+    )
+    if needle not in text:
+        return False
+    _reconcile_budget_write(dst, rel, text.replace(needle, replacement, 1))
+    return True
+
+
+def _reconcile_desktop_path_fixtures(dst: str) -> list[str]:
+    """Point the Windows desktop-path fixtures at the branded suffix.
+
+    ``NASTECH_DATA_DIR_SUFFIX: 'magic-test'`` joins ``NASTECH_HOME`` (branded to
+    ``nastech``) to form ``nastechmagic-test``, but the upstream fixtures still
+    assert the pre-rebrand ``hermesmagic-test`` literal, which no token rule
+    rewrites (``hermesmagic`` is a protected all-lowercase run).
+    """
+    fixed: list[str] = []
+    for rel in (
+        "apps/desktop/electron/data-paths.test.ts",
+        "apps/desktop/scripts/bundle-env.test.mjs",
+    ):
+        text = _reconcile_budget_read(dst, rel)
+        if text is None or "hermesmagic-test" not in text:
+            continue
+        updated = text.replace("hermesmagic-test", "nastechmagic-test")
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+    return fixed
+
+
 def reconcile_tree(dst: str) -> ReconcileResult:
     """Apply known post-brand fixes to the branded tree in place.
 
@@ -2735,6 +3127,27 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     for rel in _reconcile_desktop_export_order(dst):
         result.total += 1
         result.fixed.append(rel)
+    if _reconcile_desktop_skin_alias(dst):
+        result.total += 1
+        result.fixed.append("apps/desktop/src/themes/use-skin-command.ts")
+    for rel in _reconcile_desktop_path_fixtures(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    for rel in _reconcile_locale_key_order(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    for rel in _reconcile_ci_runner_budgets(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    for rel in _reconcile_python_test_timeout(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    if _reconcile_windows_boot_lifecycle_race(dst):
+        result.total += 1
+        result.fixed.append("tests/e2e/core/windows/test_boot_lifecycle.py")
+    if _reconcile_install_ps1_store_guard_test(dst):
+        result.total += 1
+        result.fixed.append("scripts/tests/test-install-ps1-store-guard.ps1")
     for rel in _reconcile_cli_banner_identity(dst):
         result.total += 1
         result.fixed.append(rel)
@@ -3325,6 +3738,20 @@ class UpdateManager:
                     except OSError:
                         pass
             for rel in _reconcile_skill_docs_order(dest):
+                rel_path = os.path.join(dest, rel)
+                if os.path.isfile(rel_path):
+                    try:
+                        with open(rel_path, "rb") as fh:
+                            reconciled_map[rel] = fh.read()
+                    except OSError:
+                        pass
+            # A fork-local file is preserved verbatim, so any upstream brand
+            # run left in fork-authored text (e.g. a workflow comment reading
+            # "# Hermes runs this on ...") would trip first-party-brand and
+            # brand-text-not-fixed-point on the candidate.  Apply the same
+            # canonical transform the brand stage uses so preserved text is a
+            # fixed point too, and register the changed files as reconciled.
+            for rel in _reconcile_preserved_brand_text(dest, preserved):
                 rel_path = os.path.join(dest, rel)
                 if os.path.isfile(rel_path):
                     try:

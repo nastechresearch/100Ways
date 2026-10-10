@@ -97,8 +97,33 @@ def _normalize_test_workers(text: str) -> str:
     return _TEST_WORKERS_RE.sub(_cap, text)
 
 
+# The OS-matrix Windows lane fans out to 16 workers upstream (32-core Windows
+# runners).  The free 4-core ``windows-latest`` starves every nested PowerShell
+# child into its idle deadline, so cap the Windows expression at the runner's
+# core count.  macOS/Linux rows keep their upstream expression untouched.
+_OS_WINDOWS_WORKERS_RE = re.compile(
+    r"(?m)^(?P<prefix>[ \t]*NASTECH_TEST_WORKERS:[ \t]*)"
+    r"\$\{\{[ \t]*matrix\.marker == 'windows'[ \t]*&&.*?\|\|[ \t]*''[ \t]*\}\}[ \t]*$"
+)
+_OS_WINDOWS_WORKERS = 4
+
+
+def _normalize_os_test_workers(text: str) -> str:
+    def _cap(match_obj: re.Match) -> str:
+        return (
+            f"{match_obj.group('prefix')}"
+            f"${{{{ matrix.marker == 'windows' && '{_OS_WINDOWS_WORKERS}' || '' }}}}"
+        )
+
+    return _OS_WINDOWS_WORKERS_RE.sub(_cap, text)
+
+
 # Standard runners need a little more wall-clock allowance for the complete
 # Python suite, while the smaller auxiliary jobs retain their upstream limits.
+# (The branded Python lane's own job budget is widened out of band, in
+# ``updates._reconcile_python_test_timeout``: the birth-parity drift monitor
+# pins this rules output to the fork-birth commit, so it must keep the
+# original 30->40 behaviour.)
 _FULL_TEST_TIMEOUT_RE = re.compile(
     r"(?ms)(^[ \t]*name:[ \t]*Run tests[ \t]*$\n"
     r"(?:(?!^[ \t]*(?:name|timeout-minutes):).*\n)*?"
@@ -228,6 +253,7 @@ class BrandingRules:
             )
         branded = _RUNNER_LABEL_RE.sub(_normalize_runner, branded)
         branded = _normalize_test_workers(branded)
+        branded = _normalize_os_test_workers(branded)
         return _normalize_test_timeout(branded)
 
     def transform_path(self, path: str) -> str:
