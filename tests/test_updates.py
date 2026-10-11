@@ -154,8 +154,14 @@ def test_desktop_export_order_is_reconciled_after_nastech_rename(tmp_path):
     plugin.parent.mkdir(parents=True)
     sdk.parent.mkdir(parents=True)
     plugin.write_text(
+        "export type { PluginSettingsPage, PluginSettingsSubpage } from './settings-pages'\n"
+        "import type { Contribution } from './types'\n"
+        "\n"
         "export type { PluginRestOptions } from '@/nastech'\n"
-        "export type { NastechOpenTarget } from '@/lib/nastech-open-target'\n",
+        "export type { NastechOpenTarget } from '@/lib/nastech-open-target'\n"
+        "export type { PluginAppActionId, PluginAppActionInfo, PluginRunActionResult } from '@/lib/keybinds/plugin-actions'\n"
+        "export type { PluginNativeNotificationInput, PluginNotificationAction } from '@/store/native-notifications'\n"
+        "export type { PetMessageTone, PetSayOptions } from '@/store/pet-plugin-messages'\n",
         encoding="utf-8",
     )
     sdk.write_text(
@@ -187,7 +193,15 @@ def test_desktop_export_order_is_reconciled_after_nastech_rename(tmp_path):
     }
     plugin_text = plugin.read_text(encoding="utf-8")
     sdk_text = sdk.read_text(encoding="utf-8")
+    assert plugin_text.index("@/lib/keybinds/plugin-actions") < plugin_text.index("@/lib/nastech-open-target")
     assert plugin_text.index("@/lib/nastech-open-target") < plugin_text.index("@/nastech")
+    assert plugin_text.index("@/nastech") < plugin_text.index("@/store/native-notifications")
+    assert plugin_text.index("@/store/native-notifications") < plugin_text.index("@/store/pet-plugin-messages")
+    # Non-`@/` exports and the import that separates them stay untouched.
+    assert plugin_text.startswith(
+        "export type { PluginSettingsPage, PluginSettingsSubpage } from './settings-pages'\n"
+        "import type { Contribution } from './types'\n"
+    )
     assert sdk_text.index("@/lib/budgeted-loop") < sdk_text.index("@/nastech")
     assert sdk_text.index("@/lib/format") < sdk_text.index("@/nastech")
     assert sdk_text.index("@/lib/utils") < sdk_text.index("@/nastech")

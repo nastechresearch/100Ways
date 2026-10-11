@@ -894,27 +894,49 @@ def _move_export_block(text: str, export_line: str, anchor_line: str) -> str:
     return rest[:insert_at] + block + rest[insert_at:]
 
 
+_BRAND_EXPORT_TYPE = re.compile(r"^export type \{[^}]*\} from '(@/[^']*)'$")
+
+
+def _sort_brand_export_type_runs(text: str) -> str:
+    """Sort contiguous ``export type {...} from '@/...'`` runs by source path.
+
+    ``perfectionist/sort-exports`` is an error in the desktop ESLint config.
+    Renaming ``hermes`` to ``nastech`` moves a central module (``@/nastech``)
+    past every ``@/lib/*`` source, so upstream's lexically valid order stops
+    being valid once the path is branded. Re-sort the renamed runs instead of
+    weakening the rule. Only runs where *every* line is an ``@/``-sourced
+    export-type statement are touched, so unrelated blocks are left alone.
+    """
+    lines = text.split("\n")
+    out: list[str] = []
+    index = 0
+    while index < len(lines):
+        if _BRAND_EXPORT_TYPE.match(lines[index]):
+            end = index
+            while end < len(lines) and _BRAND_EXPORT_TYPE.match(lines[end]):
+                end += 1
+            run = lines[index:end]
+            out.extend(sorted(run, key=lambda line: _BRAND_EXPORT_TYPE.match(line).group(1)))
+            index = end
+        else:
+            out.append(lines[index])
+            index += 1
+    return "\n".join(out)
+
+
 def _reconcile_desktop_export_order(dst: str) -> list[str]:
     """Preserve desktop export ordering after ``hermes`` becomes ``nastech``.
 
     The desktop ESLint configuration keeps export-path ordering as an error.
     A lexical rename from ``hermes`` to ``nastech`` changes the required order
-    in three curated public-export blocks, so normalize only those blocks
-    rather than weakening the lint policy or applying a broad formatter.
+    in the public-export blocks, so normalize those blocks rather than
+    weakening the lint policy or applying a broad formatter.
     """
     repaired: list[str] = []
     plugin = os.path.join(dst, "apps", "desktop", "src", "contrib", "plugin.ts")
-    plugin_before = (
-        "export type { PluginRestOptions } from '@/nastech'\n"
-        "export type { NastechOpenTarget } from '@/lib/nastech-open-target'\n"
-    )
-    plugin_after = (
-        "export type { NastechOpenTarget } from '@/lib/nastech-open-target'\n"
-        "export type { PluginRestOptions } from '@/nastech'\n"
-    )
     if os.path.isfile(plugin):
         text = open(plugin, encoding="utf-8").read()
-        updated = text.replace(plugin_before, plugin_after)
+        updated = _sort_brand_export_type_runs(text)
         if updated != text:
             with open(plugin, "w", encoding="utf-8") as fh:
                 fh.write(updated)
