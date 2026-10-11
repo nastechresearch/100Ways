@@ -1,10 +1,13 @@
 """The shipped icon pipeline is a fixed point the release must not drift from.
 
-The fork's mascot ships as raster art inside the master SVGs, so the fork's
-``scripts/generate_icons.py`` composes an ``<image>`` rather than recolouring a
-vector ``<path>``.  The engine does not render icons: it ships the generator,
-the two raster masters, and every generated output as NasTech-owned assets, and
-the fork's ``icons-freshness-check`` lane regenerates them and fails on any byte
+The fork invests in branding, not in icon *code*: ``scripts/generate_icons.py``
+and the two mascot masters are upstream's files (renames aside), so the candidate
+carries no icon logic Hermes does not have.  The masters ship as upstream's
+vector ``<path>`` art (``assets/nastech-bantu-{black,white}.svg``) and the
+generator recolours that ``<path>`` exactly as upstream does.  The engine does
+not render icons: it ships the generator, the two vector masters, and every
+generated output as NasTech-owned assets, and the fork's
+``icons-freshness-check`` lane regenerates them and fails on any byte
 difference.  These tests guard the two ways that contract silently breaks:
 
 * the manifest stops registering a shipped pipeline file, so upstream bytes win;
@@ -36,7 +39,7 @@ def test_owned_bootstrap_icon_is_shipped_byte_for_byte_when_compliant(tmp_path):
     assert shipped == source.read_bytes()
 
 
-def test_icon_pipeline_registers_raster_masters_and_generator():
+def test_icon_pipeline_registers_vector_masters_and_generator():
     root = Path(__file__).resolve().parents[1]
     registry = root / "config" / "owned-assets"
     manifest = json.loads((registry / "manifest.json").read_text())
@@ -46,7 +49,8 @@ def test_icon_pipeline_registers_raster_masters_and_generator():
         target = f"assets/nastech-bantu-{color}.svg"
         assert manifest[target] == f"icon-pipeline/{target}"
         art = (registry / manifest[target]).read_text(encoding="utf-8-sig")
-        assert "<image" in art and "<path" not in art, target
+        # Upstream's vector master: exactly one <path>, no embedded raster art.
+        assert "<path" in art and "<image" not in art, target
 
     # The DMG volume is hand-made art ("the girl on a drive") and the
     # apps/desktop/packaging/dmg-volume.icns target is derived from it. If the
@@ -56,7 +60,11 @@ def test_icon_pipeline_registers_raster_masters_and_generator():
     assert manifest["assets/dmg-volume.png"] == "icon-pipeline/assets/dmg-volume.png"
 
     generator = (registry / manifest["scripts/generate_icons.py"]).read_text(encoding="utf-8")
-    assert "girl_is_raster" in generator and "<image" in generator
+    # No fork-only raster scaffolding: the generator recolours the vector <path>
+    # and reads the vector masters, so the candidate's pipeline is upstream's.
+    assert "girl_is_raster" not in generator and "girl_image" not in generator
+    assert 'assets / f"nastech-bantu-{color}.svg"' in generator
+    assert 're.search(r"<path' in generator
 
 
 def test_owned_manifest_sources_all_exist():
