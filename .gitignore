@@ -8,3 +8,4 @@ build/
 dist/
 .env
 *.log
+rust/brandfast/target/
