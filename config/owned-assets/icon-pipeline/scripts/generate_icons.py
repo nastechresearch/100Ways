@@ -331,26 +331,50 @@ def girl_path(art: IconArt, girl: str) -> str:
     return art.paths[girl]
 
 
+def _art_cache(art: IconArt, name: str) -> dict:
+    """Per-`art` cache for a render input, created on first use.
+
+    `IconArt` owns the caches, but callers (and tests) may pass a minimal
+    stand-in carrying only the fields they exercise; creating the cache lazily
+    keeps raster detection from requiring attributes the stand-in never set."""
+    cache = getattr(art, name, None)
+    if cache is None:
+        cache = {}
+        try:
+            setattr(art, name, cache)
+        except (AttributeError, TypeError):
+            pass
+    return cache
+
+
 def girl_is_raster(art: IconArt, girl: str) -> bool:
     """True when the girl master ships raster art (<image>) rather than a
     vector <path>. The fork's NasTech mascot is an embedded PNG, so it has to
-    be composed as an image instead of recolored as a path."""
-    if girl not in art.raster:
+    be composed as an image instead of recolored as a path.
+
+    A pre-supplied vector `<path>` always wins: a caller that already resolved
+    the girl (or a stand-in that only carries `paths`) is reporting vector art
+    and must not be asked to open a master file it never provided."""
+    if girl in getattr(art, "paths", {}):
+        return False
+    cache = _art_cache(art, "raster")
+    if girl not in cache:
         src = art.girls[girl].read_text(encoding="utf-8-sig")
-        art.raster[girl] = re.search(r"<path\b", src) is None and re.search(r"<image\b", src) is not None
-    return art.raster[girl]
+        cache[girl] = re.search(r"<path\b", src) is None and re.search(r"<image\b", src) is not None
+    return cache[girl]
 
 
 def girl_image(art: IconArt, girl: str) -> str:
     """The girl `<image>` element (raster master) with editor metadata stripped
     the same way `girl_path` strips it from the vector master."""
-    if girl not in art.images:
+    cache = _art_cache(art, "images")
+    if girl not in cache:
         src = art.girls[girl].read_text(encoding="utf-8-sig")
         m = re.search(r"<image\b.*?/>", src, re.DOTALL)
         assert m, f"no <image> found in {art.girls[girl].name}"
         image = re.sub(r'\s+(inkscape|sodipodi):[a-zA-Z-]+="[^"]*"', "", m.group(0))
-        art.images[girl] = image
-    return art.images[girl]
+        cache[girl] = image
+    return cache[girl]
 
 
 def _raster_bbox(art: IconArt, girl: str) -> tuple[float, float, float, float]:
@@ -1019,7 +1043,6 @@ def cmd_check(source: Path, out: Path) -> int:
         for i in range(count):
             entry = data[6 + i * 16 : 6 + (i + 1) * 16]
             w = entry[0] or 256
-            h = entry[1] or 256
             sizes.append(w)
         return sorted(set(sizes))
 

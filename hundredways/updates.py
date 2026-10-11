@@ -3097,6 +3097,80 @@ def _reconcile_desktop_path_fixtures(dst: str) -> list[str]:
     return fixed
 
 
+_DUNDER_ALL_BLOCK = re.compile(
+    r'(?m)(?P<head>^[ \t]*__all__[^=\n]*=[ \t]*\[)\n'
+    r'(?P<body>(?:[ \t]*(?:"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'),?[ \t]*\n)+)'
+    r'(?P<close>[ \t]*\][^\n]*)'
+)
+_DUNDER_ALL_ITEM = re.compile(
+    r'^[ \t]*(?P<name>"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'),?[ \t]*$'
+)
+
+
+def _dunder_all_category(value: str) -> int:
+    """Ruff RUF022 classification: constants, then classes, then the rest."""
+    cased = [ch for ch in value if ch.islower() or ch.isupper()]
+    if len(value) > 1 and cased and all(ch.isupper() for ch in cased):
+        return 0
+    if value[:1].isupper():
+        return 1
+    return 2
+
+
+def _dunder_all_natural_key(value: str) -> tuple:
+    """Natural-order key, matching Ruff's RUF022 ``natord::compare``."""
+    parts = re.split(r"(\d+)", value)
+    return tuple((1, int(p)) if p.isdigit() else (0, p) for p in parts if p != "")
+
+
+def _dunder_all_sort_key(value: str) -> tuple:
+    return (_dunder_all_category(value), _dunder_all_natural_key(value))
+
+
+def _reorder_dunder_all(text: str) -> str:
+    """Re-apply Ruff's isort-style order to every single-line ``__all__``."""
+
+    def repl(m: re.Match) -> str:
+        body = m.group("body")
+        lines = body.splitlines(keepends=True)
+        names: list[str] = []
+        for line in lines:
+            item = _DUNDER_ALL_ITEM.match(line.rstrip("\r\n"))
+            if not item:
+                return m.group(0)
+            names.append(item.group("name")[1:-1])
+        order = sorted(range(len(names)), key=lambda k: _dunder_all_sort_key(names[k]))
+        if order == list(range(len(names))):
+            return m.group(0)
+        return m.group("head") + "\n" + "".join(lines[k] for k in order) + m.group("close")
+
+    return _DUNDER_ALL_BLOCK.sub(repl, text)
+
+
+def _reconcile_dunder_all_order(dst: str) -> list[str]:
+    """Re-sort ``__all__`` blocks the brand rename de-sorted.
+
+    Branding renames identifiers (``hermes_setup`` -> ``nastech_setup``) and can
+    move a single entry across its neighbours, so an upstream-sorted ``__all__``
+    is no longer sorted under the candidate's own ``ruff.toml`` (which enables
+    ``RUF022``).  Upstream's lists are the reference order, so re-sorting by the
+    same key is a no-op on every list branding did not disturb and lands the
+    renamed item back in its Ruff-accepted slot.
+    """
+    fixed: list[str] = []
+    for rel in _walk_files(dst):
+        if not rel.endswith(".py"):
+            continue
+        text = _reconcile_budget_read(dst, rel)
+        if text is None or "__all__" not in text:
+            continue
+        updated = _reorder_dunder_all(text)
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+    return fixed
+
+
 def reconcile_tree(dst: str) -> ReconcileResult:
     """Apply known post-brand fixes to the branded tree in place.
 
@@ -3214,6 +3288,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_pages_deploy_workflow(dst):
         result.total += 1
         result.fixed.append(".github/workflows/deploy-site.yml")
+    for rel in _reconcile_dunder_all_order(dst):
+        result.total += 1
+        result.fixed.append(rel)
     result.fixed.sort()
     return result
 
