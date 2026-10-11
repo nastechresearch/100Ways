@@ -546,7 +546,11 @@ class Cli:
         upstream_repo = self.args.hermes_repo or hermes_path(updates_dir)
 
         if self.args.mode == "snapshot":
-            owned = OwnedAssets(repo=self.repo)
+            owned = (
+                OwnedAssets(root=self.args.owned_assets_root)
+                if self.args.owned_assets_root
+                else OwnedAssets(repo=self.repo)
+            )
             mgr = UpdateManager(
                 updates_dir,
                 hermes_url=self.args.hermes_url,
@@ -575,6 +579,7 @@ class Cli:
             self.args.state_dir,
             mode=self.args.mode,
             ref=self.args.upstream_ref,
+            owned_assets_root=self.args.owned_assets_root,
         )
         report_path = self.args.report or os.path.join(self.args.state_dir, "weekly-full-sync-report.md")
         write_weekly_report(report_path, report)
@@ -774,6 +779,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fork-root", default="", help="NasTech fork root preserved during snapshot mode")
     p.add_argument("--project-name", default="nastech-agent", help="snapshot project name")
     p.add_argument("--state-dir", default="", help="state directory for the upstream ledger and reports")
+    p.add_argument("--owned-assets-root", default="",
+                   help="100Ways config/owned-assets registry audited in place of "
+                        "<branded-root>/config/owned-assets (never part of the product tree)")
     p.add_argument("--report", default="", help="output markdown report path")
     p.add_argument("--record", action="store_true", help="record a passing report in the upstream ledger")
     p.add_argument("--require-pass", action="store_true", help="exit nonzero when any weekly gate fails")

@@ -378,6 +378,20 @@ def _is_relocated_collision_alias(
     return source_data == _read(destination)
 
 
+#: The 100Ways-owned asset registry (``config/owned-assets/``).  It is engine
+#: tooling data: the substitution *source* the brander reads, never part of the
+#: branded product tree.  Upstream Hermes has no ``config/`` at all, so
+#: preserving it (or materializing it) planted 100Ways inside nastech-agent.
+#: Both preservation and the fork-consistency check therefore skip it.
+ENGINE_REGISTRY_PREFIX = "config/owned-assets/"
+
+
+def is_engine_registry_path(rel: str) -> bool:
+    """True only for the 100Ways-internal owned-asset registry path."""
+    rel = rel.replace(os.sep, "/")
+    return rel == "config/owned-assets" or rel.startswith(ENGINE_REGISTRY_PREFIX)
+
+
 def preserve_fork_files(
     fork_root: str,
     branded_root: str,
@@ -387,6 +401,7 @@ def preserve_fork_files(
     obsolete_upstream_paths: set[str] | None = None,
     owned_paths: set[str] | None = None,
     allow_unclassified_fork_files: bool = True,
+    owned_targets_materialized: bool = False,
 ) -> list[str]:
     """Copy fork-local files (no upstream source) into the branded tree.
 
@@ -404,35 +419,27 @@ def preserve_fork_files(
     upstream = _walk(upstream_root)
     upstream_path_map = collision_safe_path_map(upstream, rules)
     upstream_mapped = set(upstream_path_map.values())
-    engine_registry = os.path.isfile(
-        os.path.join(branded_root, "config", "owned-assets", "manifest.json")
-    )
     preserved: list[str] = []
     for rel in _walk(fork_root):
+        if is_engine_registry_path(rel):
+            continue  # 100Ways tooling data: never part of the product tree
         if rel in upstream_mapped:
             continue  # upstream provides it
         if _is_relocated_collision_alias(rel, upstream_path_map, fork_root, branded_root, rules):
             continue  # exact contributor bytes already exist at their safe destination
-        explicitly_owned = (
-            rel in owned_paths
-            or rel.startswith("config/owned-assets/")
-            or is_immutable_path(rel)
-        )
+        explicitly_owned = rel in owned_paths or is_immutable_path(rel)
         if rel in obsolete_upstream_paths and not explicitly_owned:
             continue  # direct source evidence proves this is stale upstream code
         if not allow_unclassified_fork_files and not explicitly_owned:
             continue  # without a baseline, stop for ownership review
         dst = os.path.join(branded_root, rel)
         src = os.path.join(fork_root, rel)
-        # A 100Ways-owned registry is an explicit, reviewable visual identity
-        # overlay. Preserve neither an old fork registry nor its mapped target
-        # files when that authoritative registry is already in the candidate;
-        # otherwise stale fork bytes can overwrite the freshly materialized
-        # owned assets. The fallback below still preserves explicit assets when
-        # no engine-owned registry is available.
-        if engine_registry and (
-            rel in owned_paths or rel.startswith("config/owned-assets/")
-        ):
+        # Owned targets are brand binaries the engine materializes from its own
+        # registry; copying the fork's older copy back over them would restore
+        # stale bytes.  The registry directory itself is skipped above, so this
+        # only guards its mapped target files, and only when the caller really
+        # materialized them (otherwise the fork's copy is the fallback).
+        if owned_targets_materialized and rel in owned_paths:
             continue
         if os.path.abspath(dst) == os.path.abspath(src):
             continue
@@ -479,16 +486,14 @@ def fork_consistency(
     upstream_mapped = set(upstream_path_map.values())
 
     for rel in sorted(fork_files):
+        if is_engine_registry_path(rel):
+            continue  # 100Ways tooling data: not a branded-product path
         entry = ForkEntry(path=rel, status="missing")
         if _is_relocated_collision_alias(rel, upstream_path_map, fork_root, branded_root, rules):
             entry.status = "relocated"
             report.entries.append(entry)
             continue
-        explicitly_owned = (
-            rel in owned_paths
-            or rel.startswith("config/owned-assets/")
-            or is_immutable_path(rel)
-        )
+        explicitly_owned = rel in owned_paths or is_immutable_path(rel)
         if rel in obsolete_upstream_paths and not explicitly_owned:
             entry.status = "stale_upstream" if rel in branded_files else "upstream_deleted"
             report.entries.append(entry)
@@ -519,11 +524,7 @@ def fork_consistency(
         report.entries.append(entry)
 
     for rel in sorted(branded_files - fork_files):
-        explicitly_owned = (
-            rel in owned_paths
-            or rel.startswith("config/owned-assets/")
-            or is_immutable_path(rel)
-        )
+        explicitly_owned = rel in owned_paths or is_immutable_path(rel)
         if rel in obsolete_upstream_paths and not explicitly_owned:
             report.entries.append(ForkEntry(path=rel, status="stale_upstream"))
             continue

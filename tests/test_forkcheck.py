@@ -142,12 +142,13 @@ def test_preserve_fork_files_copies_fork_local_content(tmp_path):
     })
     fork = _tree(tmp_path / "fork", {
         "nastech_cli/main.py": "x\n",             # upstream twin (branded): NOT preserved
-        "config/owned-assets/manifest.json": "{}\n",  # fork-local: preserved
+        "config/owned-assets/manifest.json": "{}\n",  # 100Ways tooling: NEVER emitted
         "local.md": "fork\n",
     })
     branded = _tree(tmp_path / "branded", {})
     preserved = preserve_fork_files(str(fork), str(branded), str(upstream), rules)
-    assert "config/owned-assets/manifest.json" in preserved
+    assert "config/owned-assets/manifest.json" not in preserved
+    assert not (tmp_path / "branded" / "config").exists()
     assert "local.md" in preserved
     assert "nastech_cli/main.py" not in preserved  # upstream provides it
     assert (tmp_path / "branded" / "local.md").read_text() == "fork\n"
@@ -274,7 +275,7 @@ def test_preserve_keeps_explicitly_owned_asset_after_upstream_deletion(tmp_path)
     assert (tmp_path / "branded" / "assets" / "logo.png").read_text() == "nastech asset\n"
 
 
-def test_preserve_does_not_overwrite_owned_targets_when_registry_exists(tmp_path):
+def test_preserve_does_not_overwrite_owned_targets_when_engine_materialized(tmp_path):
     rules = BrandingRules()
     targets = {
         "apps/bootstrap-installer/public/nastech-bantu.jpg",
@@ -284,18 +285,15 @@ def test_preserve_does_not_overwrite_owned_targets_when_registry_exists(tmp_path
     fork = _tree(tmp_path / "fork", {target: "older fork image\n" for target in targets})
     branded = _tree(tmp_path / "branded", {
         **{target: f"current owned image: {target}\n" for target in targets},
-        "config/owned-assets/manifest.json": (
-            '{"apps/bootstrap-installer/public/nastech-bantu.jpg": '
-            '"installer/nastech-bantu.jpg", '
-            '"apps/desktop/public/nastech-bantu.jpg": '
-            '"desktop/nastech-bantu.jpg"}\n'
-        ),
-        "config/owned-assets/installer/nastech-bantu.jpg": "current installer image\n",
-        "config/owned-assets/desktop/nastech-bantu.jpg": "current desktop image\n",
     })
 
     preserved = preserve_fork_files(
-        str(fork), str(branded), str(upstream), rules, owned_paths=targets
+        str(fork),
+        str(branded),
+        str(upstream),
+        rules,
+        owned_paths=targets,
+        owned_targets_materialized=True,
     )
 
     assert preserved == []
@@ -303,24 +301,27 @@ def test_preserve_does_not_overwrite_owned_targets_when_registry_exists(tmp_path
         assert (tmp_path / "branded" / target).read_text() == f"current owned image: {target}\n"
 
 
-def test_preserve_fork_files_keeps_existing_engine_owned_registry(tmp_path):
+def test_preserve_fork_files_never_emits_engine_owned_registry(tmp_path):
+    """``config/owned-assets/`` is 100Ways tooling data, not a product path.
+
+    Upstream Hermes ships no ``config/`` at all, so preserving the registry (or
+    materializing it) put 100Ways' internal tree inside nastech-agent.  The
+    preserve stage must carry the fork's *own* files and drop the registry.
+    """
     rules = BrandingRules()
     upstream = _tree(tmp_path / "upstream", {})
     fork = _tree(tmp_path / "fork", {
         "config/owned-assets/manifest.json": '{"assets/logo.png": "fork-logo.png"}\n',
         "config/owned-assets/fork-logo.png": "fork asset\n",
+        "keep.md": "fork\n",
     })
-    branded = _tree(tmp_path / "branded", {
-        "config/owned-assets/manifest.json": '{"assets/logo.png": "engine-logo.png"}\n',
-        "config/owned-assets/engine-logo.png": "engine asset\n",
-    })
+    branded = _tree(tmp_path / "branded", {})
 
     preserved = preserve_fork_files(str(fork), str(branded), str(upstream), rules)
 
-    assert preserved == []
-    manifest = tmp_path / "branded" / "config/owned-assets/manifest.json"
-    assert manifest.read_text() == '{"assets/logo.png": "engine-logo.png"}\n'
-    assert not (tmp_path / "branded" / "config/owned-assets/fork-logo.png").exists()
+    assert preserved == ["keep.md"]
+    assert not (tmp_path / "branded" / "config").exists()
+    assert (tmp_path / "branded" / "keep.md").read_text() == "fork\n"
 
 
 def test_pipeline_includes_preserve_and_forkcheck_stages(tmp_path):
@@ -338,8 +339,61 @@ def test_pipeline_includes_preserve_and_forkcheck_stages(tmp_path):
     by_name = {s.name: s for s in res.stages}
     assert by_name["preserve"].status == "ok"
     assert by_name["forkcheck"].status == "ok"
-    # fork-local files must be preserved into the snapshot
-    assert os.path.exists(os.path.join(res.dir, "config", "owned-assets", "manifest.json"))
+    # fork-local files are preserved, but the 100Ways registry is tooling data
+    # and must never appear in the branded snapshot.
+    assert not os.path.exists(os.path.join(res.dir, "config", "owned-assets", "manifest.json"))
+
+
+def test_pipeline_snapshot_never_carries_the_engine_registry(tmp_path):
+    """A branded sync is hermes -> nastech-agent with everything as upstream.
+
+    100Ways' own ``config/owned-assets/`` registry is engine tooling input, not
+    a product path (upstream Hermes has no ``config/`` at all), so it must not
+    reach the snapshot; meanwhile the fork's genuine local files must survive
+    and an owned target must hold the registry bytes, not the fork's stale copy.
+    """
+    from hundredways.assets import OwnedAssets
+
+    hermes = _hermes_repo(tmp_path)
+    baseline = subprocess.run(
+        ["git", "-C", hermes, "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    registry = tmp_path / "registry" / "config" / "owned-assets"
+    registry.mkdir(parents=True)
+    (registry / "banner.png").write_bytes(b"OUR-BANNER-BYTES")
+    (registry / "manifest.json").write_text(
+        json.dumps({"static/img/banner.png": "banner.png"})
+    )
+
+    fork = _tree(tmp_path / "fork", {
+        "manifest.json": json.dumps({"upstream_sha": baseline}),
+        "nastech_cli/nastech_runner.py": "def run_nastech():\n    return 'nastech-agent'\n",
+        "config/owned-assets/manifest.json": json.dumps(
+            {"static/img/banner.png": "fork.png"}
+        ),
+        "config/owned-assets/fork.png": "STALE-FORK-BYTES",
+        "local-only.md": "fork content\n",
+    })
+
+    updates_dir = str(tmp_path / "Updates-Commits")
+    res = UpdateManager(
+        updates_dir,
+        hermes_url=hermes,
+        owned=OwnedAssets(str(registry)),
+        fork_root=str(fork),
+    ).run()
+
+    assert res.gate
+    # the 100Ways registry never reaches the branded snapshot or its report
+    assert not os.path.exists(os.path.join(res.dir, "config"))
+    assert not any(rel.startswith("config/owned-assets/") for rel in res.fork.preserved)
+    assert not any(e.path.startswith("config/owned-assets/") for e in res.fork.entries)
+    # the fork's genuine local file is still carried forward
+    assert os.path.isfile(os.path.join(res.dir, "local-only.md"))
+    # the owned target holds the registry bytes, not the fork's stale copy
+    with open(os.path.join(res.dir, "static", "img", "banner.png"), "rb") as fh:
+        assert fh.read() == b"OUR-BANNER-BYTES"
 
 
 def test_pipeline_forkcheck_stage_skipped_without_fork_root(tmp_path):
