@@ -122,7 +122,6 @@ jobs:
             --hermes-url "$HUNDREDWAYS_HERMES_URL" \
             --source-provenance-url "$HUNDREDWAYS_PROVENANCE_URL" \
             --fork-root nastech-agent \
-            --upstream-only \
             --owned-assets-root "$GITHUB_WORKSPACE/config/owned-assets" \
             --zip "$HUNDREDWAYS_ZIP" \
             --project-name "${{ inputs.project_name }}" \
@@ -233,7 +232,7 @@ jobs:
             --source "$HUNDREDWAYS_UPDATES_DIR/hermes-agent" \
             --candidate "$SNAPSHOT" \
             --owned-assets-root "$GITHUB_WORKSPACE/config/owned-assets" \
-            --upstream-only \
+            --fork-root nastech-agent \
             --output "$HUNDREDWAYS_CONFORMANCE"
           echo "conformance=PASS" >> "$GITHUB_OUTPUT"
           echo "- Final branded-tree conformance: **PASS**" >> "$GITHUB_STEP_SUMMARY"
