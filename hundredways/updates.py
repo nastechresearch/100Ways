@@ -2782,16 +2782,23 @@ def _reconcile_ci_runner_budgets(dst: str) -> list[str]:
             "          - name: Windows-only tests (arm64)\n",
         )
         slice_env = "          NASTECH_TEST_SLICE: ${{ matrix.slice || '' }}\n"
-        if "NASTECH_TEST_FILE_TIMEOUT:" not in updated and slice_env in updated:
-            updated = updated.replace(
-                slice_env,
-                slice_env
-                + "          # e2e-windows already runs NASTECH_TEST_FILE_TIMEOUT=900 on the\n"
-                "          # same 4-core image; the Windows-only row needs the same headroom\n"
-                "          # (its desktop-update hand-off file was killed at the 300 s\n"
-                "          # default). Harmless for the macOS rows.\n"
-                "          NASTECH_TEST_FILE_TIMEOUT: '900'\n",
-            )
+        # Scope the presence check to the ``os-tests`` step's env block: the
+        # ``e2e-windows`` job below already sets ``NASTECH_TEST_FILE_TIMEOUT``,
+        # so a whole-file "is the token present?" test is always false and the
+        # Windows-only row silently kept the 300 s per-file default (the
+        # desktop-update hand-off file was SIGKILLed there).  The ``slice_env``
+        # anchor is unique to the ``os-tests`` step, and the injected block is
+        # matched verbatim, so this is a fixed point once applied.
+        file_timeout_env = (
+            slice_env
+            + "          # e2e-windows already runs NASTECH_TEST_FILE_TIMEOUT=900 on the\n"
+            "          # same 4-core image; the Windows-only row needs the same headroom\n"
+            "          # (its desktop-update hand-off file was killed at the 300 s\n"
+            "          # default). Harmless for the macOS rows.\n"
+            "          NASTECH_TEST_FILE_TIMEOUT: '900'\n"
+        )
+        if file_timeout_env not in updated and slice_env in updated:
+            updated = updated.replace(slice_env, file_timeout_env)
         if updated != text:
             _reconcile_budget_write(dst, rel, updated)
             fixed.append(rel)
@@ -2830,11 +2837,12 @@ def _reconcile_ci_runner_budgets(dst: str) -> list[str]:
         updated = text.replace(
             "INSTALL_TIMEOUT = 1500.0\nUPDATE_TIMEOUT = 1200.0\n",
             "# Upstream's 1500 s install / 1200 s update budgets assume a 32-core Windows\n"
-            "# runner. On the free 4-core windows-latest the fresh install's Node\n"
-            "# dependency build alone runs past 25 min at 6-way worker contention (run\n"
-            "# 37822129210), so widen the harness budgets for the smaller image.\n"
-            "INSTALL_TIMEOUT = 2400.0\n"
-            "UPDATE_TIMEOUT = 1800.0\n",
+            "# runner. This repo runs the free 4-core windows-latest under the 2x\n"
+            "# standard-runner rule (a fresh install's Node dependency build alone runs\n"
+            "# past 25 min at 6-way worker contention; run 37822129210): double both so\n"
+            "# the harness budget never trips before the lane's own 900 s per-file cap.\n"
+            "INSTALL_TIMEOUT = 3000.0\n"
+            "UPDATE_TIMEOUT = 2400.0\n",
         )
         if updated != text:
             _reconcile_budget_write(dst, rel, updated)
@@ -2903,6 +2911,159 @@ def _reconcile_python_test_timeout(dst: str) -> list[str]:
         return []
     _reconcile_budget_write(dst, rel, "".join(lines))
     return [rel]
+
+
+def _reconcile_js_test_timeouts(dst: str) -> list[str]:
+    """Give the branded JS lane a standard-runner per-test budget.
+
+    Upstream relies on vitest's 5 s per-test default for two tests that drive a
+    real ``git`` subprocess or the bundle-smoke pipeline; on the free 4-core
+    runner those exceed 5 s (bundle-smoke was killed at 15006 ms).  Upstream
+    budgets its own shell probes at 30 s and the fork doubles that on standard
+    runners, so each slow test carries an explicit 60 s.  Both edits are exact
+    literal replacements (or a uniquely anchored insertion), so a normalised
+    tree is a fixed point.
+    """
+    fixed: list[str] = []
+
+    rel = "tests-js/bundle-smoke-metadata.test.mjs"
+    text = _reconcile_budget_read(dst, rel)
+    if text is not None:
+        updated = text.replace("}, 15_000)", "}, 60_000)")
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+
+    rel = "tests-js/update-ui.test.mjs"
+    text = _reconcile_budget_read(dst, rel)
+    if text is not None:
+        # The git-probe test's final assertion is unique; its closing ``})`` is
+        # the only place the raised budget is inserted.  A tree that already
+        # carries the fork's raised literal (``}, 60000)`` or ``}, 60_000)``)
+        # no longer ends in ``})`` there, so re-running is a no-op.
+        head = (
+            ").toThrow(/does not match expected/)\n"
+            "  } finally {\n"
+            "    fs.rmSync(root, { recursive: true, force: true })\n"
+            "  }\n"
+        )
+        unraised = head + "})\n"
+        if unraised in text:
+            updated = text.replace(unraised, head + "}, 60_000)\n")
+            if updated != text:
+                _reconcile_budget_write(dst, rel, updated)
+                fixed.append(rel)
+
+    return fixed
+
+
+def _reconcile_python_slow_runner_wait_budgets(dst: str) -> list[str]:
+    """Widen the branded Python probes the 32-core upstream runner hides.
+
+    The Windows/CLI probes below spawn real processes and poll real CIM/PowerShell
+    or process tables; upstream's budgets assume the paid 32-core larger runner.
+    This repo's free 4-core standard runner needs >=2x upstream's wall clock, so
+    each literal is doubled (or raised to the fork's standard-runner value).
+    Every edit is an exact-literal replacement, so a normalised tree is a fixed
+    point and the next upstream sync cannot revert the headroom.
+    """
+    fixed: list[str] = []
+
+    rel = "tests/tui_gateway/test_compute_host.py"
+    text = _reconcile_budget_read(dst, rel)
+    if text is not None:
+        updated = text.replace(
+            "def _read_json_line(out: queue.Queue[dict], timeout: float = 2.0) -> dict:",
+            "def _read_json_line(out: queue.Queue[dict], timeout: float = 15.0) -> dict:",
+        ).replace("proc.wait(timeout=2)", "proc.wait(timeout=15)")
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+
+    rel = "tests/nastech_cli/test_cli_goal_parked_resume.py"
+    text = _reconcile_budget_read(dst, rel)
+    if text is not None:
+        updated = text.replace(
+            'wait_for_seconds(1, reason="cooldown")',
+            'wait_for_seconds(3600, reason="cooldown")',
+        )
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+
+    rel = "tests/nastech_cli/test_taskkill_identity_windows_live.py"
+    text = _reconcile_budget_read(dst, rel)
+    if text is not None:
+        # Each wait is matched with enough context to keep the transform a fixed
+        # point: a bare ``wait(timeout=30)`` also appears in the raised assert,
+        # so a value-only pass would re-raise it on the next run.
+        updated = text.replace(
+            "        proc.wait(timeout=10)\n",
+            "        proc.wait(timeout=20)\n",
+        )
+        updated = updated.replace(
+            "assert proc.wait(timeout=15) is not None",
+            "assert proc.wait(timeout=30) is not None",
+        )
+        updated = updated.replace("victim.wait(timeout=30)", "victim.wait(timeout=60)")
+        updated = updated.replace(
+            "        proc.wait(timeout=30)\n",
+            "        proc.wait(timeout=60)\n",
+        )
+        anchor = (
+            "        proc = _spawn_sleeper()\n"
+            "        try:\n"
+            "            start = get_process_start_time(proc.pid)\n"
+        )
+        if anchor in updated:
+            updated = updated.replace(
+                anchor,
+                "        proc = _spawn_sleeper()\n"
+                "        # Give the real-time scan a beat with the fresh process object\n"
+                "        # before fingerprinting and killing it (the same OS-beat pattern\n"
+                "        # the dead-PID sibling test uses for process teardown).\n"
+                "        time.sleep(1.0)\n"
+                "        try:\n"
+                "            start = get_process_start_time(proc.pid)\n",
+            )
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+
+    rel = "tests/scripts/desktop_update/test_desktop_update_windows_marker.py"
+    text = _reconcile_budget_read(dst, rel)
+    if text is not None:
+        updated = text.replace("timeout=60", "timeout=180").replace(
+            "timeout: int = 120)",
+            "timeout: int = 240)",
+        )
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+
+    rel = "tests/scripts/desktop_update/test_desktop_update_windows_marker_lock.py"
+    text = _reconcile_budget_read(dst, rel)
+    if text is not None:
+        updated = text.replace("'-Seconds', '60']", "'-Seconds', '120']").replace(
+            "text=True, timeout=90, check=False",
+            "text=True, timeout=180, check=False",
+        )
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+
+    rel = "tests/scripts/desktop_update/test_desktop_update_windows_commit_outcome.py"
+    text = _reconcile_budget_read(dst, rel)
+    if text is not None:
+        updated = text.replace("timeout: int = 150", "timeout: int = 300").replace(
+            "'-ProbeTimeoutSeconds', '10', timeout=120,",
+            "'-ProbeTimeoutSeconds', '10', timeout=240,",
+        )
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+
+    return fixed
 
 
 def _reconcile_windows_boot_lifecycle_race(dst: str) -> bool:
@@ -3231,6 +3392,12 @@ def reconcile_tree(dst: str) -> ReconcileResult:
         result.total += 1
         result.fixed.append(rel)
     for rel in _reconcile_python_test_timeout(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    for rel in _reconcile_js_test_timeouts(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    for rel in _reconcile_python_slow_runner_wait_budgets(dst):
         result.total += 1
         result.fixed.append(rel)
     if _reconcile_windows_boot_lifecycle_race(dst):

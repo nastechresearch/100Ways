@@ -28,7 +28,9 @@ from hundredways.updates import (
     _reconcile_desktop_path_fixtures,
     _reconcile_desktop_skin_alias,
     _reconcile_install_ps1_store_guard_test,
+    _reconcile_js_test_timeouts,
     _reconcile_locale_key_order,
+    _reconcile_python_slow_runner_wait_budgets,
     _reconcile_python_test_timeout,
     _reconcile_preserved_brand_text,
     _reconcile_windows_boot_lifecycle_race,
@@ -299,7 +301,7 @@ def test_ci_runner_budgets_normalize_free_runner_timeouts(tmp_path):
     assert "nousresearch" not in lowered
     assert "Upstream runs this on a 32-core windows-latest image" in install
     assert "Upstream runs 6 on a 32-core host" in install
-    assert "INSTALL_TIMEOUT = 2400.0\nUPDATE_TIMEOUT = 1800.0\n" in machine.read_text(
+    assert "INSTALL_TIMEOUT = 3000.0\nUPDATE_TIMEOUT = 2400.0\n" in machine.read_text(
         encoding="utf-8"
     )
     # Every edit is a fixed point, and the rendered workflow is a canonical
@@ -307,6 +309,81 @@ def test_ci_runner_budgets_normalize_free_runner_timeouts(tmp_path):
     rules = BrandingRules()
     assert rules.transform_text(install) == install
     assert _reconcile_ci_runner_budgets(str(candidate)) == []
+
+
+def test_ci_runner_budgets_inserts_file_timeout_when_e2e_job_already_sets_it(tmp_path):
+    """The os-tests Windows row must still receive NASTECH_TEST_FILE_TIMEOUT.
+
+    Regression: the presence guard used to scan the WHOLE file.  Upstream's
+    ``e2e-windows`` job already sets NASTECH_TEST_FILE_TIMEOUT, so the guard was
+    always false and the ``os-tests`` env block kept the 300 s per-file default,
+    which SIGKILLed the desktop-update hand-off test.  The check must be scoped
+    to the ``os-tests`` step's env block.
+    """
+    candidate = tmp_path / "candidate"
+    wf = candidate / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    path = wf / "tests-os.yml"
+    path.write_text(
+        "jobs:\n"
+        "  os-tests:\n"
+        "    steps:\n"
+        "      - name: Run ${{ matrix.marker }} tests\n"
+        "        run: scripts/run_tests.sh\n"
+        "        env:\n"
+        "          NASTECH_TEST_WORKERS: ${{ matrix.marker == 'windows' && '4' || '' }}\n"
+        "          NASTECH_TEST_SLICE: ${{ matrix.slice || '' }}\n"
+        "  e2e-windows:\n"
+        "    steps:\n"
+        "      - name: Run Windows E2E suite\n"
+        "        env:\n"
+        "          NASTECH_TEST_FILE_TIMEOUT: '900'\n"
+        "          NASTECH_TEST_FILE_RETRIES: '0'\n",
+        encoding="utf-8",
+    )
+
+    changed = _reconcile_ci_runner_budgets(str(candidate))
+    assert changed == [".github/workflows/tests-os.yml"]
+    text = path.read_text(encoding="utf-8")
+    # Both the os-tests insertion and the pre-existing e2e-windows value.
+    assert text.count("NASTECH_TEST_FILE_TIMEOUT: '900'") == 2
+    os_env = (
+        "          NASTECH_TEST_SLICE: ${{ matrix.slice || '' }}\n"
+        "          # e2e-windows already runs NASTECH_TEST_FILE_TIMEOUT=900 on the\n"
+        "          # same 4-core image; the Windows-only row needs the same headroom\n"
+        "          # (its desktop-update hand-off file was killed at the 300 s\n"
+        "          # default). Harmless for the macOS rows.\n"
+        "          NASTECH_TEST_FILE_TIMEOUT: '900'\n"
+    )
+    assert os_env in text
+    # The e2e-windows block itself is untouched.
+    assert (
+        "        env:\n"
+        "          NASTECH_TEST_FILE_TIMEOUT: '900'\n"
+        "          NASTECH_TEST_FILE_RETRIES: '0'\n"
+    ) in text
+    # Fixed point, and brand-clean for the first-party audit.
+    assert _reconcile_ci_runner_budgets(str(candidate)) == []
+    assert BrandingRules().transform_text(text) == text
+
+
+def test_new_timeout_reconciles_are_registered_in_reconcile_tree(tmp_path):
+    """A new reconcile only runs if ``reconcile_tree`` dispatches it."""
+    root = tmp_path / "candidate"
+    (root / "tests-js").mkdir(parents=True)
+    (root / "tests-js" / "bundle-smoke-metadata.test.mjs").write_text(
+        "test('x', () => {\n  expect(1).toBe(1)\n}, 15_000)\n", encoding="utf-8"
+    )
+    (root / "tests" / "tui_gateway").mkdir(parents=True)
+    (root / "tests" / "tui_gateway" / "test_compute_host.py").write_text(
+        "def _read_json_line(out, timeout: float = 2.0):\n    return out.get(timeout=timeout)\n\n\n"
+        "def test_x():\n    proc.wait(timeout=2)\n",
+        encoding="utf-8",
+    )
+
+    result = reconcile_tree(str(root))
+    assert "tests-js/bundle-smoke-metadata.test.mjs" in result.fixed
+    assert "tests/tui_gateway/test_compute_host.py" in result.fixed
 
 
 def test_python_test_timeout_reconcile_widens_templated_and_e2e_jobs(tmp_path):
@@ -352,6 +429,174 @@ def test_python_test_timeout_reconcile_widens_templated_and_e2e_jobs(tmp_path):
     # A file without the target jobs is a no-op.
     path.write_text("jobs:\n  other:\n    timeout-minutes: 30\n", encoding="utf-8")
     assert _reconcile_python_test_timeout(str(candidate)) == []
+
+
+def test_js_test_timeouts_reconcile_raises_slow_vitest_budgets(tmp_path):
+    candidate = tmp_path / "candidate"
+    js = candidate / "tests-js"
+    js.mkdir(parents=True)
+    smoke = js / "bundle-smoke-metadata.test.mjs"
+    smoke.write_text(
+        "test('channel smoke', () => {\n"
+        "  expect(1).toBe(1)\n"
+        "}, 15_000)\n",
+        encoding="utf-8",
+    )
+    probe = js / "update-ui.test.mjs"
+    probe.write_text(
+        "test('other', () => {\n"
+        "  expect(1).toBe(1)\n"
+        "})\n\n"
+        "test.skipIf(process.platform === 'win32')('probe Git reaches the staged main', () => {\n"
+        "  expect(() => sourceBranchProbe.prepareSourceBranchEnvironment(checkout, "
+        "'0'.repeat(40), git, capturedEnv, launchEnv)).toThrow(/does not match expected/)\n"
+        "  } finally {\n"
+        "    fs.rmSync(root, { recursive: true, force: true })\n"
+        "  }\n"
+        "})\n\n"
+        "test('after', () => {\n"
+        "  expect(1).toBe(1)\n"
+        "})\n",
+        encoding="utf-8",
+    )
+
+    changed = _reconcile_js_test_timeouts(str(candidate))
+    assert set(changed) == {
+        "tests-js/bundle-smoke-metadata.test.mjs",
+        "tests-js/update-ui.test.mjs",
+    }
+    assert "}, 60_000)\n" in smoke.read_text(encoding="utf-8")
+    assert "}, 15_000)" not in smoke.read_text(encoding="utf-8")
+    probe_text = probe.read_text(encoding="utf-8")
+    # Exactly the git-probe test gained the budget; the neighbours did not.
+    assert probe_text.count(", 60_000)") == 1
+    assert "  }\n}, 60_000)\n" in probe_text
+    assert probe_text.count("\n})") == 2  # the two untouched tests
+    assert _reconcile_js_test_timeouts(str(candidate)) == []
+    rules = BrandingRules()
+    smoke_text = smoke.read_text(encoding="utf-8")
+    assert rules.transform_text(smoke_text) == smoke_text
+    assert rules.transform_text(probe_text) == probe_text
+
+
+def test_js_test_timeouts_reconcile_noops_on_fork_raised_probe(tmp_path):
+    candidate = tmp_path / "candidate"
+    js = candidate / "tests-js"
+    js.mkdir(parents=True)
+    probe = js / "update-ui.test.mjs"
+    probe.write_text(
+        "test.skipIf(process.platform === 'win32')('probe Git reaches the staged main', () => {\n"
+        "  expect(() => sourceBranchProbe.prepareSourceBranchEnvironment(checkout, "
+        "'0'.repeat(40), git, capturedEnv, launchEnv)).toThrow(/does not match expected/)\n"
+        "  } finally {\n"
+        "    fs.rmSync(root, { recursive: true, force: true })\n"
+        "  }\n"
+        "}, 60000)\n",
+        encoding="utf-8",
+    )
+    assert _reconcile_js_test_timeouts(str(candidate)) == []
+    assert "}, 60000)" in probe.read_text(encoding="utf-8")
+
+
+def test_python_slow_runner_wait_budgets_doubles_each_probe(tmp_path):
+    candidate = tmp_path / "candidate"
+    files = {
+        "tests/tui_gateway/test_compute_host.py": (
+            "def _read_json_line(out: queue.Queue[dict], timeout: float = 2.0) -> dict:\n"
+            "    return out.get(timeout=timeout)\n\n\n"
+            "def test_compute_host_line_json_hello_and_shutdown():\n"
+            "    proc.wait(timeout=2)\n"
+        ),
+        "tests/nastech_cli/test_cli_goal_parked_resume.py": (
+            "def test_idle_hook(nastech_home):\n"
+            "    mgr = goals.GoalManager(session_id='resume-idle')\n"
+            '    mgr.wait_for_seconds(1, reason="cooldown")\n'
+        ),
+        "tests/nastech_cli/test_taskkill_identity_windows_live.py": (
+            "def _cleanup(proc):\n"
+            "    try:\n"
+            "        proc.wait(timeout=10)\n\n\n"
+            "class TestTerminatePidIdentityLive:\n"
+            "    def test_matching_identity_kills_real_process(self):\n"
+            "        proc = _spawn_sleeper()\n"
+            "        try:\n"
+            "            start = get_process_start_time(proc.pid)\n"
+            "            assert proc.wait(timeout=15) is not None\n\n"
+            "    def test_mismatched_identity(self):\n"
+            "        victim.wait(timeout=30)\n\n"
+            "    def test_dead_pid(self):\n"
+            "        proc.wait(timeout=30)\n"
+        ),
+        "tests/scripts/desktop_update/test_desktop_update_windows_marker.py": (
+            "    capture_output=True, text=True, timeout=60, check=True,\n"
+            "    capture_output=True, text=True, timeout=60, check=True,\n\n\n"
+            "def _run(home, *args, timeout: int = 120):\n"
+            "    pass\n\n\n"
+            "    capture_output=True, text=True, timeout=60, check=True,\n"
+        ),
+        "tests/scripts/desktop_update/test_desktop_update_windows_marker_lock.py": (
+            "    subprocess.run(['x',\n"
+            "                    '-Parent', str(script.pid), '-Seconds', '60'],\n"
+            "                   capture_output=True, text=True, timeout=90, check=False)\n"
+        ),
+        "tests/scripts/desktop_update/test_desktop_update_windows_commit_outcome.py": (
+            "def _handoff(tmp_path, *args, timeout: int = 150, prepare=None, **env):\n"
+            "    pass\n\n\n"
+            "def test_hanging():\n"
+            "    _handoff(\n"
+            "        tmp_path, '-NoGateway', '-ProbeTimeoutSeconds', '10', timeout=120, "
+            "HANDOFF_HELP_HANG='1',\n"
+            "    )\n"
+        ),
+    }
+    for rel, text in files.items():
+        path = candidate.joinpath(*rel.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    changed = _reconcile_python_slow_runner_wait_budgets(str(candidate))
+    assert set(changed) == set(files)
+
+    def read(rel):
+        return candidate.joinpath(*rel.split("/")).read_text(encoding="utf-8")
+
+    host = read("tests/tui_gateway/test_compute_host.py")
+    assert "timeout: float = 15.0" in host and "proc.wait(timeout=15)" in host
+    assert "timeout: float = 2.0" not in host
+    goal = read("tests/nastech_cli/test_cli_goal_parked_resume.py")
+    assert 'wait_for_seconds(3600, reason="cooldown")' in goal
+    taskkill = read("tests/nastech_cli/test_taskkill_identity_windows_live.py")
+    assert "proc.wait(timeout=20)" in taskkill
+    assert "proc.wait(timeout=30) is not None" in taskkill
+    assert taskkill.count("wait(timeout=60)") == 2
+    assert "wait(timeout=10)" not in taskkill and "wait(timeout=15)" not in taskkill
+    assert (
+        "        proc = _spawn_sleeper()\n"
+        "        # Give the real-time scan a beat with the fresh process object\n"
+        "        # before fingerprinting and killing it (the same OS-beat pattern\n"
+        "        # the dead-PID sibling test uses for process teardown).\n"
+        "        time.sleep(1.0)\n"
+        "        try:\n"
+        "            start = get_process_start_time(proc.pid)\n"
+    ) in taskkill
+    assert taskkill.count("time.sleep(1.0)") == 1
+    marker = read("tests/scripts/desktop_update/test_desktop_update_windows_marker.py")
+    assert marker.count("timeout=180") == 3 and "timeout=60" not in marker
+    assert "timeout: int = 240)" in marker and "timeout: int = 120)" not in marker
+    lock = read("tests/scripts/desktop_update/test_desktop_update_windows_marker_lock.py")
+    assert "'-Seconds', '120']" in lock and "'-Seconds', '60']" not in lock
+    assert "text=True, timeout=180, check=False" in lock and "timeout=90" not in lock
+    outcome = read("tests/scripts/desktop_update/test_desktop_update_windows_commit_outcome.py")
+    assert "timeout: int = 300" in outcome
+    assert "'-ProbeTimeoutSeconds', '10', timeout=240," in outcome and "timeout=120," not in outcome
+
+    # Fixed point: nothing is rewritten twice, and every edited file is a brand
+    # transform fixed point (the candidate audit requires it).
+    assert _reconcile_python_slow_runner_wait_budgets(str(candidate)) == []
+    rules = BrandingRules()
+    for rel in files:
+        text = read(rel)
+        assert rules.transform_text(text) == text
 
 
 def test_windows_boot_lifecycle_accepts_already_gone_taskkill(tmp_path):
