@@ -19,10 +19,12 @@ from hundredways.updates import (
     _HARDENED_PREPARE_SCRIPT,
     _SKILL_DESC_FULL_NEW,
     _SKILL_DESC_FULL_OLD,
+    _PROMPT_SURFACE_CHARS_PER_TOKEN,
     _UPSTREAM_PREPARE_SCRIPT,
     _reconcile_anon_surface_copy,
     _reconcile_apt_pool_first_char,
     _reconcile_ci_runner_budgets,
+    _reconcile_connector_test_guest_offline,
     _reconcile_credential_display_test,
     _reconcile_desktop_export_order,
     _reconcile_desktop_notification_timer_teardown,
@@ -42,6 +44,8 @@ from hundredways.updates import (
     _reconcile_fork_skill_sidebars,
     _reconcile_install_ps1_store_guard_test,
     _reconcile_locale_key_order,
+    _reconcile_managed_gateway_wire_headers,
+    _reconcile_plugin_catalog_sync_exemption,
     _reconcile_plugin_guard_trusted_installer_hosts,
     _reconcile_portable_shebang,
     _reconcile_portal_override_test_collision,
@@ -57,6 +61,7 @@ from hundredways.updates import (
     _reconcile_vercel_prepare,
     _reconcile_windows_boot_lifecycle_race,
     _sigv4_vector_signature,
+    _split_prompt_surface_tiers,
     brand_tree,
     compare_trees,
     fork_manifest_upstream_sha,
@@ -599,7 +604,7 @@ def test_python_slow_runner_wait_budgets_doubles_each_probe(tmp_path):
         "        # Give the real-time scan a beat with the fresh process object\n"
         "        # before fingerprinting and killing it (the same OS-beat pattern\n"
         "        # the dead-PID sibling test uses for process teardown).\n"
-        "        time.sleep(1.0)\n"
+        "        time.sleep(1.0)  # health: allow HX013 -- real-time beat for the free runner\n"
         "        try:\n"
         "            start = get_process_start_time(proc.pid)\n"
     ) in taskkill
@@ -727,7 +732,11 @@ def test_desktop_notification_timer_survives_jsdom_teardown(tmp_path):
 
     assert _reconcile_desktop_notification_timer_teardown(str(candidate)) is True
     text = path.read_text(encoding="utf-8")
-    assert "if (typeof window !== 'undefined') dismissNotification(id)" in text
+    # Braced body: eslint ``curly: ['error', 'all']`` rejects the single-statement
+    # form, so the guard must open a block.
+    assert "if (typeof window !== 'undefined') {\n" in text
+    assert "          dismissNotification(id)\n" in text
+    assert "if (typeof window !== 'undefined') dismissNotification(id)" not in text
     assert "window.setTimeout(() => dismissNotification(id), duration)" not in text
     # Idempotent: the guarded callback no longer matches the unguarded needle.
     assert _reconcile_desktop_notification_timer_teardown(str(candidate)) is False
@@ -2736,3 +2745,213 @@ def test_update_gate_allows_engine_registry_retirement(tmp_path):
     snap_owned = os.path.join(result.dir, "config", "owned-assets")
     assert os.path.exists(os.path.join(snap_owned, "banner.png"))
     assert not os.path.exists(os.path.join(snap_owned, "old-banner.png"))
+
+
+def test_reconcile_managed_gateway_wire_headers_restores_product_token(tmp_path):
+    """Branding collapses the two-token ``x-<org>-<product>-`` prefix.
+
+    Upstream names correlation headers ``x-nous-hermes-<field>``; the fork's
+    token rules map both ``nous`` and ``hermes`` to ``nastech``, collapsing the
+    compound to ``x-nastech-nastech-``.  The wire-identity test guards the
+    *product* prefix, so branded it matches its own headers.  Give the product
+    token its own name again.
+    """
+    root = tmp_path / "branded"
+    (root / "tools").mkdir(parents=True)
+    (root / "tests" / "tools").mkdir(parents=True)
+    source = root / "tools" / "managed_gateway_identity.py"
+    source.write_text(
+        'SESSION_HEADER = "x-nastech-nastech-session"\n'
+        'TURN_HEADER = "x-nastech-nastech-turn"\n',
+        encoding="utf-8",
+    )
+    test = root / "tests" / "tools" / "test_connector_wire_identity.py"
+    test.write_text(
+        '    headers = {k for k in first if k.startswith("x-nastech-nastech-")}\n'
+        '    assert not any(k.startswith("x-nastech-") for k in first)\n',
+        encoding="utf-8",
+    )
+
+    changed = _reconcile_managed_gateway_wire_headers(str(root))
+    assert changed == [
+        "tools/managed_gateway_identity.py",
+        "tests/tools/test_connector_wire_identity.py",
+    ]
+    source_text = source.read_text(encoding="utf-8")
+    assert "x-nastech-nastech-" not in source_text
+    assert '"x-nastech-agent-session"' in source_text
+    test_text = test.read_text(encoding="utf-8")
+    assert 'startswith("x-nastech-agent-")' in test_text
+    assert 'startswith("x-agent-")' in test_text
+    assert "x-nastech-nastech-" not in test_text
+
+    # Idempotent: the compound token is gone, so nothing matches again.
+    assert _reconcile_managed_gateway_wire_headers(str(root)) == []
+
+
+def test_reconcile_managed_gateway_wire_headers_noop_without_compound_token(tmp_path):
+    """An unskewed (upstream) file has no ``x-nastech-nastech-`` to fix."""
+    root = tmp_path / "branded"
+    (root / "tools").mkdir(parents=True)
+    source = root / "tools" / "managed_gateway_identity.py"
+    source.write_text('SESSION_HEADER = "x-nous-hermes-session"\n', encoding="utf-8")
+    (root / "tests" / "tools").mkdir(parents=True)
+    test = root / "tests" / "tools" / "test_connector_wire_identity.py"
+    test.write_text(
+        'assert not any(k.startswith("x-hermes-") for k in first)\n',
+        encoding="utf-8",
+    )
+
+    assert _reconcile_managed_gateway_wire_headers(str(root)) == []
+    assert source.read_text(encoding="utf-8") == 'SESSION_HEADER = "x-nous-hermes-session"\n'
+    assert 'x-hermes-' in test.read_text(encoding="utf-8")
+
+
+def test_reconcile_connector_test_guest_offline_pins_both_fixtures(tmp_path):
+    """The fork runs no portal, so ``ensure_guest_identity`` 503s.
+
+    Both connector RPC modules must pin the identity helper (via both of its
+    import paths) so the tests exercise reissue/alias logic, not the network.
+    """
+    root = tmp_path / "branded"
+    tg = root / "tests" / "tui_gateway"
+    tg.mkdir(parents=True)
+    accounts = tg / "test_connector_accounts_rpc.py"
+    accounts.write_text(
+        "@pytest.fixture(autouse=True)\n"
+        "def _gate(monkeypatch):\n"
+        "    live.reset_for_tests()\n"
+        '    monkeypatch.setattr("tools.connectors.connectors_available", lambda: True)\n'
+        "    yield\n",
+        encoding="utf-8",
+    )
+    operation = tg / "test_connector_operation_rpc.py"
+    operation.write_text(
+        "@pytest.fixture\n"
+        "def owned(monkeypatch):\n"
+        "    live.reset_for_tests()\n"
+        "    with ExitStack() as stack:\n"
+        "        yield\n",
+        encoding="utf-8",
+    )
+
+    changed = _reconcile_connector_test_guest_offline(str(root))
+    assert changed == [
+        "tests/tui_gateway/test_connector_accounts_rpc.py",
+        "tests/tui_gateway/test_connector_operation_rpc.py",
+    ]
+    for path in (accounts, operation):
+        text = path.read_text(encoding="utf-8")
+        assert (
+            '    monkeypatch.setattr("tools.connectors.ensure_guest_identity", lambda: None)\n'
+            in text
+        )
+        assert (
+            '    monkeypatch.setattr("tools.connectors.managed.ensure_guest_identity", '
+            "lambda: None)\n" in text
+        )
+
+    # Idempotent: the patch block is present, so the guard skips both.
+    assert _reconcile_connector_test_guest_offline(str(root)) == []
+
+
+def test_reconcile_connector_test_guest_offline_skips_unrelated_tree(tmp_path):
+    """A tree without the fixture needles is left byte-identical."""
+    root = tmp_path / "branded"
+    tg = root / "tests" / "tui_gateway"
+    tg.mkdir(parents=True)
+    path = tg / "test_connector_accounts_rpc.py"
+    original = "def test_plain():\n    assert True\n"
+    path.write_text(original, encoding="utf-8")
+    assert _reconcile_connector_test_guest_offline(str(root)) == []
+    assert path.read_text(encoding="utf-8") == original
+
+
+def test_reconcile_plugin_catalog_sync_exemption(tmp_path):
+    """The engine's 100WAYS sync PR must skip the data-only catalog gate."""
+    root = tmp_path / "branded"
+    wf = root / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    target = wf / "plugin-catalog-ci.yml"
+    target.write_text(
+        "name: Plugin Catalog CI\n"
+        "jobs:\n"
+        "  pinned-source-validate:\n"
+        "    steps:\n"
+        "      - name: Find changed catalog entries\n"
+        "        id: changed\n"
+        "        run: |\n"
+        "          set -euo pipefail\n"
+        "          # HEAD is the PR merge commit:\n"
+        "          git diff --name-only HEAD^1 HEAD\n",
+        encoding="utf-8",
+    )
+
+    assert _reconcile_plugin_catalog_sync_exemption(str(root)) is True
+    text = target.read_text(encoding="utf-8")
+    assert 'GITHUB_HEAD_REF' in text
+    assert '"100WAYS"' in text
+    assert 'nastechresearch/nastech-agent' in text
+    assert "files<<__EOF__" in text
+    # The original body is preserved after the guarded early exit.
+    assert "          # HEAD is the PR merge commit:\n" in text
+
+    # Idempotent: the marker now sits behind the guard, so the needle is gone.
+    assert _reconcile_plugin_catalog_sync_exemption(str(root)) is False
+
+
+def test_reconcile_plugin_catalog_sync_exemption_skips_missing_workflow(tmp_path):
+    assert _reconcile_plugin_catalog_sync_exemption(str(tmp_path)) is False
+
+
+def test_prompt_surface_snapshot_is_computed_after_domain_migration(tmp_path):
+    """The manifest counts characters of the final rendered prompt.
+
+    ``_reconcile_domains`` rewrites hosts inside the prompt ``.txt``; the
+    prompt-surface snapshot must run *after* it or ``surfaces.json`` describes
+    the pre-migration text (the fork's stale-prompt-surface failure).  Driving
+    the real ``reconcile_tree`` proves the dispatch order, not just the math.
+    """
+    root = tmp_path / "branded"
+    snap = root / "tests" / "fixtures" / "prompt_surface"
+    prompts = snap / "prompts"
+    prompts.mkdir(parents=True)
+    (snap / "tools").mkdir(parents=True)
+    (prompts / "cli.claude.txt").write_text(
+        "===== stable =====\n"
+        "Docs live at https://nastechresearch.com/guide today.\n"
+        "\n===== context =====\n"
+        "Context body.\n"
+        "\n===== volatile =====\n"
+        "Volatile body.\n",
+        encoding="utf-8",
+    )
+    (snap / "surfaces.json").write_text(
+        json.dumps(
+            {
+                "cli.claude": {
+                    # Stale all-zero counts, as an upstream snapshot would be.
+                    "prompt_tokens": {"context": 0, "stable": 0, "volatile": 0},
+                    "tool_tokens": 0,
+                    "tools": [],
+                }
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = reconcile_tree(str(root))
+
+    migrated = (prompts / "cli.claude.txt").read_text(encoding="utf-8")
+    assert "nastechresearch.com" not in migrated
+    assert "nastechresearch.github.io" in migrated
+    tiers = _split_prompt_surface_tiers(migrated)
+    manifest = json.loads((snap / "surfaces.json").read_text(encoding="utf-8"))
+    assert manifest["cli.claude"]["prompt_tokens"] == {
+        tier: len(body) // _PROMPT_SURFACE_CHARS_PER_TOKEN
+        for tier, body in tiers.items()
+    }
+    assert "tests/fixtures/prompt_surface/surfaces.json" in result.fixed
