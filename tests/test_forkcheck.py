@@ -502,3 +502,64 @@ def test_pipeline_records_and_removes_known_upstream_deletion(tmp_path):
         manifest = json.load(handle)
     assert manifest["source_delta"]["complete"] is True
     assert manifest["source_delta"]["counts"]["deleted"] == 1
+
+
+def test_forkcheck_registry_retirement_is_sanctioned_not_a_failure(tmp_path):
+    """A fork registry-source file the authoritative engine registry no longer
+    owns is a reviewable retirement (engine-side manifest diff = evidence),
+    not a fork-local-unpreserved gate failure."""
+    rules = BrandingRules()
+    upstream = _tree(tmp_path / "upstream", {})
+    fork = _tree(tmp_path / "fork", {
+        "config/owned-assets/manifest.json": '{"assets/logo.png": "fork-logo.png"}\n',
+        "config/owned-assets/fork-logo.png": "fork asset\n",
+        "assets/logo.png": "fork logo bytes\n",
+    })
+    branded = _tree(tmp_path / "branded", {
+        "config/owned-assets/manifest.json": '{"assets/logo.png": "engine-logo.png"}\n',
+        "config/owned-assets/engine-logo.png": "engine asset\n",
+        "assets/logo.png": "engine logo bytes\n",
+    })
+    report = fork_consistency(str(fork), str(branded), str(upstream), rules)
+    by_path = {entry.path: entry.status for entry in report.entries}
+    assert by_path["config/owned-assets/fork-logo.png"] == "registry_retired"
+    assert report.statuses.get("registry_retired") == 1
+    # the fork target "assets/logo.png" survives (locked binary asset or updated)
+    assert by_path["assets/logo.png"] in ("updated", "locked")
+    assert report.gate_passes()
+
+
+def test_forkcheck_registry_file_still_fails_without_authoritative_registry(tmp_path):
+    """Without the engine's authoritative registry in the candidate, a fork
+    registry-source file that vanished is still a fork-local-unpreserved gate
+    failure (no evidence of an intentional retirement)."""
+    rules = BrandingRules()
+    upstream = _tree(tmp_path / "upstream", {})
+    fork = _tree(tmp_path / "fork", {
+        "config/owned-assets/manifest.json": "{}\n",
+        "config/owned-assets/retired.png": "x\n",
+    })
+    branded = _tree(tmp_path / "branded", {})
+    report = fork_consistency(str(fork), str(branded), str(upstream), rules)
+    assert report.statuses.get("local_only", 0) >= 1
+    assert not report.gate_passes()
+
+
+def test_forkcheck_owned_source_missing_from_candidate_still_fails(tmp_path):
+    """A registry source the authoritative manifest STILL declares but that is
+    absent from the candidate is a broken materialization -- it must keep
+    failing (local_only), not be blessed as a retirement."""
+    rules = BrandingRules()
+    upstream = _tree(tmp_path / "upstream", {})
+    fork = _tree(tmp_path / "fork", {
+        "config/owned-assets/manifest.json": '{"assets/keep.png": "keep.png"}\n',
+        "config/owned-assets/keep.png": "keep bytes\n",
+    })
+    # branded declares keep.png but is missing the file (materialization bug)
+    branded = _tree(tmp_path / "branded", {
+        "config/owned-assets/manifest.json": '{"assets/keep.png": "keep.png"}\n',
+    })
+    report = fork_consistency(str(fork), str(branded), str(upstream), rules)
+    by_path = {entry.path: entry.status for entry in report.entries}
+    assert by_path["config/owned-assets/keep.png"] == "local_only"
+    assert not report.gate_passes()

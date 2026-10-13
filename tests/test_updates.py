@@ -25,18 +25,29 @@ from hundredways.updates import (
     _reconcile_ci_runner_budgets,
     _reconcile_credential_display_test,
     _reconcile_desktop_export_order,
+    _reconcile_desktop_notification_timer_teardown,
     _reconcile_desktop_path_fixtures,
     _reconcile_desktop_skin_alias,
+    _reconcile_docusaurus_site_config,
     _reconcile_install_ps1_store_guard_test,
+    _reconcile_js_test_timeouts,
     _reconcile_locale_key_order,
-    _reconcile_python_test_timeout,
     _reconcile_preserved_brand_text,
+    _reconcile_python_slow_runner_wait_budgets,
+    _reconcile_python_test_timeout,
     _reconcile_windows_boot_lifecycle_race,
     _reconcile_docs_posix_separators,
+    _reconcile_drop_vercel_deploy_job,
     _reconcile_fork_skill_catalogs,
     _reconcile_fork_skill_sidebars,
+    _reconcile_install_ps1_store_guard_test,
+    _reconcile_locale_key_order,
+    _reconcile_plugin_guard_trusted_installer_hosts,
     _reconcile_portable_shebang,
     _reconcile_portal_override_test_collision,
+    _reconcile_preserved_brand_text,
+    _reconcile_prompt_surface_snapshot,
+    _reconcile_python_test_timeout,
     _reconcile_reasoning_effort_selection,
     _reconcile_sigv4_vectors,
     _reconcile_skill_description_hardline,
@@ -44,6 +55,7 @@ from hundredways.updates import (
     _reconcile_telegram_mention_context_lengths,
     _reconcile_uv_lock_file,
     _reconcile_vercel_prepare,
+    _reconcile_windows_boot_lifecycle_race,
     _sigv4_vector_signature,
     brand_tree,
     compare_trees,
@@ -154,8 +166,14 @@ def test_desktop_export_order_is_reconciled_after_nastech_rename(tmp_path):
     plugin.parent.mkdir(parents=True)
     sdk.parent.mkdir(parents=True)
     plugin.write_text(
+        "export type { PluginSettingsPage, PluginSettingsSubpage } from './settings-pages'\n"
+        "import type { Contribution } from './types'\n"
+        "\n"
         "export type { PluginRestOptions } from '@/nastech'\n"
-        "export type { NastechOpenTarget } from '@/lib/nastech-open-target'\n",
+        "export type { NastechOpenTarget } from '@/lib/nastech-open-target'\n"
+        "export type { PluginAppActionId, PluginAppActionInfo, PluginRunActionResult } from '@/lib/keybinds/plugin-actions'\n"
+        "export type { PluginNativeNotificationInput, PluginNotificationAction } from '@/store/native-notifications'\n"
+        "export type { PetMessageTone, PetSayOptions } from '@/store/pet-plugin-messages'\n",
         encoding="utf-8",
     )
     sdk.write_text(
@@ -187,7 +205,15 @@ def test_desktop_export_order_is_reconciled_after_nastech_rename(tmp_path):
     }
     plugin_text = plugin.read_text(encoding="utf-8")
     sdk_text = sdk.read_text(encoding="utf-8")
+    assert plugin_text.index("@/lib/keybinds/plugin-actions") < plugin_text.index("@/lib/nastech-open-target")
     assert plugin_text.index("@/lib/nastech-open-target") < plugin_text.index("@/nastech")
+    assert plugin_text.index("@/nastech") < plugin_text.index("@/store/native-notifications")
+    assert plugin_text.index("@/store/native-notifications") < plugin_text.index("@/store/pet-plugin-messages")
+    # Non-`@/` exports and the import that separates them stay untouched.
+    assert plugin_text.startswith(
+        "export type { PluginSettingsPage, PluginSettingsSubpage } from './settings-pages'\n"
+        "import type { Contribution } from './types'\n"
+    )
     assert sdk_text.index("@/lib/budgeted-loop") < sdk_text.index("@/nastech")
     assert sdk_text.index("@/lib/format") < sdk_text.index("@/nastech")
     assert sdk_text.index("@/lib/utils") < sdk_text.index("@/nastech")
@@ -299,7 +325,7 @@ def test_ci_runner_budgets_normalize_free_runner_timeouts(tmp_path):
     assert "nousresearch" not in lowered
     assert "Upstream runs this on a 32-core windows-latest image" in install
     assert "Upstream runs 6 on a 32-core host" in install
-    assert "INSTALL_TIMEOUT = 2400.0\nUPDATE_TIMEOUT = 1800.0\n" in machine.read_text(
+    assert "INSTALL_TIMEOUT = 3000.0\nUPDATE_TIMEOUT = 2400.0\n" in machine.read_text(
         encoding="utf-8"
     )
     # Every edit is a fixed point, and the rendered workflow is a canonical
@@ -307,6 +333,81 @@ def test_ci_runner_budgets_normalize_free_runner_timeouts(tmp_path):
     rules = BrandingRules()
     assert rules.transform_text(install) == install
     assert _reconcile_ci_runner_budgets(str(candidate)) == []
+
+
+def test_ci_runner_budgets_inserts_file_timeout_when_e2e_job_already_sets_it(tmp_path):
+    """The os-tests Windows row must still receive NASTECH_TEST_FILE_TIMEOUT.
+
+    Regression: the presence guard used to scan the WHOLE file.  Upstream's
+    ``e2e-windows`` job already sets NASTECH_TEST_FILE_TIMEOUT, so the guard was
+    always false and the ``os-tests`` env block kept the 300 s per-file default,
+    which SIGKILLed the desktop-update hand-off test.  The check must be scoped
+    to the ``os-tests`` step's env block.
+    """
+    candidate = tmp_path / "candidate"
+    wf = candidate / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    path = wf / "tests-os.yml"
+    path.write_text(
+        "jobs:\n"
+        "  os-tests:\n"
+        "    steps:\n"
+        "      - name: Run ${{ matrix.marker }} tests\n"
+        "        run: scripts/run_tests.sh\n"
+        "        env:\n"
+        "          NASTECH_TEST_WORKERS: ${{ matrix.marker == 'windows' && '4' || '' }}\n"
+        "          NASTECH_TEST_SLICE: ${{ matrix.slice || '' }}\n"
+        "  e2e-windows:\n"
+        "    steps:\n"
+        "      - name: Run Windows E2E suite\n"
+        "        env:\n"
+        "          NASTECH_TEST_FILE_TIMEOUT: '900'\n"
+        "          NASTECH_TEST_FILE_RETRIES: '0'\n",
+        encoding="utf-8",
+    )
+
+    changed = _reconcile_ci_runner_budgets(str(candidate))
+    assert changed == [".github/workflows/tests-os.yml"]
+    text = path.read_text(encoding="utf-8")
+    # Both the os-tests insertion and the pre-existing e2e-windows value.
+    assert text.count("NASTECH_TEST_FILE_TIMEOUT: '900'") == 2
+    os_env = (
+        "          NASTECH_TEST_SLICE: ${{ matrix.slice || '' }}\n"
+        "          # e2e-windows already runs NASTECH_TEST_FILE_TIMEOUT=900 on the\n"
+        "          # same 4-core image; the Windows-only row needs the same headroom\n"
+        "          # (its desktop-update hand-off file was killed at the 300 s\n"
+        "          # default). Harmless for the macOS rows.\n"
+        "          NASTECH_TEST_FILE_TIMEOUT: '900'\n"
+    )
+    assert os_env in text
+    # The e2e-windows block itself is untouched.
+    assert (
+        "        env:\n"
+        "          NASTECH_TEST_FILE_TIMEOUT: '900'\n"
+        "          NASTECH_TEST_FILE_RETRIES: '0'\n"
+    ) in text
+    # Fixed point, and brand-clean for the first-party audit.
+    assert _reconcile_ci_runner_budgets(str(candidate)) == []
+    assert BrandingRules().transform_text(text) == text
+
+
+def test_new_timeout_reconciles_are_registered_in_reconcile_tree(tmp_path):
+    """A new reconcile only runs if ``reconcile_tree`` dispatches it."""
+    root = tmp_path / "candidate"
+    (root / "tests-js").mkdir(parents=True)
+    (root / "tests-js" / "bundle-smoke-metadata.test.mjs").write_text(
+        "test('x', () => {\n  expect(1).toBe(1)\n}, 15_000)\n", encoding="utf-8"
+    )
+    (root / "tests" / "tui_gateway").mkdir(parents=True)
+    (root / "tests" / "tui_gateway" / "test_compute_host.py").write_text(
+        "def _read_json_line(out, timeout: float = 2.0):\n    return out.get(timeout=timeout)\n\n\n"
+        "def test_x():\n    proc.wait(timeout=2)\n",
+        encoding="utf-8",
+    )
+
+    result = reconcile_tree(str(root))
+    assert "tests-js/bundle-smoke-metadata.test.mjs" in result.fixed
+    assert "tests/tui_gateway/test_compute_host.py" in result.fixed
 
 
 def test_python_test_timeout_reconcile_widens_templated_and_e2e_jobs(tmp_path):
@@ -352,6 +453,174 @@ def test_python_test_timeout_reconcile_widens_templated_and_e2e_jobs(tmp_path):
     # A file without the target jobs is a no-op.
     path.write_text("jobs:\n  other:\n    timeout-minutes: 30\n", encoding="utf-8")
     assert _reconcile_python_test_timeout(str(candidate)) == []
+
+
+def test_js_test_timeouts_reconcile_raises_slow_vitest_budgets(tmp_path):
+    candidate = tmp_path / "candidate"
+    js = candidate / "tests-js"
+    js.mkdir(parents=True)
+    smoke = js / "bundle-smoke-metadata.test.mjs"
+    smoke.write_text(
+        "test('channel smoke', () => {\n"
+        "  expect(1).toBe(1)\n"
+        "}, 15_000)\n",
+        encoding="utf-8",
+    )
+    probe = js / "update-ui.test.mjs"
+    probe.write_text(
+        "test('other', () => {\n"
+        "  expect(1).toBe(1)\n"
+        "})\n\n"
+        "test.skipIf(process.platform === 'win32')('probe Git reaches the staged main', () => {\n"
+        "  expect(() => sourceBranchProbe.prepareSourceBranchEnvironment(checkout, "
+        "'0'.repeat(40), git, capturedEnv, launchEnv)).toThrow(/does not match expected/)\n"
+        "  } finally {\n"
+        "    fs.rmSync(root, { recursive: true, force: true })\n"
+        "  }\n"
+        "})\n\n"
+        "test('after', () => {\n"
+        "  expect(1).toBe(1)\n"
+        "})\n",
+        encoding="utf-8",
+    )
+
+    changed = _reconcile_js_test_timeouts(str(candidate))
+    assert set(changed) == {
+        "tests-js/bundle-smoke-metadata.test.mjs",
+        "tests-js/update-ui.test.mjs",
+    }
+    assert "}, 60_000)\n" in smoke.read_text(encoding="utf-8")
+    assert "}, 15_000)" not in smoke.read_text(encoding="utf-8")
+    probe_text = probe.read_text(encoding="utf-8")
+    # Exactly the git-probe test gained the budget; the neighbours did not.
+    assert probe_text.count(", 60_000)") == 1
+    assert "  }\n}, 60_000)\n" in probe_text
+    assert probe_text.count("\n})") == 2  # the two untouched tests
+    assert _reconcile_js_test_timeouts(str(candidate)) == []
+    rules = BrandingRules()
+    smoke_text = smoke.read_text(encoding="utf-8")
+    assert rules.transform_text(smoke_text) == smoke_text
+    assert rules.transform_text(probe_text) == probe_text
+
+
+def test_js_test_timeouts_reconcile_noops_on_fork_raised_probe(tmp_path):
+    candidate = tmp_path / "candidate"
+    js = candidate / "tests-js"
+    js.mkdir(parents=True)
+    probe = js / "update-ui.test.mjs"
+    probe.write_text(
+        "test.skipIf(process.platform === 'win32')('probe Git reaches the staged main', () => {\n"
+        "  expect(() => sourceBranchProbe.prepareSourceBranchEnvironment(checkout, "
+        "'0'.repeat(40), git, capturedEnv, launchEnv)).toThrow(/does not match expected/)\n"
+        "  } finally {\n"
+        "    fs.rmSync(root, { recursive: true, force: true })\n"
+        "  }\n"
+        "}, 60000)\n",
+        encoding="utf-8",
+    )
+    assert _reconcile_js_test_timeouts(str(candidate)) == []
+    assert "}, 60000)" in probe.read_text(encoding="utf-8")
+
+
+def test_python_slow_runner_wait_budgets_doubles_each_probe(tmp_path):
+    candidate = tmp_path / "candidate"
+    files = {
+        "tests/tui_gateway/test_compute_host.py": (
+            "def _read_json_line(out: queue.Queue[dict], timeout: float = 2.0) -> dict:\n"
+            "    return out.get(timeout=timeout)\n\n\n"
+            "def test_compute_host_line_json_hello_and_shutdown():\n"
+            "    proc.wait(timeout=2)\n"
+        ),
+        "tests/nastech_cli/test_cli_goal_parked_resume.py": (
+            "def test_idle_hook(nastech_home):\n"
+            "    mgr = goals.GoalManager(session_id='resume-idle')\n"
+            '    mgr.wait_for_seconds(1, reason="cooldown")\n'
+        ),
+        "tests/nastech_cli/test_taskkill_identity_windows_live.py": (
+            "def _cleanup(proc):\n"
+            "    try:\n"
+            "        proc.wait(timeout=10)\n\n\n"
+            "class TestTerminatePidIdentityLive:\n"
+            "    def test_matching_identity_kills_real_process(self):\n"
+            "        proc = _spawn_sleeper()\n"
+            "        try:\n"
+            "            start = get_process_start_time(proc.pid)\n"
+            "            assert proc.wait(timeout=15) is not None\n\n"
+            "    def test_mismatched_identity(self):\n"
+            "        victim.wait(timeout=30)\n\n"
+            "    def test_dead_pid(self):\n"
+            "        proc.wait(timeout=30)\n"
+        ),
+        "tests/scripts/desktop_update/test_desktop_update_windows_marker.py": (
+            "    capture_output=True, text=True, timeout=60, check=True,\n"
+            "    capture_output=True, text=True, timeout=60, check=True,\n\n\n"
+            "def _run(home, *args, timeout: int = 120):\n"
+            "    pass\n\n\n"
+            "    capture_output=True, text=True, timeout=60, check=True,\n"
+        ),
+        "tests/scripts/desktop_update/test_desktop_update_windows_marker_lock.py": (
+            "    subprocess.run(['x',\n"
+            "                    '-Parent', str(script.pid), '-Seconds', '60'],\n"
+            "                   capture_output=True, text=True, timeout=90, check=False)\n"
+        ),
+        "tests/scripts/desktop_update/test_desktop_update_windows_commit_outcome.py": (
+            "def _handoff(tmp_path, *args, timeout: int = 150, prepare=None, **env):\n"
+            "    pass\n\n\n"
+            "def test_hanging():\n"
+            "    _handoff(\n"
+            "        tmp_path, '-NoGateway', '-ProbeTimeoutSeconds', '10', timeout=120, "
+            "HANDOFF_HELP_HANG='1',\n"
+            "    )\n"
+        ),
+    }
+    for rel, text in files.items():
+        path = candidate.joinpath(*rel.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    changed = _reconcile_python_slow_runner_wait_budgets(str(candidate))
+    assert set(changed) == set(files)
+
+    def read(rel):
+        return candidate.joinpath(*rel.split("/")).read_text(encoding="utf-8")
+
+    host = read("tests/tui_gateway/test_compute_host.py")
+    assert "timeout: float = 15.0" in host and "proc.wait(timeout=15)" in host
+    assert "timeout: float = 2.0" not in host
+    goal = read("tests/nastech_cli/test_cli_goal_parked_resume.py")
+    assert 'wait_for_seconds(3600, reason="cooldown")' in goal
+    taskkill = read("tests/nastech_cli/test_taskkill_identity_windows_live.py")
+    assert "proc.wait(timeout=20)" in taskkill
+    assert "proc.wait(timeout=30) is not None" in taskkill
+    assert taskkill.count("wait(timeout=60)") == 2
+    assert "wait(timeout=10)" not in taskkill and "wait(timeout=15)" not in taskkill
+    assert (
+        "        proc = _spawn_sleeper()\n"
+        "        # Give the real-time scan a beat with the fresh process object\n"
+        "        # before fingerprinting and killing it (the same OS-beat pattern\n"
+        "        # the dead-PID sibling test uses for process teardown).\n"
+        "        time.sleep(1.0)\n"
+        "        try:\n"
+        "            start = get_process_start_time(proc.pid)\n"
+    ) in taskkill
+    assert taskkill.count("time.sleep(1.0)") == 1
+    marker = read("tests/scripts/desktop_update/test_desktop_update_windows_marker.py")
+    assert marker.count("timeout=180") == 3 and "timeout=60" not in marker
+    assert "timeout: int = 240)" in marker and "timeout: int = 120)" not in marker
+    lock = read("tests/scripts/desktop_update/test_desktop_update_windows_marker_lock.py")
+    assert "'-Seconds', '120']" in lock and "'-Seconds', '60']" not in lock
+    assert "text=True, timeout=180, check=False" in lock and "timeout=90" not in lock
+    outcome = read("tests/scripts/desktop_update/test_desktop_update_windows_commit_outcome.py")
+    assert "timeout: int = 300" in outcome
+    assert "'-ProbeTimeoutSeconds', '10', timeout=240," in outcome and "timeout=120," not in outcome
+
+    # Fixed point: nothing is rewritten twice, and every edited file is a brand
+    # transform fixed point (the candidate audit requires it).
+    assert _reconcile_python_slow_runner_wait_budgets(str(candidate)) == []
+    rules = BrandingRules()
+    for rel in files:
+        text = read(rel)
+        assert rules.transform_text(text) == text
 
 
 def test_windows_boot_lifecycle_accepts_already_gone_taskkill(tmp_path):
@@ -440,6 +709,32 @@ def test_desktop_path_fixtures_use_branded_suffix(tmp_path):
     assert "nastechmagic-test" in data_paths.read_text(encoding="utf-8")
     assert "nastechmagic-test" in bundle_env.read_text(encoding="utf-8")
     assert _reconcile_desktop_path_fixtures(str(candidate)) == []
+
+
+def test_desktop_notification_timer_survives_jsdom_teardown(tmp_path):
+    candidate = tmp_path / "candidate"
+    path = candidate / "apps" / "desktop" / "src" / "store" / "notifications.ts"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "  if (duration > 0) {\n"
+        "    timers.set(\n"
+        "      id,\n"
+        "      window.setTimeout(() => dismissNotification(id), duration)\n"
+        "    )\n"
+        "  }\n",
+        encoding="utf-8",
+    )
+
+    assert _reconcile_desktop_notification_timer_teardown(str(candidate)) is True
+    text = path.read_text(encoding="utf-8")
+    assert "if (typeof window !== 'undefined') dismissNotification(id)" in text
+    assert "window.setTimeout(() => dismissNotification(id), duration)" not in text
+    # Idempotent: the guarded callback no longer matches the unguarded needle.
+    assert _reconcile_desktop_notification_timer_teardown(str(candidate)) is False
+
+
+def test_desktop_notification_timer_reconcile_skips_missing_file(tmp_path):
+    assert _reconcile_desktop_notification_timer_teardown(str(tmp_path)) is False
 
 
 def test_locale_key_order_restores_generated_sort(tmp_path):
@@ -1219,7 +1514,7 @@ def test_reconcile_target_ci_compatibility_fixes_are_audited(tmp_path):
     website.mkdir(parents=True)
     paths.mkdir(parents=True)
     (website / "docusaurus.config.ts").write_text(
-        "url: 'https://nastechresearch.github.io/nastech-agent',\n"
+        "url: 'https://nastechresearch.github.io',\n"
         "baseUrl: '/docs/',\n"
     )
     (paths / "paths.ts").write_text(
@@ -1248,16 +1543,208 @@ def test_reconcile_target_ci_compatibility_fixes_are_audited(tmp_path):
         "eslint.config.shared.mjs",
     }
     assert os.stat(runner).st_mode & 0o111
-    assert "url: 'https://nastechresearch.github.io'," not in (website / "docusaurus.config.ts").read_text()
     docs_config = (website / "docusaurus.config.ts").read_text()
     assert f"url: '{_DOCS_PUBLIC_ORIGIN}'," in docs_config
-    assert "baseUrl: '/docs/'," in docs_config
-    assert "/nastech-agent/docs/" not in docs_config
+    assert "url: 'https://nastechresearch.github.io/nastech-agent'," not in docs_config
+    assert "baseUrl: '/nastech-agent/docs/'," in docs_config
     assert "return project" in (paths / "paths.ts").read_text()
     lint_config = (root / "eslint.config.shared.mjs").read_text()
     assert "'perfectionist/sort-imports': [\n        'warn'," in lint_config
     assert "'perfectionist/sort-named-exports': ['warn'" in lint_config
     assert "'perfectionist/sort-named-imports': ['warn'" in lint_config
+
+
+def test_reconcile_plugin_guard_trusted_installer_hosts(tmp_path):
+    root = tmp_path / "branded"
+    tools = root / "tools"
+    tools.mkdir(parents=True)
+    target = tools / "plugin_guard_context.py"
+    target.write_text(
+        "_TRUSTED_INSTALLER_HOSTS = {\n"
+        '    "nastechresearch.github.io/nastech-agent", "ollama.com", "bun.sh",\n'
+        '    "get.docker.com", "sh.rustup.rs", "deno.land", "astral.sh", "app.factory.ai",\n'
+        "}\n"
+    )
+
+    assert _reconcile_plugin_guard_trusted_installer_hosts(str(root)) == 1
+    text = target.read_text()
+    assert '"nastechresearch.github.io", "ollama.com", "bun.sh",' in text
+    assert '"nastechresearch.github.io/nastech-agent",' not in text
+
+    # Idempotent once the allowlist carries the bare host.
+    assert _reconcile_plugin_guard_trusted_installer_hosts(str(root)) == 0
+
+
+def test_reconcile_plugin_guard_leaves_install_paths_untouched(tmp_path):
+    root = tmp_path / "branded"
+    tools = root / "tools"
+    tools.mkdir(parents=True)
+    target = tools / "plugin_guard_context.py"
+    original = 'url = "https://nastechresearch.github.io/nastech-agent/install.sh"\n'
+    target.write_text(original)
+
+    # A docs/install URL keeps the path form and must not be rewritten; only the
+    # trusted-installer allowlist entry collapses to the bare host.
+    assert _reconcile_plugin_guard_trusted_installer_hosts(str(root)) == 0
+    assert target.read_text() == original
+
+
+def test_reconcile_docusaurus_site_config_subpath_url_collapses(tmp_path):
+    root = tmp_path / "branded"
+    website = root / "website"
+    website.mkdir(parents=True)
+    target = website / "docusaurus.config.ts"
+    target.write_text(
+        "url: 'https://nastechresearch.github.io/nastech-agent',\n"
+        "baseUrl: '/docs/',\n"
+    )
+
+    # The fork serves docs at the project path /nastech-agent/docs/ (Pages
+    # project site); Docusaurus 3.10 rejects a sub-path inside `url`, so the
+    # reconcile collapses the branded origin to the bare Pages host and moves
+    # the project path into baseUrl.
+    assert _reconcile_docusaurus_site_config(str(root)) == 1
+    text = target.read_text()
+    assert f"url: '{_DOCS_PUBLIC_ORIGIN}'," in text
+    assert "url: 'https://nastechresearch.github.io/nastech-agent'," not in text
+    assert "baseUrl: '/nastech-agent/docs/'," in text
+    assert "baseUrl: '/docs/'," not in text
+
+    # Idempotent once the config carries the project-pages contract.
+    assert _reconcile_docusaurus_site_config(str(root)) == 0
+
+
+def test_reconcile_prompt_surface_snapshot(tmp_path):
+    root = tmp_path / "branded"
+    snap = root / "tests" / "fixtures" / "prompt_surface"
+    prompts = snap / "prompts"
+    tools = snap / "tools"
+    prompts.mkdir(parents=True)
+    tools.mkdir(parents=True)
+
+    stable = "System prompt header.\nBe helpful.\n"
+    context = "Context block.\n"
+    volatile = (
+        "# installed skills\n"
+        "  software-development:\n"
+        "    - github: GitHub via gh CLI: PRs, issues, reviews, repos, auth.\n"
+        "    - nastech-agent-skill-authoring: Author in-repo SKILL.md files: frontmatter and structure.\n"
+        "    - inspecting-nastech-desktop-dom: Read the live Nastech desktop DOM/CSS over CDP.\n"
+        "  autonomous-ai-agents:\n"
+        "    - nastech-agent: Use, configure, theme, extend, and orchestrate Nastech Agent.\n"
+    )
+    (prompts / "cli.claude.txt").write_text(
+        "===== stable =====\n"
+        f"{stable}\n\n"
+        "===== context =====\n"
+        f"{context}\n\n"
+        "===== volatile =====\n"
+        f"{volatile}\n",
+        encoding="utf-8",
+    )
+    tool_schema = {
+        "name": "frobnicate",
+        "description": "Do things.",
+        "parameters": {"type": "object", "properties": {}},
+    }
+    (tools / "frobnicate.json").write_text(
+        json.dumps(tool_schema, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    (snap / "surfaces.json").write_text(
+        json.dumps(
+            {
+                "cli.claude": {
+                    # Stale token counts: branding moved the text but upstream
+                    # numbers were never folded back (the engine's signature).
+                    "prompt_tokens": {"context": 3, "stable": 3, "volatile": 3},
+                    "tool_tokens": 3,
+                    "tools": ["frobnicate"],
+                }
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    changed = _reconcile_prompt_surface_snapshot(str(root))
+    assert changed == [
+        "tests/fixtures/prompt_surface/prompts/cli.claude.txt",
+        "tests/fixtures/prompt_surface/surfaces.json",
+    ]
+
+    text = (prompts / "cli.claude.txt").read_text(encoding="utf-8")
+    assert _SKILL_DESC_FULL_NEW in text
+    assert _SKILL_DESC_FULL_OLD not in text
+    assert text.index("    - inspecting-nastech-desktop-dom:") < text.index(
+        "    - nastech-agent-skill-authoring:"
+    )
+
+    expected_volatile = (
+        "# installed skills\n"
+        "  software-development:\n"
+        "    - github: GitHub via gh CLI: PRs, issues, reviews, repos, auth.\n"
+        "    - inspecting-nastech-desktop-dom: Read the live Nastech desktop DOM/CSS over CDP.\n"
+        "    - nastech-agent-skill-authoring: Author in-repo SKILL.md files: frontmatter and structure.\n"
+        "  autonomous-ai-agents:\n"
+        f"    - nastech-agent: {_SKILL_DESC_FULL_NEW}.\n"
+    )
+    expected = {
+        "cli.claude": {
+            # The renderer's own length formulas (scripts/ci/prompt_surface.py
+            # _write_snapshot): len(tier)//4 and len(json.dumps(tools,
+            # sort_keys=True))//4, reproduced from the corrected prompt text.
+            "prompt_tokens": {
+                "context": len(context) // 4,
+                "stable": len(stable) // 4,
+                "volatile": len(expected_volatile) // 4,
+            },
+            "tool_tokens": len(json.dumps({"frobnicate": tool_schema}, sort_keys=True)) // 4,
+            "tools": ["frobnicate"],
+        }
+    }
+    assert json.loads((snap / "surfaces.json").read_text(encoding="utf-8")) == expected
+
+    # Idempotent once the snapshot carries the branded render.
+    assert _reconcile_prompt_surface_snapshot(str(root)) == []
+
+
+def test_reconcile_drop_vercel_deploy_job(tmp_path):
+    root = tmp_path / "branded"
+    wf = root / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    target = wf / "deploy-site.yml"
+    target.write_text(
+        "name: Deploy Site\n"
+        "jobs:\n"
+        "  deploy-vercel:\n"
+        "    # Triggered automatically on release publish (production cuts) and\n"
+        "    # manually via `gh workflow run deploy-site.yml` when an out-of-band\n"
+        "    # main commit needs to ship live before the next release tag \u2014 e.g.\n"
+        "    # a skills-index PR that doesn't touch website/** paths and so\n"
+        "    # doesn't auto-deploy via the deploy-docs path.\n"
+        "    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'\n"
+        "    runs-on: ubuntu-latest\n"
+        "    timeout-minutes: 30\n"
+        "    steps:\n"
+        "      - name: Trigger Vercel Deploy\n"
+        '        run: curl -fsS --retry 3 --retry-delay 10 -X POST "${{ secrets.VERCEL_DEPLOY_HOOK }}"\n'
+        "\n"
+        "  deploy-docs:\n"
+        "    runs-on: ubuntu-latest\n"
+    )
+
+    assert _reconcile_drop_vercel_deploy_job(str(root)) == 1
+    text = target.read_text()
+    assert "deploy-vercel" not in text
+    assert "VERCEL_DEPLOY_HOOK" not in text
+    assert "deploy-docs:" in text
+    assert text.startswith("name: Deploy Site\njobs:\n  deploy-docs:\n")
+
+    # Idempotent once the job is gone.
+    assert _reconcile_drop_vercel_deploy_job(str(root)) == 0
 
 
 def test_reconcile_anon_surface_copy_neutralizes_chat_copy(tmp_path):
@@ -2195,3 +2682,57 @@ def test_reconcile_portable_shebang_rewrites_embedded_bash_payload(tmp_path):
     assert b"#!/usr/bin/env bash" in script.read_bytes()
     assert stray.read_bytes() == b'#!/usr/bin/env bash\n#!/bin/sh\n'
     assert _reconcile_portable_shebang(str(candidate)) == []
+
+
+def test_update_gate_allows_engine_registry_retirement(tmp_path):
+    """The owned-assets registry can shrink engine-side without hand-editing
+    the fork: old fork registry sources the authoritative registry no longer
+    owns are sanctioned retirements (reviewable via the engine manifest
+    diff), so the fork-consistency gate passes instead of failing local_only.
+    Mirrors PR #101's owned-registry prune."""
+    hermes = _hermes_repo(tmp_path)
+    src = tmp_path / "hermes-agent"
+    (src / "static" / "img").mkdir(parents=True, exist_ok=True)
+    (src / "static" / "img" / "banner.png").write_bytes(b"HERMES-BANNER-BYTES")
+    subprocess.run(["git", "-C", str(src), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(src), "commit", "-q", "-m", "add banner"], check=True)
+    baseline = subprocess.check_output(
+        ["git", "-C", str(src), "rev-parse", "HEAD"], text=True
+    ).strip()
+
+    # The fork was previously branded with the OLD 2-asset registry.
+    fork = tmp_path / "nastech-agent"
+    fork.mkdir()
+    (fork / "manifest.json").write_text(json.dumps({"upstream_sha": baseline}))
+    (fork / "config" / "owned-assets").mkdir(parents=True)
+    (fork / "config" / "owned-assets" / "manifest.json").write_text(json.dumps({
+        "static/img/banner.png": "banner.png",
+        "static/img/old-banner.png": "old-banner.png",
+    }))
+    (fork / "config" / "owned-assets" / "banner.png").write_bytes(b"FORK-BANNER")
+    (fork / "config" / "owned-assets" / "old-banner.png").write_bytes(b"FORK-OLD-BANNER")
+    (fork / "static" / "img").mkdir(parents=True)
+    (fork / "static" / "img" / "banner.png").write_bytes(b"FORK-BANNER")
+    (fork / "static" / "img" / "old-banner.png").write_bytes(b"FORK-OLD-BANNER")
+
+    # The NEW engine registry pruned old-banner.png (#101-style shrink).
+    registry = tmp_path / "config" / "owned-assets"
+    registry.mkdir(parents=True)
+    (registry / "banner.png").write_bytes(b"ENGINE-BANNER")
+    (registry / "manifest.json").write_text(json.dumps({
+        "static/img/banner.png": "banner.png",
+    }))
+    owned = OwnedAssets(root=str(registry))
+
+    result = UpdateManager(
+        str(tmp_path / "Updates-Commits"),
+        hermes_url=hermes, owned=owned, fork_root=str(fork),
+    ).run()
+    assert result.gate, result.fork.summary()
+    statuses = result.fork.statuses
+    assert statuses.get("registry_retired") == 1, statuses
+    assert not statuses.get("missing") and not statuses.get("local_only"), statuses
+    # pruned registry source is gone from the candidate; the retained one stays
+    snap_owned = os.path.join(result.dir, "config", "owned-assets")
+    assert os.path.exists(os.path.join(snap_owned, "banner.png"))
+    assert not os.path.exists(os.path.join(snap_owned, "old-banner.png"))

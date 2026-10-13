@@ -781,6 +781,37 @@ def _reconcile_domains(dst: str) -> list[str]:
     return fixed
 
 
+def _reconcile_plugin_guard_trusted_installer_hosts(dst: str) -> int:
+    """Restore the bare GitHub Pages host in the plugin-guard installer allowlist.
+
+    Upstream trusts its own installer via the host ``hermes-agent.nousresearch.com``.
+    Branding turns that into ``nastech-agent.nastechresearch.com`` and
+    ``_reconcile_domains`` migrates it to the docs compound
+    ``nastechresearch.github.io/nastech-agent`` -- but ``_URL_IN_LINE`` compares
+    the *bare host*, so the entry never matches and the fork's own
+    ``.../install.sh | bash`` line is downgraded instead of staying ``safe``.
+    A global rule cannot fix this: docs/install URLs legitimately keep the
+    ``github.io/nastech-agent`` path (hundreds of them in the fork).  Rewrite
+    only that one allowlist entry.  No-op once corrected.  Returns 1 when the
+    file changed.
+    """
+    path = os.path.join(dst, "tools", "plugin_guard_context.py")
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return 0
+    needle = '"nastechresearch.github.io/nastech-agent", "ollama.com", "bun.sh",'
+    if needle not in text:
+        return 0
+    replacement = '"nastechresearch.github.io", "ollama.com", "bun.sh",'
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text.replace(needle, replacement, 1))
+    return 1
+
+
 def _reconcile_fts5_trigram(dst: str) -> list[str]:
     """Fix the SQLite FTS5 trigram self-test the fork's CI runs.
 
@@ -894,27 +925,49 @@ def _move_export_block(text: str, export_line: str, anchor_line: str) -> str:
     return rest[:insert_at] + block + rest[insert_at:]
 
 
+_BRAND_EXPORT_TYPE = re.compile(r"^export type \{[^}]*\} from '(@/[^']*)'$")
+
+
+def _sort_brand_export_type_runs(text: str) -> str:
+    """Sort contiguous ``export type {...} from '@/...'`` runs by source path.
+
+    ``perfectionist/sort-exports`` is an error in the desktop ESLint config.
+    Renaming ``hermes`` to ``nastech`` moves a central module (``@/nastech``)
+    past every ``@/lib/*`` source, so upstream's lexically valid order stops
+    being valid once the path is branded. Re-sort the renamed runs instead of
+    weakening the rule. Only runs where *every* line is an ``@/``-sourced
+    export-type statement are touched, so unrelated blocks are left alone.
+    """
+    lines = text.split("\n")
+    out: list[str] = []
+    index = 0
+    while index < len(lines):
+        if _BRAND_EXPORT_TYPE.match(lines[index]):
+            end = index
+            while end < len(lines) and _BRAND_EXPORT_TYPE.match(lines[end]):
+                end += 1
+            run = lines[index:end]
+            out.extend(sorted(run, key=lambda line: _BRAND_EXPORT_TYPE.match(line).group(1)))
+            index = end
+        else:
+            out.append(lines[index])
+            index += 1
+    return "\n".join(out)
+
+
 def _reconcile_desktop_export_order(dst: str) -> list[str]:
     """Preserve desktop export ordering after ``hermes`` becomes ``nastech``.
 
     The desktop ESLint configuration keeps export-path ordering as an error.
     A lexical rename from ``hermes`` to ``nastech`` changes the required order
-    in three curated public-export blocks, so normalize only those blocks
-    rather than weakening the lint policy or applying a broad formatter.
+    in the public-export blocks, so normalize those blocks rather than
+    weakening the lint policy or applying a broad formatter.
     """
     repaired: list[str] = []
     plugin = os.path.join(dst, "apps", "desktop", "src", "contrib", "plugin.ts")
-    plugin_before = (
-        "export type { PluginRestOptions } from '@/nastech'\n"
-        "export type { NastechOpenTarget } from '@/lib/nastech-open-target'\n"
-    )
-    plugin_after = (
-        "export type { NastechOpenTarget } from '@/lib/nastech-open-target'\n"
-        "export type { PluginRestOptions } from '@/nastech'\n"
-    )
     if os.path.isfile(plugin):
         text = open(plugin, encoding="utf-8").read()
-        updated = text.replace(plugin_before, plugin_after)
+        updated = _sort_brand_export_type_runs(text)
         if updated != text:
             with open(plugin, "w", encoding="utf-8") as fh:
                 fh.write(updated)
@@ -1229,6 +1282,155 @@ def _reconcile_skill_description_hardline(dst: str) -> list[str]:
     return changed
 
 
+# scripts/ci/prompt_surface.py CHARS_PER_TOKEN — the snapshot manifest counts
+# are pure length functions of the rendered text and tool schemas.
+_PROMPT_SURFACE_CHARS_PER_TOKEN = 4
+
+
+def _re_sort_prompt_skill_runs(text: str) -> str:
+    """Re-sort consecutive ``    - name: ...`` skill-index entries by name.
+
+    The snapshot is rendered name-sorted per category; branding renames the
+    entries after the render, so a category whose ``hermes-*`` skill names
+    flipped sort order (``inspecting-nastech-desktop-dom`` now sorts before
+    ``nastech-agent-skill-authoring``, upstream the other way) must be
+    re-sorted.  A stable sort leaves already-ordered runs byte-identical,
+    which keeps the reconcile idempotent.
+    """
+    out: list[str] = []
+    run: list[tuple[str, str]] = []
+
+    def flush() -> None:
+        if len(run) > 1:
+            out.extend(line for _, line in sorted(run, key=lambda item: item[0]))
+        else:
+            out.extend(line for _, line in run)
+        run.clear()
+
+    for line in text.split("\n"):
+        if line.startswith("    - "):
+            run.append((line[6:].split(":", 1)[0], line))
+        else:
+            flush()
+            out.append(line)
+    flush()
+    return "\n".join(out)
+
+
+def _split_prompt_surface_tiers(text: str) -> dict[str, str]:
+    """Recover the per-tier texts the renderer joined into one prompt file.
+
+    Mirrors ``_write_snapshot``'s ``"\\n\\n".join("===== {tier} =====\\n{...}")``
+    so the manifest counts can be recomputed from the single file.
+    """
+    body = text[:-1] if text.endswith("\n") else text
+    tiers: dict[str, str] = {}
+    for part in body.split("\n\n===== "):
+        head, _, rest = part.partition("\n")
+        tiers[head.replace("=====", "").strip()] = rest
+    return tiers
+
+
+def _reconcile_prompt_surface_snapshot(dst: str) -> list[str]:
+    """Re-align the committed prompt-surface snapshot after branding.
+
+    ``tests/fixtures/prompt_surface/`` is the checked-in output of the fork's
+    ``scripts/ci/prompt_surface.py render`` (the fork's ``test_prompt_surface``
+    re-renders it and byte-compares).  The engine cannot run the fork's
+    renderer (the pipeline does not execute the fork's application test
+    suite), so it reproduces the render's deterministic operations instead:
+
+    * the skill-description trim (``_SKILL_DESC_FULL_OLD`` ->
+      ``_SKILL_DESC_FULL_NEW``) lands in every surface's skill index;
+    * the index is rendered name-sorted, so branding the ``hermes-*`` skill
+      names to ``nastech-*`` de-sorts the committed snapshot wherever the two
+      names straddled a sort boundary;
+    * ``surfaces.json`` counts are pure length functions of the rendered text
+      (``len(tier)//4`` and ``len(json.dumps(tools, sort_keys=True))//4`` per
+      ``_write_snapshot``), so the branding character delta must be folded
+      into the committed numbers.
+
+    Re-sorts each consecutive run of ``    - name: ...`` entries and rewrites
+    the manifest exactly as the renderer does.  Returns the repo-relative
+    paths changed.
+    """
+    changed: list[str] = []
+    base = os.path.join(dst, "tests", "fixtures", "prompt_surface")
+    prompts_dir = os.path.join(base, "prompts")
+    if not os.path.isdir(prompts_dir):
+        return changed
+    for rel in sorted(os.listdir(prompts_dir)):
+        if not rel.endswith(".txt"):
+            continue
+        path = os.path.join(prompts_dir, rel)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        fixed = text.replace(_SKILL_DESC_FULL_OLD, _SKILL_DESC_FULL_NEW)
+        fixed = _re_sort_prompt_skill_runs(fixed)
+        if fixed == text:
+            continue
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(fixed)
+        changed.append(f"tests/fixtures/prompt_surface/prompts/{rel}")
+    manifest_rel = "tests/fixtures/prompt_surface/surfaces.json"
+    manifest_path = os.path.join(base, "surfaces.json")
+    if not os.path.isfile(manifest_path):
+        return changed
+    try:
+        with open(manifest_path, encoding="utf-8-sig") as fh:
+            manifest = json.load(fh)
+    except (OSError, ValueError):
+        return changed
+    rewritten = False
+    for surface, entry in manifest.items():
+        prompt_rel = f"tests/fixtures/prompt_surface/prompts/{surface}.txt"
+        prompt_path = os.path.join(dst, prompt_rel)
+        if not os.path.isfile(prompt_path):
+            continue
+        try:
+            with open(prompt_path, encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        tiers = _split_prompt_surface_tiers(text)
+        if set(tiers) != set(entry.get("prompt_tokens", {})):
+            continue
+        new_tokens = {tier: len(body) // _PROMPT_SURFACE_CHARS_PER_TOKEN for tier, body in tiers.items()}
+        tools: dict[str, object] = {}
+        missing = False
+        for name in entry.get("tools", []):
+            variant = os.path.join(base, "tools", f"{name}.{surface}.json")
+            common = os.path.join(base, "tools", f"{name}.json")
+            path = variant if os.path.isfile(variant) else common
+            if not os.path.isfile(path):
+                missing = True
+                break
+            try:
+                with open(path, encoding="utf-8-sig") as fh:
+                    tools[name] = json.load(fh)
+            except (OSError, ValueError):
+                missing = True
+                break
+        if missing:
+            continue
+        new_tool_tokens = (
+            len(json.dumps(tools, sort_keys=True)) // _PROMPT_SURFACE_CHARS_PER_TOKEN
+        )
+        if new_tokens != entry.get("prompt_tokens") or new_tool_tokens != entry.get("tool_tokens"):
+            entry["prompt_tokens"] = new_tokens
+            entry["tool_tokens"] = new_tool_tokens
+            rewritten = True
+    if rewritten:
+        with open(manifest_path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        if manifest_rel not in changed:
+            changed.append(manifest_rel)
+    return changed
+
+
 def _reconcile_test_runner_mode(dst: str) -> int:
     """Ensure the CI test runner remains executable in the published tree.
 
@@ -1289,24 +1491,27 @@ def _reconcile_quickstart_hardware_fixture(dst: str) -> int:
     return 1
 
 
-# Public origin that fronts the docs, mirroring upstream's custom domain.
-# Upstream serves one public site: the landing at ``/`` and the Docusaurus docs
-# at ``/docs/`` (``baseUrl: '/docs/'``), with the docs artifact (published to
-# GitHub Pages) fronted by that origin -- Vercel serves ``/`` and rewrites
-# ``/docs/*`` to Pages.  The fork keeps the same shape, so the build must keep
-# ``baseUrl: '/docs/'`` and point ``url`` at this public origin (not at the
-# Pages storage origin, whose ``/docs/`` path does not exist).
-_DOCS_PUBLIC_ORIGIN = "https://nastechresearch.com"
+# Public origin that fronts the docs.  Upstream serves a single Pages site: the
+# landing at ``/`` and the Docusaurus docs at ``/docs/`` behind a custom domain.
+# The fork publishes on GitHub Pages as a *project* site: the deploy workflow
+# stages the Docusaurus artifact at ``_site/docs/``, so the docs resolve at
+# ``https://nastechresearch.github.io/nastech-agent/docs/`` (gitHub.io only;
+# there is no paid/custom origin in front).  Docusaurus 3.10 rejects a
+# sub-path inside ``url`` ("The url is not supposed to contain a sub-path ...
+# use the baseUrl field for sub-paths"), so the reconcile emits the bare Pages
+# origin in ``url`` and the deployed project path in ``baseUrl``.
+_DOCS_PUBLIC_ORIGIN = "https://nastechresearch.github.io"
 
 
 def _reconcile_docusaurus_site_config(dst: str) -> int:
-    """Match the docs build to the public landing origin, as upstream does.
+    """Point the docs build at the fork's project-pages route, as deployed.
 
-    A project-pages baseUrl (``/nastech-agent/docs/``) does not match the
-    public ``/docs`` route the landing exposes, so the Docusaurus router
-    renders "Page Not Found" once the client hydrates.  Restore the upstream
-    contract -- ``url`` == public origin, ``baseUrl: '/docs/'`` -- so the
-    landing's ``/docs/*`` external rewrite serves the docs cleanly.
+    Branding leaves ``url`` as one of the branded Pages-origin variants (the
+    bare host or the ``/nastech-agent`` project path) next to upstream's
+    ``baseUrl: '/docs/'``.  The fork serves the docs at the project path
+    ``/nastech-agent/docs/``, so the Docusaurus router and the staged
+    artifact must agree: ``url`` carries the bare Pages origin (a sub-path
+    there is a validator error) and ``baseUrl`` carries ``/nastech-agent/docs/``.
     """
     path = os.path.join(dst, "website", "docusaurus.config.ts")
     if not os.path.isfile(path):
@@ -1320,14 +1525,16 @@ def _reconcile_docusaurus_site_config(dst: str) -> int:
     for origin in (
         "https://nastechresearch.github.io/nastech-agent",
         "https://nastechresearch.github.io",
+        "https://nastechresearch.com",
+        "https://nastech-agent.nastechresearch.com",
     ):
         updated = updated.replace(
             f"url: '{origin}',",
             f"url: '{_DOCS_PUBLIC_ORIGIN}',",
         )
     updated = updated.replace(
-        "baseUrl: '/nastech-agent/docs/',",
         "baseUrl: '/docs/',",
+        "baseUrl: '/nastech-agent/docs/',",
     )
     if updated == text:
         return 0
@@ -1372,6 +1579,46 @@ def _reconcile_pages_deploy_workflow(dst: str) -> int:
         return 0
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(text.replace(needle, replacement, 1))
+    return 1
+
+
+def _reconcile_drop_vercel_deploy_job(dst: str) -> int:
+    """Remove upstream's ``deploy-vercel`` job from the site workflow.
+
+    Upstream triggers a Vercel production deploy by curling
+    ``secrets.VERCEL_DEPLOY_HOOK``.  The fork has no Vercel project and no such
+    secret, so the job fails on every release publish.  Drop the job; the GitHub
+    Pages ``deploy-docs`` job stays the only host.  No-op once removed.  Returns
+    1 when the file changed.
+    """
+    path = os.path.join(dst, ".github", "workflows", "deploy-site.yml")
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return 0
+    block = (
+        "  deploy-vercel:\n"
+        "    # Triggered automatically on release publish (production cuts) and\n"
+        "    # manually via `gh workflow run deploy-site.yml` when an out-of-band\n"
+        "    # main commit needs to ship live before the next release tag \u2014 e.g.\n"
+        "    # a skills-index PR that doesn't touch website/** paths and so\n"
+        "    # doesn't auto-deploy via the deploy-docs path.\n"
+        "    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'\n"
+        "    runs-on: ubuntu-latest\n"
+        "    timeout-minutes: 30\n"
+        "    steps:\n"
+        "      - name: Trigger Vercel Deploy\n"
+        "        run: curl -fsS --retry 3 --retry-delay 10 -X POST "
+        '"${{ secrets.VERCEL_DEPLOY_HOOK }}"\n'
+        "\n"
+    )
+    if block not in text:
+        return 0
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text.replace(block, "", 1))
     return 1
 
 
@@ -2782,16 +3029,23 @@ def _reconcile_ci_runner_budgets(dst: str) -> list[str]:
             "          - name: Windows-only tests (arm64)\n",
         )
         slice_env = "          NASTECH_TEST_SLICE: ${{ matrix.slice || '' }}\n"
-        if "NASTECH_TEST_FILE_TIMEOUT:" not in updated and slice_env in updated:
-            updated = updated.replace(
-                slice_env,
-                slice_env
-                + "          # e2e-windows already runs NASTECH_TEST_FILE_TIMEOUT=900 on the\n"
-                "          # same 4-core image; the Windows-only row needs the same headroom\n"
-                "          # (its desktop-update hand-off file was killed at the 300 s\n"
-                "          # default). Harmless for the macOS rows.\n"
-                "          NASTECH_TEST_FILE_TIMEOUT: '900'\n",
-            )
+        # Scope the presence check to the ``os-tests`` step's env block: the
+        # ``e2e-windows`` job below already sets ``NASTECH_TEST_FILE_TIMEOUT``,
+        # so a whole-file "is the token present?" test is always false and the
+        # Windows-only row silently kept the 300 s per-file default (the
+        # desktop-update hand-off file was SIGKILLed there).  The ``slice_env``
+        # anchor is unique to the ``os-tests`` step, and the injected block is
+        # matched verbatim, so this is a fixed point once applied.
+        file_timeout_env = (
+            slice_env
+            + "          # e2e-windows already runs NASTECH_TEST_FILE_TIMEOUT=900 on the\n"
+            "          # same 4-core image; the Windows-only row needs the same headroom\n"
+            "          # (its desktop-update hand-off file was killed at the 300 s\n"
+            "          # default). Harmless for the macOS rows.\n"
+            "          NASTECH_TEST_FILE_TIMEOUT: '900'\n"
+        )
+        if file_timeout_env not in updated and slice_env in updated:
+            updated = updated.replace(slice_env, file_timeout_env)
         if updated != text:
             _reconcile_budget_write(dst, rel, updated)
             fixed.append(rel)
@@ -2830,11 +3084,12 @@ def _reconcile_ci_runner_budgets(dst: str) -> list[str]:
         updated = text.replace(
             "INSTALL_TIMEOUT = 1500.0\nUPDATE_TIMEOUT = 1200.0\n",
             "# Upstream's 1500 s install / 1200 s update budgets assume a 32-core Windows\n"
-            "# runner. On the free 4-core windows-latest the fresh install's Node\n"
-            "# dependency build alone runs past 25 min at 6-way worker contention (run\n"
-            "# 37822129210), so widen the harness budgets for the smaller image.\n"
-            "INSTALL_TIMEOUT = 2400.0\n"
-            "UPDATE_TIMEOUT = 1800.0\n",
+            "# runner. This repo runs the free 4-core windows-latest under the 2x\n"
+            "# standard-runner rule (a fresh install's Node dependency build alone runs\n"
+            "# past 25 min at 6-way worker contention; run 37822129210): double both so\n"
+            "# the harness budget never trips before the lane's own 900 s per-file cap.\n"
+            "INSTALL_TIMEOUT = 3000.0\n"
+            "UPDATE_TIMEOUT = 2400.0\n",
         )
         if updated != text:
             _reconcile_budget_write(dst, rel, updated)
@@ -2903,6 +3158,159 @@ def _reconcile_python_test_timeout(dst: str) -> list[str]:
         return []
     _reconcile_budget_write(dst, rel, "".join(lines))
     return [rel]
+
+
+def _reconcile_js_test_timeouts(dst: str) -> list[str]:
+    """Give the branded JS lane a standard-runner per-test budget.
+
+    Upstream relies on vitest's 5 s per-test default for two tests that drive a
+    real ``git`` subprocess or the bundle-smoke pipeline; on the free 4-core
+    runner those exceed 5 s (bundle-smoke was killed at 15006 ms).  Upstream
+    budgets its own shell probes at 30 s and the fork doubles that on standard
+    runners, so each slow test carries an explicit 60 s.  Both edits are exact
+    literal replacements (or a uniquely anchored insertion), so a normalised
+    tree is a fixed point.
+    """
+    fixed: list[str] = []
+
+    rel = "tests-js/bundle-smoke-metadata.test.mjs"
+    text = _reconcile_budget_read(dst, rel)
+    if text is not None:
+        updated = text.replace("}, 15_000)", "}, 60_000)")
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+
+    rel = "tests-js/update-ui.test.mjs"
+    text = _reconcile_budget_read(dst, rel)
+    if text is not None:
+        # The git-probe test's final assertion is unique; its closing ``})`` is
+        # the only place the raised budget is inserted.  A tree that already
+        # carries the fork's raised literal (``}, 60000)`` or ``}, 60_000)``)
+        # no longer ends in ``})`` there, so re-running is a no-op.
+        head = (
+            ").toThrow(/does not match expected/)\n"
+            "  } finally {\n"
+            "    fs.rmSync(root, { recursive: true, force: true })\n"
+            "  }\n"
+        )
+        unraised = head + "})\n"
+        if unraised in text:
+            updated = text.replace(unraised, head + "}, 60_000)\n")
+            if updated != text:
+                _reconcile_budget_write(dst, rel, updated)
+                fixed.append(rel)
+
+    return fixed
+
+
+def _reconcile_python_slow_runner_wait_budgets(dst: str) -> list[str]:
+    """Widen the branded Python probes the 32-core upstream runner hides.
+
+    The Windows/CLI probes below spawn real processes and poll real CIM/PowerShell
+    or process tables; upstream's budgets assume the paid 32-core larger runner.
+    This repo's free 4-core standard runner needs >=2x upstream's wall clock, so
+    each literal is doubled (or raised to the fork's standard-runner value).
+    Every edit is an exact-literal replacement, so a normalised tree is a fixed
+    point and the next upstream sync cannot revert the headroom.
+    """
+    fixed: list[str] = []
+
+    rel = "tests/tui_gateway/test_compute_host.py"
+    text = _reconcile_budget_read(dst, rel)
+    if text is not None:
+        updated = text.replace(
+            "def _read_json_line(out: queue.Queue[dict], timeout: float = 2.0) -> dict:",
+            "def _read_json_line(out: queue.Queue[dict], timeout: float = 15.0) -> dict:",
+        ).replace("proc.wait(timeout=2)", "proc.wait(timeout=15)")
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+
+    rel = "tests/nastech_cli/test_cli_goal_parked_resume.py"
+    text = _reconcile_budget_read(dst, rel)
+    if text is not None:
+        updated = text.replace(
+            'wait_for_seconds(1, reason="cooldown")',
+            'wait_for_seconds(3600, reason="cooldown")',
+        )
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+
+    rel = "tests/nastech_cli/test_taskkill_identity_windows_live.py"
+    text = _reconcile_budget_read(dst, rel)
+    if text is not None:
+        # Each wait is matched with enough context to keep the transform a fixed
+        # point: a bare ``wait(timeout=30)`` also appears in the raised assert,
+        # so a value-only pass would re-raise it on the next run.
+        updated = text.replace(
+            "        proc.wait(timeout=10)\n",
+            "        proc.wait(timeout=20)\n",
+        )
+        updated = updated.replace(
+            "assert proc.wait(timeout=15) is not None",
+            "assert proc.wait(timeout=30) is not None",
+        )
+        updated = updated.replace("victim.wait(timeout=30)", "victim.wait(timeout=60)")
+        updated = updated.replace(
+            "        proc.wait(timeout=30)\n",
+            "        proc.wait(timeout=60)\n",
+        )
+        anchor = (
+            "        proc = _spawn_sleeper()\n"
+            "        try:\n"
+            "            start = get_process_start_time(proc.pid)\n"
+        )
+        if anchor in updated:
+            updated = updated.replace(
+                anchor,
+                "        proc = _spawn_sleeper()\n"
+                "        # Give the real-time scan a beat with the fresh process object\n"
+                "        # before fingerprinting and killing it (the same OS-beat pattern\n"
+                "        # the dead-PID sibling test uses for process teardown).\n"
+                "        time.sleep(1.0)\n"
+                "        try:\n"
+                "            start = get_process_start_time(proc.pid)\n",
+            )
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+
+    rel = "tests/scripts/desktop_update/test_desktop_update_windows_marker.py"
+    text = _reconcile_budget_read(dst, rel)
+    if text is not None:
+        updated = text.replace("timeout=60", "timeout=180").replace(
+            "timeout: int = 120)",
+            "timeout: int = 240)",
+        )
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+
+    rel = "tests/scripts/desktop_update/test_desktop_update_windows_marker_lock.py"
+    text = _reconcile_budget_read(dst, rel)
+    if text is not None:
+        updated = text.replace("'-Seconds', '60']", "'-Seconds', '120']").replace(
+            "text=True, timeout=90, check=False",
+            "text=True, timeout=180, check=False",
+        )
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+
+    rel = "tests/scripts/desktop_update/test_desktop_update_windows_commit_outcome.py"
+    text = _reconcile_budget_read(dst, rel)
+    if text is not None:
+        updated = text.replace("timeout: int = 150", "timeout: int = 300").replace(
+            "'-ProbeTimeoutSeconds', '10', timeout=120,",
+            "'-ProbeTimeoutSeconds', '10', timeout=240,",
+        )
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+
+    return fixed
 
 
 def _reconcile_windows_boot_lifecycle_race(dst: str) -> bool:
@@ -3097,6 +3505,43 @@ def _reconcile_desktop_path_fixtures(dst: str) -> list[str]:
     return fixed
 
 
+def _reconcile_desktop_notification_timer_teardown(dst: str) -> bool:
+    """Stop a desktop toast timer from firing into a torn-down jsdom window.
+
+    ``apps/desktop/src/store/notifications.ts`` schedules every positive-duration
+    toast with ``window.setTimeout(() => dismissNotification(id), duration)``.
+    Under vitest each test file gets its own jsdom ``window``, torn down the
+    moment the file finishes, while the pending timer keeps running in the
+    worker.  A toast scheduled late in a file — or by an earlier file that
+    shared the worker — can therefore fire with no ``window`` left;
+    ``dismissNotification`` then throws ``ReferenceError: window is not
+    defined`` and vitest fails an otherwise green run on the free standard
+    runner (nastech-agent ``check:test:ui``).  Upstream never sees this on its
+    paid 32-core runner.  Guard the callback with the ``typeof window !==
+    'undefined'`` idiom the desktop client already uses elsewhere, so a late
+    fire is a no-op.
+    """
+    rel = "apps/desktop/src/store/notifications.ts"
+    text = _reconcile_budget_read(dst, rel)
+    if text is None:
+        return False
+    needle = "      window.setTimeout(() => dismissNotification(id), duration)\n"
+    if needle not in text:
+        return False
+    replacement = (
+        "      window.setTimeout(() => {\n"
+        "        // This timer can outlive its jsdom window: vitest tears the\n"
+        "        // environment down between files, and a late auto-dismiss then\n"
+        "        // runs with no window, producing a ReferenceError that vitest\n"
+        "        // reports as an unhandled error. Drop the dismissal once the\n"
+        "        // environment is gone.\n"
+        "        if (typeof window !== 'undefined') dismissNotification(id)\n"
+        "      }, duration)\n"
+    )
+    _reconcile_budget_write(dst, rel, text.replace(needle, replacement, 1))
+    return True
+
+
 _DUNDER_ALL_BLOCK = re.compile(
     r'(?m)(?P<head>^[ \t]*__all__[^=\n]*=[ \t]*\[)\n'
     r'(?P<body>(?:[ \t]*(?:"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'),?[ \t]*\n)+)'
@@ -3224,6 +3669,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     for rel in _reconcile_desktop_path_fixtures(dst):
         result.total += 1
         result.fixed.append(rel)
+    if _reconcile_desktop_notification_timer_teardown(dst):
+        result.total += 1
+        result.fixed.append("apps/desktop/src/store/notifications.ts")
     for rel in _reconcile_locale_key_order(dst):
         result.total += 1
         result.fixed.append(rel)
@@ -3231,6 +3679,12 @@ def reconcile_tree(dst: str) -> ReconcileResult:
         result.total += 1
         result.fixed.append(rel)
     for rel in _reconcile_python_test_timeout(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    for rel in _reconcile_js_test_timeouts(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    for rel in _reconcile_python_slow_runner_wait_budgets(dst):
         result.total += 1
         result.fixed.append(rel)
     if _reconcile_windows_boot_lifecycle_race(dst):
@@ -3250,6 +3704,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
         result.total += 1
         result.fixed.append(rel)
     for rel in _reconcile_skill_description_hardline(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    for rel in _reconcile_prompt_surface_snapshot(dst):
         result.total += 1
         result.fixed.append(rel)
     if _reconcile_test_runner_mode(dst):
@@ -3282,10 +3739,19 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     for rel in _reconcile_domains(dst):
         result.total += 1
         result.fixed.append(rel)
+    if _reconcile_plugin_guard_trusted_installer_hosts(dst) and "tools/plugin_guard_context.py" not in result.fixed:
+        result.total += 1
+        result.fixed.append("tools/plugin_guard_context.py")
     if _reconcile_docusaurus_site_config(dst) and "website/docusaurus.config.ts" not in result.fixed:
         result.total += 1
         result.fixed.append("website/docusaurus.config.ts")
     if _reconcile_pages_deploy_workflow(dst):
+        result.total += 1
+        result.fixed.append(".github/workflows/deploy-site.yml")
+    if (
+        _reconcile_drop_vercel_deploy_job(dst)
+        and ".github/workflows/deploy-site.yml" not in result.fixed
+    ):
         result.total += 1
         result.fixed.append(".github/workflows/deploy-site.yml")
     for rel in _reconcile_dunder_all_order(dst):
@@ -3614,6 +4080,8 @@ def gate_report_md(result: "UpdateResult") -> str:
             "- identical files must stay byte-identical so the PR shows clean new commits",
             "- updated files are the real upstream delta; added lines must be brand-clean",
             f"- preserved fork-local files: {len(result.fork.preserved)}",
+            f"- registry-retired owned assets: {result.fork.statuses.get('registry_retired', 0)} "
+            "(old engine registry files the authoritative registry no longer owns)",
             "",
         ]
     lines += ["Auto-generated by 100Ways."]
