@@ -2397,6 +2397,68 @@ def _reconcile_preserved_brand_text(dst: str, preserved: list[str]) -> list[str]
 
 
 # ---------------------------------------------------------------------------
+# Fork-local Cloudflare Worker config (scripts/cloudflare/assets-worker)
+# ---------------------------------------------------------------------------
+# The fork connects its GitHub repository to Cloudflare Workers Builds, which
+# runs ``npx wrangler deploy`` in ``scripts/cloudflare/assets-worker`` on every
+# push to ``main``.  Upstream ships no such worker, so ``preserve_fork_files``
+# carries the whole directory over verbatim -- and an update branch cut from a
+# fork snapshot taken before the config was corrected replays the stale entry
+# point (``main = "src/index.js"``), which makes wrangler abort with
+# ``The entry-point file at "src/index.js" was not found`` and silently breaks
+# every deploy.  Pin the two values the deployment and the CLI agree on -- the
+# worker name (``nastech-assets``, the ``*.workers.dev`` host the update reader
+# resolves) and the entry point (``index.js``) -- and keep the ``[previews]``
+# block the build enables.
+
+_ASSETS_WORKER_WRANGLER_REL = "scripts/cloudflare/assets-worker/wrangler.toml"
+_ASSETS_WORKER_NAME = "nastech-assets"
+_ASSETS_WORKER_MAIN = "index.js"
+_ASSETS_WORKER_NAME_RE = re.compile(r"(?m)^name\s*=.*$")
+_ASSETS_WORKER_MAIN_RE = re.compile(r"(?m)^main\s*=.*$")
+_ASSETS_WORKER_PREVIEWS_RE = re.compile(r"(?m)^\[previews\]\s*$")
+
+
+def _reconcile_assets_worker_config(dst: str, preserved: list[str]) -> list[str]:
+    """Pin the fork-local Cloudflare Worker config so updates cannot replay a
+    stale deploy.
+
+    ``scripts/cloudflare/assets-worker`` is fork-only (upstream ships no
+    Cloudflare assets host), so ``preserve_fork_files`` copies it in verbatim.
+    A branded update branch generated from an older fork snapshot then restores
+    the config it captured, and ``wrangler deploy`` aborts on the stale entry
+    point -- the Workers Builds connection never publishes the worker the CLI
+    reads.  Rewrite only the two values that must match the deployment (worker
+    name and entry point) and re-add the ``[previews]`` block the build
+    enables, leaving every other fork-authored byte untouched.
+
+    Returns the repo-relative paths changed, so the caller can register them
+    with ``verify_branded`` / ``compare_trees`` as reconciled content.
+    """
+    rel = _ASSETS_WORKER_WRANGLER_REL
+    if rel not in (preserved or []):
+        return []
+    path = os.path.join(dst, *rel.split("/"))
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return []
+    fixed = _ASSETS_WORKER_NAME_RE.sub(f'name = "{_ASSETS_WORKER_NAME}"', text, count=1)
+    fixed = _ASSETS_WORKER_MAIN_RE.sub(f'main = "{_ASSETS_WORKER_MAIN}"', fixed, count=1)
+    if not _ASSETS_WORKER_PREVIEWS_RE.search(fixed):
+        fixed = fixed.rstrip("\n") + "\n\n[previews]\n"
+    if fixed == text:
+        return []
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(fixed)
+    except OSError:
+        return []
+    return [rel]
+
+
+# ---------------------------------------------------------------------------
 # Generated skill-docs ordering (website/scripts/generate-skill-docs.py)
 # ---------------------------------------------------------------------------
 # Upstream's generator rebuilds the two skills catalogs and the Skills sidebar
@@ -4493,6 +4555,18 @@ class UpdateManager:
             # canonical transform the brand stage uses so preserved text is a
             # fixed point too, and register the changed files as reconciled.
             for rel in _reconcile_preserved_brand_text(dest, preserved):
+                rel_path = os.path.join(dest, rel)
+                if os.path.isfile(rel_path):
+                    try:
+                        with open(rel_path, "rb") as fh:
+                            reconciled_map[rel] = fh.read()
+                    except OSError:
+                        pass
+            # The fork-owned Cloudflare Worker config is preserved verbatim too;
+            # a stale snapshot would replay the wrong entry point and break the
+            # Workers Builds deploy.  Pin the worker name and entry point, then
+            # register the changed file as reconciled content.
+            for rel in _reconcile_assets_worker_config(dest, preserved):
                 rel_path = os.path.join(dest, rel)
                 if os.path.isfile(rel_path):
                     try:
