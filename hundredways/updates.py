@@ -3280,6 +3280,43 @@ def _reconcile_desktop_path_fixtures(dst: str) -> list[str]:
     return fixed
 
 
+def _reconcile_desktop_notification_timer_teardown(dst: str) -> bool:
+    """Stop a desktop toast timer from firing into a torn-down jsdom window.
+
+    ``apps/desktop/src/store/notifications.ts`` schedules every positive-duration
+    toast with ``window.setTimeout(() => dismissNotification(id), duration)``.
+    Under vitest each test file gets its own jsdom ``window``, torn down the
+    moment the file finishes, while the pending timer keeps running in the
+    worker.  A toast scheduled late in a file — or by an earlier file that
+    shared the worker — can therefore fire with no ``window`` left;
+    ``dismissNotification`` then throws ``ReferenceError: window is not
+    defined`` and vitest fails an otherwise green run on the free standard
+    runner (nastech-agent ``check:test:ui``).  Upstream never sees this on its
+    paid 32-core runner.  Guard the callback with the ``typeof window !==
+    'undefined'`` idiom the desktop client already uses elsewhere, so a late
+    fire is a no-op.
+    """
+    rel = "apps/desktop/src/store/notifications.ts"
+    text = _reconcile_budget_read(dst, rel)
+    if text is None:
+        return False
+    needle = "      window.setTimeout(() => dismissNotification(id), duration)\n"
+    if needle not in text:
+        return False
+    replacement = (
+        "      window.setTimeout(() => {\n"
+        "        // This timer can outlive its jsdom window: vitest tears the\n"
+        "        // environment down between files, and a late auto-dismiss then\n"
+        "        // runs with no window, producing a ReferenceError that vitest\n"
+        "        // reports as an unhandled error. Drop the dismissal once the\n"
+        "        // environment is gone.\n"
+        "        if (typeof window !== 'undefined') dismissNotification(id)\n"
+        "      }, duration)\n"
+    )
+    _reconcile_budget_write(dst, rel, text.replace(needle, replacement, 1))
+    return True
+
+
 _DUNDER_ALL_BLOCK = re.compile(
     r'(?m)(?P<head>^[ \t]*__all__[^=\n]*=[ \t]*\[)\n'
     r'(?P<body>(?:[ \t]*(?:"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'),?[ \t]*\n)+)'
@@ -3407,6 +3444,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     for rel in _reconcile_desktop_path_fixtures(dst):
         result.total += 1
         result.fixed.append(rel)
+    if _reconcile_desktop_notification_timer_teardown(dst):
+        result.total += 1
+        result.fixed.append("apps/desktop/src/store/notifications.ts")
     for rel in _reconcile_locale_key_order(dst):
         result.total += 1
         result.fixed.append(rel)
