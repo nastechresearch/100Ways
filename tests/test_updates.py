@@ -2195,3 +2195,57 @@ def test_reconcile_portable_shebang_rewrites_embedded_bash_payload(tmp_path):
     assert b"#!/usr/bin/env bash" in script.read_bytes()
     assert stray.read_bytes() == b'#!/usr/bin/env bash\n#!/bin/sh\n'
     assert _reconcile_portable_shebang(str(candidate)) == []
+
+
+def test_update_gate_allows_engine_registry_retirement(tmp_path):
+    """The owned-assets registry can shrink engine-side without hand-editing
+    the fork: old fork registry sources the authoritative registry no longer
+    owns are sanctioned retirements (reviewable via the engine manifest
+    diff), so the fork-consistency gate passes instead of failing local_only.
+    Mirrors PR #101's owned-registry prune."""
+    hermes = _hermes_repo(tmp_path)
+    src = tmp_path / "hermes-agent"
+    (src / "static" / "img").mkdir(parents=True, exist_ok=True)
+    (src / "static" / "img" / "banner.png").write_bytes(b"HERMES-BANNER-BYTES")
+    subprocess.run(["git", "-C", str(src), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(src), "commit", "-q", "-m", "add banner"], check=True)
+    baseline = subprocess.check_output(
+        ["git", "-C", str(src), "rev-parse", "HEAD"], text=True
+    ).strip()
+
+    # The fork was previously branded with the OLD 2-asset registry.
+    fork = tmp_path / "nastech-agent"
+    fork.mkdir()
+    (fork / "manifest.json").write_text(json.dumps({"upstream_sha": baseline}))
+    (fork / "config" / "owned-assets").mkdir(parents=True)
+    (fork / "config" / "owned-assets" / "manifest.json").write_text(json.dumps({
+        "static/img/banner.png": "banner.png",
+        "static/img/old-banner.png": "old-banner.png",
+    }))
+    (fork / "config" / "owned-assets" / "banner.png").write_bytes(b"FORK-BANNER")
+    (fork / "config" / "owned-assets" / "old-banner.png").write_bytes(b"FORK-OLD-BANNER")
+    (fork / "static" / "img").mkdir(parents=True)
+    (fork / "static" / "img" / "banner.png").write_bytes(b"FORK-BANNER")
+    (fork / "static" / "img" / "old-banner.png").write_bytes(b"FORK-OLD-BANNER")
+
+    # The NEW engine registry pruned old-banner.png (#101-style shrink).
+    registry = tmp_path / "config" / "owned-assets"
+    registry.mkdir(parents=True)
+    (registry / "banner.png").write_bytes(b"ENGINE-BANNER")
+    (registry / "manifest.json").write_text(json.dumps({
+        "static/img/banner.png": "banner.png",
+    }))
+    owned = OwnedAssets(root=str(registry))
+
+    result = UpdateManager(
+        str(tmp_path / "Updates-Commits"),
+        hermes_url=hermes, owned=owned, fork_root=str(fork),
+    ).run()
+    assert result.gate, result.fork.summary()
+    statuses = result.fork.statuses
+    assert statuses.get("registry_retired") == 1, statuses
+    assert not statuses.get("missing") and not statuses.get("local_only"), statuses
+    # pruned registry source is gone from the candidate; the retained one stays
+    snap_owned = os.path.join(result.dir, "config", "owned-assets")
+    assert os.path.exists(os.path.join(snap_owned, "banner.png"))
+    assert not os.path.exists(os.path.join(snap_owned, "old-banner.png"))

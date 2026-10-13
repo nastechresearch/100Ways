@@ -7,7 +7,13 @@ Three guarantees, enforced by ``fork_consistency`` against the real fork:
   * **No feature loss.**  Every file the fork carries must exist in the
     branded tree.  Fork-local files (owned-assets registry, contributor
     emails, fork-only skills/tests) have no upstream source and must be
-    PRESERVED verbatim -- otherwise the PR deletes them.
+    PRESERVED verbatim -- otherwise the PR deletes them.  The one sanctioned
+    exception: a fork ``config/owned-assets/`` registry file that the
+    authoritative engine registry in the candidate no longer owns is a
+    *retirement* (``registry_retired``), proven by the engine-side manifest
+    diff exactly as an upstream deletion is proven by the upstream diff.
+    Without that carve-out the engine could never evolve its own registry
+    (the fork is branded from engine output, so nothing else can retire it).
   * **No spurious modification.**  Files upstream did not touch must be
     byte-identical to the fork (``identical``).  Only files upstream changed
     may differ (``updated``), and every added line must be brand-clean.
@@ -24,6 +30,7 @@ its added/deleted line counts, every violation carries its line number.
 from __future__ import annotations
 
 import difflib
+import json
 import os
 import shutil
 import subprocess
@@ -94,6 +101,7 @@ class ForkCheckReport:
             f"{statuses.get('missing', 0)} missing, "
             f"{statuses.get('local_only', 0)} fork-local-unpreserved, "
             f"{statuses.get('stale_upstream', 0)} stale-upstream, "
+            f"{statuses.get('registry_retired', 0)} registry-retired owned assets, "
             f"{statuses.get('locked', 0)} locked/binary, "
             f"{statuses.get('relocated', 0)} collision-safe relocated, "
             f"{len(self.preserved)} preserved fork-local files, "
@@ -461,7 +469,12 @@ def fork_consistency(
     state); ``branded_root`` is the freshly-branded pipeline snapshot;
     ``upstream_root`` is the freshly-pulled hermes source.  Every fork file
     must survive in the branded tree (identical, updated, or preserved);
-    anything missing or fork-local-but-unpreserved fails the gate.
+    anything missing or fork-local-but-unpreserved fails the gate.  Fork
+    registry-source files (``config/owned-assets/``) absent from the branded
+    tree are classified ``registry_retired`` instead of ``local_only`` when
+    the candidate carries the authoritative engine registry and no longer
+    declares them -- a sanctioned engine-side retirement, not an accidental
+    drop.
     """
     rules = rules or BrandingRules()
     obsolete_upstream_paths = obsolete_upstream_paths or set()
@@ -477,6 +490,25 @@ def fork_consistency(
     upstream = set(_walk(upstream_root))
     upstream_path_map = collision_safe_path_map(list(upstream), rules)
     upstream_mapped = set(upstream_path_map.values())
+
+    # The engine's owned-assets registry is authoritative in the candidate:
+    # the preserve stage copies it in and deliberately does NOT carry an
+    # older fork registry over (see preserve_fork_files).  So a fork file
+    # under config/owned-assets/ that the authoritative manifest no longer
+    # owns is a retirement proven by the engine-side manifest diff -- the
+    # same evidence discipline used for upstream deletions.
+    engine_owned_sources: set[str] | None = None
+    engine_manifest = os.path.join(
+        branded_root, "config", "owned-assets", "manifest.json"
+    )
+    if os.path.isfile(engine_manifest):
+        try:
+            with open(engine_manifest, encoding="utf-8") as fh:
+                registry = json.load(fh)
+        except (OSError, ValueError):
+            registry = {}
+        if isinstance(registry, dict):
+            engine_owned_sources = {str(value) for value in registry.values()}
 
     for rel in sorted(fork_files):
         entry = ForkEntry(path=rel, status="missing")
@@ -494,6 +526,27 @@ def fork_consistency(
             report.entries.append(entry)
             continue
         if rel not in branded_files:
+            registry_rel = (
+                rel[len("config/owned-assets/"):]
+                if rel.startswith("config/owned-assets/")
+                else None
+            )
+            if (
+                engine_owned_sources is not None
+                and registry_rel is not None
+                and registry_rel not in engine_owned_sources
+            ):
+                # The authoritative engine registry (already in the branded
+                # tree) no longer declares this fork registry file: the
+                # engine-side manifest diff is the reviewable retirement
+                # evidence, mirroring how upstream_deleted is proven by the
+                # source diff.  Not a gate failure.  A source the registry
+                # STILL declares but that is absent from the candidate is not
+                # blessed here -- it falls through to local_only so a broken
+                # materialization keeps failing the gate.
+                entry.status = "registry_retired"
+                report.entries.append(entry)
+                continue
             # upstream has a file mapping here -> branding dropped it (bug).
             # no upstream source -> fork-local content that was NOT preserved.
             entry.status = "missing" if rel in upstream_mapped else "local_only"
