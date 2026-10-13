@@ -21,8 +21,10 @@ from hundredways.updates import (
     _SKILL_DESC_FULL_OLD,
     _PROMPT_SURFACE_CHARS_PER_TOKEN,
     _UPSTREAM_PREPARE_SCRIPT,
+    _reconcile_assets_worker_config,
     _reconcile_anon_surface_copy,
     _reconcile_apt_pool_first_char,
+    _reconcile_channel_reader_user_agent,
     _reconcile_ci_runner_budgets,
     _reconcile_connector_test_guest_offline,
     _reconcile_credential_display_test,
@@ -2955,3 +2957,160 @@ def test_prompt_surface_snapshot_is_computed_after_domain_migration(tmp_path):
         for tier, body in tiers.items()
     }
     assert "tests/fixtures/prompt_surface/surfaces.json" in result.fixed
+
+
+def _channel_reader_source() -> str:
+    """A minimal branded ``release_channels.py`` carrying the no-UA needle."""
+    return (
+        "from urllib.request import Request\n"
+        "\n"
+        "\n"
+        "class ChannelReader:\n"
+        "    def read_bytes(self):\n"
+        "        def read():\n"
+        '            with self.opener(Request(url, headers={"Cache-Control": "no-cache"}),'
+        " timeout=30) as response:\n"
+        "                return response.read()\n"
+        "\n"
+        "        return read()\n"
+    )
+
+
+def test_reconcile_channel_reader_user_agent(tmp_path):
+    """The reader must send a real UA or the workers.dev host 403s (1010)."""
+    root = tmp_path / "branded"
+    pkg = root / "nastech_cli"
+    pkg.mkdir(parents=True)
+    target = pkg / "release_channels.py"
+    target.write_text(_channel_reader_source(), encoding="utf-8")
+
+    assert _reconcile_channel_reader_user_agent(str(root)) is True
+    text = target.read_text(encoding="utf-8")
+    assert '"User-Agent": "nastech-update"' in text
+    assert '"Cache-Control": "no-cache"' in text
+    # The rewrite stays valid Python with the read body intact.
+    compile(text, str(target), "exec")
+
+    # Idempotent: the single-line needle is gone, so a second pass is a no-op.
+    assert _reconcile_channel_reader_user_agent(str(root)) is False
+
+
+def test_reconcile_channel_reader_user_agent_skips_missing_file(tmp_path):
+    assert _reconcile_channel_reader_user_agent(str(tmp_path)) is False
+
+
+def test_reconcile_tree_registers_channel_reader_user_agent(tmp_path):
+    """The new reconcile must actually run inside ``reconcile_tree``."""
+    root = tmp_path / "branded"
+    pkg = root / "nastech_cli"
+    pkg.mkdir(parents=True)
+    target = pkg / "release_channels.py"
+    target.write_text(_channel_reader_source(), encoding="utf-8")
+
+    result = reconcile_tree(str(root))
+    assert "nastech_cli/release_channels.py" in result.fixed
+    text = target.read_text(encoding="utf-8")
+    assert '"User-Agent": "nastech-update"' in text
+    compile(text, str(target), "exec")
+
+
+def _assets_worker_dir(root):
+    path = root / "scripts" / "cloudflare" / "assets-worker"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+_STALE_WRANGLER = (
+    'name = "nastech-agent"\n'
+    'main = "src/index.js"\n'
+    'compatibility_date = "2026-10-05"\n'
+    "workers_dev = true\n"
+    "\n"
+    "[[kv_namespaces]]\n"
+    'binding = "NASTECH_ASSETS"\n'
+    'id = "ff12d5a5324d44b599d8319edabc4adb"\n'
+)
+
+
+def test_reconcile_assets_worker_config_pins_name_entry_and_previews(tmp_path):
+    """The preserved Worker config must match the deployed host the CLI reads."""
+    root = tmp_path / "branded"
+    worker = _assets_worker_dir(root)
+    target = worker / "wrangler.toml"
+    target.write_text(_STALE_WRANGLER, encoding="utf-8")
+    rel = "scripts/cloudflare/assets-worker/wrangler.toml"
+
+    changed = _reconcile_assets_worker_config(str(root), [rel])
+
+    assert changed == [rel]
+    text = target.read_text(encoding="utf-8")
+    assert 'name = "nastech-assets"' in text
+    assert 'main = "index.js"' in text
+    assert "[previews]" in text
+    assert "src/index.js" not in text
+    # Every other fork-authored byte is untouched.
+    assert 'compatibility_date = "2026-10-05"' in text
+    assert 'binding = "NASTECH_ASSETS"' in text
+
+
+def test_reconcile_assets_worker_config_is_idempotent(tmp_path):
+    root = tmp_path / "branded"
+    worker = _assets_worker_dir(root)
+    target = worker / "wrangler.toml"
+    target.write_text(_STALE_WRANGLER, encoding="utf-8")
+    rel = "scripts/cloudflare/assets-worker/wrangler.toml"
+
+    assert _reconcile_assets_worker_config(str(root), [rel]) == [rel]
+    fixed = target.read_text(encoding="utf-8")
+    # A second pass has nothing left to pin.
+    assert _reconcile_assets_worker_config(str(root), [rel]) == []
+    assert target.read_text(encoding="utf-8") == fixed
+
+
+def test_reconcile_assets_worker_config_only_touches_preserved_paths(tmp_path):
+    root = tmp_path / "branded"
+    worker = _assets_worker_dir(root)
+    target = worker / "wrangler.toml"
+    target.write_text(_STALE_WRANGLER, encoding="utf-8")
+
+    # A file the preserve stage did not carry over is left alone.
+    assert _reconcile_assets_worker_config(str(root), ["other/file.toml"]) == []
+    assert target.read_text(encoding="utf-8") == _STALE_WRANGLER
+
+
+def test_reconcile_assets_worker_config_skips_missing_file(tmp_path):
+    rel = "scripts/cloudflare/assets-worker/wrangler.toml"
+    assert _reconcile_assets_worker_config(str(tmp_path), [rel]) == []
+
+
+def test_pipeline_pins_preserved_assets_worker_config(tmp_path):
+    """End to end: preserve carries the fork-only Worker in, the post-preserve
+    reconcile pins it, and the gate stays green.
+
+    ``scripts/cloudflare/assets-worker`` has no upstream source, so a stale
+    snapshot restored by an update would otherwise replay
+    ``main = "src/index.js"`` and break the Cloudflare Workers Builds deploy.
+    """
+    hermes = _hermes_repo(tmp_path)
+    baseline = subprocess.check_output(
+        ["git", "-C", hermes, "rev-parse", "HEAD"], text=True
+    ).strip()
+    fork = tmp_path / "nastech-agent"
+    worker = _assets_worker_dir(fork)
+    (fork / "manifest.json").write_text(json.dumps({"upstream_sha": baseline}))
+    (worker / "index.js").write_text("export default { async fetch() {} };\n")
+    (worker / "wrangler.toml").write_text(_STALE_WRANGLER, encoding="utf-8")
+
+    res = UpdateManager(
+        str(tmp_path / "Updates-Commits"),
+        hermes_url=hermes,
+        fork_root=str(fork),
+    ).run()
+
+    assert res.gate
+    candidate = os.path.join(res.dir, "scripts", "cloudflare", "assets-worker", "wrangler.toml")
+    pinned = open(candidate, encoding="utf-8").read()
+    assert 'name = "nastech-assets"' in pinned
+    assert 'main = "index.js"' in pinned
+    assert "[previews]" in pinned
+    assert "src/index.js" not in pinned
