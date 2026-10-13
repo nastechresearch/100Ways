@@ -23,6 +23,7 @@ from hundredways.updates import (
     _UPSTREAM_PREPARE_SCRIPT,
     _reconcile_anon_surface_copy,
     _reconcile_apt_pool_first_char,
+    _reconcile_channel_reader_user_agent,
     _reconcile_ci_runner_budgets,
     _reconcile_connector_test_guest_offline,
     _reconcile_credential_display_test,
@@ -2955,3 +2956,58 @@ def test_prompt_surface_snapshot_is_computed_after_domain_migration(tmp_path):
         for tier, body in tiers.items()
     }
     assert "tests/fixtures/prompt_surface/surfaces.json" in result.fixed
+
+
+def _channel_reader_source() -> str:
+    """A minimal branded ``release_channels.py`` carrying the no-UA needle."""
+    return (
+        "from urllib.request import Request\n"
+        "\n"
+        "\n"
+        "class ChannelReader:\n"
+        "    def read_bytes(self):\n"
+        "        def read():\n"
+        '            with self.opener(Request(url, headers={"Cache-Control": "no-cache"}),'
+        " timeout=30) as response:\n"
+        "                return response.read()\n"
+        "\n"
+        "        return read()\n"
+    )
+
+
+def test_reconcile_channel_reader_user_agent(tmp_path):
+    """The reader must send a real UA or the workers.dev host 403s (1010)."""
+    root = tmp_path / "branded"
+    pkg = root / "nastech_cli"
+    pkg.mkdir(parents=True)
+    target = pkg / "release_channels.py"
+    target.write_text(_channel_reader_source(), encoding="utf-8")
+
+    assert _reconcile_channel_reader_user_agent(str(root)) is True
+    text = target.read_text(encoding="utf-8")
+    assert '"User-Agent": "nastech-update"' in text
+    assert '"Cache-Control": "no-cache"' in text
+    # The rewrite stays valid Python with the read body intact.
+    compile(text, str(target), "exec")
+
+    # Idempotent: the single-line needle is gone, so a second pass is a no-op.
+    assert _reconcile_channel_reader_user_agent(str(root)) is False
+
+
+def test_reconcile_channel_reader_user_agent_skips_missing_file(tmp_path):
+    assert _reconcile_channel_reader_user_agent(str(tmp_path)) is False
+
+
+def test_reconcile_tree_registers_channel_reader_user_agent(tmp_path):
+    """The new reconcile must actually run inside ``reconcile_tree``."""
+    root = tmp_path / "branded"
+    pkg = root / "nastech_cli"
+    pkg.mkdir(parents=True)
+    target = pkg / "release_channels.py"
+    target.write_text(_channel_reader_source(), encoding="utf-8")
+
+    result = reconcile_tree(str(root))
+    assert "nastech_cli/release_channels.py" in result.fixed
+    text = target.read_text(encoding="utf-8")
+    assert '"User-Agent": "nastech-update"' in text
+    compile(text, str(target), "exec")

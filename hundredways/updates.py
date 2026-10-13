@@ -3740,6 +3740,45 @@ def _reconcile_plugin_catalog_sync_exemption(dst: str) -> bool:
     return True
 
 
+def _reconcile_channel_reader_user_agent(dst: str) -> bool:
+    """Send a real User-Agent on channel reads so the update host answers.
+
+    ``release_channels.ChannelReader.read_bytes`` sends only ``Cache-Control``,
+    so urllib falls back to its default ``Python-urllib/3.x`` signature.  The
+    fork's update host is a ``*.workers.dev`` deployment and Cloudflare's edge
+    answers that signature with ``403 error code: 1010`` before the Worker runs;
+    403 is not in the retry set, so the canary release and ``nastech update``
+    both die on it.  Every other signature is served, so a fixed header is the
+    whole fix.  Rebuilding this file from upstream drops the header, so keep it
+    here; the branded ``source_releases._read`` already sends the same UA.
+    """
+    rel = "nastech_cli/release_channels.py"
+    text = _reconcile_budget_read(dst, rel)
+    if text is None:
+        return False
+    needle = (
+        "            with self.opener("
+        'Request(url, headers={"Cache-Control": "no-cache"}), timeout=30) as response:\n'
+    )
+    if needle not in text:
+        return False
+    replacement = (
+        "            with self.opener(\n"
+        "                Request(\n"
+        "                    url,\n"
+        '                    headers={"Cache-Control": "no-cache",'
+        ' "User-Agent": "nastech-update"},\n'
+        "                ),\n"
+        "                timeout=30,\n"
+        "            ) as response:\n"
+    )
+    updated = text.replace(needle, replacement, 1)
+    if updated == text:
+        return False
+    _reconcile_budget_write(dst, rel, updated)
+    return True
+
+
 def reconcile_tree(dst: str) -> ReconcileResult:
     """Apply known post-brand fixes to the branded tree in place.
 
@@ -3887,6 +3926,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_plugin_catalog_sync_exemption(dst):
         result.total += 1
         result.fixed.append(".github/workflows/plugin-catalog-ci.yml")
+    if _reconcile_channel_reader_user_agent(dst):
+        result.total += 1
+        result.fixed.append("nastech_cli/release_channels.py")
     # Prompt-surface LAST: it counts characters in the rendered prompts, and
     # _reconcile_domains above rewrites the domain hosts inside those prompt
     # files.  Computing it any earlier leaves surfaces.json describing the
