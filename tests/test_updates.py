@@ -27,18 +27,19 @@ from hundredways.updates import (
     _reconcile_desktop_export_order,
     _reconcile_desktop_path_fixtures,
     _reconcile_desktop_skin_alias,
-    _reconcile_install_ps1_store_guard_test,
-    _reconcile_locale_key_order,
-    _reconcile_python_test_timeout,
-    _reconcile_preserved_brand_text,
-    _reconcile_plugin_guard_trusted_installer_hosts,
-    _reconcile_windows_boot_lifecycle_race,
+    _reconcile_docusaurus_site_config,
     _reconcile_docs_posix_separators,
     _reconcile_drop_vercel_deploy_job,
     _reconcile_fork_skill_catalogs,
     _reconcile_fork_skill_sidebars,
+    _reconcile_install_ps1_store_guard_test,
+    _reconcile_locale_key_order,
+    _reconcile_plugin_guard_trusted_installer_hosts,
     _reconcile_portable_shebang,
     _reconcile_portal_override_test_collision,
+    _reconcile_preserved_brand_text,
+    _reconcile_prompt_surface_snapshot,
+    _reconcile_python_test_timeout,
     _reconcile_reasoning_effort_selection,
     _reconcile_sigv4_vectors,
     _reconcile_skill_description_hardline,
@@ -46,6 +47,7 @@ from hundredways.updates import (
     _reconcile_telegram_mention_context_lengths,
     _reconcile_uv_lock_file,
     _reconcile_vercel_prepare,
+    _reconcile_windows_boot_lifecycle_race,
     _sigv4_vector_signature,
     brand_tree,
     compare_trees,
@@ -1250,11 +1252,10 @@ def test_reconcile_target_ci_compatibility_fixes_are_audited(tmp_path):
         "eslint.config.shared.mjs",
     }
     assert os.stat(runner).st_mode & 0o111
-    assert "url: 'https://nastechresearch.github.io'," not in (website / "docusaurus.config.ts").read_text()
     docs_config = (website / "docusaurus.config.ts").read_text()
     assert f"url: '{_DOCS_PUBLIC_ORIGIN}'," in docs_config
-    assert "baseUrl: '/docs/'," in docs_config
-    assert "/nastech-agent/docs/" not in docs_config
+    assert "url: 'https://nastechresearch.github.io/nastech-agent'," not in docs_config
+    assert "baseUrl: '/nastech-agent/docs/'," in docs_config
     assert "return project" in (paths / "paths.ts").read_text()
     lint_config = (root / "eslint.config.shared.mjs").read_text()
     assert "'perfectionist/sort-imports': [\n        'warn'," in lint_config
@@ -1295,6 +1296,128 @@ def test_reconcile_plugin_guard_leaves_install_paths_untouched(tmp_path):
     # trusted-installer allowlist entry collapses to the bare host.
     assert _reconcile_plugin_guard_trusted_installer_hosts(str(root)) == 0
     assert target.read_text() == original
+
+
+def test_reconcile_docusaurus_site_config_subpath_url_collapses(tmp_path):
+    root = tmp_path / "branded"
+    website = root / "website"
+    website.mkdir(parents=True)
+    target = website / "docusaurus.config.ts"
+    target.write_text(
+        "url: 'https://nastechresearch.github.io/nastech-agent',\n"
+        "baseUrl: '/docs/',\n"
+    )
+
+    # The fork serves docs at the project path /nastech-agent/docs/ (Pages
+    # project site); Docusaurus 3.10 rejects a sub-path inside `url`, so the
+    # reconcile collapses the branded origin to the bare Pages host and moves
+    # the project path into baseUrl.
+    assert _reconcile_docusaurus_site_config(str(root)) == 1
+    text = target.read_text()
+    assert f"url: '{_DOCS_PUBLIC_ORIGIN}'," in text
+    assert "url: 'https://nastechresearch.github.io/nastech-agent'," not in text
+    assert "baseUrl: '/nastech-agent/docs/'," in text
+    assert "baseUrl: '/docs/'," not in text
+
+    # Idempotent once the config carries the project-pages contract.
+    assert _reconcile_docusaurus_site_config(str(root)) == 0
+
+
+def test_reconcile_prompt_surface_snapshot(tmp_path):
+    root = tmp_path / "branded"
+    snap = root / "tests" / "fixtures" / "prompt_surface"
+    prompts = snap / "prompts"
+    tools = snap / "tools"
+    prompts.mkdir(parents=True)
+    tools.mkdir(parents=True)
+
+    stable = "System prompt header.\nBe helpful.\n"
+    context = "Context block.\n"
+    volatile = (
+        "# installed skills\n"
+        "  software-development:\n"
+        "    - github: GitHub via gh CLI: PRs, issues, reviews, repos, auth.\n"
+        "    - nastech-agent-skill-authoring: Author in-repo SKILL.md files: frontmatter and structure.\n"
+        "    - inspecting-nastech-desktop-dom: Read the live Nastech desktop DOM/CSS over CDP.\n"
+        "  autonomous-ai-agents:\n"
+        "    - nastech-agent: Use, configure, theme, extend, and orchestrate Nastech Agent.\n"
+    )
+    (prompts / "cli.claude.txt").write_text(
+        "===== stable =====\n"
+        f"{stable}\n\n"
+        "===== context =====\n"
+        f"{context}\n\n"
+        "===== volatile =====\n"
+        f"{volatile}\n",
+        encoding="utf-8",
+    )
+    tool_schema = {
+        "name": "frobnicate",
+        "description": "Do things.",
+        "parameters": {"type": "object", "properties": {}},
+    }
+    (tools / "frobnicate.json").write_text(
+        json.dumps(tool_schema, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    (snap / "surfaces.json").write_text(
+        json.dumps(
+            {
+                "cli.claude": {
+                    # Stale token counts: branding moved the text but upstream
+                    # numbers were never folded back (the engine's signature).
+                    "prompt_tokens": {"context": 3, "stable": 3, "volatile": 3},
+                    "tool_tokens": 3,
+                    "tools": ["frobnicate"],
+                }
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    changed = _reconcile_prompt_surface_snapshot(str(root))
+    assert changed == [
+        "tests/fixtures/prompt_surface/prompts/cli.claude.txt",
+        "tests/fixtures/prompt_surface/surfaces.json",
+    ]
+
+    text = (prompts / "cli.claude.txt").read_text(encoding="utf-8")
+    assert _SKILL_DESC_FULL_NEW in text
+    assert _SKILL_DESC_FULL_OLD not in text
+    assert text.index("    - inspecting-nastech-desktop-dom:") < text.index(
+        "    - nastech-agent-skill-authoring:"
+    )
+
+    expected_volatile = (
+        "# installed skills\n"
+        "  software-development:\n"
+        "    - github: GitHub via gh CLI: PRs, issues, reviews, repos, auth.\n"
+        "    - inspecting-nastech-desktop-dom: Read the live Nastech desktop DOM/CSS over CDP.\n"
+        "    - nastech-agent-skill-authoring: Author in-repo SKILL.md files: frontmatter and structure.\n"
+        "  autonomous-ai-agents:\n"
+        f"    - nastech-agent: {_SKILL_DESC_FULL_NEW}.\n"
+    )
+    expected = {
+        "cli.claude": {
+            # The renderer's own length formulas (scripts/ci/prompt_surface.py
+            # _write_snapshot): len(tier)//4 and len(json.dumps(tools,
+            # sort_keys=True))//4, reproduced from the corrected prompt text.
+            "prompt_tokens": {
+                "context": len(context) // 4,
+                "stable": len(stable) // 4,
+                "volatile": len(expected_volatile) // 4,
+            },
+            "tool_tokens": len(json.dumps({"frobnicate": tool_schema}, sort_keys=True)) // 4,
+            "tools": ["frobnicate"],
+        }
+    }
+    assert json.loads((snap / "surfaces.json").read_text(encoding="utf-8")) == expected
+
+    # Idempotent once the snapshot carries the branded render.
+    assert _reconcile_prompt_surface_snapshot(str(root)) == []
 
 
 def test_reconcile_drop_vercel_deploy_job(tmp_path):

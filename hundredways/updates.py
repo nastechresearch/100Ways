@@ -1260,6 +1260,155 @@ def _reconcile_skill_description_hardline(dst: str) -> list[str]:
     return changed
 
 
+# scripts/ci/prompt_surface.py CHARS_PER_TOKEN — the snapshot manifest counts
+# are pure length functions of the rendered text and tool schemas.
+_PROMPT_SURFACE_CHARS_PER_TOKEN = 4
+
+
+def _re_sort_prompt_skill_runs(text: str) -> str:
+    """Re-sort consecutive ``    - name: ...`` skill-index entries by name.
+
+    The snapshot is rendered name-sorted per category; branding renames the
+    entries after the render, so a category whose ``hermes-*`` skill names
+    flipped sort order (``inspecting-nastech-desktop-dom`` now sorts before
+    ``nastech-agent-skill-authoring``, upstream the other way) must be
+    re-sorted.  A stable sort leaves already-ordered runs byte-identical,
+    which keeps the reconcile idempotent.
+    """
+    out: list[str] = []
+    run: list[tuple[str, str]] = []
+
+    def flush() -> None:
+        if len(run) > 1:
+            out.extend(line for _, line in sorted(run, key=lambda item: item[0]))
+        else:
+            out.extend(line for _, line in run)
+        run.clear()
+
+    for line in text.split("\n"):
+        if line.startswith("    - "):
+            run.append((line[6:].split(":", 1)[0], line))
+        else:
+            flush()
+            out.append(line)
+    flush()
+    return "\n".join(out)
+
+
+def _split_prompt_surface_tiers(text: str) -> dict[str, str]:
+    """Recover the per-tier texts the renderer joined into one prompt file.
+
+    Mirrors ``_write_snapshot``'s ``"\\n\\n".join("===== {tier} =====\\n{...}")``
+    so the manifest counts can be recomputed from the single file.
+    """
+    body = text[:-1] if text.endswith("\n") else text
+    tiers: dict[str, str] = {}
+    for part in body.split("\n\n===== "):
+        head, _, rest = part.partition("\n")
+        tiers[head.replace("=====", "").strip()] = rest
+    return tiers
+
+
+def _reconcile_prompt_surface_snapshot(dst: str) -> list[str]:
+    """Re-align the committed prompt-surface snapshot after branding.
+
+    ``tests/fixtures/prompt_surface/`` is the checked-in output of the fork's
+    ``scripts/ci/prompt_surface.py render`` (the fork's ``test_prompt_surface``
+    re-renders it and byte-compares).  The engine cannot run the fork's
+    renderer (the pipeline does not execute the fork's application test
+    suite), so it reproduces the render's deterministic operations instead:
+
+    * the skill-description trim (``_SKILL_DESC_FULL_OLD`` ->
+      ``_SKILL_DESC_FULL_NEW``) lands in every surface's skill index;
+    * the index is rendered name-sorted, so branding the ``hermes-*`` skill
+      names to ``nastech-*`` de-sorts the committed snapshot wherever the two
+      names straddled a sort boundary;
+    * ``surfaces.json`` counts are pure length functions of the rendered text
+      (``len(tier)//4`` and ``len(json.dumps(tools, sort_keys=True))//4`` per
+      ``_write_snapshot``), so the branding character delta must be folded
+      into the committed numbers.
+
+    Re-sorts each consecutive run of ``    - name: ...`` entries and rewrites
+    the manifest exactly as the renderer does.  Returns the repo-relative
+    paths changed.
+    """
+    changed: list[str] = []
+    base = os.path.join(dst, "tests", "fixtures", "prompt_surface")
+    prompts_dir = os.path.join(base, "prompts")
+    if not os.path.isdir(prompts_dir):
+        return changed
+    for rel in sorted(os.listdir(prompts_dir)):
+        if not rel.endswith(".txt"):
+            continue
+        path = os.path.join(prompts_dir, rel)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        fixed = text.replace(_SKILL_DESC_FULL_OLD, _SKILL_DESC_FULL_NEW)
+        fixed = _re_sort_prompt_skill_runs(fixed)
+        if fixed == text:
+            continue
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(fixed)
+        changed.append(f"tests/fixtures/prompt_surface/prompts/{rel}")
+    manifest_rel = "tests/fixtures/prompt_surface/surfaces.json"
+    manifest_path = os.path.join(base, "surfaces.json")
+    if not os.path.isfile(manifest_path):
+        return changed
+    try:
+        with open(manifest_path, encoding="utf-8-sig") as fh:
+            manifest = json.load(fh)
+    except (OSError, ValueError):
+        return changed
+    rewritten = False
+    for surface, entry in manifest.items():
+        prompt_rel = f"tests/fixtures/prompt_surface/prompts/{surface}.txt"
+        prompt_path = os.path.join(dst, prompt_rel)
+        if not os.path.isfile(prompt_path):
+            continue
+        try:
+            with open(prompt_path, encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        tiers = _split_prompt_surface_tiers(text)
+        if set(tiers) != set(entry.get("prompt_tokens", {})):
+            continue
+        new_tokens = {tier: len(body) // _PROMPT_SURFACE_CHARS_PER_TOKEN for tier, body in tiers.items()}
+        tools: dict[str, object] = {}
+        missing = False
+        for name in entry.get("tools", []):
+            variant = os.path.join(base, "tools", f"{name}.{surface}.json")
+            common = os.path.join(base, "tools", f"{name}.json")
+            path = variant if os.path.isfile(variant) else common
+            if not os.path.isfile(path):
+                missing = True
+                break
+            try:
+                with open(path, encoding="utf-8-sig") as fh:
+                    tools[name] = json.load(fh)
+            except (OSError, ValueError):
+                missing = True
+                break
+        if missing:
+            continue
+        new_tool_tokens = (
+            len(json.dumps(tools, sort_keys=True)) // _PROMPT_SURFACE_CHARS_PER_TOKEN
+        )
+        if new_tokens != entry.get("prompt_tokens") or new_tool_tokens != entry.get("tool_tokens"):
+            entry["prompt_tokens"] = new_tokens
+            entry["tool_tokens"] = new_tool_tokens
+            rewritten = True
+    if rewritten:
+        with open(manifest_path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        if manifest_rel not in changed:
+            changed.append(manifest_rel)
+    return changed
+
+
 def _reconcile_test_runner_mode(dst: str) -> int:
     """Ensure the CI test runner remains executable in the published tree.
 
@@ -1320,24 +1469,27 @@ def _reconcile_quickstart_hardware_fixture(dst: str) -> int:
     return 1
 
 
-# Public origin that fronts the docs, mirroring upstream's custom domain.
-# Upstream serves one public site: the landing at ``/`` and the Docusaurus docs
-# at ``/docs/`` (``baseUrl: '/docs/'``), with the docs artifact published to
-# GitHub Pages under the project path and no paid/custom origin in front.  The
-# fork keeps the same build shape, so the build must keep ``baseUrl: '/docs/'``
-# and point ``url`` at this project origin (not at the bare Pages host, whose
-# ``/docs/`` path does not resolve).
-_DOCS_PUBLIC_ORIGIN = "https://nastechresearch.github.io/nastech-agent"
+# Public origin that fronts the docs.  Upstream serves a single Pages site: the
+# landing at ``/`` and the Docusaurus docs at ``/docs/`` behind a custom domain.
+# The fork publishes on GitHub Pages as a *project* site: the deploy workflow
+# stages the Docusaurus artifact at ``_site/docs/``, so the docs resolve at
+# ``https://nastechresearch.github.io/nastech-agent/docs/`` (gitHub.io only;
+# there is no paid/custom origin in front).  Docusaurus 3.10 rejects a
+# sub-path inside ``url`` ("The url is not supposed to contain a sub-path ...
+# use the baseUrl field for sub-paths"), so the reconcile emits the bare Pages
+# origin in ``url`` and the deployed project path in ``baseUrl``.
+_DOCS_PUBLIC_ORIGIN = "https://nastechresearch.github.io"
 
 
 def _reconcile_docusaurus_site_config(dst: str) -> int:
-    """Match the docs build to the public landing origin, as upstream does.
+    """Point the docs build at the fork's project-pages route, as deployed.
 
-    A project-pages baseUrl (``/nastech-agent/docs/``) does not match the
-    public ``/docs`` route the landing exposes, so the Docusaurus router
-    renders "Page Not Found" once the client hydrates.  Restore the upstream
-    contract -- ``url`` == public origin, ``baseUrl: '/docs/'`` -- so the
-    landing's ``/docs/*`` external rewrite serves the docs cleanly.
+    Branding leaves ``url`` as one of the branded Pages-origin variants (the
+    bare host or the ``/nastech-agent`` project path) next to upstream's
+    ``baseUrl: '/docs/'``.  The fork serves the docs at the project path
+    ``/nastech-agent/docs/``, so the Docusaurus router and the staged
+    artifact must agree: ``url`` carries the bare Pages origin (a sub-path
+    there is a validator error) and ``baseUrl`` carries ``/nastech-agent/docs/``.
     """
     path = os.path.join(dst, "website", "docusaurus.config.ts")
     if not os.path.isfile(path):
@@ -1351,14 +1503,16 @@ def _reconcile_docusaurus_site_config(dst: str) -> int:
     for origin in (
         "https://nastechresearch.github.io/nastech-agent",
         "https://nastechresearch.github.io",
+        "https://nastechresearch.com",
+        "https://nastech-agent.nastechresearch.com",
     ):
         updated = updated.replace(
             f"url: '{origin}',",
             f"url: '{_DOCS_PUBLIC_ORIGIN}',",
         )
     updated = updated.replace(
-        "baseUrl: '/nastech-agent/docs/',",
         "baseUrl: '/docs/',",
+        "baseUrl: '/nastech-agent/docs/',",
     )
     if updated == text:
         return 0
@@ -3321,6 +3475,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
         result.total += 1
         result.fixed.append(rel)
     for rel in _reconcile_skill_description_hardline(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    for rel in _reconcile_prompt_surface_snapshot(dst):
         result.total += 1
         result.fixed.append(rel)
     if _reconcile_test_runner_mode(dst):
