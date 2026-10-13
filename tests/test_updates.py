@@ -31,8 +31,10 @@ from hundredways.updates import (
     _reconcile_locale_key_order,
     _reconcile_python_test_timeout,
     _reconcile_preserved_brand_text,
+    _reconcile_plugin_guard_trusted_installer_hosts,
     _reconcile_windows_boot_lifecycle_race,
     _reconcile_docs_posix_separators,
+    _reconcile_drop_vercel_deploy_job,
     _reconcile_fork_skill_catalogs,
     _reconcile_fork_skill_sidebars,
     _reconcile_portable_shebang,
@@ -1219,7 +1221,7 @@ def test_reconcile_target_ci_compatibility_fixes_are_audited(tmp_path):
     website.mkdir(parents=True)
     paths.mkdir(parents=True)
     (website / "docusaurus.config.ts").write_text(
-        "url: 'https://nastechresearch.github.io/nastech-agent',\n"
+        "url: 'https://nastechresearch.github.io',\n"
         "baseUrl: '/docs/',\n"
     )
     (paths / "paths.ts").write_text(
@@ -1258,6 +1260,77 @@ def test_reconcile_target_ci_compatibility_fixes_are_audited(tmp_path):
     assert "'perfectionist/sort-imports': [\n        'warn'," in lint_config
     assert "'perfectionist/sort-named-exports': ['warn'" in lint_config
     assert "'perfectionist/sort-named-imports': ['warn'" in lint_config
+
+
+def test_reconcile_plugin_guard_trusted_installer_hosts(tmp_path):
+    root = tmp_path / "branded"
+    tools = root / "tools"
+    tools.mkdir(parents=True)
+    target = tools / "plugin_guard_context.py"
+    target.write_text(
+        "_TRUSTED_INSTALLER_HOSTS = {\n"
+        '    "nastechresearch.github.io/nastech-agent", "ollama.com", "bun.sh",\n'
+        '    "get.docker.com", "sh.rustup.rs", "deno.land", "astral.sh", "app.factory.ai",\n'
+        "}\n"
+    )
+
+    assert _reconcile_plugin_guard_trusted_installer_hosts(str(root)) == 1
+    text = target.read_text()
+    assert '"nastechresearch.github.io", "ollama.com", "bun.sh",' in text
+    assert '"nastechresearch.github.io/nastech-agent",' not in text
+
+    # Idempotent once the allowlist carries the bare host.
+    assert _reconcile_plugin_guard_trusted_installer_hosts(str(root)) == 0
+
+
+def test_reconcile_plugin_guard_leaves_install_paths_untouched(tmp_path):
+    root = tmp_path / "branded"
+    tools = root / "tools"
+    tools.mkdir(parents=True)
+    target = tools / "plugin_guard_context.py"
+    original = 'url = "https://nastechresearch.github.io/nastech-agent/install.sh"\n'
+    target.write_text(original)
+
+    # A docs/install URL keeps the path form and must not be rewritten; only the
+    # trusted-installer allowlist entry collapses to the bare host.
+    assert _reconcile_plugin_guard_trusted_installer_hosts(str(root)) == 0
+    assert target.read_text() == original
+
+
+def test_reconcile_drop_vercel_deploy_job(tmp_path):
+    root = tmp_path / "branded"
+    wf = root / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    target = wf / "deploy-site.yml"
+    target.write_text(
+        "name: Deploy Site\n"
+        "jobs:\n"
+        "  deploy-vercel:\n"
+        "    # Triggered automatically on release publish (production cuts) and\n"
+        "    # manually via `gh workflow run deploy-site.yml` when an out-of-band\n"
+        "    # main commit needs to ship live before the next release tag \u2014 e.g.\n"
+        "    # a skills-index PR that doesn't touch website/** paths and so\n"
+        "    # doesn't auto-deploy via the deploy-docs path.\n"
+        "    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'\n"
+        "    runs-on: ubuntu-latest\n"
+        "    timeout-minutes: 30\n"
+        "    steps:\n"
+        "      - name: Trigger Vercel Deploy\n"
+        '        run: curl -fsS --retry 3 --retry-delay 10 -X POST "${{ secrets.VERCEL_DEPLOY_HOOK }}"\n'
+        "\n"
+        "  deploy-docs:\n"
+        "    runs-on: ubuntu-latest\n"
+    )
+
+    assert _reconcile_drop_vercel_deploy_job(str(root)) == 1
+    text = target.read_text()
+    assert "deploy-vercel" not in text
+    assert "VERCEL_DEPLOY_HOOK" not in text
+    assert "deploy-docs:" in text
+    assert text.startswith("name: Deploy Site\njobs:\n  deploy-docs:\n")
+
+    # Idempotent once the job is gone.
+    assert _reconcile_drop_vercel_deploy_job(str(root)) == 0
 
 
 def test_reconcile_anon_surface_copy_neutralizes_chat_copy(tmp_path):

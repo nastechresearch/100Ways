@@ -781,6 +781,37 @@ def _reconcile_domains(dst: str) -> list[str]:
     return fixed
 
 
+def _reconcile_plugin_guard_trusted_installer_hosts(dst: str) -> int:
+    """Restore the bare GitHub Pages host in the plugin-guard installer allowlist.
+
+    Upstream trusts its own installer via the host ``hermes-agent.nousresearch.com``.
+    Branding turns that into ``nastech-agent.nastechresearch.com`` and
+    ``_reconcile_domains`` migrates it to the docs compound
+    ``nastechresearch.github.io/nastech-agent`` -- but ``_URL_IN_LINE`` compares
+    the *bare host*, so the entry never matches and the fork's own
+    ``.../install.sh | bash`` line is downgraded instead of staying ``safe``.
+    A global rule cannot fix this: docs/install URLs legitimately keep the
+    ``github.io/nastech-agent`` path (hundreds of them in the fork).  Rewrite
+    only that one allowlist entry.  No-op once corrected.  Returns 1 when the
+    file changed.
+    """
+    path = os.path.join(dst, "tools", "plugin_guard_context.py")
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return 0
+    needle = '"nastechresearch.github.io/nastech-agent", "ollama.com", "bun.sh",'
+    if needle not in text:
+        return 0
+    replacement = '"nastechresearch.github.io", "ollama.com", "bun.sh",'
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text.replace(needle, replacement, 1))
+    return 1
+
+
 def _reconcile_fts5_trigram(dst: str) -> list[str]:
     """Fix the SQLite FTS5 trigram self-test the fork's CI runs.
 
@@ -1291,12 +1322,12 @@ def _reconcile_quickstart_hardware_fixture(dst: str) -> int:
 
 # Public origin that fronts the docs, mirroring upstream's custom domain.
 # Upstream serves one public site: the landing at ``/`` and the Docusaurus docs
-# at ``/docs/`` (``baseUrl: '/docs/'``), with the docs artifact (published to
-# GitHub Pages) fronted by that origin -- Vercel serves ``/`` and rewrites
-# ``/docs/*`` to Pages.  The fork keeps the same shape, so the build must keep
-# ``baseUrl: '/docs/'`` and point ``url`` at this public origin (not at the
-# Pages storage origin, whose ``/docs/`` path does not exist).
-_DOCS_PUBLIC_ORIGIN = "https://nastechresearch.com"
+# at ``/docs/`` (``baseUrl: '/docs/'``), with the docs artifact published to
+# GitHub Pages under the project path and no paid/custom origin in front.  The
+# fork keeps the same build shape, so the build must keep ``baseUrl: '/docs/'``
+# and point ``url`` at this project origin (not at the bare Pages host, whose
+# ``/docs/`` path does not resolve).
+_DOCS_PUBLIC_ORIGIN = "https://nastechresearch.github.io/nastech-agent"
 
 
 def _reconcile_docusaurus_site_config(dst: str) -> int:
@@ -1372,6 +1403,46 @@ def _reconcile_pages_deploy_workflow(dst: str) -> int:
         return 0
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(text.replace(needle, replacement, 1))
+    return 1
+
+
+def _reconcile_drop_vercel_deploy_job(dst: str) -> int:
+    """Remove upstream's ``deploy-vercel`` job from the site workflow.
+
+    Upstream triggers a Vercel production deploy by curling
+    ``secrets.VERCEL_DEPLOY_HOOK``.  The fork has no Vercel project and no such
+    secret, so the job fails on every release publish.  Drop the job; the GitHub
+    Pages ``deploy-docs`` job stays the only host.  No-op once removed.  Returns
+    1 when the file changed.
+    """
+    path = os.path.join(dst, ".github", "workflows", "deploy-site.yml")
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return 0
+    block = (
+        "  deploy-vercel:\n"
+        "    # Triggered automatically on release publish (production cuts) and\n"
+        "    # manually via `gh workflow run deploy-site.yml` when an out-of-band\n"
+        "    # main commit needs to ship live before the next release tag \u2014 e.g.\n"
+        "    # a skills-index PR that doesn't touch website/** paths and so\n"
+        "    # doesn't auto-deploy via the deploy-docs path.\n"
+        "    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'\n"
+        "    runs-on: ubuntu-latest\n"
+        "    timeout-minutes: 30\n"
+        "    steps:\n"
+        "      - name: Trigger Vercel Deploy\n"
+        "        run: curl -fsS --retry 3 --retry-delay 10 -X POST "
+        '"${{ secrets.VERCEL_DEPLOY_HOOK }}"\n'
+        "\n"
+    )
+    if block not in text:
+        return 0
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text.replace(block, "", 1))
     return 1
 
 
@@ -3282,10 +3353,19 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     for rel in _reconcile_domains(dst):
         result.total += 1
         result.fixed.append(rel)
+    if _reconcile_plugin_guard_trusted_installer_hosts(dst) and "tools/plugin_guard_context.py" not in result.fixed:
+        result.total += 1
+        result.fixed.append("tools/plugin_guard_context.py")
     if _reconcile_docusaurus_site_config(dst) and "website/docusaurus.config.ts" not in result.fixed:
         result.total += 1
         result.fixed.append("website/docusaurus.config.ts")
     if _reconcile_pages_deploy_workflow(dst):
+        result.total += 1
+        result.fixed.append(".github/workflows/deploy-site.yml")
+    if (
+        _reconcile_drop_vercel_deploy_job(dst)
+        and ".github/workflows/deploy-site.yml" not in result.fixed
+    ):
         result.total += 1
         result.fixed.append(".github/workflows/deploy-site.yml")
     for rel in _reconcile_dunder_all_order(dst):
