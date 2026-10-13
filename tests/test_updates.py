@@ -25,6 +25,7 @@ from hundredways.updates import (
     _reconcile_ci_runner_budgets,
     _reconcile_credential_display_test,
     _reconcile_desktop_export_order,
+    _reconcile_desktop_notification_timer_teardown,
     _reconcile_desktop_path_fixtures,
     _reconcile_desktop_skin_alias,
     _reconcile_install_ps1_store_guard_test,
@@ -440,6 +441,32 @@ def test_desktop_path_fixtures_use_branded_suffix(tmp_path):
     assert "nastechmagic-test" in data_paths.read_text(encoding="utf-8")
     assert "nastechmagic-test" in bundle_env.read_text(encoding="utf-8")
     assert _reconcile_desktop_path_fixtures(str(candidate)) == []
+
+
+def test_desktop_notification_timer_survives_jsdom_teardown(tmp_path):
+    candidate = tmp_path / "candidate"
+    path = candidate / "apps" / "desktop" / "src" / "store" / "notifications.ts"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "  if (duration > 0) {\n"
+        "    timers.set(\n"
+        "      id,\n"
+        "      window.setTimeout(() => dismissNotification(id), duration)\n"
+        "    )\n"
+        "  }\n",
+        encoding="utf-8",
+    )
+
+    assert _reconcile_desktop_notification_timer_teardown(str(candidate)) is True
+    text = path.read_text(encoding="utf-8")
+    assert "if (typeof window !== 'undefined') dismissNotification(id)" in text
+    assert "window.setTimeout(() => dismissNotification(id), duration)" not in text
+    # Idempotent: the guarded callback no longer matches the unguarded needle.
+    assert _reconcile_desktop_notification_timer_teardown(str(candidate)) is False
+
+
+def test_desktop_notification_timer_reconcile_skips_missing_file(tmp_path):
+    assert _reconcile_desktop_notification_timer_teardown(str(tmp_path)) is False
 
 
 def test_locale_key_order_restores_generated_sort(tmp_path):
