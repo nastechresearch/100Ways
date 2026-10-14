@@ -3864,6 +3864,63 @@ def _reconcile_channel_reader_user_agent(dst: str) -> bool:
     return True
 
 
+class CanaryNotesCapError(ValueError):
+    """The canary notes cap no longer matches upstream's ``cmd_canary``.
+
+    Same contract as :class:`ChannelReaderUserAgentError`: loud at sync time,
+    and reported rather than fatal inside ``hundredways.conformance``.
+    """
+
+
+def _reconcile_canary_notes_cap(dst: str) -> bool:
+    """Keep the canary release body under GitHub's 125000-character limit.
+
+    ``cmd_canary`` builds its changelog from ``get_commits(since_tag=since)``
+    with ``since = prev_canary or stable_commit``.  A cold canary — no previous
+    canary tag and no published stable — leaves ``since`` None, so the body is
+    the entire history and ``gh release create`` dies on ``HTTP 422 body is too
+    long`` *after* the receipt tag is already pushed.  The stable path refuses
+    before claiming anything (``GITHUB_BODY_LIMIT`` in
+    ``scripts/releases/entrypoint.py``), but a canary that refuses would simply
+    never run, so truncate the body and still publish the build.
+    """
+    rel = "scripts/release.py"
+    text = _reconcile_budget_read(dst, rel)
+    if text is None:
+        return False
+    marker = "# nastech: cap the canary release body"
+    if marker in text:
+        # Already patched: the second pass is a no-op.
+        return False
+    needle = (
+        '    changelog = generate_changelog(\n'
+        '        commits, tag_name, version, prev_tag=since, first_release=False,'
+        ' no_changelog=args.no_changelog\n'
+        '    )\n'
+    )
+    if needle not in text:
+        raise CanaryNotesCapError(
+            f"{rel} no longer builds its canary changelog the way this cap "
+            "expects, so a cold canary can still overflow GitHub's release-body "
+            "limit with HTTP 422 after its receipt tag is pushed. Update the "
+            "needle in _reconcile_canary_notes_cap to upstream's new shape."
+        )
+    replacement = needle + (
+        "    # nastech: cap the canary release body\n"
+        "    # GitHub rejects a release body over 125000 characters with HTTP 422.\n"
+        "    # A cold canary has no base (`since` is None), so the changelog is the\n"
+        "    # whole history and the create fails *after* the receipt tag is pushed.\n"
+        "    # Truncate before the tag so the canary still publishes.\n"
+        "    if len(changelog) > 120000:\n"
+        '        changelog = changelog[:120000].rsplit("\\n", 1)[0] + (\n'
+        '            "\\n\\n_Changelog truncated at 120000 characters: this canary had no "\n'
+        '            "previous canary or published stable to diff against._\\n"\n'
+        "        )\n"
+    )
+    _reconcile_budget_write(dst, rel, text.replace(needle, replacement, 1))
+    return True
+
+
 def reconcile_tree(dst: str) -> ReconcileResult:
     """Apply known post-brand fixes to the branded tree in place.
 
@@ -4014,6 +4071,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_channel_reader_user_agent(dst):
         result.total += 1
         result.fixed.append("nastech_cli/release_channels.py")
+    if _reconcile_canary_notes_cap(dst):
+        result.total += 1
+        result.fixed.append("scripts/release.py")
     # Prompt-surface LAST: it counts characters in the rendered prompts, and
     # _reconcile_domains above rewrites the domain hosts inside those prompt
     # files.  Computing it any earlier leaves surfaces.json describing the
