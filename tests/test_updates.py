@@ -15,6 +15,7 @@ from hundredways.integrity import audit_candidate_tree
 from hundredways.updates import (
     STAGES,
     ChannelReaderUserAgentError,
+    TermuxAptKeyDocError,
     UpdateManager,
     _DOCS_PUBLIC_ORIGIN,
     _HARDENED_PREPARE_SCRIPT,
@@ -60,6 +61,7 @@ from hundredways.updates import (
     _reconcile_skill_description_hardline,
     _reconcile_skill_docs_order,
     _reconcile_telegram_mention_context_lengths,
+    _reconcile_termux_apt_signing_key,
     _reconcile_uv_lock_file,
     _reconcile_vercel_prepare,
     _reconcile_windows_boot_lifecycle_race,
@@ -3047,6 +3049,94 @@ def test_reconcile_channel_reader_user_agent_flags_a_reformatted_reader(tmp_path
     with pytest.raises(ChannelReaderUserAgentError):
         _reconcile_channel_reader_user_agent(str(root))
     with pytest.raises(ChannelReaderUserAgentError):
+        reconcile_tree(str(root))
+
+
+_TERMUX_DOC_REL = "website/docs/getting-started/termux.md"
+_TERMUX_I18N_REL = (
+    "website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/"
+    "getting-started/termux.md"
+)
+_TERMUX_DOC_UPSTREAM = (
+    "# Nastech on Android with Termux\n"
+    "\n"
+    "3. Verify its primary fingerprint:\n"
+    "\n"
+    "   ```bash\n"
+    "   gpg --show-keys --with-fingerprint \"$PREFIX/etc/apt/keyrings/nastech-agent.asc\"\n"
+    "   ```\n"
+    "\n"
+    "   The repository key fingerprint is:\n"
+    "\n"
+    "   ```text\n"
+    "   C572 B5FD D1A2 9CCF A9A9 12B6 840B 0848 E139 156D\n"
+    "   ```\n"
+    "\n"
+    "   If the fingerprint differs, stop. Do not disable signature verification.\n"
+)
+
+
+def _write_termux_docs(root):
+    """Write the English page and its zh-Hans translation, as upstream ships them."""
+    primary = root / _TERMUX_DOC_REL
+    i18n = root / _TERMUX_I18N_REL
+    for path in (primary, i18n):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_TERMUX_DOC_UPSTREAM, encoding="utf-8")
+    return primary, i18n
+
+
+def test_reconcile_termux_apt_signing_key_rewrites_upstreams_fingerprint(tmp_path):
+    """The docs must name the fork's key, not the one upstream publishes.
+
+    Upstream hardcodes its own repository fingerprint; branding renames the host
+    in the surrounding curl/sources lines but not the fingerprint, and the fork
+    cannot sign with a key it does not hold.  Left alone, the page tells every
+    user to stop, because the ``key.asc`` the fork publishes is signed by a
+    different primary key.
+    """
+    root = tmp_path / "branded"
+    primary, i18n = _write_termux_docs(root)
+
+    assert _reconcile_termux_apt_signing_key(str(root)) == [
+        _TERMUX_DOC_REL,
+        _TERMUX_I18N_REL,
+    ]
+    for path in (primary, i18n):
+        text = path.read_text(encoding="utf-8")
+        assert "7F58 93A2 C517 FF53 185B 7C66 BE65 AFD0 8530 2A09" in text
+        assert "C572 B5FD" not in text
+        # The rest of the block, including the stop instruction, survives.
+        assert "If the fingerprint differs, stop." in text
+
+
+def test_reconcile_termux_apt_signing_key_is_a_fixed_point(tmp_path):
+    """A second pass changes nothing, and reconcile_tree reports it exactly once."""
+    root = tmp_path / "branded"
+    _write_termux_docs(root)
+
+    result = reconcile_tree(str(root))
+    assert _TERMUX_DOC_REL in result.fixed
+    assert result.fixed.count(_TERMUX_DOC_REL) == 1
+
+    # The fork fingerprint is the fixed point.
+    assert _reconcile_termux_apt_signing_key(str(root)) == []
+
+
+def test_reconcile_termux_apt_signing_key_flags_a_moved_block(tmp_path):
+    """A page that lost its fingerprint must fail the sync, not ship anchorless.
+
+    The fingerprint is the only trust anchor the install instructions give; a
+    silent no-op would publish a ``key.asc`` the page never names.
+    """
+    root = tmp_path / "branded"
+    primary = root / _TERMUX_DOC_REL
+    primary.parent.mkdir(parents=True, exist_ok=True)
+    primary.write_text("# Termux\n\nInstall steps moved elsewhere.\n", encoding="utf-8")
+
+    with pytest.raises(TermuxAptKeyDocError):
+        _reconcile_termux_apt_signing_key(str(root))
+    with pytest.raises(TermuxAptKeyDocError):
         reconcile_tree(str(root))
 
 

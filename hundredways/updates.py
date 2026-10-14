@@ -2146,6 +2146,78 @@ def _reconcile_apt_pool_first_char(dst: str) -> bool:
     return True
 
 
+# Upstream's Termux page hardcodes the fingerprint of upstream's own APT
+# repository key.  Branding rewrites the host in the surrounding curl /
+# sources lines but leaves the fingerprint byte-for-byte, and the fork cannot
+# sign with a key it does not hold -- so the inherited block tells every user
+# to stop, because the ``key.asc`` the fork publishes has a different primary
+# fingerprint.  This is the fork's own key (backed by the ``TERMUX_APT_GPG_KEY``
+# and ``TERMUX_APT_GPG_PASSPHRASE`` secrets); rotating the key means updating
+# this constant in the same change as the docs.
+_UPSTREAM_TERMUX_APT_FINGERPRINT = (
+    "C572 B5FD D1A2 9CCF A9A9 12B6 840B 0848 E139 156D"
+)
+_FORK_TERMUX_APT_FINGERPRINT = (
+    "7F58 93A2 C517 FF53 185B 7C66 BE65 AFD0 8530 2A09"
+)
+_TERMUX_APT_FINGERPRINT_DOCS = (
+    "website/docs/getting-started/termux.md",
+    "website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/"
+    "getting-started/termux.md",
+)
+
+
+class TermuxAptKeyDocError(ValueError):
+    """A Termux doc exists but no longer carries any repository key fingerprint.
+
+    A ``ValueError`` on purpose: :mod:`hundredways.conformance` reports it as a
+    conformance issue instead of aborting the run, while the ``reconcile`` stage
+    still marks the update failed (``not any(s.status == "fail" ...)``).  The
+    fingerprint is the only trust anchor the install instructions give, so
+    shipping the page without one would leave every ``gpg --show-keys`` check
+    comparing against nothing.
+    """
+
+
+def _reconcile_termux_apt_signing_key(dst: str) -> list[str]:
+    """Repoint the Termux docs at the fork's own APT signing key fingerprint.
+
+    Upstream's page (and its zh-Hans translation) hardcodes upstream's key.
+    Rewrite it to the fork's so the published ``key.asc`` the user verifies is
+    the one the page names.  A second pass is a no-op (the fork fingerprint is
+    the fixed point).  A doc that still exists but carries neither fingerprint
+    means upstream moved the block, which raises
+    :class:`TermuxAptKeyDocError` so the sync fails then rather than letting the
+    stale trust anchor ship.  Returns the changed rel paths.
+    """
+    changed: list[str] = []
+    for rel in _TERMUX_APT_FINGERPRINT_DOCS:
+        path = os.path.join(dst, rel)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        if _FORK_TERMUX_APT_FINGERPRINT in text:
+            continue
+        if _UPSTREAM_TERMUX_APT_FINGERPRINT not in text:
+            raise TermuxAptKeyDocError(
+                f"{rel} documents no repository key fingerprint; upstream moved "
+                "the block, so the fork's published key is no longer announced"
+            )
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(
+                text.replace(
+                    _UPSTREAM_TERMUX_APT_FINGERPRINT,
+                    _FORK_TERMUX_APT_FINGERPRINT,
+                )
+            )
+        changed.append(rel)
+    return changed
+
+
 # ---------------------------------------------------------------------------
 # Fork-preserved skill catalog sync (website/docs/reference/*-catalog.md)
 # ---------------------------------------------------------------------------
@@ -3975,6 +4047,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_apt_pool_first_char(dst):
         result.total += 1
         result.fixed.append("tests/scripts/test_stage_apt_repo.py")
+    for rel in _reconcile_termux_apt_signing_key(dst):
+        result.total += 1
+        result.fixed.append(rel)
     if _reconcile_project_identity_width(dst):
         result.total += 1
         result.fixed.append("ui-tui/src/domain/paths.ts")
