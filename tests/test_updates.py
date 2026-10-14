@@ -14,6 +14,7 @@ from hundredways.assets import OwnedAssets
 from hundredways.integrity import audit_candidate_tree
 from hundredways.updates import (
     STAGES,
+    ChannelReaderUserAgentError,
     UpdateManager,
     _DOCS_PUBLIC_ORIGIN,
     _HARDENED_PREPARE_SCRIPT,
@@ -3012,6 +3013,41 @@ def test_reconcile_tree_registers_channel_reader_user_agent(tmp_path):
     text = target.read_text(encoding="utf-8")
     assert '"User-Agent": "nastech-update"' in text
     compile(text, str(target), "exec")
+
+
+def test_reconcile_channel_reader_user_agent_flags_a_reformatted_reader(tmp_path):
+    """A moved reader must fail loudly, not drop the UA and wait for a red canary.
+
+    Upstream reformatting the ``self.opener(Request(...))`` line used to take the
+    silent ``False`` path — the same return as "already patched" — so the header
+    vanished and only surfaced when the workers.dev edge started answering 403
+    (error code: 1010). ``reconcile_tree`` must now propagate
+    ``ChannelReaderUserAgentError`` so the ``reconcile`` stage fails the update
+    gate at sync time.
+    """
+    root = tmp_path / "branded"
+    pkg = root / "nastech_cli"
+    pkg.mkdir(parents=True)
+    target = pkg / "release_channels.py"
+    target.write_text(
+        "from urllib.request import Request\n"
+        "\n"
+        "\n"
+        "class ChannelReader:\n"
+        "    def read_bytes(self):\n"
+        "        def read():\n"
+        "            request = Request(url, headers=self.headers, timeout=30)\n"
+        "            with self.opener(request) as response:\n"
+        "                return response.read()\n"
+        "\n"
+        "        return read()\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ChannelReaderUserAgentError):
+        _reconcile_channel_reader_user_agent(str(root))
+    with pytest.raises(ChannelReaderUserAgentError):
+        reconcile_tree(str(root))
 
 
 def _assets_worker_dir(root):

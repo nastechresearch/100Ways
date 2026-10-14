@@ -3802,6 +3802,15 @@ def _reconcile_plugin_catalog_sync_exemption(dst: str) -> bool:
     return True
 
 
+class ChannelReaderUserAgentError(ValueError):
+    """Upstream's channel reader no longer matches the shape the UA patch needs.
+
+    A ``ValueError`` on purpose: ``hundredways.conformance`` reports it as a
+    conformance issue instead of aborting the whole run, while the ``reconcile``
+    stage still marks the update failed (``not any(s.status == "fail" ...)``).
+    """
+
+
 def _reconcile_channel_reader_user_agent(dst: str) -> bool:
     """Send a real User-Agent on channel reads so the update host answers.
 
@@ -3813,17 +3822,34 @@ def _reconcile_channel_reader_user_agent(dst: str) -> bool:
     both die on it.  Every other signature is served, so a fixed header is the
     whole fix.  Rebuilding this file from upstream drops the header, so keep it
     here; the branded ``source_releases._read`` already sends the same UA.
+
+    A reformat upstream would have silently dropped the patch — the rule used to
+    return ``False`` for both "already patched" and "shape moved", and the 403
+    then only showed up when the canary went red days later.  Distinguish them:
+    the header marker means the fixed point, and anything else raises
+    :class:`ChannelReaderUserAgentError` so the update gate fails at sync time.
     """
     rel = "nastech_cli/release_channels.py"
     text = _reconcile_budget_read(dst, rel)
     if text is None:
+        return False
+    marker = '"User-Agent": "nastech-update"'
+    if marker in text:
+        # Already patched: the second pass is a no-op.
         return False
     needle = (
         "            with self.opener("
         'Request(url, headers={"Cache-Control": "no-cache"}), timeout=30) as response:\n'
     )
     if needle not in text:
-        return False
+        raise ChannelReaderUserAgentError(
+            f"{rel} carries neither the pre-fix reader nor {marker}, so the "
+            "channel-reader UA patch no longer applies. Cloudflare's edge answers "
+            "the default Python-urllib signature with 403 error code: 1010 before "
+            "the Worker runs, which takes the canary release and `nastech update` "
+            "down. Update the needle in _reconcile_channel_reader_user_agent to "
+            "upstream's new shape, then re-run."
+        )
     replacement = (
         "            with self.opener(\n"
         "                Request(\n"
@@ -3834,10 +3860,7 @@ def _reconcile_channel_reader_user_agent(dst: str) -> bool:
         "                timeout=30,\n"
         "            ) as response:\n"
     )
-    updated = text.replace(needle, replacement, 1)
-    if updated == text:
-        return False
-    _reconcile_budget_write(dst, rel, updated)
+    _reconcile_budget_write(dst, rel, text.replace(needle, replacement, 1))
     return True
 
 
