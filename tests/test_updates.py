@@ -14,6 +14,7 @@ from hundredways.assets import OwnedAssets
 from hundredways.integrity import audit_candidate_tree
 from hundredways.updates import (
     STAGES,
+    CanaryNotesCapError,
     ChannelReaderUserAgentError,
     UpdateManager,
     _DOCS_PUBLIC_ORIGIN,
@@ -25,6 +26,7 @@ from hundredways.updates import (
     _reconcile_assets_worker_config,
     _reconcile_anon_surface_copy,
     _reconcile_apt_pool_first_char,
+    _reconcile_canary_notes_cap,
     _reconcile_channel_reader_user_agent,
     _reconcile_ci_runner_budgets,
     _reconcile_connector_test_guest_offline,
@@ -3047,6 +3049,91 @@ def test_reconcile_channel_reader_user_agent_flags_a_reformatted_reader(tmp_path
     with pytest.raises(ChannelReaderUserAgentError):
         _reconcile_channel_reader_user_agent(str(root))
     with pytest.raises(ChannelReaderUserAgentError):
+        reconcile_tree(str(root))
+
+
+def _canary_release_source() -> str:
+    """A minimal ``scripts/release.py`` around upstream's canary changelog call."""
+    return (
+        "def cmd_canary(args):\n"
+        "    commits = get_commits(since_tag=since)\n"
+        '    version = tag_name.lstrip("v")\n'
+        "    changelog = generate_changelog(\n"
+        "        commits, tag_name, version, prev_tag=since, first_release=False,"
+        " no_changelog=args.no_changelog\n"
+        "    )\n"
+        "\n"
+        "    if not args.publish:\n"
+        "        print(changelog)\n"
+        "        return\n"
+    )
+
+
+def _branded_release_script(tmp_path):
+    root = tmp_path / "branded"
+    scripts = root / "scripts"
+    scripts.mkdir(parents=True)
+    target = scripts / "release.py"
+    target.write_text(_canary_release_source(), encoding="utf-8")
+    return root, target
+
+
+def test_reconcile_canary_notes_cap_bounds_a_cold_canary_body(tmp_path):
+    """A canary with no base commit must not overflow GitHub's body limit.
+
+    ``cmd_canary`` pushes the receipt tag *before* ``gh release create``, so an
+    ``HTTP 422 body is too long`` (the 2026-10-08 fork canary) leaves a pushed
+    tag with no release behind it.  The patched guard has to actually bound the
+    body, not just appear in the file, so drive the inserted code itself.
+    """
+    root, target = _branded_release_script(tmp_path)
+
+    assert _reconcile_canary_notes_cap(str(root)) is True
+    patched = target.read_text(encoding="utf-8")
+    assert "# nastech: cap the canary release body" in patched
+    assert "    if not args.publish:" in patched  # the original flow survives
+    compile(patched, str(target), "exec")
+
+    start = patched.index("    if len(changelog) > 120000:")
+    end = patched.index("\n\n    if not args.publish:", start)
+    namespace: dict = {}
+    harness = (
+        "def _cap(changelog):\n"
+        + patched[start:end]
+        + "\n    return changelog\n"
+    )
+    exec(compile(harness, "<cap>", "exec"), namespace)
+
+    capped = namespace["_cap"]("x" * 500_000)
+    assert len(capped) < 125_000  # GitHub's limit
+    assert "truncated at 120000 characters" in capped
+    # A normal canary body is left byte-for-byte alone.
+    assert namespace["_cap"]("short\n") == "short\n"
+
+    # Idempotent, and a missing script is not this rule's business.
+    assert _reconcile_canary_notes_cap(str(root)) is False
+    assert _reconcile_canary_notes_cap(str(tmp_path)) is False
+
+
+def test_reconcile_canary_notes_cap_flags_a_moved_changelog_call(tmp_path):
+    """A reformatted call must fail loudly, not quietly stop capping the body."""
+    root = tmp_path / "branded"
+    scripts = root / "scripts"
+    scripts.mkdir(parents=True)
+    script = scripts / "release.py"
+    script.write_text(
+        "def cmd_canary(args):\n"
+        "    changelog = build_notes(commits, tag_name, version)\n"
+        "\n"
+        "    if not args.publish:\n"
+        "        print(changelog)\n"
+        "        return\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CanaryNotesCapError):
+        _reconcile_canary_notes_cap(str(root))
+    with pytest.raises(CanaryNotesCapError):
         reconcile_tree(str(root))
 
 
