@@ -83,6 +83,47 @@ def test_repository_workflows_have_no_blocking_publication_policy_violations():
     assert blocking == []
 
 
+def test_ci_policy_flags_unpinned_external_source(tmp_path):
+    """A bare third-party clone is an unpinned, mutable supply-chain input."""
+    workflows = Path(tmp_path) / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "unpinned.yml").write_text(
+        "jobs:\n  monitor:\n    steps:\n"
+        "      - run: |\n"
+        "          git clone https://github.com/NousResearch/hermes-agent.git upstream-agent\n"
+    )
+
+    codes = {issue.code for issue in audit_workflow_security(str(tmp_path))}
+
+    assert codes == {"unpinned-source"}
+
+
+def test_ci_policy_accepts_named_ref_fork_clone_and_detached_checkout(tmp_path):
+    """Named refs, the fork's own repo, and a detach pin are all acceptable."""
+    workflows = Path(tmp_path) / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "named-ref.yml").write_text(
+        "jobs:\n  monitor:\n    steps:\n"
+        "      - run: |\n"
+        "          git clone --branch main https://github.com/NousResearch/hermes-agent.git upstream\n"
+        "          git clone --depth=1 https://github.com/nastechresearch/nastech-agent.git fork\n"
+    )
+    (workflows / "detached.yml").write_text(
+        "jobs:\n  catalog:\n    steps:\n"
+        "      - run: |\n"
+        "          git clone \"$REPO\" \"$CLONE_DIR\" </dev/null\n"
+        "          git -C \"$CLONE_DIR\" checkout --detach \"$SHA\" </dev/null\n"
+    )
+    (workflows / "continued.yml").write_text(
+        "jobs:\n  rules:\n    steps:\n"
+        "      - run: |\n"
+        "          git clone --depth=35 --no-checkout \\\n"
+        "            https://github.com/nastechresearch/nastech-agent.git fork\n"
+    )
+
+    assert audit_workflow_security(str(tmp_path)) == []
+
+
 def test_ci_policy_snapshot_mode_does_not_apply_engine_publication_denials(tmp_path):
     workflows = Path(tmp_path) / ".github" / "workflows"
     workflows.mkdir(parents=True)

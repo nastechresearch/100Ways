@@ -18,7 +18,12 @@ from typing import Any, Iterable
 
 from .assets import OwnedAssets
 from .ci_policy import WorkflowPolicyIssue, audit_workflow_security
-from .rules import BrandingRules, is_immutable_path, is_locked_path
+from .rules import (
+    BrandingRules,
+    is_immutable_path,
+    is_locked_path,
+    preserved_repo_url_spans,
+)
 from .skill_policy import SkillPolicyIssue, audit_skill_firewall
 from .visual_assets import VisualIssue, compare_owned_to_upstream
 
@@ -318,6 +323,11 @@ def _allowed_brand_occurrence(token: str, line: str, path: str) -> bool:
     """Return True only for the user's explicit, path-scoped exceptions."""
     lower = line.lower()
     if path.startswith("contributors/names/"):
+        return True
+    # A repository identifier we do not own cannot be renamed, so a brand run
+    # inside one is inherited, not a first-party leak.  Mirrors
+    # hundredways.brandscan._allowed; tests/test_brandscan.py asserts no drift.
+    if any(token.lower() in match.group(0).lower() for match in preserved_repo_url_spans(line)):
         return True
     if path == "package-lock.json" and token == "hermes":
         return "hermes-parser" in lower or "hermes-estree" in lower

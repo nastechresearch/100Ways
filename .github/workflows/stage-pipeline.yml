@@ -85,8 +85,16 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf upstream-agent
+          # Name the consumed ref: a bare clone silently follows the remote's
+          # mutable default branch, so an upstream default-branch flip would
+          # change the revision this run brands and publishes with no diff
+          # landing here.  `--branch main` keeps the sync functional (the ref is
+          # moving by design) while making silent default-branch drift a loud
+          # clone failure.  A commit SHA cannot be used: the pipeline brands the
+          # live upstream HEAD and records that SHA in manifest.json
+          # (hundredways/integrity.py verifies manifest SHA == fetched HEAD).
           for attempt in 1 2 3 4 5; do
-            if git -c http.version=HTTP/1.1 clone "$HUNDREDWAYS_HERMES_URL" upstream-agent; then
+            if git -c http.version=HTTP/1.1 clone --branch main "$HUNDREDWAYS_HERMES_URL" upstream-agent; then
               break
             fi
             echo "Upstream clone failed (attempt $attempt/5); retrying..." >&2

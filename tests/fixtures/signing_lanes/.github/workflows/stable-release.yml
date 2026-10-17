@@ -1,0 +1,127 @@
+name: Stable release
+on:
+  workflow_dispatch:
+jobs:
+  admit:
+    name: Admit the claim
+    runs-on: ubuntu-latest
+    outputs:
+      claim-tag: ${{ steps.admit.outputs.claim-tag }}
+      skip-bundles: ${{ steps.admit.outputs.skip-bundles }}
+      skip-tests: ${{ steps.admit.outputs.skip-tests }}
+      # Opt-in platforms, off unless the claim was cut with --include-macos-intel
+      # / --include-termux. A claim without the keys reads them as false.
+      include-macos-intel: ${{ steps.admit.outputs.include-macos-intel }}
+      include-termux: ${{ steps.admit.outputs.include-termux }}
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+      - id: admit
+        run: python -m scripts.releases.stable admit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_CLAIM_TAG: ${{ inputs.tag }}
+
+  candidates-darwin-arm64:
+    name: Build signed release candidates (darwin-arm64)
+    needs: admit
+    # Starts with the gates; the acceptance join is what requires CI.
+    if: >-
+      !cancelled() && needs.admit.result == 'success' && needs.admit.outputs.skip-bundles != 'true'
+    uses: ./.github/workflows/desktop-bundled-release.yml
+
+  candidates-win32-arm64:
+    name: Build signed release candidates (win32-arm64)
+    needs: admit
+    if: >-
+      !cancelled() && needs.admit.result == 'success' && needs.admit.outputs.skip-bundles != 'true'
+    uses: ./.github/workflows/desktop-bundled-release.yml
+
+  candidates-win32-x64:
+    name: Build signed release candidates (win32-x64)
+    needs: admit
+    if: >-
+      !cancelled() && needs.admit.result == 'success' && needs.admit.outputs.skip-bundles != 'true'
+    uses: ./.github/workflows/desktop-bundled-release.yml
+
+  candidates-win32-bundle:
+    name: Build signed release candidates (win32-bundle)
+    needs: [admit, candidates-win32-arm64, candidates-win32-x64]
+    if: >-
+      !cancelled() && needs.admit.result == 'success' && needs.candidates-win32-arm64.result == 'success'
+    uses: ./.github/workflows/desktop-bundled-release.yml
+
+  transitions-darwin-arm64:
+    name: Plan signed-package transitions (darwin-arm64)
+    needs: [admit, candidates-darwin-arm64]
+    if: needs.admit.outputs.skip-tests != 'true'
+    uses: ./.github/workflows/desktop-bundled-release.yml
+
+  transitions-win32:
+    name: Plan signed-package transitions (win32)
+    needs: [admit, candidates-win32-arm64, candidates-win32-x64]
+    if: needs.admit.outputs.skip-tests != 'true'
+    uses: ./.github/workflows/desktop-bundled-release.yml
+
+  windows-packaged:
+    name: Publish Windows packages
+    needs: [admit, transitions-win32]
+    if: needs.transitions-win32.outputs.baseline != 'none'
+    uses: ./.github/workflows/desktop-bundled-release.yml
+
+  macos-packaged-arm64:
+    name: Publish macOS arm64 packages
+    needs: [admit, transitions-darwin-arm64]
+    if: needs.transitions-darwin-arm64.outputs.baseline != 'none'
+    uses: ./.github/workflows/desktop-bundled-release.yml
+
+  candidate-manifest:
+    name: Merge the candidate manifest
+    needs: [admit]
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ needs.admit.outputs.tag }}
+      RELEASE_CLAIM_TAG: ${{ needs.admit.outputs.claim-tag }}
+      RELEASE_CLAIM_OBJECT: ${{ needs.admit.outputs.claim-object }}
+      RELEASE_NEEDS: ${{ toJSON(needs) }}
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+      - run: python -m scripts.releases.stable candidate-manifest
+
+  acceptance:
+    name: Independent release acceptance
+    needs: [admit, candidates-darwin-arm64, candidates-win32-arm64, candidates-win32-x64]
+    if: always() && needs.admit.outputs.skip-bundles != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+      - run: python -m scripts.releases.stable gate
+        env:
+          RELEASE_NEEDS: ${{ toJSON(needs) }}
+          INCLUDE_MACOS_INTEL: ${{ needs.admit.outputs.include-macos-intel }}
+          INCLUDE_TERMUX: ${{ needs.admit.outputs.include-termux }}
+
+  publication:
+    name: Publish the release
+    needs: [admit, acceptance]
+    if: needs.acceptance.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+      - run: python -m scripts.releases.stable publication
+        env:
+          RELEASE_NEEDS: ${{ toJSON(needs) }}
+          INCLUDE_MACOS_INTEL: ${{ needs.admit.outputs.include-macos-intel }}
+          INCLUDE_TERMUX: ${{ needs.admit.outputs.include-termux }}
+
+  complete:
+    name: Final release receipt
+    needs: [admit, publication]
+    if: always() && needs.admit.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+      - run: python -m scripts.releases.stable complete
+        env:
+          RELEASE_NEEDS: ${{ toJSON(needs) }}
+          INCLUDE_MACOS_INTEL: ${{ needs.admit.outputs.include-macos-intel }}
+          INCLUDE_TERMUX: ${{ needs.admit.outputs.include-termux }}
