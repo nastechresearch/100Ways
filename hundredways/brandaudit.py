@@ -374,6 +374,16 @@ def run_audit(
     registry = assets_root or os.path.join(target, "config", "owned-assets")
     if os.path.isfile(os.path.join(registry, "manifest.json")):
         audit.assets = audit_brand_assets(registry, candidate_root=candidate_root)
+    elif assets_root:
+        # A registry location was requested but is unusable: report it instead
+        # of silently skipping the asset audit (the registry is 100Ways tooling
+        # data and is never expected to live inside the branded tree).
+        audit.assets = [AssetIssue(
+            code="asset-registry-missing",
+            path=registry,
+            role="identity",
+            detail="--assets-root was given but holds no manifest.json",
+        )]
     return audit
 
 

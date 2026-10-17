@@ -1,0 +1,9 @@
+[package]
+name = "brandfast"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Safe deterministic filesystem primitives for the 100Ways branding pipeline"
+
+[dependencies]
+sha2 = "0.10"

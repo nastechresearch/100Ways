@@ -121,6 +121,7 @@ def _replay_fork_preservation(
         obsolete_upstream_paths=delta.obsolete_mapped,
         owned_paths=set(owned.mapping) if owned else set(),
         allow_unclassified_fork_files=bool(baseline_sha),
+        owned_targets_materialized=bool(owned and owned.count),
     )
 
 
@@ -132,6 +133,7 @@ def verify_final_candidate(
     rules: BrandingRules | None = None,
     allowed_extra_paths: Iterable[str] = (),
     fork_root: str | Path = "",
+    upstream_only: bool = False,
 ) -> ConformanceReport:
     """Rebuild expected branded source and verify the final candidate exactly.
 
@@ -141,7 +143,9 @@ def verify_final_candidate(
     tree rather than trusted from the candidate itself.  When ``fork_root`` is
     given, the pipeline's fork-preservation + post-preserve reconciles are
     replayed onto the expected tree so fork-synced content is verified against
-    the same rebuilt bytes the pipeline produced.
+    the same rebuilt bytes the pipeline produced.  In ``upstream_only`` mode,
+    reconciliation and fork replay are both disabled: the expected tree is the
+    strict transformed Hermes tree plus approved owned assets.
     """
     source_path = Path(source)
     candidate_path = Path(candidate)
@@ -163,14 +167,15 @@ def verify_final_candidate(
         try:
             brand_tree(str(source_path), str(expected), rules, owned)
             apply_owned_assets(str(expected), owned)
-            reconciled = reconcile_tree(str(expected))
-            preserved = _replay_fork_preservation(
-                str(expected),
-                str(source_path),
-                str(fork_root_path) if fork_root_path else "",
-                rules,
-                owned,
-            )
+            reconciled = reconcile_tree(str(expected)) if not upstream_only else None
+            if not upstream_only:
+                preserved = _replay_fork_preservation(
+                    str(expected),
+                    str(source_path),
+                    str(fork_root_path) if fork_root_path else "",
+                    rules,
+                    owned,
+                )
         except (OSError, ValueError) as exc:
             return ConformanceReport(
                 0,
@@ -180,23 +185,23 @@ def verify_final_candidate(
                 (ConformanceIssue("expected-tree", "", str(exc)),),
             )
         reconciled_bytes: dict[str, bytes] = {}
-        for relative in reconciled.fixed:
+        for relative in reconciled.fixed if reconciled else ():
             expected_path = expected / relative
             if expected_path.is_file():
                 reconciled_bytes[relative] = expected_path.read_bytes()
-        for relative in _reconcile_fork_skill_catalogs(str(expected), preserved):
+        for relative in _reconcile_fork_skill_catalogs(str(expected), preserved) if not upstream_only else ():
             expected_path = expected / relative
             if expected_path.is_file():
                 reconciled_bytes[relative] = expected_path.read_bytes()
-        for relative in _reconcile_docs_posix_separators(str(expected), preserved):
+        for relative in _reconcile_docs_posix_separators(str(expected), preserved) if not upstream_only else ():
             expected_path = expected / relative
             if expected_path.is_file():
                 reconciled_bytes[relative] = expected_path.read_bytes()
-        for relative in _reconcile_fork_skill_sidebars(str(expected), preserved):
+        for relative in _reconcile_fork_skill_sidebars(str(expected), preserved) if not upstream_only else ():
             expected_path = expected / relative
             if expected_path.is_file():
                 reconciled_bytes[relative] = expected_path.read_bytes()
-        for relative in _reconcile_skill_docs_order(str(expected)):
+        for relative in _reconcile_skill_docs_order(str(expected)) if not upstream_only else ():
             expected_path = expected / relative
             if expected_path.is_file():
                 reconciled_bytes[relative] = expected_path.read_bytes()
@@ -230,7 +235,7 @@ def verify_final_candidate(
     }
     allowed = set(allowed_extra_paths) | _REPORT_PATHS
     for path in sorted(candidate_paths - expected_paths):
-        if path in allowed or path.startswith("config/owned-assets/"):
+        if path in allowed:
             continue
         issues.append(
             ConformanceIssue(
@@ -263,6 +268,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--candidate", required=True)
     parser.add_argument("--owned-assets-root", default="")
     parser.add_argument("--fork-root", default="")
+    parser.add_argument(
+        "--upstream-only",
+        action="store_true",
+        help="strictly verify transformed Hermes plus approved owned assets only",
+    )
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
     allowed_extra_paths: tuple[str, ...] = ()
@@ -280,6 +290,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         owned_assets_root=args.owned_assets_root,
         allowed_extra_paths=allowed_extra_paths,
         fork_root=args.fork_root,
+        upstream_only=args.upstream_only,
     )
     Path(args.output).write_text(json.dumps(report.to_dict(), indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report.to_dict(), indent=2))

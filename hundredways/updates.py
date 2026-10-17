@@ -38,6 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .assets import OwnedAssets
+from .fastpath import list_files as fast_list_files
 from .forkcheck import (
     ForkCheckReport,
     SourceDeltaReport,
@@ -274,6 +275,9 @@ class BrandResult:
 
 
 def _walk_files(root: str) -> list[str]:
+    fast = fast_list_files(root, "brand")
+    if fast is not None:
+        return fast
     out: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
         # Only prune the checkout/updates dirs sitting directly under ``root``
@@ -5647,7 +5651,7 @@ class UpdateManager:
     def __init__(self, updates_dir: str, hermes_url: str = DEFAULT_HERMES_URL,
                  rules: BrandingRules | None = None, threshold: float = 0.99,
                  owned: OwnedAssets | None = None, ai=None, fork_root: str = "",
-                 source_provenance_url: str = ""):
+                 source_provenance_url: str = "", upstream_only: bool = False):
         self.updates_dir = updates_dir
         self.hermes_url = hermes_url
         self.source_provenance_url = source_provenance_url or hermes_url
@@ -5655,7 +5659,8 @@ class UpdateManager:
         self.threshold = threshold
         self.owned = owned
         self.ai = ai
-        self.fork_root = fork_root
+        self.upstream_only = upstream_only
+        self.fork_root = "" if upstream_only else fork_root
 
     def run(self, keep_failed: bool = True, zip_path: str = "",
             project_name: str = "nastech-agent", notify=None) -> UpdateResult:
@@ -5680,7 +5685,7 @@ class UpdateManager:
         src = hermes_path(self.updates_dir)
         baseline_sha = previous_upstream_sha(
             self.updates_dir, number
-        ) or fork_manifest_upstream_sha(self.fork_root)
+        ) or (fork_manifest_upstream_sha(self.fork_root) if self.fork_root else "")
         evidence = stage(
             "source-evidence",
             lambda: (
@@ -5712,10 +5717,13 @@ class UpdateManager:
         )
 
         def _reconcile() -> ReconcileResult:
+            if self.upstream_only:
+                return ReconcileResult()
             result = reconcile_tree(dest)
             return result
         reconcile = stage("reconcile", _reconcile,
-                          "sync lockfile root records + apply fork-local content fixes")
+                          "skipped in strict upstream-only mode" if self.upstream_only
+                          else "sync lockfile root records + apply fork-local content fixes")
         reconciled_map: dict[str, bytes] = {}
         if reconcile and reconcile.fixed:
             for rel in reconcile.fixed:
@@ -5728,13 +5736,15 @@ class UpdateManager:
                         pass
 
         def _preserve() -> list[str]:
-            # Keep the engine-owned registry inside the snapshot before fork
-            # preservation.  This makes the visual pack reviewable in the
-            # published candidate and lets preserve_fork_files protect it from
-            # an older registry in the fork checkout.
-            if self.owned and self.owned.count and os.path.isdir(self.owned.root):
-                registry_dest = os.path.join(dest, "config", "owned-assets")
-                shutil.copytree(self.owned.root, registry_dest, dirs_exist_ok=True)
+            if self.upstream_only:
+                return []
+            # ``config/owned-assets/`` is 100Ways' *own* tooling registry: it
+            # is the source of the brand substitution applied above by
+            # ``apply_owned_assets``, and it must never be part of the product
+            # tree.  Emitting it here (or letting fork preservation carry the
+            # fork's stale copy back in) is what put 100Ways' internal
+            # ``config/`` directory inside nastech-agent, which upstream
+            # Hermes does not have at all.  Keep it in 100Ways.
             preserved = preserve_fork_files(
                 self.fork_root,
                 dest,
@@ -5743,6 +5753,7 @@ class UpdateManager:
                 obsolete_upstream_paths=source_delta.obsolete_mapped,
                 owned_paths=set(self.owned.mapping) if self.owned else set(),
                 allow_unclassified_fork_files=bool(baseline_sha),
+                owned_targets_materialized=bool(self.owned and self.owned.count),
             )
             # Fork-preserved skills are invisible to the upstream-derived skill
             # catalogs; re-sync the catalogs so the docs-contract tests pass,
@@ -5828,7 +5839,8 @@ class UpdateManager:
         stage(
             "preserve",
             _preserve,
-            "carry explicit fork-owned files while rejecting retired upstream paths",
+            "skipped in strict upstream-only mode" if self.upstream_only
+            else "carry explicit fork-owned files while rejecting retired upstream paths",
         )
 
         scan = stage("scan", lambda: scan_tree(dest), "classify every branded file")
@@ -5855,7 +5867,8 @@ class UpdateManager:
                 owned_paths=set(self.owned.mapping) if self.owned else set(),
             )
         forkcheck = stage("forkcheck", _forkcheck,
-                          "diff snapshot vs nastech-agent fork (identical/updated/added/missing)")
+                          "skipped in strict upstream-only mode" if self.upstream_only
+                          else "diff snapshot vs nastech-agent fork (identical/updated/added/missing)")
 
         brand = brand or BrandResult()
         reconcile = reconcile or ReconcileResult()
@@ -5984,6 +5997,12 @@ class UpdateManager:
             "number": number,
             "dir": os.path.basename(dest),
             "upstream_sha": result.upstream_sha,
+            "policy": {
+                "upstream_only": self.upstream_only,
+                "fork_local_preservation": not self.upstream_only,
+                "custom_reconcile_patches": not self.upstream_only,
+                "owned_assets_allowed": True,
+            },
             # The shipped manifest identifies the NasTech review projection;
             # direct-source URLs remain in CI-only evidence, never in a
             # candidate file or review PR branch.

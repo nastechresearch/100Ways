@@ -12,6 +12,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
+from .fastpath import tree_hash_rows
+
 
 CANONICAL_UPSTREAM_HOST = "github.com"
 CANONICAL_UPSTREAM_PATH = "/NousResearch/hermes-agent.git"
@@ -45,6 +47,11 @@ def tree_digest(root: str | Path) -> str:
     """Hash paths, modes, and bytes in deterministic lexical order."""
     base = Path(root)
     digest = hashlib.sha256()
+    fast_rows = tree_hash_rows(str(base))
+    if fast_rows is not None:
+        for relative, mode, file_digest in fast_rows:
+            digest.update(f"{relative}\0{mode}\0{file_digest}\n".encode("utf-8"))
+        return digest.hexdigest()
     for path in sorted(base.rglob("*"), key=lambda item: item.as_posix()):
         if not path.is_file() or path.is_symlink():
             continue

@@ -277,8 +277,26 @@ def audit_nested_lockfiles(root: str) -> list[AuditIssue]:
     return issues
 
 
-def audit_owned_assets(root: str) -> list[AuditIssue]:
-    owned = OwnedAssets(repo=root)
+def audit_owned_assets(root: str, owned_assets_root: str = "") -> list[AuditIssue]:
+    """Audit every declared owned target against the 100Ways asset registry.
+
+    ``config/owned-assets/`` is engine tooling data: it is the substitution
+    *source* and never travels into the branded product, so callers name its
+    location explicitly with ``owned_assets_root``.  Falling back to a registry
+    found inside ``root`` keeps direct/escalated use working.  A registry that
+    cannot be found is a hard blocker: an audit that has nothing to compare must
+    never pass silently.
+    """
+    owned = (
+        OwnedAssets(root=owned_assets_root) if owned_assets_root
+        else OwnedAssets(repo=root)
+    )
+    if owned.count == 0:
+        return [AuditIssue(
+            "owned-assets-registry-missing",
+            owned.root,
+            "no owned-asset registry (manifest.json) was found to audit",
+        )]
     issues: list[AuditIssue] = []
     for target, rel_source in owned.mapping.items():
         target_path = Path(root) / target
@@ -290,9 +308,14 @@ def audit_owned_assets(root: str) -> list[AuditIssue]:
     return issues
 
 
-def audit_visual_assets(branded_root: str, upstream_root: str) -> list[VisualIssue]:
+def audit_visual_assets(
+    branded_root: str, upstream_root: str, owned_assets_root: str = ""
+) -> list[VisualIssue]:
     """Compare registered NasTech-owned visual assets with the upstream asset tree."""
-    owned = OwnedAssets(repo=branded_root)
+    owned = (
+        OwnedAssets(root=owned_assets_root) if owned_assets_root
+        else OwnedAssets(repo=branded_root)
+    )
     return compare_owned_to_upstream(owned.root, owned.mapping.values(), upstream_root)
 
 
@@ -579,6 +602,7 @@ def build_weekly_report(
     *,
     mode: str = "report",
     ref: str = "origin/main",
+    owned_assets_root: str = "",
 ) -> WeeklyFullSyncReport:
     """Build a deterministic full-sync report without publishing any repository change."""
     before = load_ledger(state_dir).get("upstream_sha", "")
@@ -612,8 +636,8 @@ def build_weekly_report(
     report.brand_issues.extend(audit_brand_symbols(branded_root))
     report.brand_issues.extend(audit_cli_banner_identity(branded_root))
     report.brand_issues.extend(audit_fts5_trigram_fixtures(branded_root))
-    report.asset_issues = audit_owned_assets(branded_root)
-    report.visual_issues = audit_visual_assets(branded_root, upstream_repo)
+    report.asset_issues = audit_owned_assets(branded_root, owned_assets_root)
+    report.visual_issues = audit_visual_assets(branded_root, upstream_repo, owned_assets_root)
     report.ci_issues = audit_workflow_security(
         branded_root, enforce_publication_policy=False
     )
