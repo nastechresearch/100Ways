@@ -4035,8 +4035,11 @@ def test_reconcile_dead_api_defaults_fails_closed(tmp_path):
     https://inference-api.nastechresearch.github.io/v1 both fail TLS with
     "no alternative certificate subject name matches" (GitHub's certificate
     carries only `*.github.io`, one label).  So the reconciled constant must
-    be unusable-but-importable and must raise an actionable error naming the
-    environment variable, never hand back the dead URL.
+    never hand back the dead URL, yet stay safe to stringify and strip: real
+    consumers build their authorize/token/JWKS URLs from it while they
+    register (nastech-agent#157), so the marker is an RFC 2606 `.invalid`
+    origin that names the environment variable to set.  A request then fails
+    at DNS -- nothing is ever sent to a host that cannot answer.
     """
     cli = tmp_path / "nastech_cli"
     cli.mkdir()
@@ -4046,8 +4049,8 @@ def test_reconcile_dead_api_defaults_fails_closed(tmp_path):
     assert fixed == ["nastech_cli/auth_constants.py"]
 
     text = (cli / "auth_constants.py").read_text()
-    # The dead URL survives only inside the actionable error message; it is
-    # never the assigned value of a default any more.
+    # The dead URL survives only as the recorded provenance of the default
+    # (the dead_default= argument); it is never the assigned value any more.
     assert '= "https://portal.nastechresearch.github.io"' not in text
     assert '= "https://inference-api.nastechresearch.github.io/v1"' not in text
     assert '= "https://welcome-api.nastechresearch.github.io/v1"' not in text
@@ -4055,29 +4058,68 @@ def test_reconcile_dead_api_defaults_fails_closed(tmp_path):
     assert "_NastechUnconfiguredEndpoint" in text
 
     namespace = _exec_module(text)
-    for name in (
-        "DEFAULT_NASTECH_PORTAL_URL",
-        "DEFAULT_NASTECH_INFERENCE_URL",
-        "DEFAULT_NASTECH_WELCOME_URL",
+    for name, env in (
+        ("DEFAULT_NASTECH_PORTAL_URL", "NASTECH_PORTAL_URL"),
+        ("DEFAULT_NASTECH_INFERENCE_URL", "NASTECH_INFERENCE_URL"),
+        ("DEFAULT_NASTECH_WELCOME_URL", "NASTECH_WELCOME_URL"),
     ):
         value = namespace[name]
         assert not value, f"{name} must read as unconfigured"
-        with pytest.raises(RuntimeError) as excinfo:
-            str(value)
-        assert "is not configured" in str(excinfo.value)
-        assert "NASTECH_" in str(excinfo.value)
-    # .rstrip("/") is the shape the auth code uses; it must raise, not
-    # return an empty string that then becomes a broken base URL.
-    with pytest.raises(RuntimeError):
-        namespace["DEFAULT_NASTECH_PORTAL_URL"].rstrip("/")
-    with pytest.raises(RuntimeError):
-        f"{namespace['DEFAULT_NASTECH_INFERENCE_URL']}/models"
+        # Stringifying must NOT raise: consumers -- the dashboard-auth
+        # provider among them -- build their authorize/token/JWKS URLs from
+        # this constant while they register.  A default whose str() raised
+        # took the whole provider down: no auth provider, a fail-closed
+        # non-loopback bind that therefore never happened, and
+        # ConnectionRefused for every request (nastech-agent#157).  The marker
+        # is an RFC 2606 `.invalid` origin instead: no resolver can answer it,
+        # so the branded dead origin is still never used and no credential is
+        # ever sent to a real host.
+        marker = str(value)
+        assert "nastechresearch.github.io" not in marker
+        assert marker.startswith("https://")
+        assert ".invalid" in marker
+        assert env.lower().replace("_", "-") in marker
+        # The shapes the auth code uses while registering must work.
+        assert value.rstrip("/") == marker
+        assert f"{value}/models" == f"{marker}/models"
     # an unrelated constant is untouched
     assert namespace["AUTH_STORE_VERSION"] == 1
     assert namespace["DEFAULT_NASTECH_CLIENT_ID"] == "nastech-cli"
 
     # idempotent: the dead literal is gone, so a second pass changes nothing
     assert _reconcile_dead_api_defaults(str(tmp_path)) == []
+
+
+def test_reconcile_dead_api_defaults_survives_construction_time_use(tmp_path):
+    """A consumer may build URLs from the default while it registers.
+
+    ``plugins/dashboard_auth/nastech`` does ``portal_url.rstrip("/")`` and then
+    ``f"{url}/oauth/authorize"`` inside ``NastechDashboardAuthProvider.__init__``.
+    While the default raised there, registration died, the dashboard failed
+    closed on a non-loopback bind, and every request was refused for the whole
+    probe (nastech-agent#157, docker run 39022093014).  The unconfigured default
+    must therefore behave like an ordinary string -- and still be unusable.
+    """
+    cli = tmp_path / "nastech_cli"
+    cli.mkdir()
+    (cli / "auth_constants.py").write_text(_DEAD_AUTH_CONSTANTS)
+
+    assert _reconcile_dead_api_defaults(str(tmp_path)) == ["nastech_cli/auth_constants.py"]
+    namespace = _exec_module((cli / "auth_constants.py").read_text())
+
+    portal = namespace["DEFAULT_NASTECH_PORTAL_URL"]
+    base = portal.rstrip("/")  # the provider's first use of the default
+    assert base == str(portal)
+    assert base.endswith(".invalid")
+    assert "nastechresearch.github.io" not in base
+    for derived in (f"{base}/oauth/authorize", f"{base}/.well-known/jwks.json"):
+        assert derived.startswith("https://")
+        assert ".invalid/" in derived
+
+    # the /v1 suffix shape is preserved, so request URLs look the same
+    inference = namespace["DEFAULT_NASTECH_INFERENCE_URL"]
+    assert str(inference).endswith("/v1")
+    assert f"{inference}/models".endswith("/v1/models")
 
 
 def test_reconcile_dead_api_defaults_honours_configured_env(tmp_path, monkeypatch):

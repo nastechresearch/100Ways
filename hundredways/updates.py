@@ -4524,8 +4524,11 @@ def _reconcile_gateway_plugin_gate_native_ticket(dst: str) -> bool:
 # the assets worker ``nastech-assets.nastechresearch.workers.dev`` is real),
 # and inventing a host is forbidden, so the correct behaviour is FAIL-CLOSED:
 # read the endpoint from the environment, and when it is absent hand back a
-# sentinel that raises an explicit, actionable error the moment anything
-# formats it.  What it must never do is silently dial a dead host.
+# value that no resolver can answer (an RFC 2606 ``.invalid`` origin naming the
+# variable to set).  What it must never do is silently dial a dead host -- and
+# what it must never do either is raise while it is merely stringified, which
+# takes a whole consumer down instead of failing one request (see the block
+# below).
 _DEAD_PAGES_SUFFIXES = (".nastechresearch.github.io", ".nastechresearch.com")
 
 # An assignment line whose NAME says it is a default (``DEFAULT_*_URL``,
@@ -4546,70 +4549,46 @@ _ENDPOINT_GUARD_BLOCK = '''# Post-brand reconciliation: FAIL-CLOSED API defaults
 # operates no portal/inference/welcome API, and a GitHub Pages subdomain can
 # never complete TLS (the certificate carries only `*.github.io`, one label),
 # so the literal this replaces is an origin nobody can reach.  The default is
-# therefore read from the environment; when it is absent the value is a
-# sentinel that raises an actionable error on first use instead of silently
-# sending credentials to a host that cannot answer.
+# therefore read from the environment; when the variable is absent the value
+# names an RFC 2606 `.invalid` origin instead, which no resolver can answer, so
+# the dead origin is never used and a request fails at DNS with the variable to
+# set visible in the host name.
+#
+# That value must stay safe to STRINGIFY, format and strip: real consumers
+# build their authorize/token/JWKS URLs from these constants while they
+# register, and a default whose ``str()`` raised disabled the whole
+# dashboard-auth provider rather than failing one request
+# (nastech-agent#157, 2026-10-17).
 import os as _nastech_endpoint_env
 
 
 def _nastech_endpoint_default(env: str, constant: str, dead_default: str):
-    """Operator-configured endpoint, else a default that fails when used."""
+    """Operator-configured endpoint, else an unconfigured, unresolvable origin.
+
+    ``constant`` is carried so a generated call site records which branded
+    default it replaced.
+    """
     configured = _nastech_endpoint_env.environ.get(env, "").strip().rstrip("/")
     if configured:
         return configured
+    path = dead_default.split("://", 1)[-1].partition("/")[2]
+    label = env.lower().replace("_", "-") or "endpoint"
     return _NastechUnconfiguredEndpoint(
-        f"{constant} is not configured: Nastech operates no portal, inference "
-        f"or welcome API, and the branded default {dead_default} is "
-        f"unreachable (a *.github.io subdomain has no certificate SAN). Set "
-        f"{env} to the base URL you actually operate; this default refuses "
-        f"to be used silently."
+        f"https://{label}.invalid" + (f"/{path}" if path else "")
     )
 
 
 class _NastechUnconfiguredEndpoint(str):
-    """Unconfigured endpoint: importable, but unusable as a URL on purpose.
+    """Unconfigured endpoint: a real string, at a host that can never resolve.
 
-    Truth tests report "not configured"; formatting, concatenation, ``str()``
-    and the strip helpers raise with the actionable message rather than
-    yielding a URL nobody can reach.
+    Falsy, so ``value or fallback`` keeps working; never raising, because
+    logging and URL construction stringify the default while a provider is
+    registering; and unresolvable, so nothing is ever sent to a host that
+    cannot answer instead of the branded dead origin.
     """
-
-    __slots__ = ("_failure",)
-
-    def __new__(cls, failure):
-        obj = str.__new__(cls, "")
-        obj._failure = failure
-        return obj
-
-    def _fail(self):
-        raise RuntimeError(self._failure)
 
     def __bool__(self):
         return False
-
-    def __repr__(self):
-        return "<unconfigured endpoint>"
-
-    def __str__(self):
-        self._fail()
-
-    def __format__(self, spec):
-        self._fail()
-
-    def __add__(self, other):
-        self._fail()
-
-    def __radd__(self, other):
-        self._fail()
-
-    def strip(self, *args, **kwargs):
-        self._fail()
-
-    def rstrip(self, *args, **kwargs):
-        self._fail()
-
-    def lstrip(self, *args, **kwargs):
-        self._fail()
 
 
 '''
