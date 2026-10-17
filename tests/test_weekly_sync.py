@@ -239,6 +239,63 @@ def test_reconcile_nested_lockfile_roots_repairs_branded_identity(tmp_path):
     assert audit_nested_lockfiles(str(tmp_path)) == []
 
 
+def test_owned_asset_audit_reads_the_engine_registry_not_the_product(tmp_path):
+    """The registry lives in 100Ways: the branded tree is never searched for it."""
+    from hundredways.weekly_sync import audit_owned_assets
+
+    engine = tmp_path / "100ways" / "config" / "owned-assets"
+    engine.mkdir(parents=True)
+    (engine / "banner.png").write_bytes(b"OUR-BANNER-BYTES")
+    (engine / "manifest.json").write_text(
+        json.dumps({"assets/banner.png": "banner.png"})
+    )
+    branded = tmp_path / "branded"
+    (branded / "assets").mkdir(parents=True)
+    (branded / "assets" / "banner.png").write_bytes(b"OUR-BANNER-BYTES")
+
+    assert audit_owned_assets(str(branded), str(engine)) == []
+
+    (branded / "assets" / "banner.png").write_bytes(b"STALE-FORK-BYTES")
+    issues = audit_owned_assets(str(branded), str(engine))
+    assert [i.code for i in issues] == ["asset-mismatch"]
+
+
+def test_owned_asset_audit_never_passes_silently_without_a_registry(tmp_path):
+    """A missing registry is a hard blocker, not a silent "nothing to check"."""
+    from hundredways.weekly_sync import audit_owned_assets
+
+    branded = tmp_path / "branded"
+    branded.mkdir()
+
+    issues = audit_owned_assets(str(branded))
+
+    assert [i.code for i in issues] == ["owned-assets-registry-missing"]
+    assert issues[0].path == str(branded / "config" / "owned-assets")
+
+
+def test_visual_audit_uses_the_engine_registry_not_the_product_tree(tmp_path):
+    from hundredways.weekly_sync import audit_visual_assets
+
+    engine = tmp_path / "100ways" / "config" / "owned-assets"
+    engine.mkdir(parents=True)
+    (engine / "banner.png").write_bytes(b"IDENTICAL-BANNER")
+    (engine / "manifest.json").write_text(
+        json.dumps({"assets/banner.png": "banner.png"})
+    )
+    upstream = tmp_path / "upstream"
+    (upstream / "art").mkdir(parents=True)
+    (upstream / "art" / "banner.png").write_bytes(b"IDENTICAL-BANNER")
+    branded = tmp_path / "branded"
+    (branded / "assets").mkdir(parents=True)
+    (branded / "assets" / "banner.png").write_bytes(b"IDENTICAL-BANNER")
+
+    # the branded tree carries no registry of its own; the engine root drives it
+    issues = audit_visual_assets(str(branded), str(upstream), str(engine))
+
+    assert [i.code for i in issues] == ["asset-exact-upstream"]
+    assert issues[0].severity == "block"
+
+
 def test_gate_blockers_explain_freshness_failure():
     report = WeeklyFullSyncReport("sha", "", 0, 0, 0, 0, freshness_ok=False)
 

@@ -121,6 +121,7 @@ def _replay_fork_preservation(
         obsolete_upstream_paths=delta.obsolete_mapped,
         owned_paths=set(owned.mapping) if owned else set(),
         allow_unclassified_fork_files=bool(baseline_sha),
+        owned_targets_materialized=bool(owned and owned.count),
     )
 
 
@@ -230,7 +231,7 @@ def verify_final_candidate(
     }
     allowed = set(allowed_extra_paths) | _REPORT_PATHS
     for path in sorted(candidate_paths - expected_paths):
-        if path in allowed or path.startswith("config/owned-assets/"):
+        if path in allowed:
             continue
         issues.append(
             ConformanceIssue(
