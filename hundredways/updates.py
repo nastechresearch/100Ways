@@ -2482,13 +2482,33 @@ def _reconcile_preserved_brand_text(dst: str, preserved: list[str]) -> list[str]
 # worker name (``nastech-assets``, the ``*.workers.dev`` host the update reader
 # resolves) and the entry point (``index.js``) -- and keep the ``[previews]``
 # block the build enables.
+#
+# The same stale snapshot also replays the *code* and the *bindings*.  The live
+# Worker (version d72c7b1b) serves release artifacts from the R2 bucket bound as
+# ``R2`` and channel records from the KV namespace, but the fork's config
+# declared only KV and its handler looked the key up verbatim.  A verbatim key
+# misses apt's percent-encoded ``~`` (``%7e``) and answers 404 for an object
+# published seconds earlier, and a KV-only config 404s every artifact -- so pin
+# the R2 binding in the config and pin the decode + R2-first handler in the
+# entry point.  Upstream ships no such worker, so these files are fork-only and
+# ``preserve_fork_files`` carries them verbatim; the reconciles below keep a
+# replay from silently reverting them.
 
 _ASSETS_WORKER_WRANGLER_REL = "scripts/cloudflare/assets-worker/wrangler.toml"
+_ASSETS_WORKER_INDEX_REL = "scripts/cloudflare/assets-worker/index.js"
 _ASSETS_WORKER_NAME = "nastech-assets"
 _ASSETS_WORKER_MAIN = "index.js"
 _ASSETS_WORKER_NAME_RE = re.compile(r"(?m)^name\s*=.*$")
 _ASSETS_WORKER_MAIN_RE = re.compile(r"(?m)^main\s*=.*$")
 _ASSETS_WORKER_PREVIEWS_RE = re.compile(r"(?m)^\[previews\]\s*$")
+_ASSETS_WORKER_R2_RE = re.compile(r"(?m)^\[\[r2_buckets\]\]\s*$")
+# The bucket name and the binding name must match the live Worker, which the
+# handler reads as ``env.R2``; they are not secrets, so they live here.
+_ASSETS_WORKER_R2_BLOCK = (
+    "[[r2_buckets]]\n"
+    'binding = "R2"\n'
+    'bucket_name = "nastech-assets"\n'
+)
 
 
 def _reconcile_assets_worker_config(dst: str, preserved: list[str]) -> list[str]:
@@ -2520,6 +2540,13 @@ def _reconcile_assets_worker_config(dst: str, preserved: list[str]) -> list[str]
     fixed = _ASSETS_WORKER_MAIN_RE.sub(f'main = "{_ASSETS_WORKER_MAIN}"', fixed, count=1)
     if not _ASSETS_WORKER_PREVIEWS_RE.search(fixed):
         fixed = fixed.rstrip("\n") + "\n\n[previews]\n"
+    if not _ASSETS_WORKER_R2_RE.search(fixed):
+        # A config without the R2 binding deploys a KV-only Worker that 404s
+        # every release artifact (KV holds only channel records).  Insert the
+        # binding before ``[previews]``, which the branch above just guaranteed.
+        previews = _ASSETS_WORKER_PREVIEWS_RE.search(fixed)
+        at = previews.start() if previews else len(fixed)
+        fixed = fixed[:at] + _ASSETS_WORKER_R2_BLOCK + "\n" + fixed[at:]
     if fixed == text:
         return []
     try:
@@ -2527,6 +2554,141 @@ def _reconcile_assets_worker_config(dst: str, preserved: list[str]) -> list[str]
             fh.write(fixed)
     except OSError:
         return []
+    return [rel]
+
+
+class AssetsWorkerIndexError(ValueError):
+    """The fork's Worker entry point no longer matches a shape this reconcile
+    knows how to upgrade.
+
+    A ``ValueError`` on purpose: :mod:`hundredways.conformance` reports it as a
+    conformance issue instead of aborting the run, while the ``reconcile`` stage
+    still marks the update failed -- the same contract as
+    :class:`ChannelReaderUserAgentError`.
+    """
+
+
+# Fixed point for the Worker handler reconcile: the decoder AND the R2 lookup
+# must both be present.  Anything else is either the pre-fix shape (the
+# verbatim-key, KV-only releases block below) or a shape upstream moved, which
+# must fail loudly rather than ship a reader that 404s every artifact.
+_ASSETS_WORKER_DECODE_MARKER = "function decodeChannelKey("
+_ASSETS_WORKER_R2_MARKER = "const object = await env.R2.get(key);"
+_ASSETS_WORKER_LANDING_ANCHOR = "const LANDING = `<!doctype html>"
+_ASSETS_WORKER_KEY_NEEDLE = r"""    // Everything under /releases/ is served from the KV store (publication
+    // target). Unknown objects answer a protocol-correct 404, never a redirect.
+    if (path.startsWith("/releases/")) {
+      const key = path.replace(/^\/+/, "");
+      const value = await env.NASTECH_ASSETS.get(key, "text");
+"""
+_ASSETS_WORKER_DECODE_HELPER = r"""// apt (and every conformant HTTP client) percent-encodes RFC 3986 sub-delimiters
+// such as "~" in the request path, so a fetch for an object whose stored key
+// contains "~" -- the Termux lane's
+// `nastech-agent_0.21.5~canary.<stamp>-1_aarch64.deb`, for one -- arrives here as
+// "%7e".  A verbatim key lookup misses on that and answers 404 even though
+// publication wrote the object seconds earlier.  Decode exactly ONE level, and
+// only after proving the decoded key cannot escape this Worker's key space:
+// decoding must never add a path separator ("%2f"/"%2F"), smuggle a backslash
+// ("%5c"), or yield a "." / ".." segment ("%2e%2e").  A request that fails the
+// guard is malformed or hostile, not a known object, so it returns null and the
+// caller answers 400.
+function decodeChannelKey(path) {
+  const raw = path.replace(/^\/+/, "");
+  let key;
+  try {
+    key = decodeURIComponent(raw);
+  } catch {
+    return null; // truncated or invalid escape ("%", "%e", "%zz")
+  }
+  if (
+    key.includes("\\") || // %5c smuggled a separator
+    key.includes("%") || // second-encoded probe (%252e) -- no key carries "%"
+    key.split("/").length !== raw.split("/").length || // %2f forged a segment
+    key.split("/").some((segment) => segment === "." || segment === "..")
+  ) {
+    return null;
+  }
+  return key;
+}
+
+"""
+_ASSETS_WORKER_RELEASES_BLOCK = r"""    // Everything under /releases/ is served from the object stores (publication
+    // target): release artifacts (the Termux apt pool, tag bundles) live in the
+    // R2 bucket, channel records live in KV.  Unknown objects answer a
+    // protocol-correct 404, never a redirect.
+    if (path.startsWith("/releases/")) {
+      // Decode one level before the lookup: apt sends "~" as "%7e" and a
+      // verbatim key would miss.  decodeChannelKey refuses any escape that
+      // could leave the key space, so a rejected path is a client error -- and
+      // the single validated key feeds both stores, so the guard cannot be
+      // bypassed by switching stores.
+      const key = decodeChannelKey(path);
+      if (key === null) {
+        return json({ error: "BadRequest", path }, 400);
+      }
+
+      // Artifacts live in R2; R2 wins when a key exists in both stores.  The
+      // binding is checked so a config that forgets it -- which is exactly how
+      // artifact serving broke once -- falls back to KV instead of throwing a
+      // 500 on every artifact read.
+      if (env.R2) {
+        const object = await env.R2.get(key);
+        if (object !== null) {
+          return new Response(object.body, {
+            headers: {
+              "content-type":
+                object.httpMetadata?.contentType || "application/octet-stream",
+              "cache-control": "no-cache",
+              "access-control-allow-origin": "*",
+            },
+          });
+        }
+      }
+
+      const value = await env.NASTECH_ASSETS.get(key, "text");
+"""
+
+
+def _reconcile_assets_worker_index(dst: str, preserved: list[str]) -> list[str]:
+    """Upgrade the fork-local Worker entry point to decode the key and read R2.
+
+    ``scripts/cloudflare/assets-worker`` is fork-only, so ``preserve_fork_files``
+    copies it in verbatim.  An update branch cut from a fork snapshot taken
+    before the Worker was fixed replays the verbatim-key, KV-only handler and
+    silently re-breaks the Termux lane (apt sends ``~`` as ``%7e``, the verbatim
+    key misses, the object 404s).  Insert ``decodeChannelKey`` and replace the
+    KV-only releases block with the R2-first, KV-fallback block.  A second pass
+    is a no-op (both markers present); a file carrying neither shape raises
+    :class:`AssetsWorkerIndexError` so a moved block fails at sync time rather
+    than shipping.  Returns the changed rel paths.
+    """
+    rel = _ASSETS_WORKER_INDEX_REL
+    if rel not in (preserved or []):
+        return []
+    text = _reconcile_budget_read(dst, rel)
+    if text is None:
+        return []
+    if _ASSETS_WORKER_DECODE_MARKER in text and _ASSETS_WORKER_R2_MARKER in text:
+        return []  # already fixed: a second pass is a no-op
+    if (
+        _ASSETS_WORKER_KEY_NEEDLE not in text
+        or _ASSETS_WORKER_LANDING_ANCHOR not in text
+    ):
+        raise AssetsWorkerIndexError(
+            f"{rel} carries neither the pre-fix Worker block nor the "
+            "decodeChannelKey + R2 fix, so the Worker reconcile no longer "
+            "applies. Without it the branded tree answers 404 for every Termux "
+            "artifact (apt sends '~' as '%7e') and every R2-hosted release. "
+            "Update the needles in _reconcile_assets_worker_index to the fork's "
+            "new shape, then re-run."
+        )
+    fixed = text.replace(
+        _ASSETS_WORKER_LANDING_ANCHOR,
+        _ASSETS_WORKER_DECODE_HELPER + _ASSETS_WORKER_LANDING_ANCHOR,
+        1,
+    )
+    fixed = fixed.replace(_ASSETS_WORKER_KEY_NEEDLE, _ASSETS_WORKER_RELEASES_BLOCK, 1)
+    _reconcile_budget_write(dst, rel, fixed)
     return [rel]
 
 
@@ -3488,6 +3650,160 @@ def _reconcile_windows_boot_lifecycle_race(dst: str) -> bool:
     return True
 
 
+class WindowsRealGitLocateError(ValueError):
+    """``_locate_real_git`` no longer matches the shape the robustness patch needs.
+
+    A ``ValueError`` on purpose: :mod:`hundredways.conformance` reports it as a
+    conformance issue instead of aborting the run, while the ``reconcile`` stage
+    still marks the update failed (``not any(s.status == "fail" ...)``).  The
+    trampoline swap is the only thing that keeps a Git-for-Windows install whose
+    ``bin\\git.exe`` shim cannot re-exec from silently degrading to the ZIP
+    path, so a moved shape must fail the sync rather than ship unpatched.
+    """
+
+
+def _reconcile_windows_real_git_locate(dst: str) -> bool:
+    """Make ``_locate_real_git`` independent of the git-core path.
+
+    The trampoline swap (``_ensure_non_trampoline_git``) only fires when
+    ``_locate_real_git`` finds a real binary, and that function used to look in
+    exactly one place per arch: ``<arch>\\libexec\\git-core\\git.exe``.  Git for
+    Windows 2.56 (the current ``windows-latest`` image, 20261007.264.1) no
+    longer ships that copy, so the function returned ``None`` on a perfectly
+    healthy install and every Windows update fell back to the ZIP path — an
+    environmental red on the fork's CI, not a code regression.
+
+    Enumerate every layout Git for Windows has shipped (the per-arch ``bin``
+    dir, the legacy ``libexec\\git-core``, the flat ``bin``/``cmd`` wrappers,
+    and the managed PortableGit tree) and let the fork-bomb probe — not the
+    path — decide which one is real, so an unknown future layout still
+    resolves.  ``nastech_cli/`` is upstream-owned, so this patch is applied out
+    of band on every sync; the injected block is its own fixed point, so a
+    second run is a no-op.  Raises :class:`WindowsRealGitLocateError` when the
+    function exists but carries neither the old candidate list nor the new
+    shape (upstream reformatted it), so the update fails then instead of
+    shipping an unpatched locator.
+    """
+    rel = "nastech_cli/update_cmd_git.py"
+    text = _reconcile_budget_read(dst, rel)
+    if text is None:
+        return False
+    marker = "let the fork-bomb probe"
+    if marker in text:
+        # Already applied: the second pass is a no-op.
+        return False
+    needle = (
+        "    candidates = [\n"
+        '        Path(base) / "Git" / arch / "libexec" / "git-core" / "git.exe"\n'
+        "        for base in (r\"C:\\Program Files\", r\"C:\\Program Files (x86)\")\n"
+        '        for arch in ("clangarm64", "mingw64", "mingw32")\n'
+        "    ] + _portable_git_candidates()\n"
+    )
+    if needle not in text:
+        raise WindowsRealGitLocateError(
+            f"{rel} carries neither the legacy libexec-only candidate list nor "
+            f"{marker!r}, so the real-git locator patch no longer applies. "
+            "Update the needle in _reconcile_windows_real_git_locate to "
+            "upstream's new shape, then re-run."
+        )
+    replacement = (
+        "    # Every layout Git for Windows has shipped: enumerate them all and\n"
+        "    # let the fork-bomb probe -- not the path -- decide which one is real,\n"
+        "    # so an unknown future layout still resolves instead of silently\n"
+        "    # degrading to the ZIP path. The flat bin/cmd entries are the ~46KB\n"
+        "    # trampoline shims; the probe rejects them.\n"
+        "    candidates = _portable_git_candidates()\n"
+        "    for base in (r\"C:\\Program Files\", r\"C:\\Program Files (x86)\"):\n"
+        "        git_root = Path(base) / \"Git\"\n"
+        "        if not git_root.is_dir():\n"
+        "            continue\n"
+        "        for pattern in (\n"
+        "            \"bin/git.exe\",\n"
+        "            \"cmd/git.exe\",\n"
+        "            \"*/bin/git.exe\",\n"
+        "            \"*/libexec/git-core/git.exe\",\n"
+        "        ):\n"
+        "            with suppress(OSError):\n"
+        "                candidates.extend(sorted(git_root.glob(pattern)))\n"
+    )
+    _reconcile_budget_write(dst, rel, text.replace(needle, replacement, 1))
+    return True
+
+
+def _reconcile_sync_wait_budgets(dst: str) -> list[str]:
+    """Widen the wall-clock budgets upstream's new tests assume a fast host meets.
+
+    The 7bda2a33 upstream sync adds four probes whose wait budgets assume an
+    idle machine, so they go red on the fork's free 4-core runner (and any
+    constrained host) even though they make progress: a cross-thread redirect
+    event (2 s), a detached-child exec poll (10 s), the gateway rpc bound
+    (20 s), and the tmux TUI settle window (45 s).  Each is a bounded poll, not
+    a deadlock, so a larger budget removes the false red instead of masking a
+    hang -- the red is the timeout, and the test still fails loudly if the
+    behaviour never arrives.  Every edit is an exact-literal replacement to the
+    fork's standard-runner value, so a normalised tree is a fixed point.  The
+    sibling ``tests/tui_gateway/test_legacy_fallback_ticket_profile_verbs.py``
+    red is a real defect (the connectors path never reaches the patched
+    ``managed_client``), not a budget, so it is deliberately NOT touched here.
+    """
+    fixed: list[str] = []
+
+    rel = "tests/agent/test_run_agent.py"
+    text = _reconcile_budget_read(dst, rel)
+    if text is not None:
+        updated = text.replace(
+            "                deadline = time.time() + 2\n",
+            "                deadline = time.time() + 15\n",
+        ).replace(
+            "            assert entered.wait(timeout=2)\n",
+            "            assert entered.wait(timeout=15)\n",
+        ).replace(
+            "            worker.join(timeout=5)\n",
+            "            worker.join(timeout=30)\n",
+        )
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+
+    rel = "tests/test_session_daemon_reaper.py"
+    text = _reconcile_budget_read(dst, rel)
+    if text is not None:
+        updated = text.replace(
+            "[basetemp, elsewhere])), timeout=10, what='both detached children started')",
+            "[basetemp, elsewhere])), timeout=30, what='both detached children started')",
+        )
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+
+    rel = "tests/gateway/fixtures/local_recovery_probe.py"
+    text = _reconcile_budget_read(dst, rel)
+    if text is not None:
+        updated = text.replace(
+            "    async with asyncio.timeout(20):",
+            "    async with asyncio.timeout(60):",
+        )
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+
+    rel = "tests/nastech_cli/test_gateway_chat_native.py"
+    text = _reconcile_budget_read(dst, rel)
+    if text is not None:
+        updated = text.replace(
+            "capture_output=True, text=True, timeout=10, check=False)",
+            "capture_output=True, text=True, timeout=30, check=False)",
+        ).replace(
+            "def until(text, timeout=45):",
+            "def until(text, timeout=90):",
+        )
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+
+    return fixed
+
+
 def _reconcile_install_ps1_store_guard_test(dst: str) -> bool:
     """Collapse host-wrap whitespace before matching the install refusal.
 
@@ -3874,6 +4190,82 @@ def _reconcile_plugin_catalog_sync_exemption(dst: str) -> bool:
     return True
 
 
+class UnpinnedSourceError(ValueError):
+    """A known engine workflow stopped matching either the bare or the pinned form.
+
+    A ``ValueError`` on purpose: ``hundredways.conformance`` reports it as a
+    conformance issue instead of aborting the whole run, while the ``reconcile``
+    stage still marks the update failed.
+    """
+
+
+# The engine consumes exactly one third-party repository: NousResearch's Hermes
+# agent.  A bare ``git clone <url>`` follows whatever the remote's default branch
+# points at when the run happens, so whoever can write to that remote can change
+# the revision this CI consumes without a single line changing in this
+# repository.  Each engine-owned workflow therefore names the ref it consumes,
+# and the pins live in one table so a copy of one of those workflows inside a
+# synced tree (fork preservation, or upstream later adopting the same file name)
+# is repaired to the audited ref instead of silently tracking a mutable branch.
+#
+# ``main`` is the correct ref here, not a commit SHA.  ``commit_stream.py`` must
+# count NEW upstream commits between the merged NasTech baseline and live
+# upstream HEAD (``rev-list --count baseline..HEAD``) and ``stage-pipeline``
+# brands live upstream HEAD and records that SHA in ``manifest.json`` for
+# provenance.  A frozen revision would freeze ``pending_commits`` and disable
+# the threshold trigger that starts a sync, so naming the branch keeps the flow
+# working while making a silent default-branch flip a loud clone failure.
+_PINNED_SOURCE_CLONES: tuple[tuple[str, str, str], ...] = (
+    (
+        ".github/workflows/stage-commit-stream.yml",
+        "git clone https://github.com/NousResearch/hermes-agent.git upstream-agent\n",
+        "git clone --branch main https://github.com/NousResearch/hermes-agent.git upstream-agent\n",
+    ),
+    (
+        ".github/workflows/pages.yml",
+        "git clone https://github.com/NousResearch/hermes-agent.git upstream-agent\n",
+        "git clone --branch main https://github.com/NousResearch/hermes-agent.git upstream-agent\n",
+    ),
+    (
+        ".github/workflows/stage-pipeline.yml",
+        'if git -c http.version=HTTP/1.1 clone "$HUNDREDWAYS_HERMES_URL" upstream-agent; then\n',
+        'if git -c http.version=HTTP/1.1 clone --branch main "$HUNDREDWAYS_HERMES_URL" upstream-agent; then\n',
+    ),
+)
+
+
+def _reconcile_pinned_source_clones(dst: str) -> list[str]:
+    """Name the consumed ref on every external clone in the engine workflows.
+
+    Root cause: these workflows cloned the Hermes repository with no
+    ``--branch``, so the revision they consumed was whatever that remote's
+    default branch happened to be at run time — an unpinned, mutable supply-chain
+    input that upstream can retarget with no diff on our side.
+
+    Idempotent by the needle guard: the pinned text is the marker, so once a
+    workflow carries it the bare needle is gone and the function is a no-op.
+    A file carrying neither form has changed shape, so the reconciliation cannot
+    reason about it and fails loudly instead of silently skipping the pin.
+    """
+    fixed: list[str] = []
+    for rel, bare, pinned in _PINNED_SOURCE_CLONES:
+        text = _reconcile_budget_read(dst, rel)
+        if text is None:
+            # Engine-owned workflow absent from this tree (a branded tree is
+            # built from the upstream source, which does not ship these files).
+            continue
+        if pinned in text:
+            continue
+        if bare not in text:
+            raise UnpinnedSourceError(
+                f"{rel}: neither the unpinned nor the pinned external clone is present; "
+                "re-read the workflow and update _PINNED_SOURCE_CLONES"
+            )
+        _reconcile_budget_write(dst, rel, text.replace(bare, pinned, 1))
+        fixed.append(rel)
+    return fixed
+
+
 class ChannelReaderUserAgentError(ValueError):
     """Upstream's channel reader no longer matches the shape the UA patch needs.
 
@@ -3936,6 +4328,732 @@ def _reconcile_channel_reader_user_agent(dst: str) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# Shared-gateway approval-gate ports (upstream eea7c437eb)
+# ---------------------------------------------------------------------------
+# Upstream's eea7c437eb ("fix(security): honour allowlist removals and the plugin
+# gate on the shared gateway") closes two approval gates that stopped holding once
+# one long-lived gateway daemon owned every local session: a hand removal from
+# ``command_allowlist`` never reached the running process, and the plugin runtime
+# gate skipped Desktop's native-ticket requests.  The fork's sync base predates
+# that commit, and ``brand_tree`` rewrites every upstream-owned file on each sync,
+# so a fork-local edit of ``tools/approval.py`` / ``nastech_cli/web_server.py``
+# would be clobbered.  Both ports therefore live here.  Each recognises upstream's
+# own post-fix text and becomes a no-op, so the fix survives the sync that
+# eventually carries it.
+
+_ALLOWLIST_RELOAD_HELPER = "def _sync_permanent_from_disk(approved: set, key: str) -> None:"
+_ALLOWLIST_RELOAD_CALLSITE = "    _sync_permanent_from_disk(approved, key)"
+
+_ALLOWLIST_RELOAD_NEEDLE = '''    from nastech_constants import get_nastech_home_override, nastech_home_key
+    if get_nastech_home_override() is None:
+        return _permanent_approved
+    home_key = nastech_home_key()
+    approved = _permanent_approved_by_home.get(home_key)
+    if approved is None:
+        try:
+            approved = _read_permanent_allowlist()
+        except Exception as e:
+            logger.warning("Failed to load permanent allowlist: %s", e)
+            approved = set()
+        _permanent_approved_by_home[home_key] = approved
+    return approved
+'''
+
+_ALLOWLIST_RELOAD_REPLACEMENT = '''    from nastech_constants import get_nastech_home_override, nastech_home_key
+    if get_nastech_home_override() is None:
+        approved, key = _permanent_approved, ""
+    else:
+        key = nastech_home_key()
+        approved = _permanent_approved_by_home.setdefault(key, set())
+    _sync_permanent_from_disk(approved, key)
+    return approved
+
+
+def _sync_permanent_from_disk(approved: set, key: str) -> None:
+    """Apply hand edits to ``command_allowlist`` made since the last sync. The gateway daemon
+    outlives any one session, so an entry the operator removed must stop being honoured now, not
+    at restart. Only the on-disk delta is applied: approvals this process made but could not save
+    survive. The config read is cached on the file signature. Callers hold ``_lock``."""
+    try:
+        on_disk = _read_permanent_allowlist()
+    except Exception as e:
+        logger.warning("Failed to load permanent allowlist: %s", e, exc_info=True)
+        return
+    baseline = _permanent_baseline_by_home.get(key, set())
+    if on_disk == baseline:
+        return
+    approved.difference_update(baseline - on_disk)
+    approved.update(on_disk - baseline)
+    _permanent_baseline_by_home[key] = on_disk
+'''
+
+_ALLOWLIST_RELOAD_DOC_NEEDLE = (
+    "    honouring them. Nothing re-reads the file on the approval hot path."
+)
+_ALLOWLIST_RELOAD_DOC_REPLACEMENT = (
+    "    honouring them (``_sync_permanent_from_disk`` does the same on every check)."
+)
+
+
+class GatewayAllowlistReloadError(ValueError):
+    """``tools/approval.py`` no longer matches the shape the live-reload port needs.
+
+    A ``ValueError`` on purpose: :mod:`hundredways.conformance` reports it as a
+    conformance issue instead of aborting the whole run, while the ``reconcile``
+    stage still marks the update failed (``not any(s.status == "fail" ...)``).
+    Skipping the port silently would ship a fork whose shared gateway keeps
+    auto-approving a pattern the operator deleted from ``command_allowlist``
+    until it restarts — e.g. a standing ``rm -rf`` that no longer prompts.
+    """
+
+
+def _reconcile_gateway_allowlist_live_reload(dst: str) -> bool:
+    """Re-read ``command_allowlist`` on every approval check, not only at import.
+
+    ``_permanent_set`` is the single door every approval check goes through; on a
+    long-lived gateway daemon it must apply the on-disk delta a hand edit made
+    since the last check, or a withdrawn standing approval keeps matching until
+    the process restarts.  Ports upstream's ``_sync_permanent_from_disk`` helper
+    and its call site.  Returns whether the file changed: upstream's own text is
+    the fixed point (a present helper is a no-op), and a file carrying neither
+    shape raises :class:`GatewayAllowlistReloadError` rather than shipping the hole.
+    """
+    rel = "tools/approval.py"
+    text = _reconcile_budget_read(dst, rel)
+    if text is None:
+        return False
+    if _ALLOWLIST_RELOAD_HELPER in text:
+        if _ALLOWLIST_RELOAD_CALLSITE in text:
+            # Upstream landed the fix, or an earlier pass applied this port.
+            return False
+        raise GatewayAllowlistReloadError(
+            f"{rel} defines {_ALLOWLIST_RELOAD_HELPER} but never calls it, so the "
+            "shared gateway would still auto-approve a withdrawn allowlist entry. "
+            "Re-check _permanent_set against upstream."
+        )
+    if _ALLOWLIST_RELOAD_NEEDLE not in text:
+        raise GatewayAllowlistReloadError(
+            f"{rel} matches neither the pre-fix _permanent_set body nor "
+            f"{_ALLOWLIST_RELOAD_HELPER}, so the live-reload port no longer applies. "
+            "Update _ALLOWLIST_RELOAD_NEEDLE/_ALLOWLIST_RELOAD_REPLACEMENT to "
+            "upstream's new shape, then re-run."
+        )
+    updated = text.replace(_ALLOWLIST_RELOAD_NEEDLE, _ALLOWLIST_RELOAD_REPLACEMENT, 1)
+    # The save docstring described the old "nothing re-reads the hot path" state;
+    # reword it so the file reads true.  Best-effort: if upstream reworded the
+    # sentence, the security-relevant body change above still lands.
+    updated = updated.replace(
+        _ALLOWLIST_RELOAD_DOC_NEEDLE, _ALLOWLIST_RELOAD_DOC_REPLACEMENT, 1
+    )
+    _reconcile_budget_write(dst, rel, updated)
+    return True
+
+
+_PLUGIN_GATE_AUTH_HEAD = '        getattr(request.state, "token_authenticated", False)'
+_PLUGIN_GATE_NATIVE_LINE = '        or getattr(request.state, "native_http_principal", None)'
+_PLUGIN_GATE_AUTH_REQUIRED = '        or getattr(request.app.state, "auth_required", False)'
+
+_PLUGIN_GATE_NEEDLE = f"{_PLUGIN_GATE_AUTH_HEAD}\n{_PLUGIN_GATE_AUTH_REQUIRED}"
+_PLUGIN_GATE_REPLACEMENT = (
+    f"{_PLUGIN_GATE_AUTH_HEAD}\n{_PLUGIN_GATE_NATIVE_LINE}\n{_PLUGIN_GATE_AUTH_REQUIRED}"
+)
+# Recognising upstream's own post-fix condition (not the whole ``if``) keeps the
+# no-op working when upstream reformats the surrounding expression.
+_PLUGIN_GATE_MARKER = f"{_PLUGIN_GATE_NATIVE_LINE}\n{_PLUGIN_GATE_AUTH_REQUIRED}"
+
+_PLUGIN_GATE_COMMENT_NEEDLE = "    # be used as a plugin-name oracle.\n"
+_PLUGIN_GATE_COMMENT_REPLACEMENT = (
+    "    # be used as a plugin-name oracle. Desktop authenticates with a native ticket.\n"
+)
+
+
+class GatewayPluginGateError(ValueError):
+    """``nastech_cli/web_server.py`` no longer matches the native-ticket gate port.
+
+    A ``ValueError`` on purpose for the same reason as
+    :class:`GatewayAllowlistReloadError`: conformance reports it while the
+    reconcile stage fails the update.  Skipping it silently would leave Desktop's
+    native-ticket requests reaching a plugin the user disabled until restart.
+    """
+
+
+def _reconcile_gateway_plugin_gate_native_ticket(dst: str) -> bool:
+    """Gate native-ticket requests on the shared gateway's plugin API routes.
+
+    ``_plugin_api_runtime_gate`` enforces ``plugins.enabled``/``plugins.disabled``
+    per request because a plugin disabled while the daemon runs keeps its router
+    mounted until restart.  It only entered that check for a session/query token
+    or an OAuth-gated server, so Desktop — which authenticates with a native
+    ticket (``request.state.native_http_principal``), not a session token —
+    reached a disabled plugin's ``/api/plugins/<name>/`` routes until restart,
+    weakening the #46435 consent gate.  Ports upstream's extra condition.
+    """
+    rel = "nastech_cli/web_server.py"
+    text = _reconcile_budget_read(dst, rel)
+    if text is None:
+        return False
+    if _PLUGIN_GATE_MARKER in text:
+        # Upstream landed the fix, or an earlier pass applied this port.
+        return False
+    if _PLUGIN_GATE_NEEDLE not in text:
+        raise GatewayPluginGateError(
+            f"{rel} matches neither the pre-fix plugin gate nor its native-ticket "
+            "form, so the plugin-gate port no longer applies. Update "
+            "_PLUGIN_GATE_NEEDLE/_PLUGIN_GATE_REPLACEMENT to upstream's new shape, "
+            "then re-run."
+        )
+    updated = text.replace(_PLUGIN_GATE_NEEDLE, _PLUGIN_GATE_REPLACEMENT, 1)
+    updated = updated.replace(
+        _PLUGIN_GATE_COMMENT_NEEDLE, _PLUGIN_GATE_COMMENT_REPLACEMENT, 1
+    )
+    _reconcile_budget_write(dst, rel, updated)
+    return True
+# Dead configuration the naive .com -> github.io substitution produced
+# ---------------------------------------------------------------------------
+
+# A GitHub Pages site can only ever serve ONE label under github.io:
+# GitHub's leaf certificate carries ``DNS:*.github.io`` (verified live
+# against portal.nastechresearch.github.io -> "no alternative certificate
+# subject name matches target host name").  So every
+# ``<sub>.nastechresearch.github.io`` origin is a permanent TLS failure, and
+# ``nastechresearch.com`` is not registered at all, so ``<sub>.nastechresearch.com``
+# is a permanent NXDOMAIN.  Neither can be a default endpoint: the sync must
+# not ship a base URL that cannot be reached.  Nastech owns no portal /
+# inference / welcome API whose address could be published truthfully (only
+# the assets worker ``nastech-assets.nastechresearch.workers.dev`` is real),
+# and inventing a host is forbidden, so the correct behaviour is FAIL-CLOSED:
+# read the endpoint from the environment, and when it is absent hand back a
+# sentinel that raises an explicit, actionable error the moment anything
+# formats it.  What it must never do is silently dial a dead host.
+_DEAD_PAGES_SUFFIXES = (".nastechresearch.github.io", ".nastechresearch.com")
+
+# An assignment line whose NAME says it is a default (``DEFAULT_*_URL``,
+# ``_*_DEFAULT_*_URL``) and whose value is one of those dead origins.
+_API_DEFAULT_LINE_RE = re.compile(
+    r'^(?P<name>_?[A-Z][A-Z0-9_]*)'
+    r'\s*=\s*(?P<q>["\'])(?P<url>https://[^"\']+)(?P=q)$',
+    re.MULTILINE,
+)
+
+_ENDPOINT_GUARD_MARK = "_NastechUnconfiguredEndpoint"
+
+# Injected verbatim ahead of the first rewritten constant.  It is plain,
+# brand-clean Python with no dependency on this engine, so the generated
+# tree stands on its own; ``os`` is aliased because the auth modules do not
+# import it and this must not rewrite their import block.
+_ENDPOINT_GUARD_BLOCK = '''# Post-brand reconciliation: FAIL-CLOSED API defaults.  Nastech
+# operates no portal/inference/welcome API, and a GitHub Pages subdomain can
+# never complete TLS (the certificate carries only `*.github.io`, one label),
+# so the literal this replaces is an origin nobody can reach.  The default is
+# therefore read from the environment; when it is absent the value is a
+# sentinel that raises an actionable error on first use instead of silently
+# sending credentials to a host that cannot answer.
+import os as _nastech_endpoint_env
+
+
+def _nastech_endpoint_default(env: str, constant: str, dead_default: str):
+    """Operator-configured endpoint, else a default that fails when used."""
+    configured = _nastech_endpoint_env.environ.get(env, "").strip().rstrip("/")
+    if configured:
+        return configured
+    return _NastechUnconfiguredEndpoint(
+        f"{constant} is not configured: Nastech operates no portal, inference "
+        f"or welcome API, and the branded default {dead_default} is "
+        f"unreachable (a *.github.io subdomain has no certificate SAN). Set "
+        f"{env} to the base URL you actually operate; this default refuses "
+        f"to be used silently."
+    )
+
+
+class _NastechUnconfiguredEndpoint(str):
+    """Unconfigured endpoint: importable, but unusable as a URL on purpose.
+
+    Truth tests report "not configured"; formatting, concatenation, ``str()``
+    and the strip helpers raise with the actionable message rather than
+    yielding a URL nobody can reach.
+    """
+
+    __slots__ = ("_failure",)
+
+    def __new__(cls, failure):
+        obj = str.__new__(cls, "")
+        obj._failure = failure
+        return obj
+
+    def _fail(self):
+        raise RuntimeError(self._failure)
+
+    def __bool__(self):
+        return False
+
+    def __repr__(self):
+        return "<unconfigured endpoint>"
+
+    def __str__(self):
+        self._fail()
+
+    def __format__(self, spec):
+        self._fail()
+
+    def __add__(self, other):
+        self._fail()
+
+    def __radd__(self, other):
+        self._fail()
+
+    def strip(self, *args, **kwargs):
+        self._fail()
+
+    def rstrip(self, *args, **kwargs):
+        self._fail()
+
+    def lstrip(self, *args, **kwargs):
+        self._fail()
+
+
+'''
+
+
+def _dead_default_host(url: str) -> bool:
+    """True when ``url`` names a host that can never answer.
+
+    Only subdomains of the two dead origins count; the apex Pages host
+    ``nastechresearch.github.io`` really does serve the docs (HTTP 200 on
+    ``/nastech-agent/``) and must stay untouched.
+    """
+    host = url.split("://", 1)[-1].split("/", 1)[0].split("?", 1)[0].lower()
+    return host.endswith(_DEAD_PAGES_SUFFIXES)
+
+
+def _api_default_replacement(name: str, url: str) -> str:
+    """The env-driven, fail-closed assignment for one default constant."""
+    env = name.lstrip("_")
+    if env.startswith("DEFAULT_"):
+        env = env[len("DEFAULT_"):]
+    return (
+        f"{name} = _nastech_endpoint_default(\n"
+        f"    env={env!r},\n"
+        f"    constant={name!r},\n"
+        f"    dead_default={url!r},\n"
+        f")"
+    )
+
+
+def _reconcile_dead_api_defaults(dst: str) -> list[str]:
+    """Replace unreachable default endpoint constants with a fail-closed one.
+
+    ``brand_tree`` plus ``_reconcile_domains`` turn every upstream
+    ``portal.`` / ``inference-api.`` / ``welcome-api.`` default into a
+    ``*.nastechresearch.github.io`` URL, and that origin cannot complete TLS
+    (GitHub's certificate has no SAN for a second label) -- so Portal login
+    and the default inference base were unusable, and a user got a raw
+    OpenSSL failure instead of a message saying what to set.  No Nastech
+    endpoint exists to map these to, so the default becomes an
+    environment-driven value that raises an explicit, actionable error while
+    unconfigured.
+
+    Returns the changed paths (empty on the second run: the dead literal is
+    gone, so the match set is empty and nothing is rewritten).
+    """
+    fixed: list[str] = []
+    for rel in _walk_files(dst):
+        if is_locked_path(rel) or is_immutable_path(rel):
+            continue
+        path = os.path.join(dst, rel)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        matches = [m for m in _API_DEFAULT_LINE_RE.finditer(text)
+                   if "DEFAULT" in m.group("name").upper()
+                   and _dead_default_host(m.group("url"))]
+        if not matches:
+            continue
+        chunks: list[str] = []
+        pos = 0
+        guard = _ENDPOINT_GUARD_MARK in text
+        for match in matches:
+            chunks.append(text[pos:match.start()])
+            if not guard:
+                chunks.append(_ENDPOINT_GUARD_BLOCK)
+                guard = True
+            chunks.append(_api_default_replacement(
+                match.group("name"), match.group("url")))
+            pos = match.end()
+        chunks.append(text[pos:])
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("".join(chunks))
+        fixed.append(rel)
+    return fixed
+
+
+# Two shapes of the same defect in SECURITY.md: the report instruction and
+# the disclosure channel.  ``github.io`` has no MX record (verified: GitHub
+# Pages serves no mail), so ``security@nastechresearch.github.io`` silently
+# swallows every vulnerability report.  The upstream mailbox is off-limits --
+# forkcheck's brand-clean gate rejects any ``nousresearch`` token in an added
+# line -- and no Nastech mail domain exists, so the mailbox is dropped in
+# favour of the GitHub Security Advisory channel, which is real and live
+# (302 to sign-in on the fork's advisory page).
+_SECURITY_MAILBOX_RE = re.compile(
+    r"security@[A-Za-z0-9.\-]+\.github\.io", re.IGNORECASE)
+_SECURITY_REPORT_INSTRUCTION_RE = re.compile(
+    r"or \*\*security@[A-Za-z0-9.\-]+\.github\.io\*\*\.")
+_SECURITY_CHANNEL_RE = re.compile(
+    r" or email correspondence with\s*\n\s*"
+    r"security@[A-Za-z0-9.\-]+\.github\.io")
+_NO_MAILBOX_REASON = (
+    "only; this fork publishes no mailbox because a `.github.io` domain "
+    "has no MX record."
+)
+
+
+def _reconcile_security_contact(dst: str) -> list[str]:
+    """Drop the undeliverable security mailbox, keep the live GHSA channel.
+
+    Security reports to ``security@nastechresearch.github.io`` are lost --
+    ``github.io`` accepts no mail -- so publishing it is worse than
+    publishing nothing: it looks like a working contact.  Rewrite the two
+    known shapes to say plainly that no mailbox is published, and replace
+    any other ``security@*.github.io`` address with the Advisory channel so
+    no undeliverable address survives anywhere in the tree.
+
+    Idempotent: after the first pass no ``security@*.github.io`` remains,
+    so the regexes find nothing and the file is left byte-identical.
+    """
+    fixed: list[str] = []
+    for rel in _walk_files(dst):
+        if is_locked_path(rel) or is_immutable_path(rel):
+            continue
+        path = os.path.join(dst, rel)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        if not _SECURITY_MAILBOX_RE.search(text):
+            continue
+        text = _SECURITY_REPORT_INSTRUCTION_RE.sub(_NO_MAILBOX_REASON, text)
+        text = _SECURITY_CHANNEL_RE.sub(
+            " (this fork publishes no mailbox because a `.github.io` domain "
+            "has no MX record)", text)
+        text = _SECURITY_MAILBOX_RE.sub("a GitHub Security Advisory", text)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        fixed.append(rel)
+    return fixed
+
+
+_UI_SCOPE_REF_RE = re.compile(
+    r"@(?P<scope>[A-Za-z0-9_.\-]+)/ui@(?P<version>[^/\"'\s<)]+)"
+    r"(?P<tail>/[^\"'\s<)]*)?")
+
+# Byte-identity evidence that authorises a single class of repin: a reference
+# to a version the fork does NOT publish may be moved to a published version
+# ONLY when the asset it names is proven to carry the same bytes in both.
+#
+# The one such reference in the tree is
+# optional-skills/creative/pretext/templates/donut-orbit.html, which branding
+# turns into ``@nastech-research/ui@0.4.0``.  That version is dead: upstream
+# publishes ``@nous-research/ui@0.4.0`` (and 1.5.2), but the fork scope
+# @nastech-research/ui publishes only 0.18.2/0.18.3/0.18.4, so the URL 404s at
+# esm.sh.  The template uses the renamed scope for FONTS only (pretext, gsap
+# and lil-gui keep their own upstream packages), and the font bytes were
+# verified identical across the relevant tarballs.  Method (reproducible):
+#   curl registry.npmjs.org/@nous-research/ui/-/ui-0.4.0.tgz
+#   curl registry.npmjs.org/@nastech-research/ui/-/ui-0.18.2.tgz
+#   curl registry.npmjs.org/@nastech-research/ui/-/ui-0.18.4.tgz
+#   sha256sum <each>/package/dist/fonts/*.woff2
+# All 14 files hash identically in all three tarballs, so repinning the
+# template's font URLs from the unpublished 0.4.0 to a published version
+# serves exactly the same bytes -- a verified fix, not an invented version.
+#
+# Only an asset listed below, with the source version present in its verified
+# set and a PUBLISHED version present in the same set, may be repinned.
+# Anything else still fails closed with :class:`UiScopePinError`, so the input
+# can never be changed blindly.
+_UI_SCOPE_ASSET_EVIDENCE: dict[str, tuple[str, tuple[str, ...]]] = {
+    # asset (path under the package) -> (sha256, versions proven identical)
+    "dist/fonts/Collapse-Bold.woff2": (
+        "cb1bc6803168cffb3ef7b8113f95f82480a6d0f46d6e37edc854259377c6c00b",
+        ("0.4.0", "0.18.2", "0.18.4"),
+    ),
+    "dist/fonts/Collapse-BoldItalic.woff2": (
+        "b6e1478bb272e78dcf120ab57ddda4d86fe9cdf5ddc9e7ea6a38ebadfaed578b",
+        ("0.4.0", "0.18.2", "0.18.4"),
+    ),
+    "dist/fonts/Collapse-Italic.woff2": (
+        "298e45fff3151b13a2b7cc86822c81a0098e5e8af87c209b03b2cee2e38e3147",
+        ("0.4.0", "0.18.2", "0.18.4"),
+    ),
+    "dist/fonts/Collapse-Light.woff2": (
+        "6e0a925d2f917f6e6d165047a6cc6b18290c4f5b283cefc2e6573e8c205f9b58",
+        ("0.4.0", "0.18.2", "0.18.4"),
+    ),
+    "dist/fonts/Collapse-LightItalic.woff2": (
+        "3d9c522decb96f81bcdaa53eca3aeebc34a46135181c4ba4e08f8864d8c1bd39",
+        ("0.4.0", "0.18.2", "0.18.4"),
+    ),
+    "dist/fonts/Collapse-Regular.woff2": (
+        "ce8c481f56da3a46074ab696c16481bea49ea83e75e7eb7cb42fd2114593f33a",
+        ("0.4.0", "0.18.2", "0.18.4"),
+    ),
+    "dist/fonts/Collapse-Thin.woff2": (
+        "771ac91301cf14f5d96e6c7812420d09cf6d6b5d9714ce0fb67cf57d4b81f0cf",
+        ("0.4.0", "0.18.2", "0.18.4"),
+    ),
+    "dist/fonts/Collapse-ThinItalic.woff2": (
+        "ef9abc4ca4095345bdbda9ed027a427608dce41795206e7298cbb16225d37343",
+        ("0.4.0", "0.18.2", "0.18.4"),
+    ),
+    "dist/fonts/Mondwest-Regular.woff2": (
+        "9cf6e6e1cba70f7e991a92ce4225785725b6cc9a48cc77cbfaabeba26c18f072",
+        ("0.4.0", "0.18.2", "0.18.4"),
+    ),
+    "dist/fonts/Neuebit-Bold.woff2": (
+        "7c9760348e5b65d41fa38a4689062a7ed4e82a6c945225a7f22e2379f37da8b2",
+        ("0.4.0", "0.18.2", "0.18.4"),
+    ),
+    "dist/fonts/RulesCompressed-Medium.woff2": (
+        "d865cf7154121265d3d65c0931ec27dc289aa438cd62ffad2f38e05ae79956a3",
+        ("0.4.0", "0.18.2", "0.18.4"),
+    ),
+    "dist/fonts/RulesCompressed-Regular.woff2": (
+        "3bcbc330183f49cd49c72d4cdb3d1fbc675cf4e3000b06fd1c606ffc31b73e5f",
+        ("0.4.0", "0.18.2", "0.18.4"),
+    ),
+    "dist/fonts/RulesExpanded-Bold.woff2": (
+        "f2295406de2272086d5395af32b50ac51b15d75294c25a04094c8b1f85757931",
+        ("0.4.0", "0.18.2", "0.18.4"),
+    ),
+    "dist/fonts/RulesExpanded-Regular.woff2": (
+        "e8062ac4889b0f05de94035571e86991b6efd03539775cfe0790e37da75434db",
+        ("0.4.0", "0.18.2", "0.18.4"),
+    ),
+}
+
+_UI_SCOPE_VAR_ASSIGN_RE = re.compile(r"([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*[\"'`]")
+
+
+def _ui_scope_ref_variable(text: str, offset: int) -> str | None:
+    """The variable a CDN base URL on this line is assigned to, if any.
+
+    ``const DS_CDN = "https://esm.sh/@.../ui@0.4.0/dist/fonts"`` declares a
+    base directory; the files it actually serves only appear where the
+    template interpolates ``${DS_CDN}/<name>``, so the variable name is the
+    link between the base reference and the bytes it resolves to.
+    """
+    line_start = text.rfind("\n", 0, offset) + 1
+    line_end = text.find("\n", offset)
+    line = text[line_start:] if line_end == -1 else text[line_start:line_end]
+    found = _UI_SCOPE_VAR_ASSIGN_RE.search(line)
+    return found.group(1) if found else None
+
+
+def _ui_scope_asset_paths(text: str, match: "re.Match[str]") -> list[str] | None:
+    """Asset paths a ``@scope/ui@version`` reference resolves to.
+
+    A URL that ends in a filename (``/dist/fonts/Mondwest-Regular.woff2``)
+    names its asset directly.  A URL that ends in a directory
+    (``/dist/fonts``) names none on its own, so the asset is resolved through
+    the variable it is assigned to and the ``${VAR}/<name>`` interpolations in
+    the same file.  ``None`` means the asset could not be determined, which the
+    caller treats as "cannot verify" and fails closed on.
+    """
+    tail = (match.group("tail") or "").strip("/")
+    if tail and "." in tail.rsplit("/", 1)[-1]:
+        return [tail]
+    if not tail:
+        return None
+    var = _ui_scope_ref_variable(text, match.start())
+    if not var:
+        return None
+    derived = {
+        f"{tail}/{found.group('name')}"
+        for found in re.finditer(
+            r"\$\{" + re.escape(var) + r"\}/(?P<name>[A-Za-z0-9._\-]+)", text)
+    }
+    return sorted(derived) or None
+
+
+def _ui_scope_repin_target(
+    assets: list[str], source: str, published: set[str],
+) -> str | None:
+    """Highest published version every asset is proven identical in, or None.
+
+    ``source`` must itself appear in the recorded evidence for each asset --
+    otherwise the bytes the reference currently serves were never compared and
+    a repin would be a blind substitution, so the caller fails closed.
+    """
+    common: set[str] | None = None
+    for asset in assets:
+        evidence = _UI_SCOPE_ASSET_EVIDENCE.get(asset)
+        if evidence is None or source not in evidence[1]:
+            return None
+        proven = set(evidence[1])
+        common = proven if common is None else common & proven
+        if not common:
+            return None
+    candidates = sorted((common or set()) & published)
+    return candidates[-1] if candidates else None
+
+
+class UiScopePinError(ValueError):
+    """A renamed npm scope that would resolve to a different package.
+
+    A ``ValueError`` on purpose: ``hundredways.conformance`` reports it as a
+    candidate issue and the update pipeline records it as a failed stage,
+    instead of a silent substitution reaching the fork.
+    """
+
+
+def _walk_ui_scope_text_files(dst: str) -> list[str]:
+    """Text files that mention the renamed scope in a ``pkg@version`` form.
+
+    Scanning every file in the tree again would be wasteful, so the check is
+    gated on a cheap byte substring test first; only files that can actually
+    carry a scoped CDN or install reference are decoded.
+    """
+    marker = b"research/ui@"
+    found: list[str] = []
+    for rel in _walk_files(dst):
+        if is_locked_path(rel) or is_immutable_path(rel):
+            continue
+        path = os.path.join(dst, rel)
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            continue
+        if marker in data and is_text(data):
+            found.append(rel)
+    return found
+
+
+def _reconcile_ui_scope_pins(dst: str) -> list[str]:
+    """Repin a verified-dead scope reference, otherwise fail closed.
+
+    Branding renames the dependency KEY ``@nous-research/ui`` to
+    ``@nastech-research/ui`` but cannot decide what that means at runtime:
+    upstream's scope ``latest`` is 1.5.2 while the fork-published scope's
+    ``latest`` is 0.18.4 (verified against registry.npmjs.org), so a caret,
+    tilde, ``*`` or ``latest`` spec silently installs a different package at
+    a different version than upstream ships.  In a ``package.json`` every
+    reference must therefore be an EXACT version the fork has actually
+    published -- the same version upstream pinned, carried in
+    ``_NASTECH_UI_INTEGRITY`` together with the fork tarball's
+    ``dist.integrity`` that ``npm ci`` verifies -- and no upstream scope may
+    survive branding at all.  That path is unchanged.
+
+    A non-manifest ``pkg@version`` reference (a CDN font URL inside a
+    template, say) cannot be repaired by the manifest rule, so it gets a
+    second chance: when the version is one the fork does NOT publish, the
+    reference is REPINNED to a published version whose referenced asset is
+    proven byte-identical, and recorded as fixed.  The proof is the verified
+    sha256 evidence in ``_UI_SCOPE_ASSET_EVIDENCE`` -- never a guess and never
+    a blind version bump.  Idempotent: the repinned version is published, so a
+    second pass is a no-op.
+
+    Anything else raises :class:`UiScopePinError` -- a ``ValueError``, so
+    ``conformance`` reports it as a candidate issue and the stage fails
+    visibly -- naming the exact remedy instead of substituting silently.
+    """
+    upstream_scope = "@nous-research/ui"
+    fork_scope = "@nastech-research/ui"
+    sections = (
+        "dependencies", "devDependencies",
+        "optionalDependencies", "peerDependencies",
+    )
+    for rel in _walk_files(dst):
+        if os.path.basename(rel) != "package.json":
+            continue
+        if is_locked_path(rel) or is_immutable_path(rel):
+            continue
+        path = os.path.join(dst, rel)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        for section in sections:
+            deps = data.get(section)
+            if not isinstance(deps, dict):
+                continue
+            for dep, spec in deps.items():
+                if dep == upstream_scope:
+                    raise UiScopePinError(
+                        f"{rel}: upstream npm scope {upstream_scope} survived "
+                        f"branding in {section}; the fork publishes "
+                        f"{fork_scope}, so leaving it resolves a different "
+                        f"package than upstream ships"
+                    )
+                if dep != fork_scope:
+                    continue
+                if not isinstance(spec, str) or not re.fullmatch(
+                        r"\d+\.\d+\.\d+", spec):
+                    raise UiScopePinError(
+                        f"{rel}: {fork_scope} must be pinned to an exact "
+                        f"version, got {spec!r} -- upstream's scope latest "
+                        f"and the fork's differ (1.5.2 vs 0.18.4), so a "
+                        f"range silently resolves to a different package"
+                    )
+                if spec not in _NASTECH_UI_INTEGRITY:
+                    raise UiScopePinError(
+                        f"{rel}: {fork_scope}@{spec} is not a version the "
+                        f"fork has published; add its npm dist.integrity to "
+                        f"_NASTECH_UI_INTEGRITY in updates.py (published: "
+                        f"{', '.join(sorted(_NASTECH_UI_INTEGRITY))})"
+                    )
+    fixed: list[str] = []
+    published = set(_NASTECH_UI_INTEGRITY)
+    for rel in _walk_ui_scope_text_files(dst):
+        path = os.path.join(dst, rel)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        rewrites: list[tuple[int, int, str]] = []
+        for match in _UI_SCOPE_REF_RE.finditer(text):
+            scope, version = match.group("scope"), match.group("version")
+            if version in published:
+                continue
+            if scope == "nous-research":
+                raise UiScopePinError(
+                    f"{rel}: upstream npm scope reference "
+                    f"@{scope}/ui@{version} survived branding; the fork "
+                    f"publishes {fork_scope} and must rename it"
+                )
+            assets = _ui_scope_asset_paths(text, match)
+            target = (
+                None if assets is None
+                else _ui_scope_repin_target(assets, version, published)
+            )
+            if target is None:
+                named = ", ".join(assets) if assets else "the referenced asset"
+                raise UiScopePinError(
+                    f"{rel}: {fork_scope}@{version} is not a version the fork "
+                    f"has published (published: "
+                    f"{', '.join(sorted(published))}); {named} has no "
+                    f"byte-identical copy in a published version, so it cannot "
+                    f"be repinned safely -- republish it, pin it to a published "
+                    f"version, or drop the reference"
+                )
+            rewrites.append((match.start("version"), match.end("version"), target))
+        if not rewrites:
+            continue
+        for start, end, target in reversed(rewrites):
+            text = text[:start] + target + text[end:]
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        fixed.append(rel)
+    return fixed
+
+
 def reconcile_tree(dst: str) -> ReconcileResult:
     """Apply known post-brand fixes to the branded tree in place.
 
@@ -3944,6 +5062,14 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     expect the reconciled content instead of the raw token transform.
     """
     result = ReconcileResult()
+    # Signing-gated release lanes: the fork-local policy the token rules cannot
+    # express, so it is re-derived here after every brand and cannot be
+    # clobbered by a fresh upstream sync. The paths are recorded so
+    # verify_branded / compare_trees / conformance expect the reconciled
+    # content rather than the raw token transform.
+    for rel in _reconcile_signing_gated_release_lanes(dst):
+        result.total += 1
+        result.fixed.append(rel)
     name = _root_package_name(dst, "pyproject.toml", "package.json")
     if name:
         if _reconcile_uv_lock(dst, name):
@@ -4007,6 +5133,12 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     for rel in _reconcile_python_slow_runner_wait_budgets(dst):
         result.total += 1
         result.fixed.append(rel)
+    for rel in _reconcile_sync_wait_budgets(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    if _reconcile_windows_real_git_locate(dst):
+        result.total += 1
+        result.fixed.append("nastech_cli/update_cmd_git.py")
     if _reconcile_windows_boot_lifecycle_race(dst):
         result.total += 1
         result.fixed.append("tests/e2e/core/windows/test_boot_lifecycle.py")
@@ -4059,6 +5191,23 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     for rel in _reconcile_domains(dst):
         result.total += 1
         result.fixed.append(rel)
+    # AFTER _reconcile_domains: that stage is what turns upstream's
+    # .com hosts into *.nastechresearch.github.io, so only it can make the
+    # dead default endpoints visible here.  Both are idempotent -- the dead
+    # literal and the undeliverable mailbox are gone after one pass.
+    for rel in _reconcile_dead_api_defaults(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    for rel in _reconcile_security_contact(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    # Rewrites a verified-dead scope reference to a published, byte-identical
+    # version and records it; raises ValueError when no such target exists, so
+    # a reference that would resolve to a different package stops the sync
+    # instead of reaching the fork.
+    for rel in _reconcile_ui_scope_pins(dst):
+        result.total += 1
+        result.fixed.append(rel)
     if _reconcile_plugin_guard_trusted_installer_hosts(dst) and "tools/plugin_guard_context.py" not in result.fixed:
         result.total += 1
         result.fixed.append("tools/plugin_guard_context.py")
@@ -4086,9 +5235,22 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_plugin_catalog_sync_exemption(dst):
         result.total += 1
         result.fixed.append(".github/workflows/plugin-catalog-ci.yml")
+    for rel in _reconcile_pinned_source_clones(dst):
+        result.total += 1
+        result.fixed.append(rel)
     if _reconcile_channel_reader_user_agent(dst):
         result.total += 1
         result.fixed.append("nastech_cli/release_channels.py")
+    # Shared-gateway approval-gate ports (upstream eea7c437eb): keep a revoked
+    # `command_allowlist` entry from staying auto-approved and gate Desktop's
+    # native-ticket requests on the plugin runtime check.  Durable here because
+    # the next brand_tree rewrite would drop a fork-local edit.
+    if _reconcile_gateway_allowlist_live_reload(dst):
+        result.total += 1
+        result.fixed.append("tools/approval.py")
+    if _reconcile_gateway_plugin_gate_native_ticket(dst):
+        result.total += 1
+        result.fixed.append("nastech_cli/web_server.py")
     # Prompt-surface LAST: it counts characters in the rendered prompts, and
     # _reconcile_domains above rewrites the domain hosts inside those prompt
     # files.  Computing it any earlier leaves surfaces.json describing the
@@ -4672,6 +5834,17 @@ class UpdateManager:
                             reconciled_map[rel] = fh.read()
                     except OSError:
                         pass
+            # The same stale snapshot replays the Worker *code*: the verbatim-key,
+            # KV-only handler that 404s apt's percent-encoded "~".  Upgrade it to
+            # the guarded decode + R2 read and register the changed file too.
+            for rel in _reconcile_assets_worker_index(dest, preserved):
+                rel_path = os.path.join(dest, rel)
+                if os.path.isfile(rel_path):
+                    try:
+                        with open(rel_path, "rb") as fh:
+                            reconciled_map[rel] = fh.read()
+                    except OSError:
+                        pass
             return preserved
         stage(
             "preserve",
@@ -4922,3 +6095,740 @@ class UpdateManager:
             shutil.rmtree(dest)
 
         return result
+
+
+# ---------------------------------------------------------------------------
+# Signing-gated stable release lanes
+# ---------------------------------------------------------------------------
+# The fork has to publish a stable release built from Linux and Termux alone
+# while the Apple, Windows/Azure and Microsoft Store signing accounts are still
+# unconfigured.  Those desktop lanes are therefore *declared skippable* -- and
+# the publish gate has to accept the declaration as a non-failure while still
+# failing on a genuine error.  A lane whose credentials are configured is never
+# skippable.
+#
+# The enabling condition is the presence of the platform's signing
+# configuration, not a flag an operator has to remember to pass: a lane comes
+# back by itself as soon as its signing material exists.  It is all-or-nothing
+# per platform -- a partially configured platform stays unconfigured, so it
+# declares a skip instead of half-building a lane that cannot sign and then
+# breaking the release.  GitHub does not expose ``secrets`` to a job-level
+# ``if:``, so the decision cannot live there: the admit step maps the names into
+# its own environment, folds them into the admitted flags and publishes one
+# ``include-*`` output per lane, and every job, gate and check reads that.
+#
+# The fork already has the shape: ``scripts/releases/optional_platforms.py``
+# carries opt-in rows (macOS Intel, Termux) that ``scripts/releases/stable.py``
+# turns into gate exclusions (``CLAIM_FLAGS`` / ``SKIPPED_BY`` /
+# ``require_gate``).  What it lacks is lanes whose exclusion is driven by
+# credential *absence* rather than by a claim edit, plus the Store check's
+# credential safety and the macOS feed that must tolerate an arm64 the release
+# did not build.
+#
+# The policy is derived here, not hand-written into the fork, because a sync
+# rebrands from upstream: ``brand_tree`` re-derives every file and discards
+# fork-local edits, whereas ``reconcile_tree`` runs after branding and
+# ``_reconcile_signing_gated_release_lanes`` puts these files back.  The
+# reconcile reports the paths it changed, so ``verify_branded`` /
+# ``compare_trees`` / ``conformance`` expect the reconciled content instead of
+# the raw token transform.
+@dataclass(frozen=True)
+class SigningGatedLane:
+    """One release lane whose skip is decided by its signing credentials."""
+
+    label: str
+    claim_flag: str  # key in the claim message
+    key: str  # normalized claim field, keyword argument, and admit output
+    option: str  # release.py release option
+    exclusion: str  # gate removal reason when the lane is left out
+    jobs: tuple[str, ...]  # stable-release.yml jobs the exclusion removes
+    handoff: str  # candidate handoff group
+    target: str  # candidate manifest platform/arch
+    left_out: str  # what users of the platform get when it is left out
+    call: str | None = None  # candidate call whose result records the smoke
+    smoke: str | None = None
+    credentials: tuple[str, ...] = ()  # names the lane needs; absent or partial skips it
+
+
+# The exact names the workflows already reference for each signing account: the
+# darwin legs take the Developer ID certificate and the notarization key, the
+# win32 legs take the Azure Trusted Signing values, and the Store submission
+# takes the Partner Center app.  The lane runs only when every name is present;
+# an absent or partial set leaves it a declared skip, never a half-built lane.
+APPLE_SIGNING_CREDENTIALS = ("CSC_LINK", "CSC_KEY_PASSWORD", "APPLE_API_KEY_P8",
+                             "APPLE_API_KEY_ID", "APPLE_API_ISSUER")
+WINDOWS_SIGNING_CREDENTIALS = ("AZURE_SIGN_ENDPOINT", "AZURE_SIGN_ACCOUNT",
+                               "AZURE_SIGN_PROFILE", "AZURE_SIGN_PUBLISHER",
+                               "AZURE_CLIENT_ID", "AZURE_TENANT_ID")
+STORE_CREDENTIALS = ("MS_STORE_PRODUCT_ID", "MS_STORE_TENANT_ID",
+                     "MS_STORE_CLIENT_ID", "MS_STORE_CLIENT_SECRET")
+
+# Windows needs three handoffs and two targets but one decision, so its rows
+# share one claim key and one exclusion.  ``claim_flags``, ``excluded``,
+# ``SKIPPED_BY`` and the gate all work on sets, so the repetition is harmless.
+SIGNING_GATED_LANES = (
+    SigningGatedLane("macOS arm64", "includeMacosArm64", "include_macos_arm64",
+                     "--include-macos-arm64", "excludeMacosArm64",
+                     ("candidates-darwin-arm64", "transitions-darwin-arm64",
+                      "macos-packaged-arm64"),
+                     "darwin-arm64", "macos/arm64",
+                     "Apple-signed macOS arm64 packages are not published",
+                     "candidates-darwin-arm64", "smoke-darwin-arm64",
+                     APPLE_SIGNING_CREDENTIALS),
+    SigningGatedLane("Windows x64", "includeWindows", "include_windows", "--include-windows",
+                     "excludeWindows", ("candidates-win32-x64",), "win32-x64", "windows/x64",
+                     "Azure-signed Windows x64 installers are not published",
+                     "candidates-win32-x64", "smoke-win32-x64",
+                     WINDOWS_SIGNING_CREDENTIALS),
+    SigningGatedLane("Windows arm64", "includeWindows", "include_windows", "--include-windows",
+                     "excludeWindows", ("candidates-win32-arm64",), "win32-arm64", "windows/arm64",
+                     "Azure-signed Windows arm64 installers are not published",
+                     "candidates-win32-arm64", "smoke-win32-arm64",
+                     WINDOWS_SIGNING_CREDENTIALS),
+    SigningGatedLane("Windows bundle", "includeWindows", "include_windows", "--include-windows",
+                     "excludeWindows",
+                     ("candidates-win32-bundle", "transitions-win32", "windows-packaged"),
+                     "windows-universal", "windows/x64",
+                     "Windows users stay on the previous release: the appinstaller feed is "
+                     "not advanced",
+                     None, None, WINDOWS_SIGNING_CREDENTIALS),
+)
+
+# How each credential reaches the admit step.  The workflows already read every
+# one of these names, so the reconcile reuses the same context: the AZURE_*
+# trusted-signing values are repository variables, the Apple ones are secrets.
+# GitHub exposes ``vars`` to a job-level ``if`` but not ``secrets``, so the
+# decision is folded in a step instead -- admit publishes the effective flags
+# and every downstream job, the gate and the complete check read those.
+SIGNING_CREDENTIAL_CONTEXT = {
+    "CSC_LINK": "secrets",
+    "CSC_KEY_PASSWORD": "secrets",
+    "APPLE_API_KEY_P8": "secrets",
+    "APPLE_API_KEY_ID": "secrets",
+    "APPLE_API_ISSUER": "secrets",
+    "AZURE_SIGN_ENDPOINT": "vars",
+    "AZURE_SIGN_ACCOUNT": "vars",
+    "AZURE_SIGN_PROFILE": "vars",
+    "AZURE_SIGN_PUBLISHER": "vars",
+    "AZURE_CLIENT_ID": "vars",
+    "AZURE_TENANT_ID": "vars",
+}
+
+_STABLE_RELEASE_WORKFLOW = ".github/workflows/stable-release.yml"
+_OPTIONAL_PLATFORMS = "scripts/releases/optional_platforms.py"
+_STABLE_RELEASE = "scripts/releases/stable.py"
+# Upstream renamed ``optional_platforms.py`` into the lane table ``lanes.py``.
+# A live sync carries the lane table and not the old module, so the reconcile
+# below has to recognise both shapes.
+_LANES_MODULE = "scripts/releases/lanes.py"
+_STORE = "scripts/releases/store.py"
+_CHANNEL_ARTIFACTS = "scripts/bundles/channel_artifacts.py"
+_STABLE_RELEASE_TESTS = "tests/scripts/test_stable_release.py"
+
+
+def _signing_lane_env(indent: str = "") -> tuple[str, ...]:
+    """The ``INCLUDE_*`` line each lane publishes, derived from the lane table.
+
+    One line per distinct lane key, mapping the admit output back to the value
+    the gate steps read, so the workflow and :func:`admitted_lanes` can never
+    disagree about a name.
+    """
+    lines: list[str] = []
+    for lane in SIGNING_GATED_LANES:
+        line = (f"{indent}{lane.key.upper()}: "
+                f"${{{{ needs.admit.outputs.{lane.key.replace('_', '-')} }}}}")
+        if line not in lines:
+            lines.append(line)
+    return tuple(lines)
+
+
+class SigningGatedLaneError(ValueError):
+    """A signing-gated lane anchor moved, so the reconcile cannot be applied."""
+
+
+def _sgl_literal(value: str) -> str:
+    """A double-quoted Python string literal, matching the fork's own style."""
+    if '"' not in value and "\\" not in value:
+        return f'"{value}"'
+    return json.dumps(value)
+
+
+def _signing_gated_conditions() -> dict:
+    """Every lane job and the admit output that lets it run."""
+    conditions = {}
+    for lane in SIGNING_GATED_LANES:
+        dashed = lane.key.replace("_", "-")
+        for job in lane.jobs:
+            conditions[job] = f"needs.admit.outputs.{dashed} == 'true'"
+    return conditions
+
+
+def _sgl_read(dst: str, rel: str) -> str | None:
+    path = os.path.join(dst, rel)
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
+
+
+def _sgl_write(dst: str, rel: str, text: str) -> None:
+    with open(os.path.join(dst, rel), "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+
+def _sgl_sub(text: str, old: str, new: str, *, rel: str, done: str) -> str:
+    """``old`` -> ``new`` once unless ``done`` shows a previous reconcile did it.
+
+    Raises when neither the old text nor its replacement is present, so a moved
+    anchor fails the sync loudly instead of shipping a half-patched tree.
+    """
+    if done in text:
+        return text
+    if old not in text:
+        raise SigningGatedLaneError(f"{rel} no longer contains the anchor {old!r}")
+    if text.count(old) != 1:
+        raise SigningGatedLaneError(f"{rel} has {text.count(old)} copies of the anchor {old!r}")
+    return text.replace(old, new, 1)
+
+
+def _sgl_insert_after_each(lines: list, needle: str, additions: tuple, *, rel: str,
+                           indent: str | None = None) -> bool:
+    """Insert ``additions`` after every line whose stripped text is ``needle``.
+
+    Each addition is indented to its match, because the admit outputs and the
+    three gate steps sit at different depths.  ``indent`` restricts the match to
+    one depth, so a needle that appears both as a job-level and a step-level
+    ``env`` entry is patched where it belongs.  Returns whether anything moved;
+    raises when ``needle`` is gone entirely.
+    """
+    blob = "".join(lines)
+    if all(addition.strip() in blob for addition in additions):
+        return False
+    index, sites = 0, 0
+    while index < len(lines):
+        depth = len(lines[index]) - len(lines[index].lstrip(" "))
+        if lines[index].strip() == needle and (indent is None or depth == len(indent)):
+            lead = " " * depth
+            for offset, addition in enumerate(additions, start=1):
+                lines.insert(index + offset, f"{lead}{addition.strip()}\n")
+            index += len(additions) + 1
+            sites += 1
+            continue
+        index += 1
+    if sites == 0:
+        raise SigningGatedLaneError(f"{rel} no longer contains the anchor {needle!r}")
+    return True
+
+
+def _sgl_indent(line: str) -> int:
+    """How many columns ``line`` is indented by."""
+    return len(line) - len(line.lstrip(" "))
+
+
+def _sgl_condition_lines(lines: list, job: str, condition: str) -> bool:
+    """OR nothing: append ``condition`` to one job's ``if:`` in a YAML workflow.
+
+    Handles both shapes the workflow uses -- a folded block (``if: >-`` with
+    the expression on indented lines) and a single-line expression -- and
+    leaves the job alone when the condition is already there.
+    """
+    start = next((index for index, line in enumerate(lines)
+                  if line.rstrip("\n") == f"  {job}:"), None)
+    if start is None:
+        raise SigningGatedLaneError(f"{_STABLE_RELEASE_WORKFLOW} has no {job} job")
+    header = re.compile(r"^  [a-z0-9][a-z0-9-]*:$")
+    for index in range(start + 1, len(lines)):
+        if header.match(lines[index]):
+            break
+        if not lines[index].lstrip(" ").startswith("if:"):
+            continue
+        indent = _sgl_indent(lines[index])
+        if lines[index].split("if:", 1)[1].strip() in (">-", ">", "|", "|-"):
+            last = index
+            while last + 1 < len(lines) and (lines[last + 1].strip() == ""
+                                             or _sgl_indent(lines[last + 1]) > indent):
+                last += 1
+            if condition in "".join(lines[index:last + 1]):
+                return False
+            deeper = _sgl_indent(lines[last]) if last > index else indent + 2
+            lines.insert(last + 1, f"{' ' * deeper}&& {condition}\n")
+            return True
+        if condition in lines[index]:
+            return False
+        lines[index] = lines[index].rstrip("\n") + f" && {condition}\n"
+        return True
+    raise SigningGatedLaneError(f"{_STABLE_RELEASE_WORKFLOW} {job} has no if:")
+
+
+def _signing_lane_source(lane: SigningGatedLane) -> str:
+    """The fork's ``SigningLane(...)`` call for one credential-gated lane."""
+    jobs = ", ".join(_sgl_literal(job) for job in lane.jobs)
+    jobs += "," if len(lane.jobs) == 1 else ""
+    credentials = ", ".join(_sgl_literal(name) for name in lane.credentials)
+    call = _sgl_literal(lane.call) if lane.call else "None"
+    smoke = _sgl_literal(lane.smoke) if lane.smoke else "None"
+    return ("    SigningLane(\n"
+            f"        label={_sgl_literal(lane.label)},\n"
+            f"        key={_sgl_literal(lane.key)},\n"
+            f"        exclusion={_sgl_literal(lane.exclusion)},\n"
+            f"        jobs=({jobs}),\n"
+            f"        handoff={_sgl_literal(lane.handoff)},\n"
+            f"        call={call},\n"
+            f"        smoke={smoke},\n"
+            f"        credentials=({credentials}),\n"
+            "    ),\n")
+
+
+_LANES_CLASS = '''
+
+@dataclass(frozen=True)
+class SigningLane:
+    """One signed desktop lane: built only when its whole credential set is set.
+
+    A lane is not a claim flag. Nobody has to remember a key for it: the lane is
+    built exactly when every credential below is configured, and it is a declared
+    skip otherwise, so a fork with no signing account still ships.
+    """
+
+    label: str
+    key: str  # normalized flag, keyword argument, and admit output (with dashes)
+    exclusion: str  # gate removal reason when the lane is left out
+    jobs: tuple[str, ...]  # stable-release.yml jobs the lane gates
+    handoff: str  # candidate handoff group
+    call: str | None = None  # candidate call whose result records the smoke
+    smoke: str | None = None
+    credentials: tuple[str, ...] = ()  # every name must be configured to build it
+
+
+'''
+
+_LANES_HELPERS = '''
+
+def configured_lanes(env: Mapping[str, str]) -> dict:
+    """The signing lanes whose whole credential set is present in ``env``.
+
+    All-or-nothing per lane: a lane that can see only part of its signing material
+    cannot sign, so it reports unbuilt and the release declares a skip rather than
+    failing at the end of a long build. ``env`` is what admit was given.
+    """
+    return {lane.key: all(env.get(name) for name in lane.credentials)
+            for lane in SIGNING_LANES}
+
+
+def admitted_lanes(env: Mapping[str, str]) -> dict:
+    """The signing lanes admit decided, from the INCLUDE_* values it published.
+
+    Only the lanes whose value is present appear. A step that was not given them
+    learns nothing about those lanes, so nothing is skipped on their behalf and a
+    lane that ran anyway still fails the gate.
+    """
+    admitted = {}
+    for lane in SIGNING_LANES:
+        name = lane.key.upper()
+        if name not in env:
+            continue
+        value = env[name]
+        if value not in ("true", "false"):
+            raise ValueError(f"{name} must be true or false, not {value!r}")
+        admitted[lane.key] = value == "true"
+    return admitted
+
+
+def lanes_left_out(signing: Mapping[str, bool] | None = None) -> tuple[SigningLane, ...]:
+    """The signing lanes a release left out, from the flags it published."""
+    flags = {} if signing is None else signing
+    return tuple(lane for lane in SIGNING_LANES if flags.get(lane.key) is False)
+
+
+def lane_jobs(signing: Mapping[str, bool] | None = None) -> frozenset[str]:
+    """Every job of the signing lanes a release left out; empty when none is known."""
+    return frozenset(job for lane in lanes_left_out(signing) for job in lane.jobs)
+
+
+def lane_handoffs(handoffs: tuple[str, ...],
+                  signing: Mapping[str, bool] | None = None) -> tuple[str, ...]:
+    """``handoffs`` without the signing lanes a release left out.
+
+    A lane the caller does not mention is kept: fetching a group this release never
+    staged fails loudly, which is better than publishing a release that silently
+    leaves out a lane it did build.
+    """
+    omitted = {lane.handoff for lane in lanes_left_out(signing)}
+    return tuple(name for name in handoffs if name not in omitted)
+'''
+
+
+def _reconcile_signing_gated_lanes(dst: str) -> bool:
+    """Add the credential-gated lane table and its helpers to ``optional_platforms.py``.
+
+    The lanes stay out of ``PLATFORMS`` on purpose: those rows are claim flags, and
+    a claim cannot opt a lane in. Keeping the two tables apart also leaves the
+    claim flags, the opt-in handoff map and the manifest check exactly as they are.
+    """
+    text = _sgl_read(dst, _OPTIONAL_PLATFORMS)
+    if text is None:
+        return False
+    before = text
+    text = _sgl_sub(
+        text,
+        "and smoke job. A claim cut before these flags existed lacks the keys, and a\n"
+        "missing key reads as false.\n",
+        "and smoke job. A claim cut before these flags existed lacks the keys, and a\n"
+        "missing key reads as false.\n"
+        "\n"
+        "The signed desktop lanes are separate: ``SIGNING_LANES`` names each one with\n"
+        "the credentials it needs, so a lane is built exactly when its whole signing\n"
+        "configuration is present and nobody has to remember a flag for it.\n",
+        rel=_OPTIONAL_PLATFORMS, done="``SIGNING_LANES`` names each one")
+    rows = "".join(_signing_lane_source(lane) for lane in SIGNING_GATED_LANES)
+    text = _sgl_sub(
+        text,
+        '            raise ValueError(f"Candidate manifest {\'lacks\' if wanted else \'carries\'} {p.target}, "\n'
+        '                             "which differs from the claim")\n',
+        '            raise ValueError(f"Candidate manifest {\'lacks\' if wanted else \'carries\'} {p.target}, "\n'
+        '                             "which differs from the claim")\n'
+        + _LANES_CLASS
+        + "SIGNING_LANES = (\n"
+        + rows
+        + ")\n"
+        + _LANES_HELPERS,
+        rel=_OPTIONAL_PLATFORMS, done="SIGNING_LANES = (")
+    if text != before:
+        _sgl_write(dst, _OPTIONAL_PLATFORMS, text)
+    return text != before
+
+
+def _reconcile_signing_gated_stable(dst: str) -> bool:
+    """Fold the credentials into admit and teach the gates and manifest the lanes."""
+    text = _sgl_read(dst, _STABLE_RELEASE)
+    if text is None:
+        return False
+    before = text
+    text = _sgl_sub(
+        text,
+        "from pathlib import Path\nfrom urllib.parse import unquote, urlsplit\n",
+        "from pathlib import Path\nfrom typing import Mapping\nfrom urllib.parse import unquote, urlsplit\n",
+        rel=_STABLE_RELEASE, done="from typing import Mapping\n")
+    text = _sgl_sub(
+        text,
+        '    admitted = check_claim(env)\n    repository = env["GITHUB_REPOSITORY"]\n',
+        '    admitted = check_claim(env)\n'
+        "    # A signed desktop lane is not a claim flag: it is built exactly when every\n"
+        "    # credential in its signing configuration is present, so admit decides the\n"
+        "    # lanes here and every later step reads the values it publishes.\n"
+        '    admitted = {**admitted, **optional_platforms.configured_lanes(env)}\n'
+        '    repository = env["GITHUB_REPOSITORY"]\n',
+        rel=_STABLE_RELEASE, done="optional_platforms.configured_lanes(env)")
+    text = _sgl_sub(
+        text,
+        '           for p in optional_platforms.PLATFORMS},\n',
+        '           for p in (*optional_platforms.PLATFORMS, *optional_platforms.SIGNING_LANES)},\n',
+        rel=_STABLE_RELEASE, done="*optional_platforms.SIGNING_LANES)},")
+    text = _sgl_sub(
+        text,
+        "    opted = [p.label for p in optional_platforms.PLATFORMS if admitted[p.key]]\n",
+        "    opted = [p.label for p in (*optional_platforms.PLATFORMS,\n"
+        "                               *optional_platforms.SIGNING_LANES) if admitted[p.key]]\n",
+        rel=_STABLE_RELEASE, done="*optional_platforms.SIGNING_LANES) if admitted[p.key]]")
+    text = _sgl_sub(
+        text,
+        "f\"Opt-in packages: {', '.join(opted) or 'none (macOS Intel and Termux are not built)'}\\n\",\n",
+        "f\"Opt-in packages: {', '.join(opted) or 'none (no opt-in or signed desktop platform is built)'}\\n\",\n",
+        rel=_STABLE_RELEASE, done="no opt-in or signed desktop platform is built")
+    text = _sgl_sub(
+        text,
+        'def gate_expectations(required: list[str], *, skip_bundles: bool, skip_tests: bool,\n'
+        '                      **platforms: bool) -> dict:\n'
+        '    """Each gated job\'s required result under the claim\'s flags (``platforms``:\n'
+        '    the optional_platforms keys, each false when omitted)."""\n'
+        '    active = {flag for flag, on in (("skipBundles", skip_bundles), ("skipTests", skip_tests)) if on}\n'
+        '    if set(platforms) - {p.key for p in optional_platforms.PLATFORMS}:\n'
+        '        raise TypeError(f"Unknown platform flags: {sorted(platforms)}")\n'
+        '    active |= {p.exclusion for p in optional_platforms.excluded(platforms)}\n'
+        '    return {name: "skipped" if SKIPPED_BY.get(name, frozenset()) & active else "success"\n'
+        '            for name in required}\n',
+        'def gate_expectations(required: list[str], *, skip_bundles: bool, skip_tests: bool,\n'
+        '                      signing: Mapping[str, bool] | None = None, **platforms: bool) -> dict:\n'
+        '    """Each gated job\'s required result under the release\'s flags.\n'
+        '\n'
+        '    ``platforms`` are the optional_platforms keys, each false when omitted.\n'
+        '    ``signing`` names the signed desktop lanes admit decided: a lane it left\n'
+        '    out is a declared skip exactly like an opt-in the claim left out, so its\n'
+        '    jobs must report skipped, and a lane it built must succeed. A lane the\n'
+        '    caller does not name is not judged here, so a gate step that was not told\n'
+        '    keeps the claim\'s own behaviour instead of excusing a lane that ran.\n'
+        '    """\n'
+        '    active = {flag for flag, on in (("skipBundles", skip_bundles), ("skipTests", skip_tests)) if on}\n'
+        '    if set(platforms) - {p.key for p in optional_platforms.PLATFORMS}:\n'
+        '        raise TypeError(f"Unknown platform flags: {sorted(platforms)}")\n'
+        '    active |= {p.exclusion for p in optional_platforms.excluded(platforms)}\n'
+        '    left_out = optional_platforms.lane_jobs(signing)\n'
+        '    return {name: "skipped" if name in left_out or SKIPPED_BY.get(name, frozenset()) & active\n'
+        '                    else "success"\n'
+        '            for name in required}\n',
+        rel=_STABLE_RELEASE, done="optional_platforms.lane_jobs(signing)")
+    text = _sgl_sub(
+        text,
+        'def require_gate(needs: dict, required: list[str], *, skip_bundles: bool, skip_tests: bool,\n'
+        '                 **platforms: bool) -> None:\n',
+        'def require_gate(needs: dict, required: list[str], *, skip_bundles: bool, skip_tests: bool,\n'
+        '                 signing: Mapping[str, bool] | None = None, **platforms: bool) -> None:\n',
+        rel=_STABLE_RELEASE, done="signing: Mapping[str, bool] | None = None, **platforms: bool) -> None:\n"
+        '    """``require_success`` that also demands a flag-removed job really was skipped."""')
+    text = _sgl_sub(
+        text,
+        "    expected = gate_expectations(required, skip_bundles=skip_bundles, skip_tests=skip_tests, **platforms)\n",
+        "    expected = gate_expectations(required, skip_bundles=skip_bundles, skip_tests=skip_tests,\n"
+        "                                 signing=signing, **platforms)\n",
+        rel=_STABLE_RELEASE, done="signing=signing, **platforms)")
+    text = _sgl_sub(
+        text,
+        '        require_gate(needs, argv[1:], skip_bundles=_flag(env, "SKIP_BUNDLES"),\n'
+        '                     skip_tests=_flag(env, "SKIP_TESTS"),\n'
+        '                     **{p.key: _flag(env, p.key.upper()) for p in optional_platforms.PLATFORMS})\n',
+        '        require_gate(needs, argv[1:], skip_bundles=_flag(env, "SKIP_BUNDLES"),\n'
+        '                     skip_tests=_flag(env, "SKIP_TESTS"),\n'
+        '                     signing=optional_platforms.admitted_lanes(env),\n'
+        '                     **{p.key: _flag(env, p.key.upper()) for p in optional_platforms.PLATFORMS})\n',
+        rel=_STABLE_RELEASE, done="signing=optional_platforms.admitted_lanes(env)")
+    text = _sgl_sub(
+        text,
+        "    handoffs = optional_platforms.claim_handoffs(CANDIDATE_HANDOFFS, claim)\n"
+        "    # A call the claim did not opt into never ran, so it has no smoke to record.\n"
+        "    skipped_calls = {p.call for p in optional_platforms.excluded(claim)}\n",
+        "    lanes = optional_platforms.admitted_lanes(env)\n"
+        "    handoffs = optional_platforms.claim_handoffs(CANDIDATE_HANDOFFS, claim)\n"
+        "    # A signed lane the credentials left out staged nothing, so its group and its\n"
+        "    # smoke are absent rather than failed.\n"
+        "    handoffs = optional_platforms.lane_handoffs(handoffs, lanes)\n"
+        "    # A call the claim did not opt into, or a lane the credentials left out,\n"
+        "    # never ran, so it has no smoke to record.\n"
+        "    skipped_calls = {p.call for p in optional_platforms.excluded(claim)}\n"
+        "    skipped_calls |= {lane.call for lane in optional_platforms.lanes_left_out(lanes)}\n",
+        rel=_STABLE_RELEASE, done="optional_platforms.lane_handoffs(handoffs, lanes)")
+    text = _sgl_sub(
+        text,
+        "def require_smokes_match_claim(manifest: dict, *, skip_tests: bool) -> None:\n"
+        "    if smokes_skipped(manifest) != skip_tests:\n"
+        "        raise ValueError(\"Candidate smoke results differ from the claim's test policy\")\n",
+        "def require_smokes_match_claim(manifest: dict, *, skip_tests: bool) -> None:\n"
+        '    """The recorded smokes match the lanes the release built.\n'
+        "\n"
+        "    A manifest with no smoke target at all is a release whose signed desktop\n"
+        "    lanes were all left out, so every smoke is skipped without the claim\n"
+        "    skipping tests. A lane that was built still fails the release when its\n"
+        "    smoke did not run.\n"
+        '    """\n'
+        '    built = {SMOKE_TARGETS[job] for job in SMOKE_JOBS\n'
+        '             if SMOKE_TARGETS[job] in {f"{row.get(\'platform\')}/{row.get(\'arch\')}"\n'
+        '                                        for row in manifest.get("packages", [])}}\n'
+        "    if smokes_skipped(manifest):\n"
+        "        if not skip_tests and built:\n"
+        '            raise ValueError("Candidate smoke results differ from the claim\'s test policy")\n'
+        "        return\n"
+        "    if skip_tests:\n"
+        '        raise ValueError("Candidate smoke results differ from the claim\'s test policy")\n',
+        rel=_STABLE_RELEASE, done="match the lanes the release built")
+    if text != before:
+        _sgl_write(dst, _STABLE_RELEASE, text)
+    return text != before
+
+
+def _reconcile_signing_gated_store(dst: str) -> bool:
+    """Make an unconfigured Store a declared skip instead of a KeyError."""
+    text = _sgl_read(dst, _STORE)
+    if text is None:
+        return False
+    before = text
+    credentials = "(" + ", ".join(_sgl_literal(name) for name in STORE_CREDENTIALS) + ")"
+    text = _sgl_sub(
+        text,
+        "def check_from_env(env: dict, run=_http_run) -> str:\n",
+        "# The Partner Center credentials the submission needs; MS_STORE_PRODUCT_ID is\n"
+        "# the one that decides whether the Store is configured at all.\n"
+        f"_STORE_CREDENTIALS = {credentials}\n"
+        "\n"
+        "\n"
+        "def check_from_env(env: dict, run=_http_run) -> str:\n",
+        rel=_STORE, done="_STORE_CREDENTIALS = (")
+    text = _sgl_sub(
+        text,
+        "    return check(\n"
+        "        product_id=product_id,\n"
+        '        tenant_id=env["MS_STORE_TENANT_ID"],\n'
+        '        client_id=env["MS_STORE_CLIENT_ID"],\n'
+        '        client_secret=env["MS_STORE_CLIENT_SECRET"],\n'
+        "        run=run,\n"
+        "    )\n",
+        '    missing = [name for name in _STORE_CREDENTIALS\n'
+        '               if name != "MS_STORE_PRODUCT_ID" and not env.get(name)]\n'
+        "    if missing:\n"
+        "        # A Store the fork cannot authenticate to is a declared skip, not a crash:\n"
+        "        # the release is already published and the submission is manual, so the\n"
+        "        # sequencer turns this into a warning.\n"
+        '        raise StoreError("Store submission credentials are not configured: "\n'
+        '                         + ", ".join(missing))\n'
+        "    return check(\n"
+        "        product_id=product_id,\n"
+        '        tenant_id=env["MS_STORE_TENANT_ID"],\n'
+        '        client_id=env["MS_STORE_CLIENT_ID"],\n'
+        '        client_secret=env["MS_STORE_CLIENT_SECRET"],\n'
+        "        run=run,\n"
+        "    )\n",
+        rel=_STORE, done="Store submission credentials are not configured")
+    if text != before:
+        _sgl_write(dst, _STORE, text)
+    return text != before
+
+
+def _reconcile_signing_gated_workflow(dst: str) -> bool:
+    """Gate each lane job, publish the folded flags, and feed admit the credentials."""
+    text = _sgl_read(dst, _STABLE_RELEASE_WORKFLOW)
+    if text is None:
+        return False
+    original = text
+    text = _sgl_sub(
+        text,
+        "      # Opt-in platforms, off unless the claim was cut with --include-macos-intel\n"
+        "      # / --include-termux. A claim without the keys reads them as false.\n",
+        "      # Opt-in platforms, off unless the claim was cut with --include-macos-intel\n"
+        "      # / --include-termux. A claim without the keys reads them as false. The\n"
+        "      # signed desktop lanes below are instead decided by the credentials the\n"
+        "      # admit step can see, so nobody remembers a flag for them.\n",
+        rel=_STABLE_RELEASE_WORKFLOW, done="decided by the credentials the")
+    text = _sgl_sub(
+        text,
+        "  admit:\n    name: Admit the claim\n",
+        "  admit:\n"
+        "    name: Admit the claim\n"
+        "    # The signing lanes are decided by their credentials, and a job only sees\n"
+        "    # environment secrets when it declares this environment.\n"
+        "    environment: release-signing\n",
+        rel=_STABLE_RELEASE_WORKFLOW,
+        done="environment secrets when it declares this environment.\n    environment: release-signing")
+    lines = text.splitlines(keepends=True)
+    changed = text != original
+    outputs = ("include-macos-arm64: ${{ steps.admit.outputs.include-macos-arm64 }}",
+               "include-windows: ${{ steps.admit.outputs.include-windows }}")
+    changed |= _sgl_insert_after_each(
+        lines, "include-termux: ${{ steps.admit.outputs.include-termux }}", outputs,
+        rel=_STABLE_RELEASE_WORKFLOW)
+    credentials = []
+    seen = set()
+    for lane in SIGNING_GATED_LANES:
+        for name in lane.credentials:
+            if name in seen:
+                continue
+            seen.add(name)
+            credentials.append(f"{name}: ${{{{ {SIGNING_CREDENTIAL_CONTEXT[name]}.{name} }}}}")
+    changed |= _sgl_insert_after_each(
+        lines, "RELEASE_CLAIM_TAG: ${{ inputs.tag }}", tuple(credentials),
+        rel=_STABLE_RELEASE_WORKFLOW)
+    for job, condition in sorted(_signing_gated_conditions().items()):
+        changed |= _sgl_condition_lines(lines, job, condition)
+    changed |= _sgl_insert_after_each(
+        lines, "INCLUDE_TERMUX: ${{ needs.admit.outputs.include-termux }}",
+        _signing_lane_env(),
+        rel=_STABLE_RELEASE_WORKFLOW)
+    text = "".join(lines)
+    # ``lane_env`` is built apart on purpose: a bare ``"...\n"`` next to
+    # ``"\n".join(...)`` would be concatenated into the literal by Python's
+    # implicit string joining and swallowed as the separator, breaking the YAML.
+    lane_env = "".join(f"{line}\n" for line in _signing_lane_env("      "))
+    text = _sgl_sub(
+        text,
+        "      RELEASE_CLAIM_OBJECT: ${{ needs.admit.outputs.claim-object }}\n"
+        "      RELEASE_NEEDS: ${{ toJSON(needs) }}\n",
+        "      RELEASE_CLAIM_OBJECT: ${{ needs.admit.outputs.claim-object }}\n"
+        "      # The signed desktop lanes admit decided, so this step stages exactly the\n"
+        "      # handoffs the lane jobs produced.\n"
+        + lane_env
+        + "      RELEASE_NEEDS: ${{ toJSON(needs) }}\n",
+        rel=_STABLE_RELEASE_WORKFLOW, done="The signed desktop lanes admit decided")
+    if text != original:
+        _sgl_write(dst, _STABLE_RELEASE_WORKFLOW, text)
+    return text != original
+
+
+_LANES_DEFAULT = "DEFAULT = frozenset(lane.name for lane in LANES if lane.default)\n"
+_LANES_DEFAULT_MARK = "# NasTech: a release ships only the lanes this fork can sign."
+_LANES_DEFAULT_FORK = (
+    _LANES_DEFAULT_MARK + "\n"
+    "# The Apple and Azure/Store signing accounts are unconfigured, so those\n"
+    "# lanes stay out of the default set; --with re-enables one once its\n"
+    "# credentials exist.  Termux needs no signing, so it is on.\n"
+    "DEFAULT = frozenset(\n"
+    "    lane.name for lane in LANES\n"
+    "    if lane.default\n"
+    '    and lane.name not in {"macos-arm64", "macos-intel", "windows", "windows-store"}\n'
+    ') | {"termux"}\n'
+)
+
+
+def _lanes_own_the_signing_gate(dst: str) -> bool:
+    """True when the tree carries upstream's lane system, not the fork's.
+
+    ``lanes.py`` only appears on a tree synced past upstream's rename, and that
+    table is what ``stable.py`` imports once it has: the module alone is not
+    enough, so both have to be present before the older anchors are skipped.
+    """
+    stable = _sgl_read(dst, _STABLE_RELEASE)
+    return (_sgl_read(dst, _LANES_MODULE) is not None
+            and stable is not None and "lane_set" in stable)
+
+
+def _reconcile_signing_gated_defaults(dst: str) -> bool:
+    """Point upstream's default lane set at the lanes this fork can ship.
+
+    Upstream keeps the whole mechanism -- the lane table, the per-lane ``admit``
+    outputs, every job's ``if`` and the gates' ``skipped`` expectations -- so the
+    fork's only remaining decision is which lanes a release asks for.  Its
+    default is therefore upstream's minus the lanes whose signing accounts are
+    unconfigured, plus Termux, which needs no signing.  Idempotent, and a moved
+    anchor raises so the sync fails rather than shipping a default set that no
+    longer means what this fork needs.
+    """
+    text = _sgl_read(dst, _LANES_MODULE)
+    if text is None:
+        return False
+    before = text
+    text = _sgl_sub(text, _LANES_DEFAULT, _LANES_DEFAULT_FORK,
+                    rel=_LANES_MODULE, done=_LANES_DEFAULT_MARK)
+    if text != before:
+        _sgl_write(dst, _LANES_MODULE, text)
+    return text != before
+
+
+def _reconcile_signing_gated_release_lanes(dst: str) -> list[str]:
+    """Keep the signed desktop lanes skippable, so Linux and Termux can publish.
+
+    The fork's stable release must ship while the Apple, Windows/Azure and
+    Store signing accounts are unconfigured.  A signed lane is therefore built
+    exactly when its whole signing configuration is present, and left out
+    otherwise: its jobs skip, the acceptance gate accepts that as a declared
+    skip, a genuine failure still blocks, and the Store check warns instead of
+    crashing.
+
+    Each file is derived from the tables above and each edition is idempotent
+    (a second pass changes nothing), while a moved anchor raises
+    :class:`SigningGatedLaneError` so the sync fails then rather than shipping
+    a tree whose signed lanes can no longer be skipped.  Returns the changed
+    relative paths.
+
+    A tree synced past upstream's lane table does that job itself, so only the
+    fork's default lane set is re-derived there; the optional-platforms shape
+    below is kept for a tree that has not moved yet, and the two are told apart
+    by whether the lane table and ``stable.py``'s import of it are both present.
+    """
+    changed: list[str] = []
+    if _lanes_own_the_signing_gate(dst):
+        if _reconcile_signing_gated_defaults(dst):
+            changed.append(_LANES_MODULE)
+        return changed
+    for rel, apply in ((_OPTIONAL_PLATFORMS, _reconcile_signing_gated_lanes),
+                       (_STABLE_RELEASE, _reconcile_signing_gated_stable),
+                       (_STORE, _reconcile_signing_gated_store),
+                       (_STABLE_RELEASE_WORKFLOW, _reconcile_signing_gated_workflow)):
+        if apply(dst):
+            changed.append(rel)
+    return changed

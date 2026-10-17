@@ -60,6 +60,39 @@ _PUBLISH_COMMAND = re.compile(
     r"\b(?:gh\s+pr\s+(?:create|edit)|git\s+push)\b", re.IGNORECASE
 )
 
+# A third-party source is pinned only when the clone names the revision it
+# consumes.  A bare ``git clone <url>`` follows whatever that remote's default
+# branch points at when the run happens, so anyone with write access to the
+# remote can change the revision this CI consumes without a line changing here.
+_CLONE_STATEMENT = re.compile(r"git(?:\s+-c\s+\S+)?\s+clone\b[^\n]*")
+_CLONE_REF = re.compile(r"--branch\b|--revision\b|--detach\b")
+_DETACHED_CHECKOUT = re.compile(r"\bcheckout\b[^\n]*--detach\b")
+# The fork's own repository is not a third party: its branches are produced by
+# this engine's own publication workflow, and the wrappers read the merged
+# baseline from ``main`` and the open candidate from ``100WAYS`` on purpose.
+_SELF_REPOSITORY = "nastechresearch/nastech-agent"
+
+
+def _joined_shell(text: str) -> str:
+    """Join shell line-continuations and drop YAML comments.
+
+    A clone URL routinely sits on the line after ``git clone ... \\``, so the
+    statement has to be reassembled before it can be judged.
+    """
+    joined: list[str] = []
+    pending = ""
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        if line.rstrip().endswith("\\"):
+            pending += line.rstrip()[:-1] + " "
+            continue
+        joined.append(pending + line)
+        pending = ""
+    if pending:
+        joined.append(pending)
+    return "\n".join(joined)
+
 
 def audit_workflow_security(
     root: str, *, enforce_publication_policy: bool = True
@@ -115,6 +148,25 @@ def audit_workflow_security(
                         f"action must use a full commit SHA: {target}",
                     )
                 )
+
+        # Supply chain: a cloned third-party repository must name the revision
+        # it consumes.  Detaching onto an explicit commit counts (upstream's
+        # plugin-catalog-ci clones a catalog entry then ``checkout --detach``).
+        shell = _joined_shell(text)
+        detached = bool(_DETACHED_CHECKOUT.search(shell))
+        for statement in _CLONE_STATEMENT.findall(shell):
+            if _SELF_REPOSITORY in statement:
+                continue
+            if _CLONE_REF.search(statement) or detached:
+                continue
+            issues.append(
+                WorkflowPolicyIssue(
+                    "unpinned-source",
+                    rel,
+                    "external git clone must name its revision "
+                    f"(git clone --branch/--detach, or a checkout --detach): {statement.strip()}",
+                )
+            )
 
         if enforce_publication_policy:
             for code, pattern, detail in _FORBIDDEN_WORKFLOW_ACTIONS:

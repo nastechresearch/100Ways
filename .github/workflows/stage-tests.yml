@@ -1,7 +1,10 @@
 name: stage-tests
 
-# Stage 2: the full pytest suite (stdlib + pytest only, no network, no
-# writes to ~/.nastech).
+# Stage 2: the full pytest suite (no writes to ~/.nastech).  It runs on the
+# package's declared dependencies plus pytest and pyyaml: the release-lane
+# tests load the reconciled release workflow as YAML, so that a corrupted
+# env block is caught instead of passing as a text blob.  No other services
+# are needed.
 
 on:
   workflow_call:
@@ -16,10 +19,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install 100ways + pytest
+      - name: Install 100ways + test dependencies
         run: |
           pip install -e .
-          pip install "pytest>=7,<9"
+          pip install "pytest>=7,<9" "pyyaml>=6,<7"
 
       - name: Run test suite
         run: |

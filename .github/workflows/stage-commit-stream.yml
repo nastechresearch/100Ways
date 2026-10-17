@@ -63,7 +63,18 @@ jobs:
         run: |
           git clone --depth=1 https://github.com/nastechresearch/nastech-agent.git nastech-agent
           git clone --depth=1 --branch 100WAYS https://github.com/nastechresearch/nastech-agent.git nastech-candidate || true
-          git clone https://github.com/NousResearch/hermes-agent.git upstream-agent
+          # Name the upstream ref explicitly.  A bare clone follows whatever
+          # NousResearch/hermes-agent's default branch points at when the run
+          # happens, so whoever can write to that remote can change the
+          # revision this CI consumes with no diff landing here.  `--branch
+          # main` turns the consumed ref into an auditable line and fails closed
+          # (clone error) if upstream ever renames or retargets the branch.
+          # It is deliberately a branch name, not a commit SHA: the monitor must
+          # count NEW upstream commits between the merged NasTech baseline and
+          # live upstream HEAD (`rev-list --count` in hundredways/commit_stream.py),
+          # so a frozen revision would freeze `pending_commits` and permanently
+          # disable the threshold trigger that starts a sync.
+          git clone --branch main https://github.com/NousResearch/hermes-agent.git upstream-agent
 
       - name: Compare commit stream
         id: decision

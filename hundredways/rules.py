@@ -162,8 +162,62 @@ def _normalize_runner(match_obj: re.Match) -> str:
     return base
 
 
+# Upstream Hermes re-homed its CI onto Blacksmith hosted runners
+# (2026-10-13..15, ``ci: run everything on blacksmith.sh runners``): every
+# ``runs-on``/``runner`` became ``blacksmith-<N>vcpu-<os>-<ver>[-arm]`` and the
+# action steps became the ``useblacksmith/*`` forks.  This org has no Blacksmith
+# account, so — exactly like the 2026-08-24 larger-runner incident above —
+# a branded update carrying those labels over leaves the whole CI queued with no
+# runner to match.  Restore the standard hosted labels and the upstream action
+# pins the fork used before the switch.  Kept inside the canonical transform so
+# brander, porter, forkcheck, analyzer, and verify (birth parity) agree.
+_BLACKSMITH_LABEL_RE = re.compile(
+    r"\bblacksmith-(\d+)vcpu-(ubuntu|windows|macos)-([a-z0-9.]+)(-arm)?\b"
+)
+_BLACKSMITH_ACTION_RE = re.compile(
+    r"\buseblacksmith/(checkout|setup-docker-builder|build-push-action)"
+    r"@[0-9a-zA-Z._-]+(?:[ \t]*#[^\n]*)?"
+)
+_BLACKSMITH_ACTIONS = {
+    "checkout": "actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1",
+    "setup-docker-builder": (
+        "docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3"
+    ),
+    "build-push-action": (
+        "docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0"
+    ),
+}
+
+
+def _normalize_blacksmith(match_obj: re.Match) -> str:
+    os_name, arm = match_obj.group(2), match_obj.group(4)
+    if os_name == "ubuntu":
+        return "ubuntu-24.04-arm" if arm else "ubuntu-latest"
+    return f"{os_name}-latest"
+
+
+def _normalize_blacksmith_action(match_obj: re.Match) -> str:
+    return _BLACKSMITH_ACTIONS[match_obj.group(1)]
+
+
 # The canonical learned set.  Order matters: longest compounds first.
 DEFAULT_TOKENS: list[TokenRule] = [
+    # -- hosted community plugin: whole repo path ---------------------------
+    # Branding renames the repo NAME inside a GitHub URL
+    # (hermes-plugin-holographic -> nastech-plugin-holographic) but cannot
+    # rename a foreign OWNER, so branding alone left
+    # ``itpartypattaya/nastech-plugin-holographic`` -- a repo that does not
+    # exist.  We host our own copy of this plugin under the ``nastechtest``
+    # organization, pinned at the same commit, so the whole path maps.
+    # It must be a whole-path compound, not the bare ``itpartypattaya``
+    # owner: the other three plugins that owner publishes are not ours, and
+    # the maintainer's contributor record must stay verbatim.  Listed first
+    # because ``transform_strict_metadata_text`` applies tokens in order, so
+    # this has to win before the generic ``hermes`` token below.
+    _rule(
+        "itpartypattaya/hermes-plugin-holographic",
+        "nastechtest/nastech-plugin-holographic",
+    ),
     # -- nous family: compounds before short forms -------------------------
     # Girl mascot file keeps Hermes' structure — hermes ships nous-girl.jpg,
     # so nastech ships nastech-<mascot-name>.jpg.  Only the word "girl" is
@@ -202,6 +256,74 @@ DEFAULT_TOKENS: list[TokenRule] = [
 ]
 
 
+# -- repository identifiers -------------------------------------------------
+# A GitHub repository path is not a brand claim: we have no authority to
+# rename somebody else's repository.  Branding DID rename the repo name inside
+# the URL (``hermes-plugin-foo`` -> ``nastech-plugin-foo``) while leaving the
+# foreign owner untouched, which produced 383 catalog entries pointing at
+# repositories that do not exist (verified: 15/15 sampled URLs 404 while every
+# matching upstream ``hermes-*`` repository exists).  Any owner outside
+# :data:`OWNED_GITHUB_ORGS` is therefore preserved verbatim, unless a token rule
+# redirects that path into an organization we do own -- which is how a plugin we
+# host ourselves (``nastechtest/nastech-plugin-holographic``) still gets branded.
+GITHUB_REPO_RE = re.compile(
+    # A repository identifier in either the web form
+    # (``github.com/<owner>/<repo>``) or the REST form
+    # (``api.github.com/repos/<owner>/<repo>``).  The ``repos/`` segment belongs
+    # to the API path and never to the owner, so it is consumed explicitly; the
+    # leading boundary stops ``api.github.com`` from matching with the owner
+    # read as a literal ``repos``, which silently preserved a first-party URL
+    # (``NousResearch``) that branding must rename, and renamed a foreign one.
+    r"(?<![.\w-])"
+    r"(?:(?:api|uploads)\.github\.com/repos/|(?:[a-z0-9-]+\.)?github\.com/)"
+    r"(?P<owner>[A-Za-z0-9._-]+)/(?P<repo>[A-Za-z0-9._-]+)"
+)
+
+# GitHub owners whose repositories we control and may therefore rename.
+OWNED_GITHUB_ORGS: frozenset[str] = frozenset({"nastechresearch", "nastechtest"})
+
+
+def is_owned_repo_path(path: str) -> bool:
+    """True when a GitHub repository identifier sits in an org we control."""
+    match = GITHUB_REPO_RE.search(path)
+    return match is not None and match.group("owner").lower() in OWNED_GITHUB_ORGS
+
+
+def preserved_repo_url_spans(
+    line: str, rules: "BrandingRules | None" = None
+) -> tuple[re.Match, ...]:
+    """Repository identifiers in ``line`` that branding must leave verbatim.
+
+    A path is preserved when neither the owner we inherited nor the owner the
+    rules would move it into is one we control -- renaming somebody else's
+    repository yields a URL that 404s.  ``NousResearch/misaki.git`` is NOT
+    preserved, because the rules move it into an organization we do own, so it
+    stays a first-party brand leak for the audit to catch.
+    """
+    rules = rules if rules is not None else BrandingRules()
+    spans: list[re.Match] = []
+    for match in GITHUB_REPO_RE.finditer(line):
+        original = match.group(0)
+        if is_owned_repo_path(original):
+            continue
+        if is_owned_repo_path(rules.brand_repo_path(original)):
+            continue
+        spans.append(match)
+    return tuple(spans)
+
+
+# Placeholder sentinels used to carry a preserved URL through the token pass.
+# They live in a private-use block and hold no digits, so no normalizer can
+# rewrite them and no brand token can match inside them.
+_MASK_OPEN = ""
+_MASK_CLOSE = ""
+_MASK_BASE = 0xE100
+
+
+def _mask(index: int) -> str:
+    return f"{_MASK_OPEN}{chr(_MASK_BASE + index)}{_MASK_CLOSE}"
+
+
 @dataclass
 class BrandingRules:
     """Compiled, order-preserving token rules."""
@@ -235,8 +357,8 @@ class BrandingRules:
                 return tok.replace
         return match_obj.group(0)  # pragma: no cover - defensive
 
-    def transform_text(self, text: str) -> str:
-        """Apply all branding tokens to free text."""
+    def _apply_tokens(self, text: str) -> str:
+        """Every rule, with no repository-path exemption."""
         tokens = list(self.tokens)
         pattern = self._pattern()
         branded = pattern.sub(lambda m: self._replacement(m, tokens), text)
@@ -252,9 +374,57 @@ class BrandingRules:
                 flags=re.IGNORECASE,
             )
         branded = _RUNNER_LABEL_RE.sub(_normalize_runner, branded)
+        branded = _BLACKSMITH_LABEL_RE.sub(_normalize_blacksmith, branded)
+        branded = _BLACKSMITH_ACTION_RE.sub(_normalize_blacksmith_action, branded)
         branded = _normalize_test_workers(branded)
         branded = _normalize_os_test_workers(branded)
         return _normalize_test_timeout(branded)
+
+    def brand_repo_path(self, path: str) -> str:
+        """The branded form of a single repository identifier."""
+        return self._apply_tokens(path)
+
+    def preserves_repo_path(self, path: str) -> bool:
+        """True when branding must leave this repository identifier verbatim.
+
+        Preserved only when neither endpoint owner is ours: the inherited owner,
+        which means it is somebody else's repository, and the owner the rules
+        would move it into, which means no rule claims it for us.
+        """
+        return not is_owned_repo_path(path) and not is_owned_repo_path(
+            self.brand_repo_path(path)
+        )
+
+    def transform_text(self, text: str) -> str:
+        """Apply all branding tokens to free text.
+
+        A ``github.com/<owner>/<repo>`` path that :meth:`preserves_repo_path`
+        keeps its inherited spelling -- renaming it yields a URL that 404s --
+        while everything around it is branded normally.
+        """
+        return self._transform_text(text, preserve_foreign_repos=True)
+
+    def _transform_text(self, text: str, *, preserve_foreign_repos: bool) -> str:
+        if not preserve_foreign_repos:
+            return self._apply_tokens(text)
+        spans: list[str] = []
+
+        def _stash(match: re.Match) -> str:
+            spans.append(match.group(0))
+            return _mask(len(spans) - 1)
+
+        working = GITHUB_REPO_RE.sub(_stash, text)
+        if not spans:
+            return self._apply_tokens(working)
+        branded = self._apply_tokens(working)
+        for index, original in enumerate(spans):
+            keep = (
+                original
+                if self.preserves_repo_path(original)
+                else self.brand_repo_path(original)
+            )
+            branded = branded.replace(_mask(index), keep)
+        return branded
 
     def transform_path(self, path: str) -> str:
         """Apply branding tokens to a filesystem path (each component)."""
