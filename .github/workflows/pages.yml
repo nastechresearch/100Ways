@@ -34,7 +34,15 @@ jobs:
           set -euo pipefail
           git clone --depth=1 https://github.com/nastechresearch/nastech-agent.git nastech-agent
           git clone --depth=1 --branch 100WAYS https://github.com/nastechresearch/nastech-agent.git nastech-candidate || true
-          git clone https://github.com/NousResearch/hermes-agent.git upstream-agent
+          # Name the upstream ref explicitly.  A bare clone follows whatever
+          # NousResearch/hermes-agent's default branch points at when the run
+          # happens, so whoever can write to that remote can change the
+          # revision this public status payload reports with no diff landing
+          # here.  `--branch main` makes the consumed ref auditable and fails
+          # closed if upstream renames or retargets the branch.  A commit SHA is
+          # not usable: the payload reports the live upstream HEAD and its
+          # pending-commit distance from the merged baseline.
+          git clone --branch main https://github.com/NousResearch/hermes-agent.git upstream-agent
 
       - name: Build public status payload
         run: |

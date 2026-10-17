@@ -23,6 +23,7 @@ from .integrity import audit_candidate_tree, tree_digest
 from .rules import BrandingRules
 from .updates import (
     _reconcile_assets_worker_config,
+    _reconcile_assets_worker_index,
     _reconcile_docs_posix_separators,
     _reconcile_fork_skill_catalogs,
     _reconcile_fork_skill_sidebars,
@@ -200,6 +201,10 @@ def verify_final_candidate(
             if expected_path.is_file():
                 reconciled_bytes[relative] = expected_path.read_bytes()
         for relative in _reconcile_assets_worker_config(str(expected), preserved):
+            expected_path = expected / relative
+            if expected_path.is_file():
+                reconciled_bytes[relative] = expected_path.read_bytes()
+        for relative in _reconcile_assets_worker_index(str(expected), preserved):
             expected_path = expected / relative
             if expected_path.is_file():
                 reconciled_bytes[relative] = expected_path.read_bytes()

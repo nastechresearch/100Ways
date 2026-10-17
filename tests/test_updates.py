@@ -1,11 +1,17 @@
 """Tests for the ordered update pipeline: staged runs, folder-name branding,
 release zip layout, sequential numbering, and reports."""
 
+import ast
+import asyncio
 import json
+import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
+import threading
+import types
 import zipfile
 
 import pytest
@@ -14,9 +20,13 @@ from hundredways.assets import OwnedAssets
 from hundredways.integrity import audit_candidate_tree
 from hundredways.updates import (
     STAGES,
+    AssetsWorkerIndexError,
     ChannelReaderUserAgentError,
+    GatewayAllowlistReloadError,
+    GatewayPluginGateError,
     TermuxAptKeyDocError,
     UpdateManager,
+    WindowsRealGitLocateError,
     _DOCS_PUBLIC_ORIGIN,
     _HARDENED_PREPARE_SCRIPT,
     _SKILL_DESC_FULL_NEW,
@@ -24,6 +34,7 @@ from hundredways.updates import (
     _PROMPT_SURFACE_CHARS_PER_TOKEN,
     _UPSTREAM_PREPARE_SCRIPT,
     _reconcile_assets_worker_config,
+    _reconcile_assets_worker_index,
     _reconcile_anon_surface_copy,
     _reconcile_apt_pool_first_char,
     _reconcile_channel_reader_user_agent,
@@ -41,14 +52,19 @@ from hundredways.updates import (
     _reconcile_preserved_brand_text,
     _reconcile_python_slow_runner_wait_budgets,
     _reconcile_python_test_timeout,
+    _reconcile_sync_wait_budgets,
     _reconcile_windows_boot_lifecycle_race,
+    _reconcile_windows_real_git_locate,
     _reconcile_docs_posix_separators,
     _reconcile_drop_vercel_deploy_job,
     _reconcile_fork_skill_catalogs,
     _reconcile_fork_skill_sidebars,
+    _reconcile_gateway_allowlist_live_reload,
+    _reconcile_gateway_plugin_gate_native_ticket,
     _reconcile_install_ps1_store_guard_test,
     _reconcile_locale_key_order,
     _reconcile_managed_gateway_wire_headers,
+    _reconcile_pinned_source_clones,
     _reconcile_plugin_catalog_sync_exemption,
     _reconcile_plugin_guard_trusted_installer_hosts,
     _reconcile_portable_shebang,
@@ -61,10 +77,17 @@ from hundredways.updates import (
     _reconcile_skill_description_hardline,
     _reconcile_skill_docs_order,
     _reconcile_telegram_mention_context_lengths,
+    _reconcile_dead_api_defaults,
+    _reconcile_domains,
+    _reconcile_security_contact,
     _reconcile_termux_apt_signing_key,
+    _reconcile_ui_scope_pins,
     _reconcile_uv_lock_file,
     _reconcile_vercel_prepare,
     _reconcile_windows_boot_lifecycle_race,
+    _NASTECH_UI_INTEGRITY,
+    _UI_SCOPE_ASSET_EVIDENCE,
+    UiScopePinError,
     _sigv4_vector_signature,
     _split_prompt_surface_tiers,
     brand_tree,
@@ -653,6 +676,159 @@ def test_windows_boot_lifecycle_accepts_already_gone_taskkill(tmp_path):
     assert "def _kill_raced_its_target(" in text
     assert "killed.returncode == 0 or _kill_raced_its_target(killed)" in text
     assert _reconcile_windows_boot_lifecycle_race(str(candidate)) is False
+
+
+def test_windows_real_git_locate_picks_every_git_for_windows_layout(tmp_path):
+    """The trampoline swap must not depend on ``libexec\\git-core\\git.exe``.
+
+    Git for Windows 2.56 (the windows-latest image) no longer ships that copy,
+    so the old one-path-per-arch candidate list returned ``None`` on a healthy
+    install and every Windows update degraded to the ZIP path.  The patched
+    locator enumerates every layout Git for Windows has shipped and lets the
+    fork-bomb probe pick the real binary.
+    """
+    candidate = tmp_path / "candidate"
+    path = candidate / "nastech_cli" / "update_cmd_git.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "from contextlib import suppress\n"
+        "from pathlib import Path\n\n\n"
+        "def _locate_real_git() -> Optional[Path]:\n"
+        "    candidates = [\n"
+        '        Path(base) / "Git" / arch / "libexec" / "git-core" / "git.exe"\n'
+        '        for base in (r"C:\\Program Files", r"C:\\Program Files (x86)")\n'
+        '        for arch in ("clangarm64", "mingw64", "mingw32")\n'
+        "    ] + _portable_git_candidates()\n"
+        "    return next(c for c in candidates)\n",
+        encoding="utf-8",
+    )
+
+    assert _reconcile_windows_real_git_locate(str(candidate)) is True
+    text = path.read_text(encoding="utf-8")
+    # Every layout the patch enumerates, not just the dropped legacy one.
+    for pattern in (
+        '"bin/git.exe"',
+        '"cmd/git.exe"',
+        '"*/bin/git.exe"',
+        '"*/libexec/git-core/git.exe"',
+    ):
+        assert pattern in text, pattern
+    assert "git_root.glob(pattern)" in text
+    # The legacy one-path-per-arch list is gone: no dependency on that exact path.
+    assert 'for arch in ("clangarm64", "mingw64", "mingw32")' not in text
+    # Idempotent (fixed point) and brand-clean for the first-party audit.
+    assert _reconcile_windows_real_git_locate(str(candidate)) is False
+    assert BrandingRules().transform_text(text) == text
+
+
+def test_windows_real_git_locate_noop_without_the_file_and_raises_on_shape_move(tmp_path):
+    candidate = tmp_path / "candidate"
+    # No upstream counterpart at all: a silent no-op, never an error.
+    assert _reconcile_windows_real_git_locate(str(candidate)) is False
+
+    # File exists but carries neither the legacy list nor the patched block:
+    # upstream reformatted it, so fail loudly at sync time (a ValueError, which
+    # conformance catches) rather than shipping an unpatched locator.
+    path = candidate / "nastech_cli" / "update_cmd_git.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "def _locate_real_git():\n"
+        "    return _candidates_from_unknown_shape()\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(WindowsRealGitLocateError) as excinfo:
+        _reconcile_windows_real_git_locate(str(candidate))
+    # Must be a ValueError so hundredways.conformance reports it, not crashes.
+    assert isinstance(excinfo.value, ValueError)
+    assert "update_cmd_git.py" in str(excinfo.value)
+
+
+def test_sync_wait_budgets_widen_the_four_new_probes(tmp_path):
+    """Widen the four 7bda2a33 probes that assume an idle host, once each."""
+    candidate = tmp_path / "candidate"
+
+    def write(rel: str, text: str) -> None:
+        path = candidate / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    write(
+        "tests/agent/test_run_agent.py",
+        "class TestRunConversation:\n"
+        "    def test_redirect_from_input_thread_cancels_live_model_request(self, agent):\n"
+        "        def _fake_api_call(_api_kwargs):\n"
+        "                deadline = time.time() + 2\n"
+        "            return final\n"
+        "            assert entered.wait(timeout=2)\n"
+        "            worker.join(timeout=5)\n",
+    )
+    write(
+        "tests/test_session_daemon_reaper.py",
+        "def test_session_teardown_terminates_daemons_under_the_session_basetemp_only(tmp_path):\n"
+        "        wait_until(lambda: x <= y,\n"
+        "            [basetemp, elsewhere])), timeout=10, what='both detached children started')\n",
+    )
+    write(
+        "tests/gateway/fixtures/local_recovery_probe.py",
+        "async def rpc(ws, method, **params):\n"
+        "    async with asyncio.timeout(20):\n",
+    )
+    write(
+        "tests/nastech_cli/test_gateway_chat_native.py",
+        "        result = tmux(\"new-session\", text=True, timeout=10, check=False)\n"
+        "    def until(text, timeout=45):\n",
+    )
+
+    changed = _reconcile_sync_wait_budgets(str(candidate))
+    assert changed == [
+        "tests/agent/test_run_agent.py",
+        "tests/test_session_daemon_reaper.py",
+        "tests/gateway/fixtures/local_recovery_probe.py",
+        "tests/nastech_cli/test_gateway_chat_native.py",
+    ]
+    # Each bounded poll grows to the fork's standard-runner budget; the red is
+    # the timeout, so a genuine regression still fails loudly.
+    assert "assert entered.wait(timeout=15)" in (candidate / "tests/agent/test_run_agent.py").read_text(encoding="utf-8")
+    assert "worker.join(timeout=30)" in (candidate / "tests/agent/test_run_agent.py").read_text(encoding="utf-8")
+    assert "timeout=30, what='both detached children started'" in (candidate / "tests/test_session_daemon_reaper.py").read_text(encoding="utf-8")
+    assert "async with asyncio.timeout(60)" in (candidate / "tests/gateway/fixtures/local_recovery_probe.py").read_text(encoding="utf-8")
+    assert "def until(text, timeout=90)" in (candidate / "tests/nastech_cli/test_gateway_chat_native.py").read_text(encoding="utf-8")
+    # Fixed point: a second pass rewrites nothing.
+    assert _reconcile_sync_wait_budgets(str(candidate)) == []
+    # Brand-clean for the first-party audit on every edited file.
+    rules = BrandingRules()
+    for rel in changed:
+        assert rules.transform_text((candidate / rel).read_text(encoding="utf-8")) == (candidate / rel).read_text(encoding="utf-8")
+
+
+def test_windows_git_locate_and_sync_wait_budgets_run_from_reconcile_tree(tmp_path):
+    """A new reconcile only runs if ``reconcile_tree`` dispatches it."""
+    root = tmp_path / "candidate"
+    path = root / "nastech_cli" / "update_cmd_git.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "def _locate_real_git():\n"
+        "    candidates = [\n"
+        '        Path(base) / "Git" / arch / "libexec" / "git-core" / "git.exe"\n'
+        '        for base in (r"C:\\Program Files", r"C:\\Program Files (x86)")\n'
+        '        for arch in ("clangarm64", "mingw64", "mingw32")\n'
+        "    ] + _portable_git_candidates()\n",
+        encoding="utf-8",
+    )
+    probe = root / "tests" / "gateway" / "fixtures" / "local_recovery_probe.py"
+    probe.parent.mkdir(parents=True)
+    probe.write_text(
+        "async def rpc(ws, method, **params):\n"
+        "    async with asyncio.timeout(20):\n",
+        encoding="utf-8",
+    )
+
+    result = reconcile_tree(str(root))
+    assert "nastech_cli/update_cmd_git.py" in result.fixed
+    assert "tests/gateway/fixtures/local_recovery_probe.py" in result.fixed
+    # Both are fixed points on the next run.
+    assert _reconcile_windows_real_git_locate(str(root)) is False
+    assert _reconcile_sync_wait_budgets(str(root)) == []
 
 
 def test_install_ps1_store_guard_test_collapses_host_wrapping(tmp_path):
@@ -2909,6 +3085,97 @@ def test_reconcile_plugin_catalog_sync_exemption_skips_missing_workflow(tmp_path
     assert _reconcile_plugin_catalog_sync_exemption(str(tmp_path)) is False
 
 
+def test_reconcile_pinned_source_clones_names_every_external_ref(tmp_path):
+    """The engine workflows that clone Hermes must name the ref they consume.
+
+    A bare ``git clone <url>`` follows whatever NousResearch/hermes-agent's
+    default branch is at run time, so an upstream default-branch flip changes
+    the revision CI consumes with no diff landing in this repository.
+    """
+    root = tmp_path / "branded"
+    wf = root / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    stream = wf / "stage-commit-stream.yml"
+    stream.write_text(
+        "      - name: Fetch\n"
+        "        run: |\n"
+        "          git clone https://github.com/NousResearch/hermes-agent.git upstream-agent\n",
+        encoding="utf-8",
+    )
+    pages = wf / "pages.yml"
+    pages.write_text(
+        "          git clone https://github.com/NousResearch/hermes-agent.git upstream-agent\n",
+        encoding="utf-8",
+    )
+    pipeline = wf / "stage-pipeline.yml"
+    pipeline.write_text(
+        "          if git -c http.version=HTTP/1.1 clone "
+        '"$HUNDREDWAYS_HERMES_URL" upstream-agent; then\n',
+        encoding="utf-8",
+    )
+
+    changed = _reconcile_pinned_source_clones(str(root))
+
+    # Reported in the table's order, so a missing pin is traceable to a row.
+    assert changed == [
+        ".github/workflows/stage-commit-stream.yml",
+        ".github/workflows/pages.yml",
+        ".github/workflows/stage-pipeline.yml",
+    ]
+    assert (
+        "git clone --branch main https://github.com/NousResearch/hermes-agent.git "
+        "upstream-agent" in stream.read_text(encoding="utf-8")
+    )
+    assert "--branch main" in pages.read_text(encoding="utf-8")
+    assert 'clone --branch main "$HUNDREDWAYS_HERMES_URL"' in pipeline.read_text(
+        encoding="utf-8"
+    )
+
+    # Idempotent: the pinned needle is now present, so the bare needle is gone.
+    assert _reconcile_pinned_source_clones(str(root)) == []
+
+
+def test_reconcile_pinned_source_clones_registered_in_reconcile_tree(tmp_path):
+    """reconcile_tree must carry the pin (a fork-local edit is not durable)."""
+    root = tmp_path / "branded"
+    wf = root / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / "pages.yml").write_text(
+        "          git clone https://github.com/NousResearch/hermes-agent.git upstream-agent\n",
+        encoding="utf-8",
+    )
+
+    result = reconcile_tree(str(root))
+
+    assert ".github/workflows/pages.yml" in result.fixed
+    assert "--branch main" in (wf / "pages.yml").read_text(encoding="utf-8")
+
+
+def test_reconcile_pinned_source_clones_skips_absent_and_raises_on_unknown(tmp_path):
+    """Absent = no-op; present in neither shape = fail closed as ValueError."""
+    root = tmp_path / "branded"
+    wf = root / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    assert _reconcile_pinned_source_clones(str(root)) == []
+
+    # Already pinned: idempotent no-op, byte-identical output.
+    pinned = wf / "pages.yml"
+    pinned.write_text(
+        "          git clone --branch main "
+        "https://github.com/NousResearch/hermes-agent.git upstream-agent\n",
+        encoding="utf-8",
+    )
+    before = pinned.read_bytes()
+    assert _reconcile_pinned_source_clones(str(root)) == []
+    assert pinned.read_bytes() == before
+
+    # Neither form: the reconciliation cannot reason about the file.
+    pinned.write_text("jobs:\n  monitor:\n    steps: []\n", encoding="utf-8")
+    with pytest.raises(ValueError) as excinfo:
+        _reconcile_pinned_source_clones(str(root))
+    assert "pages.yml" in str(excinfo.value)
+
+
 def test_prompt_surface_snapshot_is_computed_after_domain_migration(tmp_path):
     """The manifest counts characters of the final rendered prompt.
 
@@ -3052,6 +3319,463 @@ def test_reconcile_channel_reader_user_agent_flags_a_reformatted_reader(tmp_path
         reconcile_tree(str(root))
 
 
+# ---------------------------------------------------------------------------
+# Shared-gateway approval-gate ports (upstream eea7c437eb)
+# ---------------------------------------------------------------------------
+# Upstream eea7c437eb ("fix(security): honour allowlist removals and the plugin
+# gate on the shared gateway") closes two gates that stopped holding once one
+# long-lived gateway daemon owned every local session.  ``brand_tree`` rewrites
+# every upstream-owned file on each sync, so both fixes live in the engine as
+# ``_reconcile_*`` ports (see ``hundredways/updates.py``).  The fixtures below
+# are the pre-fix and post-fix UPSTREAM text (unbranded); each test brands them
+# with the engine's own rules, exactly as ``brand_tree`` would, so the ports are
+# proved end to end and the behavioural tests can execute the emitted code.
+
+_APPROVAL_PORT_PREFIX = '''def _permanent_set() -> set:
+    """The permanent allowlist that governs the ACTIVE profile. Unscoped (single-profile process,
+    or the multiplexer's own launch profile) → the module-level set tests and the CLI seed. A routed
+    profile (HERMES_HOME override) → its own set, lazily loaded from ITS ``command_allowlist``: the
+    launch profile's "always" approvals must not pre-approve commands for a secondary, nor may a
+    secondary's "always" choice be written back into the launch profile's config. Callers hold ``_lock``.
+    """
+    from hermes_constants import get_hermes_home_override, hermes_home_key
+    if get_hermes_home_override() is None:
+        return _permanent_approved
+    home_key = hermes_home_key()
+    approved = _permanent_approved_by_home.get(home_key)
+    if approved is None:
+        try:
+            approved = _read_permanent_allowlist()
+        except Exception as e:
+            logger.warning("Failed to load permanent allowlist: %s", e)
+            approved = set()
+        _permanent_approved_by_home[home_key] = approved
+    return approved
+
+
+def is_approved(session_key: str, pattern_key: str) -> bool:
+    """Session-scoped or permanent approval. Accepts the canonical key and the legacy
+    regex-derived key so existing command_allowlist entries survive key migrations."""
+    aliases = _approval_key_aliases(pattern_key)
+    with _lock:
+        approved = _permanent_set() | _session_approved.get(session_key, set())
+    return any(alias in approved for alias in aliases)
+
+
+def save_permanent_allowlist(patterns: set):
+    """Save permanently allowed command patterns to config, reconciling with the file.
+
+    ``command_allowlist`` is a file an operator edits by hand; removing an entry
+    there is the documented way to withdraw a standing approval. This process read
+    it once at import and ``load_permanent`` only ever unions, so writing the
+    in-memory set straight back deleted entries added on disk since import and
+    resurrected the ones removed. The result written is ``what is on disk now``
+    plus ``what this process approved since its own baseline``; revoked entries are
+    also dropped from the governing permanent set so ``is_approved()`` stops
+    honouring them. Nothing re-reads the file on the approval hot path.
+
+    ``patterns`` may only ADD: an entry left out of it is not removed, because the
+    on-disk list wins for anything this process did not approve itself. Remove
+    entries by editing ``command_allowlist`` in config.yaml.
+    """
+    pass
+'''
+
+_APPROVAL_PORT_POSTFIX = '''def _permanent_set() -> set:
+    """The permanent allowlist that governs the ACTIVE profile. Unscoped (single-profile process,
+    or the multiplexer's own launch profile) → the module-level set tests and the CLI seed. A routed
+    profile (HERMES_HOME override) → its own set, lazily loaded from ITS ``command_allowlist``: the
+    launch profile's "always" approvals must not pre-approve commands for a secondary, nor may a
+    secondary's "always" choice be written back into the launch profile's config. Callers hold ``_lock``.
+    """
+    from hermes_constants import get_hermes_home_override, hermes_home_key
+    if get_hermes_home_override() is None:
+        approved, key = _permanent_approved, ""
+    else:
+        key = hermes_home_key()
+        approved = _permanent_approved_by_home.setdefault(key, set())
+    _sync_permanent_from_disk(approved, key)
+    return approved
+
+
+def _sync_permanent_from_disk(approved: set, key: str) -> None:
+    """Apply hand edits to ``command_allowlist`` made since the last sync. The gateway daemon
+    outlives any one session, so an entry the operator removed must stop being honoured now, not
+    at restart. Only the on-disk delta is applied: approvals this process made but could not save
+    survive. The config read is cached on the file signature. Callers hold ``_lock``."""
+    try:
+        on_disk = _read_permanent_allowlist()
+    except Exception as e:
+        logger.warning("Failed to load permanent allowlist: %s", e, exc_info=True)
+        return
+    baseline = _permanent_baseline_by_home.get(key, set())
+    if on_disk == baseline:
+        return
+    approved.difference_update(baseline - on_disk)
+    approved.update(on_disk - baseline)
+    _permanent_baseline_by_home[key] = on_disk
+
+
+def is_approved(session_key: str, pattern_key: str) -> bool:
+    """Session-scoped or permanent approval. Accepts the canonical key and the legacy
+    regex-derived key so existing command_allowlist entries survive key migrations."""
+    aliases = _approval_key_aliases(pattern_key)
+    with _lock:
+        approved = _permanent_set() | _session_approved.get(session_key, set())
+    return any(alias in approved for alias in aliases)
+
+
+def save_permanent_allowlist(patterns: set):
+    """Save permanently allowed command patterns to config, reconciling with the file.
+
+    ``command_allowlist`` is a file an operator edits by hand; removing an entry
+    there is the documented way to withdraw a standing approval. This process read
+    it once at import and ``load_permanent`` only ever unions, so writing the
+    in-memory set straight back deleted entries added on disk since import and
+    resurrected the ones removed. The result written is ``what is on disk now``
+    plus ``what this process approved since its own baseline``; revoked entries are
+    also dropped from the governing permanent set so ``is_approved()`` stops
+    honouring them (``_sync_permanent_from_disk`` does the same on every check).
+
+    ``patterns`` may only ADD: an entry left out of it is not removed, because the
+    on-disk list wins for anything this process did not approve itself. Remove
+    entries by editing ``command_allowlist`` in config.yaml.
+    """
+    pass
+'''
+
+_GATE_PORT_PREFIX = '''async def _plugin_api_runtime_gate(request: Request, call_next):
+    """Block requests to disabled plugin API routes at request time.
+
+    :func:`_mount_plugin_api_routes` gates at import time; a plugin disabled
+    while running keeps its router mounted until restart, so enforce on every
+    ``/api/plugins/{name}/...`` request. Registered BEFORE the auth middlewares
+    (runs AFTER them): an unauthenticated caller must get auth's 401, never this
+    404, or the status code becomes a plugin-name oracle.
+    """
+    path = request.url.path
+    # parts: ['', 'api', 'plugins', '<name>', ...]
+    parts = path.split("/")
+    plugin_name = parts[3] if path.startswith("/api/plugins/") and len(parts) >= 4 else ""
+    # Only gate authenticated requests. Unauthenticated ones fall through so
+    # auth_middleware / the OAuth gate return 401 first and this route can't
+    # be used as a plugin-name oracle.
+    if plugin_name and (
+        getattr(request.state, "token_authenticated", False)
+        or getattr(request.app.state, "auth_required", False)
+        or _has_valid_session_token(request)
+        or _has_valid_query_token(request, path)
+    ):
+        try:
+            from hermes_cli.plugins_cmd import _get_enabled_set, _get_disabled_set
+            enabled_set = _get_enabled_set()
+            disabled_set = _get_disabled_set()
+        except Exception:
+            enabled_set = set()
+            disabled_set = set()
+        plugin = next((p for p in _get_dashboard_plugins() if p.get("name") == plugin_name), None)
+        source = plugin.get("source") if plugin else "user"
+        blocked = plugin_name in disabled_set or (source == "user" and plugin_name not in enabled_set)
+        if blocked and source in ("user", "bundled"):
+            return JSONResponse(status_code=404, content={"detail": "Plugin not found"})
+    return await call_next(request)
+'''
+
+_GATE_PORT_POSTFIX = '''async def _plugin_api_runtime_gate(request: Request, call_next):
+    """Block requests to disabled plugin API routes at request time.
+
+    :func:`_mount_plugin_api_routes` gates at import time; a plugin disabled
+    while running keeps its router mounted until restart, so enforce on every
+    ``/api/plugins/{name}/...`` request. Registered BEFORE the auth middlewares
+    (runs AFTER them): an unauthenticated caller must get auth's 401, never this
+    404, or the status code becomes a plugin-name oracle.
+    """
+    path = request.url.path
+    # parts: ['', 'api', 'plugins', '<name>', ...]
+    parts = path.split("/")
+    plugin_name = parts[3] if path.startswith("/api/plugins/") and len(parts) >= 4 else ""
+    # Only gate authenticated requests. Unauthenticated ones fall through so
+    # auth_middleware / the OAuth gate return 401 first and this route can't
+    # be used as a plugin-name oracle. Desktop authenticates with a native ticket.
+    if plugin_name and (
+        getattr(request.state, "token_authenticated", False)
+        or getattr(request.state, "native_http_principal", None)
+        or getattr(request.app.state, "auth_required", False)
+        or _has_valid_session_token(request)
+        or _has_valid_query_token(request, path)
+    ):
+        try:
+            from hermes_cli.plugins_cmd import _get_enabled_set, _get_disabled_set
+            enabled_set = _get_enabled_set()
+            disabled_set = _get_disabled_set()
+        except Exception:
+            enabled_set = set()
+            disabled_set = set()
+        plugin = next((p for p in _get_dashboard_plugins() if p.get("name") == plugin_name), None)
+        source = plugin.get("source") if plugin else "user"
+        blocked = plugin_name in disabled_set or (source == "user" and plugin_name not in enabled_set)
+        if blocked and source in ("user", "bundled"):
+            return JSONResponse(status_code=404, content={"detail": "Plugin not found"})
+    return await call_next(request)
+'''
+
+
+def _port_branded(text: str) -> str:
+    """Brand a fixture the way ``brand_tree`` brands an upstream file."""
+    return BrandingRules().transform_text(text)
+
+
+def _port_normalise_tokens(text: str) -> str:
+    """Collapse every brand spelling to ``X`` so a branded fork file and its
+    upstream source can be compared for semantic (not spelling) equality."""
+    return re.sub(r"(?i)(hermes|nous|nastech)", "X", text)
+
+
+def _port_write(tmp_path, rel: str, text: str):
+    root = tmp_path / "branded"
+    target = root / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+    return root, target
+
+
+def test_reconcile_gateway_allowlist_live_reload_emits_upstream_post_fix(tmp_path):
+    """The port must reproduce upstream's own post-fix text (brand-normalised)."""
+    root, target = _port_write(
+        tmp_path, "tools/approval.py", _port_branded(_APPROVAL_PORT_PREFIX)
+    )
+
+    assert _reconcile_gateway_allowlist_live_reload(str(root)) is True
+    emitted = target.read_text(encoding="utf-8")
+    expected = _port_branded(_APPROVAL_PORT_POSTFIX)
+    assert emitted == expected
+    assert _port_normalise_tokens(emitted) == _port_normalise_tokens(expected)
+    compile(emitted, str(target), "exec")
+
+    # Idempotent: the helper is the fixed point, so a second pass is a no-op.
+    assert _reconcile_gateway_allowlist_live_reload(str(root)) is False
+
+
+def test_reconcile_gateway_plugin_gate_emits_upstream_post_fix(tmp_path):
+    """The native-ticket condition must land exactly as upstream wrote it."""
+    root, target = _port_write(
+        tmp_path, "nastech_cli/web_server.py", _port_branded(_GATE_PORT_PREFIX)
+    )
+
+    assert _reconcile_gateway_plugin_gate_native_ticket(str(root)) is True
+    emitted = target.read_text(encoding="utf-8")
+    expected = _port_branded(_GATE_PORT_POSTFIX)
+    assert emitted == expected
+    assert _port_normalise_tokens(emitted) == _port_normalise_tokens(expected)
+    compile(emitted, str(target), "exec")
+
+    assert _reconcile_gateway_plugin_gate_native_ticket(str(root)) is False
+
+
+def test_gateway_security_ports_skip_absent_files(tmp_path):
+    """Files upstream may move away: nothing to patch, no error."""
+    assert _reconcile_gateway_allowlist_live_reload(str(tmp_path)) is False
+    assert _reconcile_gateway_plugin_gate_native_ticket(str(tmp_path)) is False
+
+
+def test_reconcile_gateway_allowlist_live_reload_flags_a_reshaped_file(tmp_path):
+    """A moved ``_permanent_set`` must fail the sync, not silently drop the port."""
+    root, _ = _port_write(
+        tmp_path,
+        "tools/approval.py",
+        "def _permanent_set() -> set:\n    return _permanent_approved\n",
+    )
+
+    with pytest.raises(GatewayAllowlistReloadError):
+        _reconcile_gateway_allowlist_live_reload(str(root))
+    with pytest.raises(GatewayAllowlistReloadError):
+        reconcile_tree(str(root))
+
+
+def test_reconcile_gateway_allowlist_live_reload_flags_a_missing_call_site(tmp_path):
+    """A present helper with no call site is still the unpatched defect."""
+    root, _ = _port_write(
+        tmp_path,
+        "tools/approval.py",
+        "def _sync_permanent_from_disk(approved: set, key: str) -> None:\n"
+        "    return None\n",
+    )
+
+    with pytest.raises(GatewayAllowlistReloadError):
+        _reconcile_gateway_allowlist_live_reload(str(root))
+
+
+def test_reconcile_gateway_plugin_gate_flags_a_reshaped_file(tmp_path):
+    root, _ = _port_write(
+        tmp_path, "nastech_cli/web_server.py", "async def _plugin_api_runtime_gate():\n    pass\n"
+    )
+
+    with pytest.raises(GatewayPluginGateError):
+        _reconcile_gateway_plugin_gate_native_ticket(str(root))
+    with pytest.raises(GatewayPluginGateError):
+        reconcile_tree(str(root))
+
+
+def test_reconcile_tree_registers_the_gateway_security_ports(tmp_path):
+    root = tmp_path / "branded"
+    (root / "tools").mkdir(parents=True)
+    (root / "nastech_cli").mkdir(parents=True)
+    (root / "tools" / "approval.py").write_text(
+        _port_branded(_APPROVAL_PORT_PREFIX), encoding="utf-8"
+    )
+    (root / "nastech_cli" / "web_server.py").write_text(
+        _port_branded(_GATE_PORT_PREFIX), encoding="utf-8"
+    )
+
+    result = reconcile_tree(str(root))
+
+    assert "tools/approval.py" in result.fixed
+    assert "nastech_cli/web_server.py" in result.fixed
+
+
+def _port_function_source(source: str, name: str) -> str | None:
+    """Source of module-level ``name`` in ``source``, decorators stripped so the
+    function can be compiled without the FastAPI app that upstream decorates it with."""
+    for node in ast.parse(source).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            node.decorator_list = []
+            return ast.unparse(node)
+    return None
+
+
+def _install_nastech_constants_stub(monkeypatch):
+    """Stand in for the branded ``nastech_constants`` the approval fixture imports."""
+    stub = types.ModuleType("nastech_constants")
+    stub.get_nastech_home_override = lambda: None  # unscoped, single-profile process
+    stub.nastech_home_key = lambda: ""
+    monkeypatch.setitem(sys.modules, "nastech_constants", stub)
+
+
+def _approval_namespace(source: str, disk: set) -> dict:
+    """Exec the fixture's approval-check functions over module state, exactly as the
+    running gateway holds it: one long-lived process, ``disk`` = config.yaml."""
+    namespace = {
+        "logger": logging.getLogger("gateway-allowlist-port-test"),
+        "_permanent_approved": set(disk),
+        "_permanent_approved_by_home": {},
+        "_permanent_baseline_by_home": {"": set(disk)},
+        "_read_permanent_allowlist": lambda: set(disk),
+        "_lock": threading.Lock(),
+        "_session_approved": {},
+        "_approval_key_aliases": lambda key: {key},
+    }
+    for name in ("_permanent_set", "_sync_permanent_from_disk", "is_approved"):
+        found = _port_function_source(source, name)
+        if found is not None:
+            exec(found, namespace)
+    assert "_permanent_set" in namespace and "is_approved" in namespace
+    return namespace
+
+
+def _assert_allowlist_removal_takes_effect(monkeypatch, source: str) -> None:
+    """A hand removal must reach the very next approval check of a live process."""
+    _install_nastech_constants_stub(monkeypatch)
+    disk = {"rm -rf build", "ls *"}
+    namespace = _approval_namespace(source, disk)
+
+    assert namespace["is_approved"]("s1", "rm -rf build") is True  # standing approval
+
+    disk.discard("rm -rf build")  # the operator edits command_allowlist in config.yaml
+
+    # No re-import and no restart: the next check must see the withdrawal.
+    assert namespace["is_approved"]("s1", "rm -rf build") is False, (
+        "the removal must reach a live process without a restart"
+    )
+    assert namespace["is_approved"]("s1", "ls *") is True
+
+
+def test_allowlist_removal_needs_a_restart_on_the_pre_fix_text(monkeypatch):
+    """Documents the defect the port closes: a removed ``rm -rf`` stays auto-approved."""
+    with pytest.raises(AssertionError, match="without a restart"):
+        _assert_allowlist_removal_takes_effect(
+            monkeypatch, _port_branded(_APPROVAL_PORT_PREFIX)
+        )
+
+
+def test_allowlist_removal_takes_effect_without_restart_once_reconciled(monkeypatch, tmp_path):
+    root, target = _port_write(
+        tmp_path, "tools/approval.py", _port_branded(_APPROVAL_PORT_PREFIX)
+    )
+    assert _reconcile_gateway_allowlist_live_reload(str(root)) is True
+
+    _assert_allowlist_removal_takes_effect(monkeypatch, target.read_text(encoding="utf-8"))
+
+
+class _FakeJSONResponse:
+    """Starlette's ``JSONResponse`` reduced to what the gate returns."""
+
+    def __init__(self, status_code: int = 200, content=None):
+        self.status_code = status_code
+        self.content = content
+
+
+def _install_plugins_cmd_stub(monkeypatch, enabled: set, disabled: set):
+    """Stand in for the branded ``nastech_cli.plugins_cmd`` the gate imports lazily."""
+    plugins_cmd = types.ModuleType("nastech_cli.plugins_cmd")
+    plugins_cmd._get_enabled_set = lambda: set(enabled)
+    plugins_cmd._get_disabled_set = lambda: set(disabled)
+    package = types.ModuleType("nastech_cli")
+    package.plugins_cmd = plugins_cmd
+    monkeypatch.setitem(sys.modules, "nastech_cli", package)
+    monkeypatch.setitem(sys.modules, "nastech_cli.plugins_cmd", plugins_cmd)
+
+
+def _plugin_gate_response(source: str):
+    """Run the fixture's gate for a Desktop native-ticket request to a disabled plugin."""
+    found = _port_function_source(source, "_plugin_api_runtime_gate")
+    assert found is not None, "fixture lost _plugin_api_runtime_gate"
+    namespace = {
+        "Request": object,  # only the parameter annotation; never used at runtime
+        "JSONResponse": _FakeJSONResponse,
+        "_has_valid_session_token": lambda request: False,
+        "_has_valid_query_token": lambda request, path: False,
+        "_get_dashboard_plugins": lambda: [{"name": "hot", "source": "user"}],
+    }
+    exec(found, namespace)
+    request = types.SimpleNamespace(
+        url=types.SimpleNamespace(path="/api/plugins/hot/probe"),
+        # Desktop's native ticket, and neither a session token nor the OAuth gate.
+        state=types.SimpleNamespace(
+            native_http_principal={"profile_id": "default", "purpose": "native-http"}
+        ),
+        app=types.SimpleNamespace(state=types.SimpleNamespace(auth_required=False)),
+    )
+
+    async def call_next(next_request):
+        return _FakeJSONResponse(status_code=200)
+
+    return asyncio.run(namespace["_plugin_api_runtime_gate"](request, call_next))
+
+
+def _assert_plugin_gate_blocks_native_ticket(source: str) -> None:
+    response = _plugin_gate_response(source)
+    assert response.status_code == 404, "a disabled plugin answered a native-ticket request"
+    assert response.content == {"detail": "Plugin not found"}
+
+
+def test_plugin_gate_ignores_a_native_ticket_on_the_pre_fix_text(monkeypatch):
+    """Documents the defect the port closes: Desktop reaches a disabled plugin."""
+    _install_plugins_cmd_stub(monkeypatch, enabled={"hot"}, disabled={"hot"})
+
+    with pytest.raises(AssertionError, match="answered a native-ticket request"):
+        _assert_plugin_gate_blocks_native_ticket(_port_branded(_GATE_PORT_PREFIX))
+
+
+def test_plugin_gate_blocks_a_native_ticket_once_reconciled(monkeypatch, tmp_path):
+    _install_plugins_cmd_stub(monkeypatch, enabled={"hot"}, disabled={"hot"})
+    root, target = _port_write(
+        tmp_path, "nastech_cli/web_server.py", _port_branded(_GATE_PORT_PREFIX)
+    )
+    assert _reconcile_gateway_plugin_gate_native_ticket(str(root)) is True
+
+    _assert_plugin_gate_blocks_native_ticket(target.read_text(encoding="utf-8"))
+
+
 _TERMUX_DOC_REL = "website/docs/getting-started/termux.md"
 _TERMUX_I18N_REL = (
     "website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/"
@@ -3157,6 +3881,36 @@ _STALE_WRANGLER = (
     'id = "ff12d5a5324d44b599d8319edabc4adb"\n'
 )
 
+# The fork's Worker entry point before the Termux fix: a verbatim-key, KV-only
+# lookup.  It carries the shapes the reconcile pins on -- the ``[previews]``
+# sibling ``const LANDING = `<!doctype html>`` anchor and the pre-fix releases
+# block -- so a stale snapshot of this file must be upgraded, not shipped.
+_STALE_WORKER_INDEX = (
+    "const LANDING = `<!doctype html>\n"
+    "<html></html>`;\n"
+    "\n"
+    "function json(body, status = 200) {\n"
+    "  return new Response(JSON.stringify(body), {\n"
+    "    status,\n"
+    '    headers: { "content-type": "application/json; charset=utf-8" },\n'
+    "  });\n"
+    "}\n"
+    "\n"
+    "export default {\n"
+    "  async fetch(request, env) {\n"
+    "    const path = new URL(request.url).pathname;\n"
+    "    // Everything under /releases/ is served from the KV store (publication\n"
+    "    // target). Unknown objects answer a protocol-correct 404, never a redirect.\n"
+    '    if (path.startsWith("/releases/")) {\n'
+    '      const key = path.replace(/^\\/+/, "");\n'
+    '      const value = await env.NASTECH_ASSETS.get(key, "text");\n'
+    '      return new Response(value ?? "", { status: value === null ? 404 : 200 });\n'
+    "    }\n"
+    '    return new Response("", { status: 404 });\n'
+    "  },\n"
+    "};\n"
+)
+
 
 def test_reconcile_assets_worker_config_pins_name_entry_and_previews(tmp_path):
     """The preserved Worker config must match the deployed host the CLI reads."""
@@ -3211,11 +3965,12 @@ def test_reconcile_assets_worker_config_skips_missing_file(tmp_path):
 
 def test_pipeline_pins_preserved_assets_worker_config(tmp_path):
     """End to end: preserve carries the fork-only Worker in, the post-preserve
-    reconcile pins it, and the gate stays green.
+    reconcile pins the config AND upgrades the handler, and the gate stays green.
 
     ``scripts/cloudflare/assets-worker`` has no upstream source, so a stale
     snapshot restored by an update would otherwise replay
-    ``main = "src/index.js"`` and break the Cloudflare Workers Builds deploy.
+    ``main = "src/index.js"`` (breaking the Cloudflare Workers Builds deploy)
+    and the verbatim-key, KV-only handler that 404s every Termux artifact.
     """
     hermes = _hermes_repo(tmp_path)
     baseline = subprocess.check_output(
@@ -3224,7 +3979,7 @@ def test_pipeline_pins_preserved_assets_worker_config(tmp_path):
     fork = tmp_path / "nastech-agent"
     worker = _assets_worker_dir(fork)
     (fork / "manifest.json").write_text(json.dumps({"upstream_sha": baseline}))
-    (worker / "index.js").write_text("export default { async fetch() {} };\n")
+    (worker / "index.js").write_text(_STALE_WORKER_INDEX, encoding="utf-8")
     (worker / "wrangler.toml").write_text(_STALE_WRANGLER, encoding="utf-8")
 
     res = UpdateManager(
@@ -3240,3 +3995,414 @@ def test_pipeline_pins_preserved_assets_worker_config(tmp_path):
     assert 'main = "index.js"' in pinned
     assert "[previews]" in pinned
     assert "src/index.js" not in pinned
+    # The R2 binding the live Worker needs must survive the replay.
+    assert "[[r2_buckets]]" in pinned
+    assert 'bucket_name = "nastech-assets"' in pinned
+    # And the handler must come out decoding the key and reading R2.
+    index = os.path.join(res.dir, "scripts", "cloudflare", "assets-worker", "index.js")
+    handler = open(index, encoding="utf-8").read()
+    assert "function decodeChannelKey(" in handler
+    assert "const object = await env.R2.get(key);" in handler
+    assert 'const key = path.replace(/^\\/+/, "");' not in handler
+
+
+# ---------------------------------------------------------------------------
+# Dead configuration produced by the .com -> github.io substitution
+# ---------------------------------------------------------------------------
+
+_DEAD_AUTH_CONSTANTS = (
+    "AUTH_STORE_VERSION = 1\n"
+    "\n"
+    "# Nastech Portal defaults\n"
+    'DEFAULT_NASTECH_PORTAL_URL = "https://portal.nastechresearch.github.io"\n'
+    'DEFAULT_NASTECH_INFERENCE_URL = "https://inference-api.nastechresearch.github.io/v1"\n'
+    'DEFAULT_NASTECH_WELCOME_URL = "https://welcome-api.nastechresearch.github.io/v1"\n'
+    'DEFAULT_NASTECH_CLIENT_ID = "nastech-cli"\n'
+)
+
+
+def _exec_module(text):
+    """Compile+exec a reconciled module body; return its namespace."""
+    namespace = {}
+    exec(compile(text, "<reconciled>", "exec"), namespace)  # noqa: S102 - test fixture
+    return namespace
+
+
+def test_reconcile_dead_api_defaults_fails_closed(tmp_path):
+    """portal/inference/welcome defaults must not silently point at a dead host.
+
+    Verified live: https://portal.nastechresearch.github.io and
+    https://inference-api.nastechresearch.github.io/v1 both fail TLS with
+    "no alternative certificate subject name matches" (GitHub's certificate
+    carries only `*.github.io`, one label).  So the reconciled constant must
+    be unusable-but-importable and must raise an actionable error naming the
+    environment variable, never hand back the dead URL.
+    """
+    cli = tmp_path / "nastech_cli"
+    cli.mkdir()
+    (cli / "auth_constants.py").write_text(_DEAD_AUTH_CONSTANTS)
+
+    fixed = _reconcile_dead_api_defaults(str(tmp_path))
+    assert fixed == ["nastech_cli/auth_constants.py"]
+
+    text = (cli / "auth_constants.py").read_text()
+    # The dead URL survives only inside the actionable error message; it is
+    # never the assigned value of a default any more.
+    assert '= "https://portal.nastechresearch.github.io"' not in text
+    assert '= "https://inference-api.nastechresearch.github.io/v1"' not in text
+    assert '= "https://welcome-api.nastechresearch.github.io/v1"' not in text
+    assert "DEFAULT_NASTECH_PORTAL_URL = _nastech_endpoint_default(" in text
+    assert "_NastechUnconfiguredEndpoint" in text
+
+    namespace = _exec_module(text)
+    for name in (
+        "DEFAULT_NASTECH_PORTAL_URL",
+        "DEFAULT_NASTECH_INFERENCE_URL",
+        "DEFAULT_NASTECH_WELCOME_URL",
+    ):
+        value = namespace[name]
+        assert not value, f"{name} must read as unconfigured"
+        with pytest.raises(RuntimeError) as excinfo:
+            str(value)
+        assert "is not configured" in str(excinfo.value)
+        assert "NASTECH_" in str(excinfo.value)
+    # .rstrip("/") is the shape the auth code uses; it must raise, not
+    # return an empty string that then becomes a broken base URL.
+    with pytest.raises(RuntimeError):
+        namespace["DEFAULT_NASTECH_PORTAL_URL"].rstrip("/")
+    with pytest.raises(RuntimeError):
+        f"{namespace['DEFAULT_NASTECH_INFERENCE_URL']}/models"
+    # an unrelated constant is untouched
+    assert namespace["AUTH_STORE_VERSION"] == 1
+    assert namespace["DEFAULT_NASTECH_CLIENT_ID"] == "nastech-cli"
+
+    # idempotent: the dead literal is gone, so a second pass changes nothing
+    assert _reconcile_dead_api_defaults(str(tmp_path)) == []
+
+
+def test_reconcile_dead_api_defaults_honours_configured_env(tmp_path, monkeypatch):
+    """An operator-supplied endpoint is used verbatim (rstripped)."""
+    cli = tmp_path / "nastech_cli"
+    cli.mkdir()
+    (cli / "auth_constants.py").write_text(_DEAD_AUTH_CONSTANTS)
+    _reconcile_dead_api_defaults(str(tmp_path))
+    monkeypatch.setenv("NASTECH_PORTAL_URL", "https://portal.test.invalid/")
+    namespace = _exec_module((cli / "auth_constants.py").read_text())
+    assert namespace["DEFAULT_NASTECH_PORTAL_URL"] == "https://portal.test.invalid"
+    # only the configured variable is replaced; the others stay fail-closed
+    assert not namespace["DEFAULT_NASTECH_INFERENCE_URL"]
+
+
+def test_reconcile_dead_api_defaults_leaves_live_and_apex_hosts(tmp_path):
+    """Only dead subdomains are touched; the real worker host and the apex stay."""
+    cli = tmp_path / "nastech_cli"
+    cli.mkdir()
+    (cli / "source_releases.py").write_text(
+        '_PUBLIC_BASE = "https://nastech-assets.nastechresearch.workers.dev"\n'
+    )
+    (cli / "auth_constants.py").write_text(
+        'DEFAULT_NASTECH_DOCS_URL = "https://nastechresearch.github.io/nastech-agent/docs"\n'
+    )
+    assert _reconcile_dead_api_defaults(str(tmp_path)) == []
+    assert "_NastechUnconfiguredEndpoint" not in (
+        (cli / "auth_constants.py").read_text())
+
+
+def test_reconcile_security_contact_removes_undeliverable_mailbox(tmp_path):
+    """github.io accepts no mail, so the security address must not survive.
+
+    Verified: github.io has no MX record, so
+    security@nastechresearch.github.io silently loses every report.  The
+    live GitHub Security Advisory channel (302 to sign-in on the fork's
+    advisory page) is kept.
+    """
+    (tmp_path / "SECURITY.md").write_text(
+        "## 1. Reporting a Vulnerability\n"
+        "\n"
+        "Report privately via [GitHub Security Advisories](https://github.com/NastechResearch/nastech-agent/security/advisories/new)\n"
+        "or **security@nastechresearch.github.io**. Do not open public issues for\n"
+        "security vulnerabilities.\n"
+        "\n"
+        "## 5. Disclosure\n"
+        "\n"
+        "- **Channel:** the GHSA thread or email correspondence with\n"
+        "  security@nastechresearch.github.io.\n"
+    )
+    fixed = _reconcile_security_contact(str(tmp_path))
+    assert fixed == ["SECURITY.md"]
+
+    text = (tmp_path / "SECURITY.md").read_text()
+    assert "security@" not in text
+    assert "github.io" in text  # the reason is stated, not the address
+    assert "has no MX record" in text
+    # the deliverable channel is still advertised, once and untouched
+    assert text.count(
+        "https://github.com/NastechResearch/nastech-agent/security/advisories/new"
+    ) == 1
+    # grammatical in both spots
+    assert "only; this fork publishes no mailbox" in text
+    assert "no MX record. Do not open public issues" in text
+    assert "the GHSA thread (this fork publishes no mailbox" in text
+
+    # idempotent
+    assert _reconcile_security_contact(str(tmp_path)) == []
+    assert (tmp_path / "SECURITY.md").read_text() == text
+
+
+def test_reconcile_ui_scope_pins_rejects_range_and_unknown_version(tmp_path):
+    """A range silently installs a different package: fail closed instead.
+
+    Verified against registry.npmjs.org: @nous-research/ui latest is 1.5.2,
+    @nastech-research/ui latest is 0.18.4 -- so "^1.5.2" or "latest" cannot
+    mean the same thing after branding.
+    """
+    app = tmp_path / "apps" / "desktop"
+    app.mkdir(parents=True)
+    manifest = app / "package.json"
+
+    manifest.write_text(json.dumps(
+        {"name": "desktop", "dependencies": {"@nastech-research/ui": "^1.5.2"}}))
+    with pytest.raises(ValueError) as excinfo:
+        _reconcile_ui_scope_pins(str(tmp_path))
+    # conformance catches ValueError; keep that contract explicit
+    assert issubclass(UiScopePinError, ValueError)
+    assert isinstance(excinfo.value, UiScopePinError)
+    assert "must be pinned to an exact version" in str(excinfo.value)
+    assert "@nastech-research/ui" in str(excinfo.value)
+
+    manifest.write_text(json.dumps(
+        {"name": "desktop", "dependencies": {"@nastech-research/ui": "latest"}}))
+    with pytest.raises(ValueError):
+        _reconcile_ui_scope_pins(str(tmp_path))
+
+    manifest.write_text(json.dumps(
+        {"name": "desktop", "dependencies": {"@nastech-research/ui": "9.9.9"}}))
+    with pytest.raises(ValueError) as excinfo:
+        _reconcile_ui_scope_pins(str(tmp_path))
+    assert "not a version the fork has published" in str(excinfo.value)
+    assert "_NASTECH_UI_INTEGRITY" in str(excinfo.value)
+
+    # the upstream scope must never survive branding
+    manifest.write_text(json.dumps(
+        {"name": "desktop", "dependencies": {"@nous-research/ui": "0.18.2"}}))
+    with pytest.raises(ValueError) as excinfo:
+        _reconcile_ui_scope_pins(str(tmp_path))
+    assert "survived branding" in str(excinfo.value)
+
+
+def test_reconcile_ui_scope_pins_allows_the_upstream_pinned_version(tmp_path):
+    """Upstream pins 0.18.2 (verified in its package.json/package-lock.json)."""
+    app = tmp_path / "apps" / "desktop"
+    app.mkdir(parents=True)
+    version = sorted(_NASTECH_UI_INTEGRITY)[-1]
+    (app / "package.json").write_text(json.dumps(
+        {"name": "desktop", "dependencies": {"@nastech-research/ui": version}}))
+    assert _reconcile_ui_scope_pins(str(tmp_path)) == []
+    assert "0.18.2" in _NASTECH_UI_INTEGRITY
+
+
+def test_reconcile_domains_keeps_the_real_assets_worker_host(tmp_path):
+    """Contrast case: the one real Nastech origin is never sent to github.io."""
+    (tmp_path / "notes.md").write_text(
+        "Assets: https://nastech-assets.nastechresearch.com/upstream/sha256/abc\n"
+        "Legacy: https://nastech-assets.nastechresearch.github.io/releases/x\n"
+        "Docs: https://nastechresearch.github.io/nastech-agent/docs\n"
+    )
+    assert _reconcile_domains(str(tmp_path)) == ["notes.md"]
+    text = (tmp_path / "notes.md").read_text()
+    assert "https://nastech-assets.nastechresearch.workers.dev/upstream/sha256/abc" in text
+    assert "nastech-assets.nastechresearch.github.io" not in text
+    assert "https://nastechresearch.github.io/nastech-agent/docs" in text
+
+
+def test_pipeline_registers_the_dead_config_reconciles(tmp_path):
+    """reconcile_tree must actually run the three new stages on a real run."""
+    hermes = _hermes_repo(tmp_path)
+    hermes_path = os.path.join(hermes, "hermes_cli")
+    with open(os.path.join(hermes_path, "auth_constants.py"), "w", encoding="utf-8") as fh:
+        fh.write(_DEAD_AUTH_CONSTANTS)
+    with open(os.path.join(hermes, "SECURITY.md"), "w", encoding="utf-8") as fh:
+        fh.write(
+            "Report privately via [GitHub Security Advisories](https://github.com/NousResearch/hermes-agent/security/advisories/new)\n"
+            "or **security@nousresearch.com**. Do not open public issues.\n"
+        )
+    # Upstream's own scope, at a version the fork never published: branding
+    # renames the scope to one whose 0.4.0 does not exist, so the stage must
+    # repin it (via verified byte-identity) instead of failing the sync.
+    tpl_dir = os.path.join(
+        hermes, "optional-skills", "creative", "pretext", "templates")
+    os.makedirs(tpl_dir)
+    with open(os.path.join(tpl_dir, "donut-orbit.html"), "w", encoding="utf-8") as fh:
+        fh.write(_REAL_DONUT_FONT_REFS.replace("nastech-research", "nous-research"))
+    subprocess.run(["git", "-C", hermes, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", hermes, "commit", "-q", "-m", "dead config"], check=True)
+
+    res = UpdateManager(
+        str(tmp_path / "Updates-Commits"), hermes_url=hermes).run()
+
+    assert res.gate, f"gate FAILED: {[s for s in res.stages if s.status == 'fail']}"
+    assert "nastech_cli/auth_constants.py" in res.reconcile.fixed
+    assert "SECURITY.md" in res.reconcile.fixed
+
+    candidate = open(
+        os.path.join(res.dir, "nastech_cli", "auth_constants.py"), encoding="utf-8").read()
+    assert '= "https://portal.nastechresearch.github.io"' not in candidate
+    assert "DEFAULT_NASTECH_PORTAL_URL = _nastech_endpoint_default(" in candidate
+    assert "_NastechUnconfiguredEndpoint" in candidate
+
+    security = open(os.path.join(res.dir, "SECURITY.md"), encoding="utf-8").read()
+    assert "security@" not in security
+    assert "nousresearch" not in security
+
+    # the dead scoped-font reference became a published, byte-identical pin,
+    # and the sync still produced a candidate (the gate did not fail)
+    tpl_rel = "optional-skills/creative/pretext/templates/donut-orbit.html"
+    assert tpl_rel in res.reconcile.fixed
+    template = open(os.path.join(res.dir, tpl_rel), encoding="utf-8").read()
+    assert "ui@0.4.0" not in template
+    assert template.count("@nastech-research/ui@0.18.4") == 2
+    assert "nous-research" not in template
+
+
+def test_reconcile_ui_scope_pins_rejects_unpublished_cdn_version(tmp_path):
+    """A scoped CDN reference must not point at a version nobody published.
+
+    Verified live: upstream's @nous-research/ui@0.4.0 exists (npm 200) but the
+    branded @nastech-research/ui@0.4.0 is 404 on npm AND on esm.sh, so the
+    rebrand turns this template's font URL into a dead link that resolves to
+    a package the fork never shipped.
+    """
+    tpl = tmp_path / "optional-skills" / "creative" / "pretext" / "templates"
+    tpl.mkdir(parents=True)
+    (tpl / "donut-orbit.html").write_text(
+        '    src: url("https://esm.sh/@nastech-research/ui@0.4.0/dist/fonts/x.woff2");\n'
+    )
+    with pytest.raises(ValueError) as excinfo:
+        _reconcile_ui_scope_pins(str(tmp_path))
+    assert "@nastech-research/ui@0.4.0 is not a version the fork has published" in (
+        str(excinfo.value))
+    assert "never" not in str(excinfo.value)  # the message names the remedies
+
+    # a reference at a published version is fine
+    (tpl / "donut-orbit.html").write_text(
+        '    src: url("https://esm.sh/@nastech-research/ui@0.18.2/dist/fonts/x.woff2");\n'
+    )
+    assert _reconcile_ui_scope_pins(str(tmp_path)) == []
+
+    # a leftover upstream reference is always an error
+    (tpl / "donut-orbit.html").write_text(
+        '    src: url("https://esm.sh/@nous-research/ui@0.4.0/dist/fonts/x.woff2");\n'
+    )
+    with pytest.raises(ValueError) as excinfo:
+        _reconcile_ui_scope_pins(str(tmp_path))
+    assert "survived branding" in str(excinfo.value)
+
+
+# The real optional-skills/creative/pretext/templates/donut-orbit.html (fork
+# commit 907460ad) uses the renamed scope for FONTS only, in exactly the two
+# shapes below; pretext/gsap/lil-gui keep their own upstream packages.
+_REAL_DONUT_FONT_REFS = (
+    "<style>\n"
+    "@font-face {\n"
+    '  font-family: "Mondwest";\n'
+    '  src: url("https://esm.sh/@nastech-research/ui@0.4.0/dist/fonts/'
+    'Mondwest-Regular.woff2") format("woff2");\n'
+    '  font-weight: 400; font-style: normal; font-display: block;\n'
+    "}\n"
+    "</style>\n"
+    "<script type=\"module\">\n"
+    'import { Pretext } from "https://esm.sh/pretext@1.4.1/dist/index.js";\n'
+    'import gsap from "https://esm.sh/gsap@3.12.5/dist/gsap.min.js";\n'
+    'const DS_CDN = "https://esm.sh/@nastech-research/ui@0.4.0/dist/fonts";\n'
+    "const FACES = [new FontFace(\"Mondwest\", `url(${DS_CDN}/"
+    'Mondwest-Regular.woff2) format("woff2")`, { weight: "400", display: "block" })];\n'
+    "</script>\n"
+)
+
+
+def test_ui_scope_asset_evidence_records_verified_byte_identity():
+    """The repin is authorised by recorded evidence, not by assumption.
+
+    sha256sum of dist/fonts/*.woff2 in the three published tarballs
+    (@nous-research/ui@0.4.0, @nastech-research/ui@0.18.2 and @0.18.4) yields
+    the same digest for all 14 files; these values are the recorded proof.
+    """
+    assert _UI_SCOPE_ASSET_EVIDENCE["dist/fonts/Mondwest-Regular.woff2"] == (
+        "9cf6e6e1cba70f7e991a92ce4225785725b6cc9a48cc77cbfaabeba26c18f072",
+        ("0.4.0", "0.18.2", "0.18.4"),
+    )
+    assert _UI_SCOPE_ASSET_EVIDENCE["dist/fonts/Collapse-Regular.woff2"] == (
+        "ce8c481f56da3a46074ab696c16481bea49ea83e75e7eb7cb42fd2114593f33a",
+        ("0.4.0", "0.18.2", "0.18.4"),
+    )
+    assert len(_UI_SCOPE_ASSET_EVIDENCE) == 14
+    for asset, (digest, versions) in _UI_SCOPE_ASSET_EVIDENCE.items():
+        assert asset.startswith("dist/fonts/")
+        assert len(digest) == 64 and set(digest) <= set("0123456789abcdef")
+        # the unpublished source and at least one published target are covered
+        assert "0.4.0" in versions
+        assert set(versions) & set(_NASTECH_UI_INTEGRITY)
+
+
+def test_reconcile_ui_scope_repins_verified_identical_font_version(tmp_path):
+    """A dead version with a proven-identical published twin is repinned.
+
+    Reproduces the real template: the direct font URL and the DS_CDN base
+    both point at the unpublished 0.4.0; every asset they name is proven
+    byte-identical in the published 0.18.4, so both references are repinned
+    (instead of the stage failing and stopping the sync).
+    """
+    tpl = tmp_path / "optional-skills" / "creative" / "pretext" / "templates"
+    tpl.mkdir(parents=True)
+    template = tpl / "donut-orbit.html"
+    template.write_text(_REAL_DONUT_FONT_REFS)
+
+    assert _reconcile_ui_scope_pins(str(tmp_path)) == [
+        "optional-skills/creative/pretext/templates/donut-orbit.html"]
+
+    text = template.read_text()
+    assert "ui@0.4.0" not in text
+    assert text.count("@nastech-research/ui@0.18.4") == 2
+    # the repin touches only the dead scope: other CDN packages are untouched
+    assert "https://esm.sh/pretext@1.4.1/dist/index.js" in text
+    assert "https://esm.sh/gsap@3.12.5/dist/gsap.min.js" in text
+
+    # idempotent: the repinned version is published, so a second pass no-ops
+    assert _reconcile_ui_scope_pins(str(tmp_path)) == []
+    assert template.read_text() == text
+
+
+def test_reconcile_ui_scope_pins_still_fails_closed_without_verified_target(tmp_path):
+    """No evidence for the asset means no repin: raise, do not guess.
+
+    A version the fork never published whose asset has no recorded
+    byte-identical twin cannot be repaired safely, so the reference must stay
+    loud -- this is the guarantee that keeps the repin from being blind.
+    """
+    tpl = tmp_path / "optional-skills" / "creative" / "pretext" / "templates"
+    tpl.mkdir(parents=True)
+    template = tpl / "donut-orbit.html"
+    template.write_text(
+        '    src: url("https://esm.sh/@nastech-research/ui@0.9.9/dist/fonts/'
+        'Mondwest-Regular.woff2");\n'
+    )
+    with pytest.raises(UiScopePinError) as excinfo:
+        _reconcile_ui_scope_pins(str(tmp_path))
+    assert "no byte-identical copy in a published version" in str(excinfo.value)
+    # unverified source version: even an evidenced asset must not be repinned
+    assert template.read_text().count("ui@0.9.9") == 1
+
+    # a directory base that resolves to an asset nothing verified is refused
+    template.write_text(
+        'const CDN = "https://esm.sh/@nastech-research/ui@0.4.0/dist/fonts";\n'
+        'const F = [`url(${CDN}/Mystery-Regular.woff2)`];\n'
+    )
+    with pytest.raises(UiScopePinError):
+        _reconcile_ui_scope_pins(str(tmp_path))
+
+    # a bare directory base with no interpolation cannot be resolved: refuse
+    template.write_text(
+        'const CDN = "https://esm.sh/@nastech-research/ui@0.4.0/dist/fonts";\n'
+    )
+    with pytest.raises(UiScopePinError):
+        _reconcile_ui_scope_pins(str(tmp_path))

@@ -28,7 +28,12 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .rules import BrandingRules, is_immutable_path, is_locked_path
+from .rules import (
+    BrandingRules,
+    is_immutable_path,
+    is_locked_path,
+    preserved_repo_url_spans,
+)
 
 # A word may begin with the upstream brand and then run on
 # (``hermesagent``, ``nousresearch``, ``HERMESCLOUD``).  The look-behind
@@ -78,6 +83,11 @@ def _allowed(path: str, word: str, line: str) -> bool:
     """
     word = word.lower()
     if path.startswith("contributors/names/"):
+        return True
+    # A repository identifier we do not own cannot be renamed, so a brand run
+    # inside one is inherited, not a first-party leak.  Matches the exemption
+    # BrandingRules.transform_text applies when it preserves such a path.
+    if any(word in match.group(0).lower() for match in preserved_repo_url_spans(line)):
         return True
     lower = line.lower()
     if path == "package-lock.json" and word == "hermes":

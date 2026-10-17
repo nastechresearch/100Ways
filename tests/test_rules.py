@@ -75,6 +75,139 @@ def test_third_party_misaki_git_url_is_branded_to_the_fork():
         '"misaki[en] @ git+https://github.com/NastechResearch/misaki.git@abc"'
 
 
+def test_repository_paths_we_do_not_own_are_preserved_verbatim():
+    """A foreign repository identifier is not ours to rename.
+
+    Branding rewrote the repo NAME inside third-party GitHub URLs
+    (``hermes-agent-memory`` -> ``nastech-agent-memory``) while leaving the
+    foreign owner, which produced 383 catalog entries pointing at repositories
+    that do not exist.  Renaming somebody else's repository only ever yields a
+    404, so the whole identifier must survive.
+    """
+    rules = BrandingRules()
+    for url in (
+        "https://github.com/lancedb/hermes-agent-memory",
+        "https://github.com/prismhq/hermes-prism-provider",
+        "https://github.com/oxylabs/hermes-web-oxylabs",
+    ):
+        assert rules.transform_text(f"repo: {url}") == f"repo: {url}"
+    # a pinned sha appended to the path is still part of the identifier
+    pinned = "https://github.com/adolanium/hermes-terminal/blob/abc123/README.md"
+    assert rules.transform_text(f"docs_url: {pinned}") == f"docs_url: {pinned}"
+    # several identifiers on one line must each survive
+    line = "see https://github.com/foo/hermes-a and https://github.com/bar/hermes-b"
+    assert rules.transform_text(line) == line
+
+
+def test_repositories_we_own_are_still_branded():
+    """The exemption must not become a hole in our own orgs."""
+    rules = BrandingRules()
+    # an inherited owner a token rule maps into an org we own
+    assert rules.transform_text(
+        "git = https://github.com/NousResearch/misaki.git?rev=abc"
+    ) == "git = https://github.com/NastechResearch/misaki.git?rev=abc"
+    # already ours
+    assert rules.transform_text(
+        "repo: https://github.com/NastechResearch/nastech-official-plugins"
+    ) == "repo: https://github.com/NastechResearch/nastech-official-plugins"
+    # prose around a preserved identifier is still branded
+    assert rules.transform_text(
+        "The Hermes agent ships https://github.com/lancedb/hermes-agent-memory"
+    ) == "The Nastech agent ships https://github.com/lancedb/hermes-agent-memory"
+
+
+def test_rest_api_repository_paths_read_the_owner_not_the_repos_segment():
+    """The ``/repos/`` in a REST URL is API path, not the owner.
+
+    ``api.github.com/repos/<owner>/<repo>`` occurs ~270 times across the tree.
+    Matching only ``github.com/<seg>/<seg>`` read the owner as a literal
+    ``repos``, so a first-party identifier (``NousResearch``) was "preserved"
+    and leaked upstream branding, while a foreign repo name was still renamed
+    (``alice/hermes-plugin`` -> ``alice/nastech-plugin``, a 404).  Both halves
+    of the rule must hold for the REST form exactly as for the web form.
+    """
+    from hundredways.rules import is_owned_repo_path
+
+    rules = BrandingRules()
+    # a first-party owner is ours to rename, in either form and either case
+    assert rules.transform_text(
+        "https://api.github.com/repos/NousResearch/hermes-agent/issues/comments/123"
+    ) == "https://api.github.com/repos/NastechResearch/nastech-agent/issues/comments/123"
+    assert rules.transform_text(
+        "https://uploads.github.com/repos/NousResearch/hermes-agent/releases/1"
+    ) == "https://uploads.github.com/repos/NastechResearch/nastech-agent/releases/1"
+    # a foreign repository survives verbatim, name included
+    foreign = "https://api.github.com/repos/alice/hermes-plugin-foo/issues/1"
+    assert rules.transform_text(f"url: {foreign}") == f"url: {foreign}"
+    # the owner is read from the identifier, not from a fixed position
+    assert is_owned_repo_path("github.com/nastechresearch/nastech-agent")
+    assert is_owned_repo_path("api.github.com/repos/NastechResearch/nastech-agent")
+    assert not is_owned_repo_path("api.github.com/repos/alice/hermes-plugin-foo")
+    # and the correction is stable under a second pass
+    once = rules.transform_text(foreign)
+    assert rules.transform_text(once) == once
+
+
+def test_preserved_repository_path_is_a_branding_fixed_point():
+    """The audit defines clean as ``transform_text(text) == text``.
+
+    A preserved identifier therefore passes the zero-upstream-brand audit by
+    construction, rather than by weakening the audit.
+    """
+    from hundredways.brandaudit import residual_brand_lines
+
+    rules = BrandingRules()
+    entry = "repo: https://github.com/lancedb/hermes-agent-memory\n"
+    assert rules.transform_text(entry) == entry
+
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "lancedb.yaml").write_text(
+            "name: agent-memory\nrepo: https://github.com/lancedb/hermes-agent-memory\n",
+            encoding="utf-8",
+        )
+        # a genuinely unbranded first-party line is still reported
+        (root / "leak.yaml").write_text(
+            "repo: https://github.com/NousResearch/hermes-agent\n", encoding="utf-8"
+        )
+        residual = residual_brand_lines(str(root), rules)
+    assert [(item.path, item.line) for item in residual] == [("leak.yaml", 1)]
+
+
+def test_hosted_community_plugin_maps_to_our_own_fork():
+    """The holographic plugin is one we host ourselves, under ``nastechtest``.
+
+    Branding rewrites the repo NAME inside a foreign GitHub URL
+    (``hermes-plugin-holographic`` -> ``nastech-plugin-holographic``) but
+    cannot rename the owner, so the naive rewrite produced
+    ``itpartypattaya/nastech-plugin-holographic`` -- a repo that does not
+    exist.  Both the ``repo:`` and the ``docs_url:`` (which carries the same
+    path plus the pinned sha) must point at our fork instead.
+    """
+    from hundredways.rules import transform_strict_metadata_text
+
+    rules = BrandingRules()
+    sha = "a6d009315bc72a7c4e68d6a0e60a6eeed68080fd"
+    assert rules.transform_text(
+        "repo: https://github.com/itpartypattaya/hermes-plugin-holographic"
+    ) == "repo: https://github.com/nastechtest/nastech-plugin-holographic"
+    assert rules.transform_text(
+        "docs_url: https://github.com/itpartypattaya/hermes-plugin-holographic"
+        f"/blob/{sha}/README.md"
+    ) == (
+        "docs_url: https://github.com/nastechtest/nastech-plugin-holographic"
+        f"/blob/{sha}/README.md"
+    )
+    # strict metadata applies tokens in order, so the compound must still win
+    # rather than the generic hermes token firing first.
+    assert "itpartypattaya" not in transform_strict_metadata_text(
+        "https://github.com/itpartypattaya/hermes-plugin-holographic"
+    )
+
+
 def test_path_transforms():
     rules = BrandingRules()
     assert "nastech" in rules.transform_path("tools/hermes_runner.py").lower()
@@ -199,6 +332,68 @@ def test_runner_labels_normalize_to_standard_hosted():
     assert "-core" not in out.split("macos")[0]
     # the non-matching line survives verbatim
     assert "macos-14-xlarge-core" in out
+
+
+def test_blacksmith_runner_labels_normalize_to_standard_hosted():
+    rules = BrandingRules()
+    text = (
+        "runs-on: blacksmith-4vcpu-ubuntu-2404\n"
+        "runs-on: blacksmith-32vcpu-ubuntu-2404\n"
+        "runs-on: blacksmith-2vcpu-ubuntu-2404\n"
+        "runs-on: blacksmith-32vcpu-ubuntu-2404-arm\n"
+        "runs-on: blacksmith-4vcpu-ubuntu-2404-arm\n"
+        "runner: blacksmith-32vcpu-windows-2025\n"
+        "runner: blacksmith-2vcpu-windows-2025\n"
+        "runs-on: blacksmith-12vcpu-macos-latest\n"
+        "runs-on: blacksmith-6vcpu-macos-latest\n"
+    )
+    out = rules.transform_text(text)
+    assert out == (
+        "runs-on: ubuntu-latest\n"
+        "runs-on: ubuntu-latest\n"
+        "runs-on: ubuntu-latest\n"
+        "runs-on: ubuntu-24.04-arm\n"
+        "runs-on: ubuntu-24.04-arm\n"
+        "runner: windows-latest\n"
+        "runner: windows-latest\n"
+        "runs-on: macos-latest\n"
+        "runs-on: macos-latest\n"
+    )
+    # idempotent: re-branding the output changes nothing
+    assert rules.transform_text(out) == out
+
+
+def test_blacksmith_action_forks_normalize_to_upstream_actions():
+    rules = BrandingRules()
+    text = (
+        "        uses: useblacksmith/checkout@"
+        "25227e61ff9dafe400e22fa487b673eac4e4409a  # v1\n"
+        "        uses: useblacksmith/setup-docker-builder@"
+        "19215110ab936351210feebdfa5b440b4493e184  # v2\n"
+        "        uses: useblacksmith/build-push-action@"
+        "9b0579bbec7a6cad2f171596c57e7ac1e7658850  # v2\n"
+    )
+    out = rules.transform_text(text)
+    assert out == (
+        "        uses: actions/checkout@"
+        "f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1\n"
+        "        uses: docker/setup-buildx-action@"
+        "8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3\n"
+        "        uses: docker/build-push-action@"
+        "bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0\n"
+    )
+    assert "useblacksmith" not in out
+    # idempotent
+    assert rules.transform_text(out) == out
+
+
+def test_blacksmith_words_in_prose_are_untouched():
+    rules = BrandingRules()
+    text = (
+        "Blacksmith is a CI vendor; useblacksmith is mentioned without an "
+        "action step, so neither is rewritten by the runner/action rules.\n"
+    )
+    assert rules.transform_text(text) == text
 
 
 def test_runner_prose_is_untouched():
