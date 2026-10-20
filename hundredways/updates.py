@@ -4893,6 +4893,222 @@ def _reconcile_dead_api_defaults(dst: str) -> list[str]:
         fixed.append(rel)
     return fixed
 
+# ---------------------------------------------------------------------------
+# The suite's share of "this fork hosts no portal"
+# ---------------------------------------------------------------------------
+# ``_reconcile_dead_api_defaults`` turns every unreachable branded endpoint
+# default into an environment-driven one that falls back to an unresolvable
+# ``.invalid`` origin.  That is right for a user -- Nastech publishes no portal,
+# inference or welcome API, so the shipped default must never dial a host that
+# cannot answer -- and it is what nastech-agent#157 asked for.  It is not what
+# the suite was written against: 99 test files spell the branded origin in an
+# assertion (host identity, provider attribution headers, the portal's wire
+# contract), and those constants are captured at *import* time, so with the
+# variable unset every one of them reads the ``.invalid`` fallback and the file
+# goes red on a tree whose code is fine.  This fork's OS and Python lanes were
+# red on exactly that after #118 landed.
+#
+# So the suite runs with the endpoints configured, the way an operator's process
+# would be, and it declares them the way the engine declares them: the block
+# below is generated from the ``_nastech_endpoint_default(...)`` call sites the
+# reconcile already wrote into the tree, one pin per (env, dead_default) pair.
+# Deriving rather than listing is the point -- a hand-kept dict drifts from the
+# rewrite set silently, and a missing pin is a red lane three syncs later.  No
+# test ever contacts these origins: they serve nothing, and every request a test
+# makes is mocked.  A test of the unconfigured path itself overrides the variable
+# or ``delenv`` + reloads around this, which ``os.environ.setdefault`` leaves it
+# free to do.
+#
+# The second fix here is a branding consequence of a different kind.  Upstream's
+# ``tests/conftest.py`` reads ``/proc/<pid>/environ`` and slices the value off
+# with a hard-coded ``item[12:]`` that matches its own ``b"HERMES_HOME="``.
+# Branding rewrote the literal to ``b"NASTECH_HOME="`` -- thirteen bytes -- and
+# left the offset, so the guard that stops pytest from touching a real
+# ``NASTECH_HOME`` was reading ``=/path`` and resolving nothing: a silently
+# disabled safety net, invisible because it fails by finding no processes.  The
+# rewrite binds the offset to the literal it belongs to, so the next brand token
+# of any length keeps working.
+#
+# The third is the same class of fork-environment gap in one connector test:
+# three sibling files in ``tests/tui_gateway/`` already stub the hosted guest
+# mint (and pass on the fork), and the fourth never got the stub, so it alone
+# reaches a portal this fork does not run and ``connectors.list`` never answers.
+
+
+class NastechSuitePinError(ValueError):
+    """A suite-side anchor for the fail-closed endpoints no longer matches.
+
+    A ``ValueError`` on purpose: ``hundredways.conformance`` surfaces it as a
+    conformance issue while the ``reconcile`` stage still marks the update
+    failed -- an un-pinned suite is 99 red files in the fork, and an un-sliced
+    ``environ`` guard is a safety net that quietly stopped doing anything.
+    """
+
+
+_CONFTEST = "tests/conftest.py"
+_ENDPOINT_PIN_MARK = "_NASTECH_TEST_ENDPOINTS = {"
+_ENDPOINT_PIN_ANCHOR = '_PRE_SANDBOX_NASTECH_HOME = os.environ.get("NASTECH_HOME", "")\n'
+_NASTECH_HOME_PREFIX_MARK = "_NASTECH_HOME_PREFIX = "
+_GUEST_IDENTITY_TESTS = "tests/tui_gateway/test_legacy_fallback_ticket_profile_verbs.py"
+_GUEST_IDENTITY_MARK = "ensure_guest_identity', lambda: None)"
+
+# One generated fail-closed default: ``env=`` names the variable an operator
+# sets and ``dead_default=`` the origin the branded tree used to ship, so the
+# pair is exactly what a configured suite must report.
+_ENDPOINT_CALL_SITE_RE = re.compile(
+    r"_nastech_endpoint_default\(\s*\n"
+    r"\s*env=[\"'](?P<env>[^\"']+)[\"'],\s*\n"
+    r"\s*constant=[\"'][^\"']+[\"'],\s*\n"
+    r"\s*dead_default=[\"'](?P<url>[^\"']+)[\"'],"
+)
+
+_ENDPOINT_PIN_HEADER = '''
+# Post-brand reconciliation made the Nastech endpoint defaults fail closed: each
+# is read from its env var at import time, falling back to an unresolvable
+# `.invalid` origin when unconfigured (a GitHub Pages subdomain can never complete
+# TLS). The suite asserts the branded URL each site names as its ``dead_default``,
+# so declare those configured here, before any module under test is imported -- a
+# module-level constant then captures exactly what an operator's environment would
+# give it. Nothing here is ever contacted: these origins serve nothing, and every
+# request a test makes is mocked. Tests that exercise the unconfigured path
+# override or delenv+reload around these.
+# Generated from the `_nastech_endpoint_default` call sites in this tree by
+# _reconcile_test_endpoint_defaults; do not hand-edit, it cannot stay in step.
+_NASTECH_TEST_ENDPOINTS = {
+'''
+
+_ENDPOINT_PIN_FOOTER = '''}
+for _env_key, _env_value in _NASTECH_TEST_ENDPOINTS.items():
+    os.environ.setdefault(_env_key, _env_value)
+'''
+
+_NASTECH_HOME_EDITS = (
+    (
+        '''
+def _processes_with_nastech_home_under(roots) -> list[int]:
+''',
+        '''
+_NASTECH_HOME_PREFIX = b"NASTECH_HOME="
+
+
+def _processes_with_nastech_home_under(roots) -> list[int]:
+''',
+    ),
+    (
+        '''        home = next((item[12:] for item in environ if item.startswith(b"NASTECH_HOME=")), None)
+''',
+        '''        home = next((item[len(_NASTECH_HOME_PREFIX):] for item in environ
+                     if item.startswith(_NASTECH_HOME_PREFIX)), None)
+''',
+    ),
+)
+
+_GUEST_IDENTITY_EDITS = (
+    (
+        """    monkeypatch.setattr(server, '_nastech_home', launch)
+    return server, launch, bee
+""",
+        """    monkeypatch.setattr(server, '_nastech_home', launch)
+    # The account connector path first mints a hosted guest (same stub as the sibling
+    # connector RPC tests). This fork runs no portal, so that mint always fails and
+    # `connectors.list` answers before ever reaching the profile-scoped client.
+    monkeypatch.setattr('tools.connectors.ensure_guest_identity', lambda: None)
+    monkeypatch.setattr('tools.connectors.managed.ensure_guest_identity', lambda: None)
+    return server, launch, bee
+""",
+    ),
+)
+
+
+def _nastech_endpoint_pins(dst: str) -> dict[str, str]:
+    """Every ``(env, dead_default)`` pair the fail-closed reconcile emitted.
+
+    Read back from the generated call sites rather than passed along by
+    ``_reconcile_dead_api_defaults``, so a constant added, renamed or dropped
+    upstream needs no change here to stay pinned.
+    """
+    pins: dict[str, str] = {}
+    for rel in _walk_files(dst):
+        if not rel.endswith(".py") or is_locked_path(rel) or is_immutable_path(rel):
+            continue
+        text = _reconcile_budget_read(dst, rel)
+        if text is None or "_nastech_endpoint_default(" not in text:
+            continue
+        for match in _ENDPOINT_CALL_SITE_RE.finditer(text):
+            pins[match.group("env")] = match.group("url")
+    return pins
+
+
+def _reconcile_test_endpoint_defaults(dst: str) -> bool:
+    """Declare the fail-closed endpoint variables configured for the test suite.
+
+    ``_reconcile_dead_api_defaults`` rewrites the defaults to read their env var
+    first; the suite's assertions name the branded origin, which a module
+    captures at import.  Without this block those imports resolve to the
+    ``.invalid`` fallback and every one of those files fails.  True when
+    ``tests/conftest.py`` changed.
+    """
+    text = _sgl_read(dst, _CONFTEST)
+    if text is None or _ENDPOINT_PIN_MARK in text:
+        return False
+    pins = _nastech_endpoint_pins(dst)
+    if not pins:
+        return False
+    if text.count(_ENDPOINT_PIN_ANCHOR) != 1:
+        raise NastechSuitePinError(
+            f"{_CONFTEST} no longer carries the single "
+            f"{_ENDPOINT_PIN_ANCHOR!r} anchor that _reconcile_test_endpoint_defaults "
+            "injects the endpoint pins after. Upstream moved the pre-sandbox "
+            "environment capture; re-anchor it here, before any module under test is "
+            "imported, or the suite reads the fail-closed `.invalid` defaults and 99 "
+            "endpoint-asserting files go red."
+        )
+    block = (_ENDPOINT_PIN_HEADER
+             + "".join(f"    {name!r}: {url!r},\n" for name, url in sorted(pins.items()))
+             + _ENDPOINT_PIN_FOOTER)
+    _sgl_write(dst, _CONFTEST, text.replace(_ENDPOINT_PIN_ANCHOR,
+                                            _ENDPOINT_PIN_ANCHOR + block, 1))
+    return True
+
+
+def _reconcile_nastech_home_env_prefix(dst: str) -> bool:
+    """Bind conftest's ``/proc`` environ slice to the literal it strips.
+
+    Branding lengthened ``b"HERMES_HOME="`` to ``b"NASTECH_HOME="`` and left the
+    hard-coded ``[12:]`` behind, so the guard that keeps pytest off a real
+    ``NASTECH_HOME`` sliced a leading ``=`` and matched no path -- it fails by
+    finding nothing, which is why this needs a rule and not a fix-once.  True when
+    ``tests/conftest.py`` changed.
+    """
+    text = _sgl_read(dst, _CONFTEST)
+    if text is None or _NASTECH_HOME_PREFIX_MARK in text:
+        return False
+    return _marker_edits(
+        dst, _CONFTEST, _NASTECH_HOME_PREFIX_MARK, _NASTECH_HOME_EDITS,
+        error=NastechSuitePinError, rule="_reconcile_nastech_home_env_prefix",
+        why="so the /proc environ guard keeps slicing the value off a hard-coded "
+           "offset that branding moved: it then matches no path and silently stops "
+           "protecting a real NASTECH_HOME")
+
+
+def _reconcile_guest_identity_stub(dst: str) -> bool:
+    """Stub the hosted guest mint in the one connector test that lacks it.
+
+    The fork runs no portal, so ``ensure_guest_identity`` cannot mint the guest a
+    connector RPC needs first, and ``connectors.list`` is never reached: the file
+    fails on ``{'charge'} != {'charge', 'list'}`` on a tree whose connector code is
+    upstream's.  Its three siblings in the same directory already carry this exact
+    stub and pass, so this brings the fourth in line with the idiom rather than
+    inventing one.  True when the file changed.
+    """
+    return _marker_edits(
+        dst, _GUEST_IDENTITY_TESTS, _GUEST_IDENTITY_MARK, _GUEST_IDENTITY_EDITS,
+        error=NastechSuitePinError, rule="_reconcile_guest_identity_stub",
+        why="so the one connector RPC test without the sibling stub reaches the "
+           "hosted guest mint this fork cannot answer and fails on "
+           "{'charge'} != {'charge', 'list'}")
+
+
 
 # Two shapes of the same defect in SECURITY.md: the report instruction and
 # the disclosure channel.  ``github.io`` has no MX record (verified: GitHub
@@ -5275,6 +5491,12 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     for rel in _reconcile_signing_gated_release_lanes(dst):
         result.total += 1
         result.fixed.append(rel)
+    # The lane default above is a fork decision five other files still read as
+    # upstream's; they have to move with it or the release tests contradict the
+    # tree's own lane table.
+    for rel in _reconcile_fork_lane_release_surface(dst):
+        result.total += 1
+        result.fixed.append(rel)
     name = _root_package_name(dst, "pyproject.toml", "package.json")
     if name:
         if _reconcile_uv_lock(dst, name):
@@ -5406,6 +5628,16 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     for rel in _reconcile_dead_api_defaults(dst):
         result.total += 1
         result.fixed.append(rel)
+    # Fail-closed defaults only hold for a user: the suite asserts the branded
+    # origin each constant names as its dead_default, and captures it at import.
+    # These run after the rewrite above, which is what they read from.
+    pinned = _reconcile_test_endpoint_defaults(dst)
+    sliced = _reconcile_nastech_home_env_prefix(dst)
+    for rel, fixed in ((_CONFTEST, pinned or sliced),
+                       (_GUEST_IDENTITY_TESTS, _reconcile_guest_identity_stub(dst))):
+        if fixed:
+            result.total += 1
+            result.fixed.append(rel)
     for rel in _reconcile_security_contact(dst):
         result.total += 1
         result.fixed.append(rel)
@@ -6965,10 +7197,14 @@ _LANES_DEFAULT_FORK = (
     "# The Apple and Azure/Store signing accounts are unconfigured, so those\n"
     "# lanes stay out of the default set; --with re-enables one once its\n"
     "# credentials exist.  Termux needs no signing, so it is on.\n"
+    "# smoke and upgrade gate on built desktop packages: with every desktop lane\n"
+    "# off they would run nothing, and stable.require_smokes_match_claim rejects a\n"
+    "# claim whose test policy names smokes a release cannot produce.\n"
     "DEFAULT = frozenset(\n"
     "    lane.name for lane in LANES\n"
     "    if lane.default\n"
-    '    and lane.name not in {"macos-arm64", "macos-intel", "windows", "windows-store"}\n'
+    '    and lane.name not in {"macos-arm64", "macos-intel", "windows", "windows-store",'
+    ' "smoke", "upgrade"}\n'
     ') | {"termux"}\n'
 )
 
@@ -6992,7 +7228,11 @@ def _reconcile_signing_gated_defaults(dst: str) -> bool:
     outputs, every job's ``if`` and the gates' ``skipped`` expectations -- so the
     fork's only remaining decision is which lanes a release asks for.  Its
     default is therefore upstream's minus the lanes whose signing accounts are
-    unconfigured, plus Termux, which needs no signing.  Idempotent, and a moved
+    unconfigured, plus Termux, which needs no signing.  The two desktop-gated test
+    lanes (``smoke``, ``upgrade``) leave with them: they smoke and upgrade the
+    desktop packages a lane builds, so with every desktop lane off they would run
+    nothing, while ``stable.require_smokes_match_claim`` refuses a claim whose
+    test policy names smokes the release cannot produce.  Idempotent, and a moved
     anchor raises so the sync fails rather than shipping a default set that no
     longer means what this fork needs.
     """
@@ -7038,5 +7278,335 @@ def _reconcile_signing_gated_release_lanes(dst: str) -> list[str]:
                        (_STORE, _reconcile_signing_gated_store),
                        (_STABLE_RELEASE_WORKFLOW, _reconcile_signing_gated_workflow)):
         if apply(dst):
+            changed.append(rel)
+    return changed
+
+
+# ---------------------------------------------------------------------------
+# Fork release policy the lane table alone cannot carry
+# ---------------------------------------------------------------------------
+# ``_reconcile_signing_gated_defaults`` moves ``lane_set.DEFAULT`` to the lanes
+# this fork can sign, but five files still read that default the way upstream's
+# does, and a fork that ships no desktop package makes each of them wrong:
+#
+#   * ``scripts/releases/entrypoint.py`` warned "This is a partial desktop
+#     release" for any bundle build, so a Termux-only release -- the whole of
+#     what this fork publishes -- was described as incomplete.  The note now
+#     fires only when a desktop lane was actually asked for.
+#   * ``tests/scripts/test_release_lanes.py`` pinned ``DEFAULT`` to "everything
+#     but macOS Intel and Termux" and expected the protected desktop channel to
+#     move for it, so the fork's own default failed its own lane table.
+#   * ``tests/scripts/test_release_channels.py`` and
+#     ``tests/scripts/test_stable_release.py`` built claims from
+#     ``lane_set.DEFAULT`` over manifests that carry desktop smoke results, and
+#     ``stable.require_smokes_match_claim`` refused them ("Candidate smoke
+#     results differ from the claim's test policy"): a default that builds no
+#     desktop package cannot produce those results.  Each fixture now names the
+#     lane set it actually describes (``SIGNED``, ``DESKTOP_SIGNED``,
+#     ``LEGACY_DEFAULT``), so they keep testing upstream's full-lane behaviour
+#     instead of accidentally testing the fork's default.
+#   * ``tests/scripts/test_release_entrypoint.py`` asserted the "Not built" /
+#     "Not tested" lines ``next_steps`` derives from the default -- exactly the
+#     text this fork changes.
+#
+# These are the divergences nastech-agent PR #160 carried by hand; encoding them
+# here is what keeps them across the next sync, because a sync re-derives every
+# one of these files from upstream.  Anchors are exact, so a moved file raises
+# :class:`ForkLaneReleaseEditError` and the sync fails there rather than shipping
+# release tests that contradict the tree's own lane table.  Idempotent by
+# construction: each marker names the reconciled shape and a second pass changes
+# nothing.
+
+
+class ForkLaneReleaseEditError(ValueError):
+    """A fork-lane release anchor no longer matches upstream's file.
+
+    A ``ValueError`` on purpose: ``hundredways.conformance`` reports it as a
+    conformance issue for the operator to read, while the ``reconcile`` stage
+    still marks the update failed -- a silently un-reconciled release test goes
+    red in the fork with nothing pointing at the cause.
+    """
+
+
+_RELEASE_ENTRYPOINT_EDITS = (
+    (
+        r'''    if lane_set.has_bundles(lanes) and not lane_set.advances_desktop(lanes):
+''',
+        r'''    # The note warns about a partial DESKTOP release: a termux-only build (this fork's default,
+    # which signs no desktop package) ships no desktop packages at all, so nothing is partial.
+    if lanes & {*lane_set.DESKTOP, *lane_set.WINDOWS} and not lane_set.advances_desktop(lanes):
+''',
+    ),
+)
+
+_RELEASE_LANES_TESTS_EDITS = (
+    (
+        r'''from scripts.releases import lanes as lane_set
+
+
+def test_the_default_builds_everything_but_macos_intel_and_termux():
+    assert lane_set.DEFAULT == set(lane_set.NAMES) - {"macos-intel", "termux"}
+''',
+        r'''from scripts.releases import lanes as lane_set
+
+# NasTech contract: this fork ships only the lanes it can sign. The Apple and
+# Azure/Store signing accounts are unconfigured, and smoke/upgrade gate on built
+# desktop packages, so those lanes stay out of DEFAULT until --with names them.
+UNSIGNED_LANES = {"macos-arm64", "macos-intel", "windows", "windows-store", "smoke", "upgrade"}
+
+
+def test_the_default_ships_the_lanes_this_fork_can_sign():
+    assert lane_set.DEFAULT == (set(lane_set.NAMES) - UNSIGNED_LANES) | {"termux"}
+''',
+    ),
+    (
+        r'''    ({"with_": ["macos-intel", "termux"]}, set(lane_set.NAMES)),
+''',
+        r'''    ({"with_": ["macos-intel", "termux"]}, set(lane_set.DEFAULT) | {"macos-intel"}),
+''',
+    ),
+    (
+        r'''    assert lane_set.flags(lane_set.DEFAULT)["desktop-channel"] is True
+''',
+        r'''    assert lane_set.flags(lane_set.DEFAULT)["desktop-channel"] is False
+    # The channel needs both signed desktop lanes; --with restores them.
+    signed = lane_set.DEFAULT | {"windows", "macos-arm64"}
+    assert lane_set.flags(signed)["desktop-channel"] is True
+''',
+    ),
+    (
+        r'''    assert lane_set.runs_smokes(lane_set.DEFAULT)
+''',
+        r'''    assert not lane_set.runs_smokes(lane_set.DEFAULT)
+    assert lane_set.runs_smokes(lane_set.DEFAULT | {"smoke", "macos-arm64"})
+''',
+    ),
+    (
+        r'''    assert lane_set.advances_desktop(lane_set.DEFAULT)
+''',
+        r'''    assert not lane_set.advances_desktop(lane_set.DEFAULT)
+    assert lane_set.advances_desktop(lane_set.DEFAULT | {"windows", "macos-arm64"})
+''',
+    ),
+)
+
+_RELEASE_CHANNELS_TESTS_EDITS = (
+    (
+        r'''from scripts.releases import lanes as lane_set
+
+''',
+        r'''from scripts.releases import lanes as lane_set
+
+# A claim that built and smoked every desktop package (see test_stable_release.py).
+SIGNED = frozenset(lane_set.NAMES)
+
+''',
+    ),
+    (
+        r'''                                                       "lanes": lane_set.DEFAULT}))
+''',
+        r'''                                                       "lanes": SIGNED}))
+''',
+    ),
+    (
+        r'''                                                lanes=lane_set.DEFAULT) == candidate
+''',
+        r'''                                                lanes=SIGNED) == candidate
+''',
+    ),
+    (
+        r'''                                             lanes=lane_set.DEFAULT)
+''',
+        r'''                                             lanes=SIGNED)
+''',
+    ),
+)
+
+_STABLE_RELEASE_TESTS_EDITS = (
+    (
+        r'''from scripts.releases.versioning import tag_record
+
+''',
+        r'''from scripts.releases.versioning import tag_record
+
+# The lane set a release must claim to build and smoke every desktop package —
+# the default once the fork's signing credentials are configured.
+SIGNED = frozenset(lane_set.NAMES)
+# Same, without Termux or macOS Intel: a claim over a desktop-only candidate
+# manifest (arm64 Mac + signed Windows rows).
+DESKTOP_SIGNED = frozenset({"windows", "windows-store", "macos-arm64",
+                            "smoke", "upgrade", "docker", "ci", "nix", "docker-tests",
+                            "pm-bundle", "windows-live", "install-e2e", "bootstrap-version"})
+# Claims cut before lanes existed are read as the pre-lanes default: every lane
+# except the two that were then opt-in (scripts/releases/lanes.py legacy path).
+LEGACY_DEFAULT = frozenset(set(lane_set.NAMES) - {"macos-intel", "termux"})
+
+''',
+    ),
+    (
+        r'''        "autopublish": False, "lanes": lane_set.DEFAULT,
+''',
+        r'''        "autopublish": False, "lanes": LEGACY_DEFAULT,
+''',
+    ),
+    (
+        r'''    assert parsed == {**old, "lanes": lane_set.DEFAULT}
+''',
+        r'''    assert parsed == {**old, "lanes": LEGACY_DEFAULT}
+''',
+    ),
+    (
+        r'''def test_a_default_claim_builds_no_macos_intel_or_termux_and_lanes_restore_them(
+        tmp_path, r2_server, https_origin, monkeypatch):
+    from scripts.releases import stable
+
+    off = {"candidates-darwin-x64", "transitions-darwin-x64", "macos-packaged-x64",
+           "candidates-termux", "termux-checks"}
+''',
+        r'''def test_a_default_claim_builds_no_desktop_packages_and_lanes_restore_them(
+        tmp_path, r2_server, https_origin, monkeypatch):
+    """NasTech DEFAULT ships the signable lanes only: every desktop build and its test
+    arms are skipped, and --with restores a lane once its signing credentials exist."""
+    from scripts.releases import stable
+
+    off = {"candidates-darwin-x64", "transitions-darwin-x64", "macos-packaged-x64",
+           "candidates-darwin-arm64", "transitions-darwin-arm64", "macos-packaged-arm64",
+           "candidates-win32-arm64", "candidates-win32-x64", "candidates-win32-bundle",
+           "transitions-win32", "windows-packaged"}
+''',
+    ),
+    (
+        r'''    intel = stable.gate_expectations(required, lane_set.select(with_=["macos-intel"]))
+    assert {name for name, result in intel.items() if result == "skipped"} == \
+        {"candidates-termux", "termux-checks"}
+''',
+        r'''    intel = stable.gate_expectations(required, lane_set.select(with_=["macos-intel"]))
+    # Termux is on in this fork's default; restoring macos-intel builds its candidate,
+    # but the upgrade-gated transition arms wait for the `upgrade` lane too.
+    assert {name for name, result in intel.items() if result == "skipped"} == \
+        off - {"candidates-darwin-x64"}
+''',
+    ),
+    (
+        r'''    monkeypatch.setattr(stable, "stable_context", _fake_stable_context(lanes=lane_set.DEFAULT))
+    calls = _calls(lane_set.DEFAULT)
+''',
+        r'''    monkeypatch.setattr(stable, "stable_context", _fake_stable_context(lanes=DESKTOP_SIGNED))
+    calls = _calls(DESKTOP_SIGNED)
+''',
+    ),
+    (
+        r'''    stable.require_targets_match_claim(manifest, lane_set.DEFAULT)
+''',
+        r'''    stable.require_targets_match_claim(manifest, DESKTOP_SIGNED)
+''',
+    ),
+    (
+        r'''    lanes = lane_set.select(without=["windows"])
+''',
+        r'''    lanes = frozenset({"macos-arm64", "windows-store", "smoke"})
+''',
+    ),
+    (
+        r'''def _claim_fixture(tmp_path, *, tag, version, lanes=lane_set.DEFAULT):
+''',
+        r'''def _claim_fixture(tmp_path, *, tag, version, lanes=SIGNED):
+''',
+    ),
+    (
+        r'''    commit, tag_object = _claim_fixture(tmp_path, tag="rc.1-v1.2.3", version="1.2.3")
+''',
+        r'''    commit, tag_object = _claim_fixture(tmp_path, tag="rc.1-v1.2.3", version="1.2.3", lanes=DESKTOP_SIGNED)
+''',
+    ),
+    (
+        r'''def _publish_record(commit, tag_object, *, epoch, release_id=42, lanes=lane_set.DEFAULT):
+''',
+        r'''def _publish_record(commit, tag_object, *, epoch, release_id=42, lanes=SIGNED):
+''',
+    ),
+    (
+        r'''        stable.require_smokes_match_claim(manifest, lane_set.DEFAULT)
+''',
+        r'''        stable.require_smokes_match_claim(manifest, SIGNED)
+''',
+    ),
+)
+
+_RELEASE_ENTRYPOINT_TESTS_EDITS = (
+    (
+        r'''    # The default set names what it leaves out, and warns about no test lane.
+    assert "Not built: macos-intel, termux." in text
+    assert "Not tested" not in text
+''',
+        r'''    # The default set names what it leaves out: this fork signs no desktop package by default,
+    # and the desktop-gated test lanes (smoke, upgrade) are off with them.
+    assert "Not built: windows, windows-store, macos-arm64, macos-intel." in text
+    assert "Not tested: smoke, upgrade" in text
+''',
+    ),
+)
+
+
+_RELEASE_ENTRYPOINT = "scripts/releases/entrypoint.py"
+_RELEASE_ENTRYPOINT_MARK = "# The note warns about a partial DESKTOP release:"
+_RELEASE_LANES_TESTS = "tests/scripts/test_release_lanes.py"
+_RELEASE_LANES_TESTS_MARK = "UNSIGNED_LANES = {"
+_RELEASE_CHANNELS_TESTS = "tests/scripts/test_release_channels.py"
+_RELEASE_CHANNELS_TESTS_MARK = "SIGNED = frozenset(lane_set.NAMES)"
+_STABLE_RELEASE_TESTS_MARK = "DESKTOP_SIGNED = frozenset("
+_RELEASE_ENTRYPOINT_TESTS = "tests/scripts/test_release_entrypoint.py"
+_RELEASE_ENTRYPOINT_TESTS_MARK = 'assert "Not tested: smoke, upgrade" in text'
+
+_FORK_LANE_RELEASE = (
+    (_RELEASE_ENTRYPOINT, _RELEASE_ENTRYPOINT_MARK, _RELEASE_ENTRYPOINT_EDITS),
+    (_RELEASE_LANES_TESTS, _RELEASE_LANES_TESTS_MARK, _RELEASE_LANES_TESTS_EDITS),
+    (_RELEASE_CHANNELS_TESTS, _RELEASE_CHANNELS_TESTS_MARK, _RELEASE_CHANNELS_TESTS_EDITS),
+    (_STABLE_RELEASE_TESTS, _STABLE_RELEASE_TESTS_MARK, _STABLE_RELEASE_TESTS_EDITS),
+    (_RELEASE_ENTRYPOINT_TESTS, _RELEASE_ENTRYPOINT_TESTS_MARK,
+     _RELEASE_ENTRYPOINT_TESTS_EDITS),
+)
+
+
+def _marker_edits(dst: str, rel: str, marker: str, edits, *,
+                  error: type[ValueError], rule: str, why: str) -> bool:
+    """Apply ``edits`` to ``rel`` unless ``marker`` shows they already ran.
+
+    True when the file changed.  A missing or duplicated anchor raises ``error``
+    naming the rewrite and what it protects, so a moved upstream file fails the
+    sync instead of leaving a half-patched tree.
+    """
+    text = _sgl_read(dst, rel)
+    if text is None or marker in text:
+        return False
+    for index, (before, after) in enumerate(edits, start=1):
+        if text.count(before) != 1:
+            raise error(
+                f"{rel} no longer matches rewrite #{index} of {rule}, {why}. "
+                f"Re-derive the pairs against upstream's current {rel}, then re-run."
+            )
+        text = text.replace(before, after, 1)
+    _sgl_write(dst, rel, text)
+    return True
+
+
+def _reconcile_fork_lane_release_surface(dst: str) -> list[str]:
+    """Align the release CLI note and the release tests with the fork's lanes.
+
+    ``_reconcile_signing_gated_defaults`` decides which lanes a fork release asks
+    for; this keeps the files that read that decision from upstream's point of
+    view in step with it.  Returns the changed relative paths.
+    """
+    changed: list[str] = []
+    for rel, marker, edits in _FORK_LANE_RELEASE:
+        if _marker_edits(dst, rel, marker, edits,
+                         error=ForkLaneReleaseEditError,
+                         rule="_reconcile_fork_lane_release_surface",
+                         why="so the fork's release tests keep asserting upstream's "
+                             "full-lane default; on a fork that signs no desktop "
+                             "package that default fails its own lane table, the claim "
+                             "gate raises 'Candidate smoke results differ from the "
+                             "claim's test policy' and the desktop-channel expectation "
+                             "goes the other way"):
             changed.append(rel)
     return changed
