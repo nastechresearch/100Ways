@@ -410,27 +410,58 @@ class BrandingRules:
 
         A ``github.com/<owner>/<repo>`` path that :meth:`preserves_repo_path`
         keeps its inherited spelling -- renaming it yields a URL that 404s --
-        while everything around it is branded normally.
+        while everything around it is branded normally.  One exception: an
+        identifier that the same file also spells bare (outside any repository
+        identifier, so the token pass rewrites it there) is branded in its URL
+        form too.  A file that carried two spellings of one identifier could
+        not be read as a whole, and the fork's release tests build a URL from a
+        repository string they then assert against a URL literal, so a split
+        spelling fails them on a tree whose only divergence is the brand.
         """
         return self._transform_text(text, preserve_foreign_repos=True)
+
+    def _bare_also_branded(
+        self, text: str, identifier: str, covered: list[tuple[int, int]]
+    ) -> bool:
+        """True when this repository identifier is also spelled bare in *text*.
+
+        ``covered`` holds the spans of the repository identifiers that were
+        masked out, so an occurrence inside one of them does not count: only a
+        bare ``<owner>/<repo>`` outside every identifier the pass protects is a
+        token the pass rewrites in place.
+        """
+        core = identifier[: -len(".git")] if identifier.endswith(".git") else identifier
+        if self.brand_repo_path(core) == core:
+            return False
+        start = text.find(core)
+        while start != -1:
+            end = start + len(core)
+            if not any(lo <= start and end <= hi for lo, hi in covered):
+                return True
+            start = text.find(core, start + 1)
+        return False
 
     def _transform_text(self, text: str, *, preserve_foreign_repos: bool) -> str:
         if not preserve_foreign_repos:
             return self._apply_tokens(text)
         spans: list[str] = []
+        identifiers: list[str] = []
 
         def _stash(match: re.Match) -> str:
             spans.append(match.group(0))
+            identifiers.append(f"{match.group('owner')}/{match.group('repo')}")
             return _mask(len(spans) - 1)
 
         working = GITHUB_REPO_RE.sub(_stash, text)
         if not spans:
             return self._apply_tokens(working)
         branded = self._apply_tokens(working)
+        covered = [(m.start(), m.end()) for m in GITHUB_REPO_RE.finditer(text)]
         for index, original in enumerate(spans):
             keep = (
                 original
                 if self.preserves_repo_path(original)
+                and not self._bare_also_branded(text, identifiers[index], covered)
                 else self.brand_repo_path(original)
             )
             branded = branded.replace(_mask(index), keep)

@@ -208,6 +208,63 @@ def test_hosted_community_plugin_maps_to_our_own_fork():
     )
 
 
+def test_one_identifier_is_branded_under_every_spelling_it_uses():
+    """A file carrying both a bare identifier and its URL must brand both.
+
+    The fork's release tests build a URL *from* a repository string and compare it
+    with a URL literal: ``target_repository="example/hermes-agent"`` is what turns
+    into ``https://github.com/example/hermes-agent/archive/<sha>.zip``.  The bare
+    form is ordinary token-rule text and was branded in place while the URL form
+    was preserved verbatim, so the generated file asserted ``nastech-agent``
+    against ``hermes-agent`` and failed.  A repository identifier is therefore
+    only preserved when the text never spells it bare.
+    """
+    rules = BrandingRules()
+    both = (
+        '    repository = "example/hermes-agent"\n'
+        '    url = "https://github.com/example/hermes-agent/releases/tag/v1"\n'
+    )
+    branded = rules.transform_text(both)
+    assert branded == (
+        '    repository = "example/nastech-agent"\n'
+        '    url = "https://github.com/example/nastech-agent/releases/tag/v1"\n'
+    )
+    assert "hermes" not in branded
+    assert rules.transform_text(branded) == branded
+    # a trailing ``.git`` belongs to the identifier, so it must not hide the bare
+    # spelling sitting two lines away (the real shape of the fixture fork in
+    # ``tests/nastech_cli/test_source_release_channels.py``).
+    dotted = (
+        '    url = "https://github.com/Fixture/hermes-agent.git"\n'
+        '    target_repository = "Fixture/hermes-agent"\n'
+    )
+    assert rules.transform_text(dotted) == (
+        '    url = "https://github.com/Fixture/nastech-agent.git"\n'
+        '    target_repository = "Fixture/nastech-agent"\n'
+    )
+
+
+def test_the_bare_spelling_exception_never_widens_preservation():
+    """Preservation still holds for a URL the file does not spell bare.
+
+    The exception is one-way: it can move a would-be-preserved identifier into
+    ``brand_repo_path``, never the other way round.  An occurrence that only
+    exists *inside* repository identifiers is not a bare spelling -- the pass
+    masks those before it looks -- so the 383 catalog entries that started this
+    exemption stay verbatim.
+    """
+    rules = BrandingRules()
+    for text in (
+        "repo: https://github.com/lancedb/hermes-agent-memory\n",
+        # the same identifier twice, both times as part of a URL
+        "a = 'https://github.com/lancedb/hermes-agent-memory'\n"
+        "b = 'https://github.com/lancedb/hermes-agent-memory/issues/1'\n",
+        # already ours, so nothing here is a rename in either direction
+        'url = "https://github.com/NastechResearch/nastech-agent/releases"\n',
+    ):
+        assert rules.transform_text(text) == text
+
+
 def test_path_transforms():
     rules = BrandingRules()
     assert "nastech" in rules.transform_path("tools/hermes_runner.py").lower()

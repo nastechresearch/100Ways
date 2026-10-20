@@ -23,15 +23,31 @@ from hundredways.updates import (
     AssetsWorkerIndexError,
     BrowseBudgetFlockTestError,
     ChannelReaderUserAgentError,
+    ForkLaneReleaseEditError,
     GatewayAllowlistReloadError,
     GatewayPluginGateError,
+    NastechSuitePinError,
     TermuxAptKeyDocError,
     UpdateManager,
     WindowsRealGitLocateError,
     _BROWSE_BUDGET_EDITS,
     _BROWSE_BUDGET_TEST_REL,
+    _CONFTEST,
     _DOCS_PUBLIC_ORIGIN,
+    _ENDPOINT_PIN_MARK,
+    _GUEST_IDENTITY_TESTS,
     _HARDENED_PREPARE_SCRIPT,
+    _LANES_DEFAULT_FORK,
+    _RELEASE_CHANNELS_TESTS,
+    _RELEASE_CHANNELS_TESTS_EDITS,
+    _RELEASE_ENTRYPOINT,
+    _RELEASE_ENTRYPOINT_EDITS,
+    _RELEASE_ENTRYPOINT_TESTS,
+    _RELEASE_ENTRYPOINT_TESTS_EDITS,
+    _RELEASE_LANES_TESTS,
+    _RELEASE_LANES_TESTS_EDITS,
+    _STABLE_RELEASE_TESTS,
+    _STABLE_RELEASE_TESTS_EDITS,
     _SKILL_DESC_FULL_NEW,
     _SKILL_DESC_FULL_OLD,
     _PROMPT_SURFACE_CHARS_PER_TOKEN,
@@ -63,11 +79,14 @@ from hundredways.updates import (
     _reconcile_drop_vercel_deploy_job,
     _reconcile_fork_skill_catalogs,
     _reconcile_fork_skill_sidebars,
+    _reconcile_fork_lane_release_surface,
     _reconcile_gateway_allowlist_live_reload,
     _reconcile_gateway_plugin_gate_native_ticket,
+    _reconcile_guest_identity_stub,
     _reconcile_install_ps1_store_guard_test,
     _reconcile_locale_key_order,
     _reconcile_managed_gateway_wire_headers,
+    _reconcile_nastech_home_env_prefix,
     _reconcile_pinned_source_clones,
     _reconcile_plugin_catalog_sync_exemption,
     _reconcile_plugin_guard_trusted_installer_hosts,
@@ -85,6 +104,7 @@ from hundredways.updates import (
     _reconcile_domains,
     _reconcile_security_contact,
     _reconcile_termux_apt_signing_key,
+    _reconcile_test_endpoint_defaults,
     _reconcile_ui_scope_pins,
     _reconcile_uv_lock_file,
     _reconcile_vercel_prepare,
@@ -4212,6 +4232,315 @@ def test_reconcile_dead_api_defaults_leaves_live_and_apex_hosts(tmp_path):
     assert _reconcile_dead_api_defaults(str(tmp_path)) == []
     assert "_NastechUnconfiguredEndpoint" not in (
         (cli / "auth_constants.py").read_text())
+
+
+# --- the suite's half of the fail-closed defaults -------------------------
+
+_ENDPOINT_SOURCE = '''
+DEFAULT_NASTECH_PORTAL_URL = _nastech_endpoint_default(
+    env="NASTECH_PORTAL_URL",
+    constant="DEFAULT_NASTECH_PORTAL_URL",
+    dead_default="https://portal.nastechresearch.github.io",
+)
+TELEGRAM_ONBOARDING_DEFAULT_URL = _nastech_endpoint_default(
+    env="TELEGRAM_ONBOARDING_DEFAULT_URL",
+    constant="TELEGRAM_ONBOARDING_DEFAULT_URL",
+    dead_default="https://setup.nastechresearch.github.io/nastech-agent",
+)
+'''
+
+_CONFTEST_HEAD = (
+    "import os\n"
+    "\n"
+    '_PRE_SANDBOX_NASTECH_HOME = os.environ.get("NASTECH_HOME", "")\n'
+    "\n"
+    "import json\n"
+)
+
+
+def _suite_tree(tmp_path, source=_ENDPOINT_SOURCE, conftest=_CONFTEST_HEAD):
+    """A branded candidate: fail-closed call sites plus the conftest that must read them."""
+    root = tmp_path / "candidate"
+    (root / "nastech_cli").mkdir(parents=True)
+    (root / "nastech_cli" / "auth_constants.py").write_text(source, encoding="utf-8")
+    (root / "tests").mkdir()
+    (root / "tests" / "conftest.py").write_text(conftest, encoding="utf-8")
+    return root
+
+
+def _pins_of(path):
+    """The ``_NASTECH_TEST_ENDPOINTS`` literal, read back out of a written conftest."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if (isinstance(node, ast.Assign)
+                and [t.id for t in node.targets] == ["_NASTECH_TEST_ENDPOINTS"]):
+            return ast.literal_eval(node.value)
+    raise AssertionError("no _NASTECH_TEST_ENDPOINTS assignment")
+
+
+def test_endpoint_pins_are_derived_from_the_generated_call_sites(tmp_path):
+    """The suite asserts the branded origin each default names as its dead_default.
+
+    ``_reconcile_dead_api_defaults`` makes an unconfigured constant read as a
+    ``.invalid`` origin, which is the correct answer for a user and the wrong one
+    for 99 endpoint-asserting test files (nastech-agent#157 / 100Ways#118).  The
+    pins therefore have to be *read out of* the generated call sites: a list typed
+    in beside this file drifts the moment upstream adds, renames or drops an
+    endpoint, and the failure it produces is a wall of red across the suite.
+    """
+    root = _suite_tree(tmp_path)
+
+    assert _reconcile_test_endpoint_defaults(str(root)) is True
+    path = root / _CONFTEST
+    text = path.read_text(encoding="utf-8")
+    assert _pins_of(path) == {
+        "NASTECH_PORTAL_URL": "https://portal.nastechresearch.github.io",
+        "TELEGRAM_ONBOARDING_DEFAULT_URL": (
+            "https://setup.nastechresearch.github.io/nastech-agent"),
+    }
+    # setdefault, so an operator's own configuration still wins.
+    assert "os.environ.setdefault(_env_key, _env_value)" in text
+    # ahead of every later import: a module-level constant captures the
+    # environment at import time, which is the only moment that matters.
+    assert text.index("_NASTECH_TEST_ENDPOINTS") < text.index("import json")
+    # idempotent, and a second sync re-derives the block from the new call sites
+    assert _reconcile_test_endpoint_defaults(str(root)) is False
+    assert root.joinpath("tests", "conftest.py").read_text(encoding="utf-8") == text
+
+
+def test_endpoint_pins_follow_the_constant_that_names_them(tmp_path):
+    """Renaming an endpoint upstream needs no edit here -- that is the whole point."""
+    root = _suite_tree(
+        tmp_path, source=_ENDPOINT_SOURCE.replace("NASTECH_PORTAL_URL", "NAS_PORTAL_URL"))
+
+    assert _reconcile_test_endpoint_defaults(str(root)) is True
+    assert set(_pins_of(root / _CONFTEST)) == {
+        "NAS_PORTAL_URL", "TELEGRAM_ONBOARDING_DEFAULT_URL"}
+
+
+def test_endpoint_pins_need_no_block_without_a_fail_closed_default(tmp_path):
+    """A tree with no reconciled default gets no block, so the mark stays meaningful."""
+    root = _suite_tree(tmp_path, source='PORTAL = "https://portal.example.test"\n')
+
+    assert _reconcile_test_endpoint_defaults(str(root)) is False
+    assert _ENDPOINT_PIN_MARK not in (root / _CONFTEST).read_text(encoding="utf-8")
+
+
+def test_endpoint_pins_fail_loudly_when_conftest_moved_the_anchor(tmp_path):
+    """Upstream relocating its environment capture must fail the sync, not the suite."""
+    root = _suite_tree(
+        tmp_path,
+        conftest='import os\n\n_PRE_SANDBOX_NASTECH_HOME = os.environ["NASTECH_HOME"]\n')
+
+    with pytest.raises(NastechSuitePinError) as excinfo:
+        _reconcile_test_endpoint_defaults(str(root))
+    message = str(excinfo.value)
+    assert _CONFTEST in message
+    assert "_reconcile_test_endpoint_defaults" in message
+    # nothing half-written
+    assert _ENDPOINT_PIN_MARK not in (root / _CONFTEST).read_text(encoding="utf-8")
+
+
+_HOME_PRE = '''
+
+def _processes_with_nastech_home_under(roots) -> list[int]:
+    found = []
+    for pid in os.listdir("/proc"):
+        try:
+            environ = Path("/proc", pid, "environ").read_bytes().split(b"\\0")
+        except OSError:
+            continue
+        home = next((item[12:] for item in environ if item.startswith(b"NASTECH_HOME=")), None)
+        if home:
+            found.append(int(pid))
+    return found
+'''
+
+
+def test_nastech_home_env_prefix_binds_the_slice_to_its_literal(tmp_path):
+    """Branding lengthened ``HERMES_HOME`` to ``NASTECH_HOME`` and left ``[12:]``.
+
+    The guard that keeps pytest off a real ``NASTECH_HOME`` sliced a leading ``=``
+    and matched no path, so it protected nothing and failed by finding nothing --
+    invisible from the suite, which is why it needs a rule rather than a fix once.
+    """
+    root = _suite_tree(tmp_path)
+    path = root / _CONFTEST
+    path.write_text("import os\nfrom pathlib import Path\n" + _HOME_PRE, encoding="utf-8")
+
+    assert _reconcile_nastech_home_env_prefix(str(root)) is True
+    text = path.read_text(encoding="utf-8")
+    assert "item[12:]" not in text
+    assert 'item.startswith(b"NASTECH_HOME=")' not in text
+    assert "item[len(_NASTECH_HOME_PREFIX):]" in text
+    ast.parse(text)
+    assert _reconcile_nastech_home_env_prefix(str(root)) is False
+    assert path.read_text(encoding="utf-8") == text
+
+
+def test_nastech_home_env_prefix_fails_loudly_when_the_slice_moved(tmp_path):
+    root = _suite_tree(tmp_path)
+    (root / _CONFTEST).write_text(
+        "import os\nfrom pathlib import Path\n"
+        + _HOME_PRE.replace('item[12:]', 'item[13:]'),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(NastechSuitePinError) as excinfo:
+        _reconcile_nastech_home_env_prefix(str(root))
+    assert "rewrite #" in str(excinfo.value)
+    assert "_reconcile_nastech_home_env_prefix" in str(excinfo.value)
+
+
+_GUEST_PRE = '''
+
+def _server(tmp_path, monkeypatch):
+    launch = tmp_path / "launch"
+    launch.mkdir()
+    monkeypatch.setattr(server, '_nastech_home', launch)
+    return server, launch, bee
+'''
+
+
+def test_guest_identity_stub_matches_the_sibling_connector_tests(tmp_path):
+    """The connector RPC path mints a hosted guest before answering ``connectors.list``.
+
+    This fork runs no portal, so the mint always fails and the one connector test
+    without the stub that three of its siblings already carries reaches a
+    ``{'charge'}`` answer where ``{'charge', 'list'}`` is expected.
+    """
+    root = tmp_path / "candidate"
+    path = root / _GUEST_IDENTITY_TESTS
+    path.parent.mkdir(parents=True)
+    path.write_text(_GUEST_PRE, encoding="utf-8")
+
+    assert _reconcile_guest_identity_stub(str(root)) is True
+    text = path.read_text(encoding="utf-8")
+    assert "monkeypatch.setattr('tools.connectors.ensure_guest_identity', lambda: None)" in text
+    assert (
+        "monkeypatch.setattr('tools.connectors.managed.ensure_guest_identity', lambda: None)"
+        in text)
+    ast.parse(text)
+    assert _reconcile_guest_identity_stub(str(root)) is False
+    assert path.read_text(encoding="utf-8") == text
+
+
+def test_suite_pin_reconciles_are_registered_in_reconcile_tree(tmp_path):
+    """``reconcile_tree`` must dispatch the suite rules, or the fork never receives them."""
+    root = _suite_tree(tmp_path)
+    conftest = root / _CONFTEST
+    conftest.write_text(
+        "import os\nfrom pathlib import Path\n" + _CONFTEST_HEAD + _HOME_PRE, encoding="utf-8"
+    )
+    guest = root / _GUEST_IDENTITY_TESTS
+    guest.parent.mkdir(parents=True)
+    guest.write_text(_GUEST_PRE, encoding="utf-8")
+
+    result = reconcile_tree(str(root))
+    assert _CONFTEST in result.fixed
+    assert _GUEST_IDENTITY_TESTS in result.fixed
+    text = conftest.read_text(encoding="utf-8")
+    assert _pins_of(conftest)
+    assert "item[len(_NASTECH_HOME_PREFIX):]" in text
+    assert "ensure_guest_identity" in guest.read_text(encoding="utf-8")
+
+
+# --- fork-lane release surface --------------------------------------------
+
+_FORK_LANE_EDITS = (
+    (_RELEASE_ENTRYPOINT, _RELEASE_ENTRYPOINT_EDITS),
+    (_RELEASE_LANES_TESTS, _RELEASE_LANES_TESTS_EDITS),
+    (_RELEASE_CHANNELS_TESTS, _RELEASE_CHANNELS_TESTS_EDITS),
+    (_STABLE_RELEASE_TESTS, _STABLE_RELEASE_TESTS_EDITS),
+    (_RELEASE_ENTRYPOINT_TESTS, _RELEASE_ENTRYPOINT_TESTS_EDITS),
+)
+
+
+def _lane_release_tree(tmp_path, rel, edits):
+    """A candidate holding one release file at the exact pre-image of its rewrites."""
+    root = tmp_path / "candidate"
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(before for before, _ in edits), encoding="utf-8")
+    return root, path
+
+
+@pytest.mark.parametrize("rel, edits", _FORK_LANE_EDITS, ids=[rel for rel, _ in _FORK_LANE_EDITS])
+def test_fork_lane_release_pairs_apply_once_and_reach_a_fixed_point(tmp_path, rel, edits):
+    """Every pair matches upstream exactly once, in order, and the result stops there.
+
+    These five files read ``lane_set.DEFAULT``, so on a fork that signs no desktop
+    package each of them asserts upstream's full-lane behaviour and fails: the
+    lane table disagrees with its own test, ``require_smokes_match_claim`` refuses a
+    default that cannot produce desktop smoke results, and the release note calls a
+    Termux-only build a partial desktop release.
+    """
+    root, path = _lane_release_tree(tmp_path, rel, edits)
+
+    assert _reconcile_fork_lane_release_surface(str(root)) == [rel]
+    text = path.read_text(encoding="utf-8")
+    assert text == "".join(after for _, after in edits)
+    assert _reconcile_fork_lane_release_surface(str(root)) == []
+    assert path.read_text(encoding="utf-8") == text
+
+
+def test_fork_lane_release_noops_on_a_tree_without_the_release_files(tmp_path):
+    """A pre-lane tree has nothing to align: absence is a no-op, not an error."""
+    assert _reconcile_fork_lane_release_surface(str(tmp_path / "empty")) == []
+
+
+def test_fork_lane_release_default_set_and_its_test_agree(tmp_path):
+    """The lane test may not name a lane set the lane table does not exclude.
+
+    ``_reconcile_signing_gated_defaults`` writes the fork's ``DEFAULT`` and this
+    rule writes the test that asserts it; the two lists are hand-typed in separate
+    constants, so a lane added to one and not the other goes red in the fork's
+    release suite with nothing pointing at the pairing.
+    """
+    root, path = _lane_release_tree(
+        tmp_path, _RELEASE_LANES_TESTS, _RELEASE_LANES_TESTS_EDITS)
+    assert _reconcile_fork_lane_release_surface(str(root)) == [_RELEASE_LANES_TESTS]
+
+    test_names = set(re.findall(
+        r'"([a-z0-9-]+)"',
+        re.search(r"UNSIGNED_LANES = \{([^}]*)\}", path.read_text(encoding="utf-8")).group(1)))
+    source_names = set(re.findall(
+        r'"([a-z0-9-]+)"',
+        re.search(r"lane\.name not in \{([^}]*)\}", _LANES_DEFAULT_FORK, re.S).group(1)))
+    assert test_names == source_names
+    # Termux is the one lane both sides put back in: it needs no signing.
+    assert '"termux"' in _LANES_DEFAULT_FORK
+    assert 'termux' not in test_names
+
+
+@pytest.mark.parametrize("drop", [1, 4])
+def test_fork_lane_release_fails_loudly_when_upstream_moved(tmp_path, drop):
+    """A rewrite that stopped matching raises; it never no-ops into a silent red lane."""
+    pairs = list(_RELEASE_LANES_TESTS_EDITS)
+    pairs.pop(drop)
+    root, _ = _lane_release_tree(tmp_path, _RELEASE_LANES_TESTS, pairs)
+
+    with pytest.raises(ForkLaneReleaseEditError) as excinfo:
+        _reconcile_fork_lane_release_surface(str(root))
+    message = str(excinfo.value)
+    assert f"rewrite #{drop + 1}" in message
+    assert _RELEASE_LANES_TESTS in message
+    assert "_reconcile_fork_lane_release_surface" in message
+
+
+def test_fork_lane_release_runs_from_reconcile_tree(tmp_path):
+    """``reconcile_tree`` must dispatch it, or the fork receives none of the five."""
+    root = tmp_path / "candidate"
+    for rel, edits in _FORK_LANE_EDITS:
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(before for before, _ in edits), encoding="utf-8")
+
+    result = reconcile_tree(str(root))
+    for rel, edits in _FORK_LANE_EDITS:
+        assert rel in result.fixed
+        assert (root / rel).read_text(encoding="utf-8") == "".join(
+            after for _, after in edits)
 
 
 def test_reconcile_security_contact_removes_undeliverable_mailbox(tmp_path):
