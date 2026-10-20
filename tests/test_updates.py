@@ -21,12 +21,15 @@ from hundredways.integrity import audit_candidate_tree
 from hundredways.updates import (
     STAGES,
     AssetsWorkerIndexError,
+    BrowseBudgetFlockTestError,
     ChannelReaderUserAgentError,
     GatewayAllowlistReloadError,
     GatewayPluginGateError,
     TermuxAptKeyDocError,
     UpdateManager,
     WindowsRealGitLocateError,
+    _BROWSE_BUDGET_EDITS,
+    _BROWSE_BUDGET_TEST_REL,
     _DOCS_PUBLIC_ORIGIN,
     _HARDENED_PREPARE_SCRIPT,
     _SKILL_DESC_FULL_NEW,
@@ -37,6 +40,7 @@ from hundredways.updates import (
     _reconcile_assets_worker_index,
     _reconcile_anon_surface_copy,
     _reconcile_apt_pool_first_char,
+    _reconcile_browse_budget_flock_tests,
     _reconcile_channel_reader_user_agent,
     _reconcile_ci_runner_budgets,
     _reconcile_connector_test_guest_offline,
@@ -388,7 +392,7 @@ def test_ci_runner_budgets_inserts_file_timeout_when_e2e_job_already_sets_it(tmp
         "      - name: Run ${{ matrix.marker }} tests\n"
         "        run: scripts/run_tests.sh\n"
         "        env:\n"
-        "          NASTECH_TEST_WORKERS: ${{ matrix.marker == 'windows' && '4' || '' }}\n"
+        "          NASTECH_TEST_WORKERS: ${{ matrix.marker == 'windows' && '4' || '2' }}\n"
         "          NASTECH_TEST_SLICE: ${{ matrix.slice || '' }}\n"
         "  e2e-windows:\n"
         "    steps:\n"
@@ -422,6 +426,66 @@ def test_ci_runner_budgets_inserts_file_timeout_when_e2e_job_already_sets_it(tmp
     # Fixed point, and brand-clean for the first-party audit.
     assert _reconcile_ci_runner_budgets(str(candidate)) == []
     assert BrandingRules().transform_text(text) == text
+
+
+def _browse_budget_tree(tmp_path, text):
+    """A branded candidate tree carrying ``text`` as the drift-test file."""
+    candidate = tmp_path / "candidate"
+    path = candidate / _BROWSE_BUDGET_TEST_REL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return candidate, path
+
+
+def test_browse_budget_flock_tests_rebuild_the_host_aware_bounds(tmp_path):
+    """Every rewrite pair applies, in order, and the result is a fixed point.
+
+    The fixture is the rule's own pre-image stitched together, so a pair that no longer matches
+    upstream -- or one that overlaps its neighbour's context -- fails here instead of on the
+    fork's macOS lane.
+    """
+    pre = "".join(before for before, _ in _BROWSE_BUDGET_EDITS)
+    expected = "".join(after for _, after in _BROWSE_BUDGET_EDITS)
+    candidate, path = _browse_budget_tree(tmp_path, pre)
+
+    assert _reconcile_browse_budget_flock_tests(str(candidate)) is True
+    text = path.read_text(encoding="utf-8")
+    assert text == expected
+    assert _reconcile_browse_budget_flock_tests(str(candidate)) is False
+    assert path.read_text(encoding="utf-8") == expected
+    # The rewritten file must charge the budgeted window, not the child's whole wall time.
+    assert "assert window < budget_s + 2, out" in text
+    assert 'result.split(" ", 4)' in text
+    assert "assert float(elapsed) < budget_s + 2" not in text
+
+
+@pytest.mark.parametrize("drop", [0, 3, 7, 11])
+def test_browse_budget_flock_tests_fail_loudly_when_upstream_moved(tmp_path, drop):
+    """A rewrite that stopped matching raises; it never no-ops into a silent red lane."""
+    pairs = list(_BROWSE_BUDGET_EDITS)
+    pairs.pop(drop)
+    candidate, _ = _browse_budget_tree(
+        tmp_path, "".join(before for before, _ in pairs) + "\ndef _unrelated():\n    return 1\n"
+    )
+
+    with pytest.raises(BrowseBudgetFlockTestError) as excinfo:
+        _reconcile_browse_budget_flock_tests(str(candidate))
+    message = str(excinfo.value)
+    assert f"rewrite #{drop + 1}" in message
+    assert "_reconcile_browse_budget_flock_tests" in message
+    assert "macOS" in message
+
+
+def test_browse_budget_flock_reconcile_is_registered_in_reconcile_tree(tmp_path):
+    """``reconcile_tree`` must dispatch the new rule, or the fork never receives it."""
+    root = tmp_path / "candidate"
+    path = root / _BROWSE_BUDGET_TEST_REL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(before for before, _ in _BROWSE_BUDGET_EDITS), encoding="utf-8")
+
+    result = reconcile_tree(str(root))
+    assert _BROWSE_BUDGET_TEST_REL in result.fixed
+    assert "def _hold_release_latency(" in path.read_text(encoding="utf-8")
 
 
 def test_new_timeout_reconciles_are_registered_in_reconcile_tree(tmp_path):
