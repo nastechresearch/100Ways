@@ -5551,6 +5551,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     for rel in _reconcile_ci_runner_budgets(dst):
         result.total += 1
         result.fixed.append(rel)
+    for rel in _reconcile_free_runner_parallelism(dst):
+        result.total += 1
+        result.fixed.append(rel)
     for rel in _reconcile_python_test_timeout(dst):
         result.total += 1
         result.fixed.append(rel)
@@ -7875,3 +7878,122 @@ def _reconcile_browse_ddl_budget_guard(dst: str) -> list[str]:
     _reconcile_budget_write(dst, _BROWSE_RECONCILE_REL,
                             text.replace(_BROWSE_DDL_UNGUARDED, _BROWSE_DDL_GUARDED, 1))
     return [_BROWSE_RECONCILE_REL]
+
+
+class FreeRunnerParallelismError(ValueError):
+    """The branded CI no longer has the shape the free-runner split rewrites."""
+
+
+# Upstream runs the Python suite on two 32-core slices at 32 workers each and
+# adds native arm64 Windows rows to the OS matrix. This repo has no Blacksmith
+# account, so every lane lands on a free 4-core hosted image. Eight 4-core
+# Python slices restore upstream's 32 cores at one worker per core; the two
+# ``(arm64, ...)`` Windows rows normalise to ``windows-latest`` (x64), so the
+# plain Windows row already runs the same marked set and the slices duplicate
+# it. Both edits are exact literals, so a normalised tree is a fixed point.
+_FREE_PYTHON_TEST_NAME = "    name: Run tests (${{ matrix.slice }}/8)\n"
+_FREE_PYTHON_SLICE_MATRIX = "        slice: [1, 2, 3, 4, 5, 6, 7, 8]\n"
+_FREE_PYTHON_SLICE_ENV = "          NASTECH_TEST_SLICE: ${{ matrix.slice }}/8\n"
+_FREE_PYTHON_TEST_WORKERS = "          NASTECH_TEST_WORKERS: 4\n"
+
+_UPSTREAM_PYTHON_TEST_NAME = "    name: Run tests (${{ matrix.slice }}/2)\n"
+_UPSTREAM_PYTHON_SLICE_MATRIX = "        slice: [1, 2]\n"
+_UPSTREAM_PYTHON_SLICE_ENV = "          NASTECH_TEST_SLICE: ${{ matrix.slice }}/2\n"
+_UPSTREAM_PYTHON_TEST_WORKERS = "          NASTECH_TEST_WORKERS: 8\n"
+
+_WINDOWS_PLAIN_ROW = (
+    "          - name: Windows-only tests\n"
+    "            runner: windows-latest\n"
+    "            marker: windows\n"
+)
+_WINDOWS_ARM64_SLICE_ROWS = (
+    "          - name: Windows-only tests (arm64, 1/2)\n"
+    "            runner: windows-latest\n"
+    "            marker: windows\n"
+    "            timeout: 60\n"
+    "            slice: 1/2\n"
+    "          - name: Windows-only tests (arm64, 2/2)\n"
+    "            runner: windows-latest\n"
+    "            marker: windows\n"
+    "            timeout: 60\n"
+    "            slice: 2/2\n"
+)
+
+
+def _reconcile_free_runner_parallelism(dst: str) -> list[str]:
+    """Reshape the branded CI for 4-core runners at one worker per core.
+
+    Upstream budgets for a 32-core host; the fork's runners are the free 4-core
+    images because the org has no Blacksmith account (``_normalize_blacksmith``
+    rewrites every upstream label). The branded Python lane therefore ran 8
+    workers on 4 cores and the OS matrix ran the same x64 Windows tests three
+    times. That contention is what turns the absolute-second probes red: the
+    admission and prepare tests see 0.90 s / 0.69 s event-loop stalls against
+    0.5 s budgets, the hosted-request fixture answers its warm-up with a 504
+    under a patched 1 s timeout, and a ``CREATE_SUSPENDED`` child is observed
+    RUNNING (PR #159, run 39452039925, jobs 118766195222/118766195566/118766449748).
+
+    Returns the files rewritten.  Raises :class:`FreeRunnerParallelismError`
+    when a workflow is present but matches neither the upstream shape nor the
+    fixed point, because the next sync would silently re-publish the red.
+    """
+    fixed: list[str] = []
+
+    rel = ".github/workflows/tests.yml"
+    text = _reconcile_budget_read(dst, rel)
+    if text is not None:
+        upstream = (
+            _UPSTREAM_PYTHON_TEST_NAME,
+            _UPSTREAM_PYTHON_SLICE_MATRIX,
+            _UPSTREAM_PYTHON_SLICE_ENV,
+            _UPSTREAM_PYTHON_TEST_WORKERS,
+        )
+        target = (
+            _FREE_PYTHON_TEST_NAME,
+            _FREE_PYTHON_SLICE_MATRIX,
+            _FREE_PYTHON_SLICE_ENV,
+            _FREE_PYTHON_TEST_WORKERS,
+        )
+        if all(marker in text for marker in target):
+            pass  # fixed point
+        elif all(marker in text for marker in upstream):
+            updated = text
+            for old, new in zip(upstream, target):
+                if updated.count(old) != 1:
+                    raise FreeRunnerParallelismError(
+                        f"{rel} has {updated.count(old)} copies of the anchor {old!r}; "
+                        "_reconcile_free_runner_parallelism needs exactly one. "
+                        "Re-derive the eight-slice/one-worker-per-core rule against "
+                        "upstream's current tests.yml.")
+                updated = updated.replace(old, new, 1)
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+        else:
+            raise FreeRunnerParallelismError(
+                f"{rel} is neither the upstream two-slice/8-worker shape nor the "
+                "fork's eight-slice/4-worker fixed point. The free 4-core runner "
+                "would keep 8 workers on 4 cores and the absolute-second probes "
+                "would stay red (PR #159: 0.90 s stall vs a 0.5 s budget). "
+                "Re-derive the anchors against upstream's current tests.yml; do "
+                "not raise the probe budgets instead.")
+
+    rel = ".github/workflows/tests-os.yml"
+    text = _reconcile_budget_read(dst, rel)
+    if text is not None:
+        if _WINDOWS_ARM64_SLICE_ROWS in text:
+            if _WINDOWS_PLAIN_ROW not in text:
+                raise FreeRunnerParallelismError(
+                    f"{rel} has the (arm64, 1/2)/(arm64, 2/2) duplicate rows but "
+                    "not the plain Windows row that already runs their union. "
+                    "Removing them now would drop Windows coverage; re-derive "
+                    "_reconcile_free_runner_parallelism against the current matrix.")
+            _reconcile_budget_write(dst, rel, text.replace(_WINDOWS_ARM64_SLICE_ROWS, "", 1))
+            fixed.append(rel)
+        elif "Windows-only tests (arm64" in text:
+            raise FreeRunnerParallelismError(
+                f"{rel} still labels a Windows row arm64 in a shape this rule does "
+                "not recognise. On the free image every such row normalises to "
+                "windows-latest (x64), so it duplicates the plain row; re-derive "
+                "the exact matrix block instead of leaving the duplicate to run.")
+
+    return fixed

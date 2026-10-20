@@ -26,6 +26,7 @@ from hundredways.updates import (
     BrowseBudgetFlockTestError,
     ChannelReaderUserAgentError,
     ForkLaneReleaseEditError,
+    FreeRunnerParallelismError,
     GatewayAllowlistReloadError,
     GatewayPluginGateError,
     NastechSuitePinError,
@@ -89,6 +90,7 @@ from hundredways.updates import (
     _reconcile_fork_skill_catalogs,
     _reconcile_fork_skill_sidebars,
     _reconcile_fork_lane_release_surface,
+    _reconcile_free_runner_parallelism,
     _reconcile_gateway_allowlist_live_reload,
     _reconcile_gateway_plugin_gate_native_ticket,
     _reconcile_guest_identity_stub,
@@ -455,6 +457,91 @@ def test_ci_runner_budgets_inserts_file_timeout_when_e2e_job_already_sets_it(tmp
     # Fixed point, and brand-clean for the first-party audit.
     assert _reconcile_ci_runner_budgets(str(candidate)) == []
     assert BrandingRules().transform_text(text) == text
+
+
+def _free_runner_workflow_tree(tmp_path):
+    candidate = tmp_path / "candidate"
+    wf = candidate / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / "tests.yml").write_text(
+        "jobs:\n"
+        "  test:\n"
+        "    name: Run tests (${{ matrix.slice }}/2)\n"
+        "    strategy:\n"
+        "      matrix:\n"
+        "        slice: [1, 2]\n"
+        "    steps:\n"
+        "      - name: Run tests\n"
+        "        env:\n"
+        "          NASTECH_TEST_SLICE: ${{ matrix.slice }}/2\n"
+        "          NASTECH_TEST_WORKERS: 8\n",
+        encoding="utf-8",
+    )
+    (wf / "tests-os.yml").write_text(
+        "jobs:\n"
+        "  os-tests:\n"
+        "    strategy:\n"
+        "      matrix:\n"
+        "        include:\n"
+        "          - name: Windows-only tests\n"
+        "            runner: windows-latest\n"
+        "            marker: windows\n"
+        "          - name: Windows-only tests (arm64, 1/2)\n"
+        "            runner: windows-latest\n"
+        "            marker: windows\n"
+        "            timeout: 60\n"
+        "            slice: 1/2\n"
+        "          - name: Windows-only tests (arm64, 2/2)\n"
+        "            runner: windows-latest\n"
+        "            marker: windows\n"
+        "            timeout: 60\n"
+        "            slice: 2/2\n",
+        encoding="utf-8",
+    )
+    return candidate, wf
+
+
+def test_free_runner_parallelism_uses_one_worker_per_core(tmp_path):
+    """Eight 4-core slices replace two oversubscribed 8-worker slices."""
+    candidate, wf = _free_runner_workflow_tree(tmp_path)
+    changed = _reconcile_free_runner_parallelism(str(candidate))
+    assert set(changed) == {
+        ".github/workflows/tests.yml",
+        ".github/workflows/tests-os.yml",
+    }
+    tests_yml = (wf / "tests.yml").read_text(encoding="utf-8")
+    assert "    name: Run tests (${{ matrix.slice }}/8)\n" in tests_yml
+    assert "        slice: [1, 2, 3, 4, 5, 6, 7, 8]\n" in tests_yml
+    assert "          NASTECH_TEST_SLICE: ${{ matrix.slice }}/8\n" in tests_yml
+    assert "          NASTECH_TEST_WORKERS: 4\n" in tests_yml
+    os_yml = (wf / "tests-os.yml").read_text(encoding="utf-8")
+    # The arm64 rows normalise to windows-latest, so they only re-ran the
+    # plain row's x64 tests; the plain row stays and is now the only one.
+    assert "(arm64" not in os_yml
+    assert "          - name: Windows-only tests\n" in os_yml
+    assert _reconcile_free_runner_parallelism(str(candidate)) == []
+
+
+def test_free_runner_parallelism_stops_when_the_python_matrix_moves(tmp_path):
+    candidate, wf = _free_runner_workflow_tree(tmp_path)
+    path = wf / "tests.yml"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("slice: [1, 2]", "slice: [1, 2, 3]"),
+        encoding="utf-8",
+    )
+    with pytest.raises(FreeRunnerParallelismError, match="neither"):
+        _reconcile_free_runner_parallelism(str(candidate))
+
+
+def test_free_runner_parallelism_stops_when_the_windows_rows_move(tmp_path):
+    candidate, wf = _free_runner_workflow_tree(tmp_path)
+    path = wf / "tests-os.yml"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("(arm64, 1/2)", "(arm64, 1/3)"),
+        encoding="utf-8",
+    )
+    with pytest.raises(FreeRunnerParallelismError, match="arm64"):
+        _reconcile_free_runner_parallelism(str(candidate))
 
 
 def _browse_budget_tree(tmp_path, text):
