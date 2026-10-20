@@ -5641,6 +5641,22 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     for rel in _reconcile_security_contact(dst):
         result.total += 1
         result.fixed.append(rel)
+    # Branding adds one character per renamed token, and the deepest AGENTS.md
+    # chain sits close enough to its cap that those additions alone put this
+    # fork over a lint upstream passes.  Drops the developer-guide directory
+    # each area file repeats after the root stated it, then re-measures every
+    # chain with the checker's own numbers and stops for review if one is still
+    # over -- a cap is never raised here.
+    for rel in _reconcile_agents_md_chain_cap(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    # The browse DDL arms its time budget one statement before the guard that
+    # converts an expired budget into "nothing was changed"; on macOS the pragmas
+    # in that gap spend the budget, so the interrupt lands outside the guard and a
+    # clean store is reported as corrupt. Puts the statement inside the guard.
+    for rel in _reconcile_browse_ddl_budget_guard(dst):
+        result.total += 1
+        result.fixed.append(rel)
     # Rewrites a verified-dead scope reference to a published, byte-identical
     # version and records it; raises ValueError when no such target exists, so
     # a reference that would resolve to a different package stops the sync
@@ -7610,3 +7626,252 @@ def _reconcile_fork_lane_release_surface(dst: str) -> list[str]:
                              "goes the other way"):
             changed.append(rel)
     return changed
+
+
+# ---------------------------------------------------------------------------
+# The AGENTS.md chain cap that branding alone breaks
+# ---------------------------------------------------------------------------
+# ``scripts/ci/check_agents_md_size.py`` budgets the project-context block an
+# agent actually loads: every ``AGENTS.md`` from the git root down to that
+# agent's directory, summed, stays under ``CHAIN_MAX_CHARS``, and the root --
+# which sits in every chain -- stays under ``ROOT_MAX_CHARS``.  Those numbers
+# are the model's context window, not a style preference, and the checker's own
+# instruction is to shrink a file instead of raising one.
+#
+# Branding is what pushes this fork past it.  ``hermes_cli`` -> ``nastech_cli``,
+# ``Hermes`` -> ``Nastech`` and their siblings add one character per occurrence,
+# and in the deepest chain (``AGENTS.md`` + ``gateway/AGENTS.md``) they add 66:
+# upstream measures that chain at 29956, forty-four under the same cap, so the
+# identical tree that is green there is red here.  Nothing may be reworded to
+# suit the brand, so the fork stops paying for a path it was already given:
+#
+#   The root ``AGENTS.md`` spells out ``website/docs/developer-guide/`` as where
+#   long-form background lives, and the root is in every chain.  An area file
+#   that repeats that directory in each of its pointers restates a fact the
+#   reader saw at the top of the same block, so the pointer names the file alone
+#   -- which is how ``gateway/AGENTS.md`` already cites that very doc in one of
+#   its two pointers.
+#
+# The rewrite is derived from the tree instead of from remembered sentences, so
+# upstream rewording a pointer cannot break it and a file that already uses bare
+# names is left byte-identical.  Every chain is then re-measured with the
+# checker's own constants; if one is still over, the sync stops for a human
+# (:class:`AgentsChainCapError`) rather than publish a candidate whose lint job
+# fails forty minutes later.  Neither cap is ever edited here.
+
+_DEV_GUIDE_DIR = "website/docs/developer-guide/"
+_DEV_GUIDE_POINTER_RE = re.compile(re.escape(_DEV_GUIDE_DIR) + r"([A-Za-z0-9._/-]+\.md)")
+_AGENTS_SIZE_CHECKER = "scripts/ci/check_agents_md_size.py"
+_SUBDIRECTORY_HINTS = "agent/subdirectory_hints.py"
+_ROOT_AGENTS = "AGENTS.md"
+
+
+class AgentsChainCapError(ValueError):
+    """A branded AGENTS.md chain is still over the cap an agent truncates at."""
+
+
+def _chain_cap_constant(dst: str, rel: str, name: str) -> int:
+    """Read a cap from the source that enforces it, so the engine and CI cannot drift."""
+    try:
+        with open(os.path.join(dst, rel), encoding="utf-8") as fh:
+            source = fh.read()
+    except OSError as exc:
+        raise AgentsChainCapError(
+            f"{rel} is not readable, so the AGENTS.md chain cannot be measured against the number "
+            f"CI enforces: {exc}") from exc
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == name for t in node.targets):
+            return int(ast.literal_eval(node.value))
+    raise AgentsChainCapError(
+        f"{rel}: no {name} assignment -- the AGENTS.md chain budget moved; update this rule to read it")
+
+
+def _agents_chain(rel: str, present: set[str]) -> list[str]:
+    """Every AGENTS.md from the root down to *rel*, root first -- the block one agent loads."""
+    dirs = rel.split("/")[:-1]
+    chain: list[str] = []
+    if rel != _ROOT_AGENTS and _ROOT_AGENTS in present:
+        chain.append(_ROOT_AGENTS)
+    for depth in range(1, len(dirs) + 1):
+        ancestor = "/".join(dirs[:depth]) + "/AGENTS.md"
+        if ancestor in present and ancestor != rel:
+            chain.append(ancestor)
+    if rel not in chain:
+        chain.append(rel)
+    return chain
+
+
+def _agents_md_texts(dst: str) -> dict[str, str]:
+    """Every AGENTS.md in the tree, keyed by forward-slashed relative path."""
+    texts: dict[str, str] = {}
+    for raw in _walk_files(dst):
+        rel = raw.replace(os.sep, "/")
+        if rel != _ROOT_AGENTS and not rel.endswith("/" + _ROOT_AGENTS):
+            continue
+        try:
+            with open(os.path.join(dst, raw), encoding="utf-8") as fh:
+                text = fh.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        texts[rel] = text
+    return texts
+
+
+def _agents_chain_violations(texts: dict[str, str], *, root_max: int, chain_max: int,
+                             hint_max: int) -> list[str]:
+    """The same violations ``scripts/ci/check_agents_md_size.py`` would print for this tree."""
+    present = set(texts)
+    over: list[str] = []
+    for rel, text in sorted(texts.items()):
+        cap = root_max if rel == _ROOT_AGENTS else hint_max
+        if len(text) > cap:
+            over.append(f"{rel}: {len(text)} chars > {cap} cap")
+        chain = _agents_chain(rel, present)
+        total = sum(len(texts[p]) for p in chain)
+        if len(chain) > 1 and total > chain_max:
+            over.append(f"{' + '.join(chain)}: {total} chars > {chain_max} chain cap")
+    return over
+
+
+def _reconcile_agents_md_chain_cap(dst: str) -> list[str]:
+    """Point area AGENTS.md files at a developer-guide doc by file name, then re-measure.
+
+    Returns the files rewritten.  Raises :class:`AgentsChainCapError` when the
+    branded tree still carries an over-cap chain (or over-cap file), because the
+    only remaining fix is to shrink prose, which is a human call -- never to
+    raise a cap, which is the context an agent is truncated at.
+
+    Measures nothing, and changes nothing, on a tree with no root ``AGENTS.md``
+    or no ``scripts/ci/check_agents_md_size.py``: without the budgeting file the
+    fork's CI enforces no chain, so there is no cap to keep clear.
+    """
+    texts = _agents_md_texts(dst)
+    if _ROOT_AGENTS not in texts:
+        return []  # no root file: there is no chain to budget and nothing to declare
+    if not os.path.exists(os.path.join(dst, _AGENTS_SIZE_CHECKER)):
+        return []  # this tree's CI budgets no chain, so there is nothing to keep under a cap
+    root_max = _chain_cap_constant(dst, _AGENTS_SIZE_CHECKER, "ROOT_MAX_CHARS")
+    chain_max = _chain_cap_constant(dst, _AGENTS_SIZE_CHECKER, "CHAIN_MAX_CHARS")
+    hint_max = _chain_cap_constant(dst, _SUBDIRECTORY_HINTS, "_MAX_HINT_CHARS")
+    changed: list[str] = []
+    if _DEV_GUIDE_DIR in texts[_ROOT_AGENTS]:
+        for rel in sorted(texts):
+            if rel == _ROOT_AGENTS:
+                continue  # the root is where the directory is stated, once, for every chain
+            shortened = _DEV_GUIDE_POINTER_RE.sub(lambda m: m.group(1), texts[rel])
+            if shortened == texts[rel]:
+                continue
+            with open(os.path.join(dst, *rel.split("/")), "w", encoding="utf-8") as fh:
+                fh.write(shortened)
+            texts[rel] = shortened
+            changed.append(rel)
+    over = _agents_chain_violations(texts, root_max=root_max, chain_max=chain_max, hint_max=hint_max)
+    if over:
+        raise AgentsChainCapError(
+            f"AGENTS.md chain still over budget after dropping the repeated {_DEV_GUIDE_DIR} prefix "
+            f"from area files: {'; '.join(over)}. The cap is the context an agent is truncated at, so "
+            f"{_AGENTS_SIZE_CHECKER} shrinks a file instead of raising any number: move the long form "
+            "into a developer-guide page or a sibling doc, then teach this rule the new shape.")
+    return changed
+
+
+# ---------------------------------------------------------------------------
+# The one armed statement the browse budget's own guard does not cover
+# ---------------------------------------------------------------------------
+# ``nastech_state_reconcile._apply_additive_schema`` runs the additive DDL under
+# ``_Budget(BROWSE_RECONCILE_BUDGET_S)`` and converts an expired-budget
+# ``sqlite3.OperationalError`` into ``BrowseBudgetExceeded``, which the browse path
+# answers with "your history is untouched: nothing was changed" plus the repair
+# command.  Its ``except BaseException`` starts *after* ``conn.execute('BEGIN
+# IMMEDIATE')``, and ``budget.arm(conn)`` runs *before* it -- so the one statement
+# that opens the transaction is armed but unguarded.
+#
+# That is the whole of nastech-agent PR #159's macOS red.  The deadline is armed
+# when browse takes ``gateway.lock``, and between arming it and arming the handler
+# sit ``connect_tracked`` and ``_reapply_durability_barriers``, whose two pragmas
+# are ``_darwin_pragma`` calls -- real work on macOS, no-ops everywhere else.  On
+# the free 3-core image that gap consumes the remaining budget, so the first armed
+# progress callback lands inside ``BEGIN IMMEDIATE`` and sqlite interrupts it
+# (SQLITE_INTERRUPT).  ``nastech_state_errors.is_transient_sqlite_error`` does not
+# claim an interrupt -- deliberately, corruption must never be retried into a
+# timeout -- so ``nastech_cli/web_server_sessions.py`` falls through to its generic
+# branch and answers a *clean, untouched* store with "Session store schema is
+# unavailable or corrupt. Start or restart this profile's gateway…".  Run
+# 39403870276 job 118565005702: ``[ddl]`` failed on
+# ``assert "nothing was changed" in detail`` with exactly that text, while the same
+# code passes on Linux, where the gap is short and the interrupt lands inside the
+# guarded region.
+#
+# Reproduced off macOS by charging that gap 3.4 s against the 3.0 s budget:
+# unguarded, the browse raises ``OperationalError('interrupted')`` and returns the
+# corrupt-store 503; with ``BEGIN IMMEDIATE`` moved inside the ``try``, the same
+# conditions return the too-slow 503 that names ``nastech -p scribe sessions
+# repair``, never mentions a gateway, and leaves the file byte-identical.
+#
+# Nothing here widens a bound: the budget, ``busy_timeout``, the progress-handler
+# cadence and every classifier are untouched.  One statement moves under a guard
+# that already exists, and the transaction it would have opened never starts, so
+# the store stays exactly as it was either way.  The rollback that guard issues on
+# the way out is already ``contextlib.suppress(sqlite3.Error)``-wrapped, which is
+# why a failed ``BEGIN`` needs no special case.
+_BROWSE_RECONCILE_REL = "nastech_state_reconcile.py"
+_BROWSE_DDL_UNGUARDED = """        budget.arm(conn)
+        conn.execute('BEGIN IMMEDIATE')
+        try:
+            cursor = conn.cursor()
+"""
+_BROWSE_DDL_GUARDED = """        budget.arm(conn)
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            cursor = conn.cursor()
+"""
+# What the move leans on inside the guard it moves the statement into: the
+# expired-budget conversion that produces the right message, and the suppressed
+# rollback that stops a failed BEGIN from surfacing "no transaction is active".
+_BROWSE_DDL_GUARD_ARMS = (
+    "raise BrowseBudgetExceeded",
+    "with contextlib.suppress(sqlite3.Error):",
+)
+
+
+class BrowseBudgetDdlError(ValueError):
+    """``BEGIN IMMEDIATE`` is no longer the armed-but-unguarded statement this rule guards."""
+
+
+def _reconcile_browse_ddl_budget_guard(dst: str) -> list[str]:
+    """Run the browse DDL's ``BEGIN IMMEDIATE`` under its own expired-budget guard.
+
+    Returns the files rewritten.  Raises :class:`BrowseBudgetDdlError` when the
+    file still arms a budget but this anchor moved, or when the guard lost one of
+    the two features the move depends on, because the failure that returns is
+    silent: an interrupted transaction reads as a corrupt store, and a user is
+    told their history may be gone when nothing was written.  A tree with no
+    ``budget.arm(conn)`` here has no browse budget to guard, and is left alone.
+    """
+    text = _reconcile_budget_read(dst, _BROWSE_RECONCILE_REL)
+    if text is None or "budget.arm(conn)" not in text:
+        return []
+    if _BROWSE_DDL_GUARDED in text:
+        return []
+    if text.count(_BROWSE_DDL_UNGUARDED) != 1:
+        raise BrowseBudgetDdlError(
+            f"{_BROWSE_RECONCILE_REL} no longer opens its browse DDL where "
+            "_reconcile_browse_ddl_budget_guard expects, so the armed-but-unguarded "
+            "statement is back. On the free macOS image the budget is spent before "
+            "the handler is armed, the interrupt lands in BEGIN IMMEDIATE, and "
+            "nastech_cli/web_server_sessions.py reports a clean store as 'Session "
+            "store schema is unavailable or corrupt' (PR #159, job 118565005702). "
+            "Re-derive the anchor against upstream's current file: the fix is to "
+            "move the statement inside the try that already converts an expired "
+            "budget, never to widen the budget or reclassify an interrupt.")
+    for arm in _BROWSE_DDL_GUARD_ARMS:
+        if arm not in text:
+            raise BrowseBudgetDdlError(
+                f"{_BROWSE_RECONCILE_REL} no longer has {arm!r}, the guard feature "
+                "_reconcile_browse_ddl_budget_guard moves BEGIN IMMEDIATE under: "
+                "without it an expired budget still escapes unclassified, so the "
+                "move would buy nothing. Re-derive this rule against upstream's "
+                "current browse reconcile.")
+    _reconcile_budget_write(dst, _BROWSE_RECONCILE_REL,
+                            text.replace(_BROWSE_DDL_UNGUARDED, _BROWSE_DDL_GUARDED, 1))
+    return [_BROWSE_RECONCILE_REL]

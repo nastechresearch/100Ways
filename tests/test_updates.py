@@ -20,7 +20,9 @@ from hundredways.assets import OwnedAssets
 from hundredways.integrity import audit_candidate_tree
 from hundredways.updates import (
     STAGES,
+    AgentsChainCapError,
     AssetsWorkerIndexError,
+    BrowseBudgetDdlError,
     BrowseBudgetFlockTestError,
     ChannelReaderUserAgentError,
     ForkLaneReleaseEditError,
@@ -52,11 +54,18 @@ from hundredways.updates import (
     _SKILL_DESC_FULL_OLD,
     _PROMPT_SURFACE_CHARS_PER_TOKEN,
     _UPSTREAM_PREPARE_SCRIPT,
+    _BROWSE_DDL_GUARDED,
+    _BROWSE_DDL_UNGUARDED,
+    _BROWSE_RECONCILE_REL,
+    _DEV_GUIDE_DIR,
+    _agents_chain,
+    _reconcile_agents_md_chain_cap,
     _reconcile_assets_worker_config,
     _reconcile_assets_worker_index,
     _reconcile_anon_surface_copy,
     _reconcile_apt_pool_first_char,
     _reconcile_browse_budget_flock_tests,
+    _reconcile_browse_ddl_budget_guard,
     _reconcile_channel_reader_user_agent,
     _reconcile_ci_runner_budgets,
     _reconcile_connector_test_guest_offline,
@@ -4841,3 +4850,314 @@ def test_reconcile_ui_scope_pins_still_fails_closed_without_verified_target(tmp_
     )
     with pytest.raises(UiScopePinError):
         _reconcile_ui_scope_pins(str(tmp_path))
+
+
+# ---------------------------------------------------------------------------
+# The AGENTS.md chain cap that branding alone breaks
+# ---------------------------------------------------------------------------
+
+_AGENTS_CHECKER_REL = "scripts/ci/check_agents_md_size.py"
+_AGENTS_HINTS_REL = "agent/subdirectory_hints.py"
+_AGENTS_ROOT_DECLARATION = "Long-form background: `%s`.\n" % _DEV_GUIDE_DIR
+_AGENTS_GATEWAY_POINTER = (
+    "Applies on top of the root `AGENTS.md`. Long-form: `%sgateway-internals.md`.\n" % _DEV_GUIDE_DIR
+) + ("Long form: `%sgateway-internals.md` § `/login`.\n" % _DEV_GUIDE_DIR)
+
+
+def _agents_chain_tree(tmp_path, *, root, area, chain_max=30_000, root_max=12_000, hint_max=32_000):
+    """A tree whose AGENTS.md chain is measured by the same numbers the fork's CI reads."""
+    checker = tmp_path / _AGENTS_CHECKER_REL
+    checker.parent.mkdir(parents=True, exist_ok=True)
+    checker.write_text("ROOT_MAX_CHARS = %d\nCHAIN_MAX_CHARS = %d\n" % (root_max, chain_max),
+                       encoding="utf-8")
+    hints = tmp_path / _AGENTS_HINTS_REL
+    hints.parent.mkdir(parents=True, exist_ok=True)
+    hints.write_text("_MAX_HINT_CHARS = %d\n" % hint_max, encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text(root, encoding="utf-8")
+    for rel, text in area.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    return tmp_path
+
+
+def _padded(text, size):
+    assert size >= len(text), f"{size} cannot hold a {len(text)}-char header"
+    return text + "g" * (size - len(text))
+
+
+def test_reconcile_agents_md_drops_a_directory_the_root_already_stated(tmp_path):
+    """An area pointer pays 29 chars for a directory the root stated in the same block.
+
+    ``scripts/ci/check_agents_md_size.py`` budgets every ``AGENTS.md`` from the
+    git root down to the agent's directory as the ONE context block an agent
+    loads, and the root is inside every block: it names
+    ``website/docs/developer-guide/`` as where long-form lives.  A pointer that
+    repeats the directory buys nothing, so the rewrite keeps the file and drops
+    the prefix -- which is how ``gateway/AGENTS.md`` already cites that very doc
+    in one of its two pointers.
+    """
+    tree = _agents_chain_tree(tmp_path, root=_AGENTS_ROOT_DECLARATION,
+                              area={"gateway/AGENTS.md": _AGENTS_GATEWAY_POINTER +
+                                    "Long form: `engine-notes.md` § Shapes.\n"})
+
+    assert _reconcile_agents_md_chain_cap(str(tree)) == ["gateway/AGENTS.md"]
+    text = (tree / "gateway/AGENTS.md").read_text(encoding="utf-8")
+    assert _DEV_GUIDE_DIR not in text
+    assert "`gateway-internals.md` § `/login`" in text and "`engine-notes.md`" in text
+    # the root is the declaration: shortening it would strand every bare pointer
+    assert _DEV_GUIDE_DIR in (tree / "AGENTS.md").read_text(encoding="utf-8")
+
+
+def test_reconcile_agents_md_pointer_rewrite_is_a_fixed_point(tmp_path):
+    """A second pass sees bare names only and leaves the file byte-identical."""
+    tree = _agents_chain_tree(tmp_path, root=_AGENTS_ROOT_DECLARATION,
+                              area={"gateway/AGENTS.md": _AGENTS_GATEWAY_POINTER})
+    assert _reconcile_agents_md_chain_cap(str(tree)) == ["gateway/AGENTS.md"]
+    before = (tree / "gateway/AGENTS.md").read_bytes()
+
+    assert _reconcile_agents_md_chain_cap(str(tree)) == []
+    assert (tree / "gateway/AGENTS.md").read_bytes() == before
+
+
+def test_reconcile_agents_md_keeps_pointers_whole_when_the_root_stops_declaring_the_dir(tmp_path):
+    """A bare file name resolves only because the root spells out the directory.
+
+    If upstream removes that declaration the rule must not strand area pointers;
+    it leaves the text alone and lets the chain measurement decide.
+    """
+    tree = _agents_chain_tree(tmp_path, root="No directory is named anywhere here.\n",
+                              area={"gateway/AGENTS.md": _AGENTS_GATEWAY_POINTER})
+
+    assert _reconcile_agents_md_chain_cap(str(tree)) == []
+    assert (tree / "gateway/AGENTS.md").read_text(encoding="utf-8") == _AGENTS_GATEWAY_POINTER
+
+
+def test_reconcile_agents_md_clears_the_branded_chain_overrun(tmp_path):
+    """The exact chain nastech-agent PR #159's lint failed: 11840 + 18182 > 30000.
+
+    Upstream measures the same two files at 29956 -- forty-four under the cap --
+    and the brand adds one character per renamed token, sixty-six of them in
+    this chain, so the identical tree that is green upstream is red in the fork.
+    Two repeated directory prefixes (29 chars each) pay for the overrun and leave
+    the chain under budget without rewording a single sentence of guidance.
+    """
+    root = _padded(_AGENTS_ROOT_DECLARATION, 11_840)
+    area = _padded(_AGENTS_GATEWAY_POINTER, 18_182)
+    tree = _agents_chain_tree(tmp_path, root=root, area={"gateway/AGENTS.md": area})
+    assert len(root) + len(area) == 30_022 > 30_000
+
+    assert _reconcile_agents_md_chain_cap(str(tree)) == ["gateway/AGENTS.md"]
+    after = (tree / "gateway/AGENTS.md").read_text(encoding="utf-8")
+    assert len(root) + len(after) == 29_964
+
+
+def test_reconcile_agents_md_stops_when_a_chain_is_still_over(tmp_path):
+    """Past the repeated prefix there is no redundancy left, only prose.
+
+    The rule must not invent a shorter sentence to squeeze under the cap: it
+    raises so the sync stops for a human, because the only other move -- raising
+    ``CHAIN_MAX_CHARS`` -- raises the size an agent is truncated at.
+    """
+    tree = _agents_chain_tree(tmp_path, root=_padded(_AGENTS_ROOT_DECLARATION, 145),
+                              area={"gateway/AGENTS.md": _padded(_AGENTS_GATEWAY_POINTER, 320)},
+                              chain_max=400)
+
+    with pytest.raises(AgentsChainCapError) as caught:
+        _reconcile_agents_md_chain_cap(str(tree))
+    message = str(caught.value)
+    assert "AGENTS.md + gateway/AGENTS.md" in message
+    assert "chain cap" in message and "instead of raising any number" in message
+    # the rewrite still landed: what stopped the sync is the measured remainder
+    assert _DEV_GUIDE_DIR not in (tree / "gateway/AGENTS.md").read_text(encoding="utf-8")
+
+
+def test_reconcile_agents_md_measures_with_the_budget_ci_reads(tmp_path):
+    """Same tree, a larger CHAIN_MAX_CHARS in the checker: nothing is over.
+
+    The numbers live in ``scripts/ci/check_agents_md_size.py``; taking them from
+    there is what keeps this guard from quietly disagreeing with CI when that
+    file moves -- and a checker that no longer names them is an error, not a
+    silently disabled guard.
+    """
+    root, area = _padded(_AGENTS_ROOT_DECLARATION, 145), _padded(_AGENTS_GATEWAY_POINTER, 320)
+    roomy = _agents_chain_tree(tmp_path / "roomy", root=root,
+                               area={"gateway/AGENTS.md": area}, chain_max=20_000)
+    assert _reconcile_agents_md_chain_cap(str(roomy)) == ["gateway/AGENTS.md"]
+
+    moved = _agents_chain_tree(tmp_path / "moved", root=root, area={"gateway/AGENTS.md": area})
+    (moved / _AGENTS_CHECKER_REL).write_text("ROOT_MAX_CHARS = 12_000\n", encoding="utf-8")
+    with pytest.raises(AgentsChainCapError, match="no CHAIN_MAX_CHARS assignment"):
+        _reconcile_agents_md_chain_cap(str(moved))
+
+    blind = _agents_chain_tree(tmp_path / "blind", root=root, area={"gateway/AGENTS.md": area})
+    (blind / _AGENTS_HINTS_REL).unlink()
+    with pytest.raises(AgentsChainCapError, match="not readable"):
+        _reconcile_agents_md_chain_cap(str(blind))
+
+
+def test_reconcile_agents_md_has_no_chain_to_budget_on_a_tree_without_the_checker(tmp_path):
+    """No budgeting file means CI enforces no chain here: change nothing, raise nothing."""
+    bare = _agents_chain_tree(tmp_path / "bare", root=_AGENTS_ROOT_DECLARATION,
+                              area={"gateway/AGENTS.md": _AGENTS_GATEWAY_POINTER})
+    (bare / _AGENTS_CHECKER_REL).unlink()
+    assert _reconcile_agents_md_chain_cap(str(bare)) == []
+    assert (bare / "gateway/AGENTS.md").read_text(encoding="utf-8") == _AGENTS_GATEWAY_POINTER
+
+    _agents_chain_tree(tmp_path / "signs", root="", area={})
+    no_root = tmp_path / "signs" / "AGENTS.md"
+    no_root.unlink()
+    assert _reconcile_agents_md_chain_cap(str(tmp_path / "signs")) == []
+
+
+def test_agents_chain_is_the_block_one_agent_loads():
+    """Root first, every intermediate that exists, the file itself last."""
+    present = {"AGENTS.md", "apps/desktop/AGENTS.md", "apps/desktop/src/AGENTS.md",
+               "tools/AGENTS.md"}
+    assert _agents_chain("apps/desktop/src/AGENTS.md", present) == [
+        "AGENTS.md", "apps/desktop/AGENTS.md", "apps/desktop/src/AGENTS.md"]
+    assert _agents_chain("tools/AGENTS.md", present) == ["AGENTS.md", "tools/AGENTS.md"]
+    assert _agents_chain("AGENTS.md", present) == ["AGENTS.md"]
+    # a missing intermediate contributes nothing, exactly as in the checker
+    assert _agents_chain("apps/desktop/src/AGENTS.md", {"AGENTS.md", "apps/desktop/src/AGENTS.md"}) == [
+        "AGENTS.md", "apps/desktop/src/AGENTS.md"]
+
+
+def test_reconcile_agents_md_chain_cap_runs_from_reconcile_tree(tmp_path):
+    """``reconcile_tree`` must dispatch the rule, or every sync re-publishes the red chain."""
+    tree = _agents_chain_tree(tmp_path / "candidate", root=_AGENTS_ROOT_DECLARATION,
+                              area={"gateway/AGENTS.md": _AGENTS_GATEWAY_POINTER})
+
+    result = reconcile_tree(str(tree))
+    assert "gateway/AGENTS.md" in result.fixed
+    assert _DEV_GUIDE_DIR not in (tree / "gateway/AGENTS.md").read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# The one armed statement the browse budget's own guard does not cover
+# ---------------------------------------------------------------------------
+
+_DDL_HEAD = (
+    "def _apply_additive_schema(path, budget=None):\n"
+    "    from nastech_cli.sqlite_safe_read import connect_tracked\n"
+    "    budget = budget or _Budget(BROWSE_RECONCILE_BUDGET_S)\n"
+    "    with closing(connect_tracked(path, isolation_level=None)) as conn:\n"
+    "        _reapply_durability_barriers(conn)\n"
+)
+_DDL_TAIL = (
+    "            apply_declared_schema(cursor)\n"
+    "            budget.check()\n"
+    "            conn.execute('COMMIT')\n"
+    "        except BaseException as exc:\n"
+    "            with contextlib.suppress(sqlite3.Error):\n"
+    "                conn.execute('ROLLBACK')\n"
+    "            if budget.expired and isinstance(exc, sqlite3.OperationalError):\n"
+    "                raise BrowseBudgetExceeded(\n"
+    "                    'browse schema catch-up exceeded its time budget') from exc\n"
+    "            raise\n"
+)
+
+
+def _ddl_tree(tmp_path, *, arm=_BROWSE_DDL_UNGUARDED, tail=_DDL_TAIL):
+    """Upstream's browse DDL shape: the budget handler is armed one statement early."""
+    (tmp_path / _BROWSE_RECONCILE_REL).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / _BROWSE_RECONCILE_REL).write_text(_DDL_HEAD + arm + tail, encoding="utf-8")
+    return tmp_path
+
+
+def _ddl_text(tree):
+    return (tree / _BROWSE_RECONCILE_REL).read_text(encoding="utf-8")
+
+
+def test_reconcile_browse_ddl_moves_the_armed_begin_under_its_own_guard(tmp_path):
+    """The transaction-opening statement is the one the expired-budget conversion cannot see.
+
+    ``budget.arm(conn)`` installs the progress handler that raises
+    ``sqlite3.OperationalError('interrupted')`` once ``BROWSE_RECONCILE_BUDGET_S``
+    is gone, and the ``except BaseException`` that turns that into
+    ``BrowseBudgetExceeded`` -- the only path that answers "nothing was changed" --
+    begins after ``BEGIN IMMEDIATE``.  Moving the statement inside the ``try`` is
+    the whole fix: the budget, the busy timeout, the handler cadence and every
+    classifier stay exactly as upstream wrote them.
+    """
+    tree = _ddl_tree(tmp_path)
+
+    assert _reconcile_browse_ddl_budget_guard(str(tree)) == [_BROWSE_RECONCILE_REL]
+    text = _ddl_text(tree)
+    ast.parse(text)
+    assert _BROWSE_DDL_GUARDED in text and _BROWSE_DDL_UNGUARDED not in text
+    # still the first statement of the guarded block, and still ahead of the DDL
+    assert text.index("try:") < text.index("conn.execute('BEGIN IMMEDIATE')")
+    assert text.index("conn.execute('BEGIN IMMEDIATE')") < text.index("apply_declared_schema(cursor)")
+    # the guard it moved under is the one that produces the retryable message
+    assert "raise BrowseBudgetExceeded" in text
+    assert text.count("conn.execute('BEGIN IMMEDIATE')") == 1
+
+
+def test_reconcile_browse_ddl_guard_is_a_fixed_point(tmp_path):
+    """A second sync sees the guarded shape and leaves the file byte-identical."""
+    tree = _ddl_tree(tmp_path)
+    assert _reconcile_browse_ddl_budget_guard(str(tree)) == [_BROWSE_RECONCILE_REL]
+    before = _ddl_text(tree)
+
+    assert _reconcile_browse_ddl_budget_guard(str(tree)) == []
+    assert _ddl_text(tree) == before
+
+
+def test_reconcile_browse_ddl_stops_when_the_anchor_moves(tmp_path):
+    """An armed statement this rule cannot see is the bug returning, quietly.
+
+    The misread is user-facing: an interrupted transaction makes
+    ``nastech_cli/web_server_sessions.py`` answer a clean, untouched store with
+    "Session store schema is unavailable or corrupt", which is PR #159's macOS
+    ``[ddl]`` failure.  So a shape change stops the sync instead of publishing it.
+    """
+    moved = _BROWSE_DDL_UNGUARDED.replace("        conn.execute", "    conn.execute")
+    tree = _ddl_tree(tmp_path, arm=moved)
+    before = _ddl_text(tree)
+
+    with pytest.raises(BrowseBudgetDdlError, match="no longer opens its browse DDL"):
+        _reconcile_browse_ddl_budget_guard(str(tree))
+    assert _ddl_text(tree) == before
+
+
+def test_reconcile_browse_ddl_stops_when_the_guard_loses_what_the_move_needs(tmp_path):
+    """Without the expired-budget conversion the move would classify nothing.
+
+    Either half of the guard can be edited away upstream: the conversion, or the
+    suppressed rollback that keeps a failed ``BEGIN`` from surfacing "cannot
+    rollback - no transaction is active" in place of the real error.
+    """
+    dropped = (
+        "            with contextlib.suppress(sqlite3.Error):\n"
+        "                conn.execute('ROLLBACK')\n",
+        "            if budget.expired and isinstance(exc, sqlite3.OperationalError):\n"
+        "                raise BrowseBudgetExceeded(\n"
+        "                    'browse schema catch-up exceeded its time budget') from exc\n",
+    )
+    for index, arm in enumerate(dropped):
+        assert arm in _DDL_TAIL
+        tree = _ddl_tree(tmp_path / f"guard{index}", tail=_DDL_TAIL.replace(arm, ""))
+        with pytest.raises(BrowseBudgetDdlError, match="no longer has"):
+            _reconcile_browse_ddl_budget_guard(str(tree))
+
+
+def test_reconcile_browse_ddl_has_nothing_to_guard_on_a_tree_without_a_budget(tmp_path):
+    """No armed budget in this file means this rule owns nothing here: no change, no raise."""
+    tree = _ddl_tree(tmp_path, arm="        conn.execute('BEGIN IMMEDIATE')\n        try:\n"
+                                      "            cursor = conn.cursor()\n")
+    text = _ddl_text(tree).replace("budget.arm(conn)", "_Budget(BROWSE_RECONCILE_BUDGET_S)")
+    (tree / _BROWSE_RECONCILE_REL).write_text(text, encoding="utf-8")
+
+    assert _reconcile_browse_ddl_budget_guard(str(tree)) == []
+    assert _ddl_text(tree) == text
+    assert _reconcile_browse_ddl_budget_guard(str(tmp_path / "absent")) == []
+
+
+def test_reconcile_browse_ddl_budget_guard_runs_from_reconcile_tree(tmp_path):
+    """``reconcile_tree`` must dispatch the rule, or every sync re-publishes the corrupt-store 503."""
+    tree = _ddl_tree(tmp_path / "candidate")
+
+    result = reconcile_tree(str(tree))
+    assert _BROWSE_RECONCILE_REL in result.fixed
+    assert _BROWSE_DDL_GUARDED in _ddl_text(tree)
