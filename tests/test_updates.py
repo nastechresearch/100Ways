@@ -5289,6 +5289,7 @@ def test_unsigned_darwin_build_env_unsets_empty_certificate(tmp_path):
     text = path.read_text(encoding="utf-8")
     assert 'if [ -z "$CSC_LINK" ]; then' in text
     assert "unset CSC_LINK CSC_KEY_PASSWORD" in text
+    assert "export CSC_IDENTITY_AUTO_DISCOVERY=false" in text
     # The guard belongs to the build step, after the credential gate's run.
     assert text.index("missing=()") < text.index('if [ -z "$CSC_LINK" ]; then')
     # Fixed point, and the injected prose carries no upstream brand token.

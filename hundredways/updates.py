@@ -3426,6 +3426,7 @@ def _reconcile_unsigned_darwin_build_env(dst: str) -> list[str]:
         "          if [ -z \"$CSC_LINK\" ]; then\n"
         "            echo \"::notice::no signing certificate configured; building unsigned\"\n"
         "            unset CSC_LINK CSC_KEY_PASSWORD\n"
+        "            export CSC_IDENTITY_AUTO_DISCOVERY=false\n"
         "          fi\n"
         "          # Sign + notarize of a bundled-payload app runs long (Apple scans\n"
         "          # every Mach-O) — raise the fd limit and let DEBUG show progress.\n"
