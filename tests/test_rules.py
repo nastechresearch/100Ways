@@ -447,7 +447,7 @@ def test_full_python_test_timeout_normalizes_to_40_minutes_only():
     assert "name: e2e\n    timeout-minutes: 30" in out
 
 
-def test_os_matrix_windows_workers_cap_to_runner_cores():
+def test_os_matrix_workers_cap_to_the_free_runner_cores():
     rules = BrandingRules()
     line = (
         "          NASTECH_TEST_WORKERS: ${{ matrix.marker == 'windows' "
@@ -456,9 +456,19 @@ def test_os_matrix_windows_workers_cap_to_runner_cores():
     out = rules.transform_text(line)
     assert out == (
         "          NASTECH_TEST_WORKERS: "
-        "${{ matrix.marker == 'windows' && '4' || '' }}\n"
+        "${{ matrix.marker == 'windows' && '4' || '2' }}\n"
     )
     assert rules.transform_text(out) == out
+
+
+def test_os_matrix_workers_rewrites_a_quoted_fallback_too():
+    rules = BrandingRules()
+    # Upstream narrowing the ``||`` arm to a literal must not turn the rule into
+    # a silent no-op: the macOS rows still get this fork's cap.
+    line = "          NASTECH_TEST_WORKERS: ${{ matrix.marker == 'windows' && '16' || '9' }}\n"
+    assert rules.transform_text(line) == (
+        "          NASTECH_TEST_WORKERS: ${{ matrix.marker == 'windows' && '4' || '2' }}\n"
+    )
 
 
 def test_runner_normalization_is_idempotent_and_analyzer_stable():

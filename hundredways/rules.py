@@ -97,25 +97,35 @@ def _normalize_test_workers(text: str) -> str:
     return _TEST_WORKERS_RE.sub(_cap, text)
 
 
-# The OS-matrix Windows lane fans out to 16 workers upstream (32-core Windows
-# runners).  The free 4-core ``windows-latest`` starves every nested PowerShell
-# child into its idle deadline, so cap the Windows expression at the runner's
-# core count.  macOS/Linux rows keep their upstream expression untouched.
-_OS_WINDOWS_WORKERS_RE = re.compile(
+# The OS-matrix Windows lane fans out to 16 workers upstream (a 32-core paid
+# Windows image) and its ``||`` arm is ``''``, which the runner reads as unset and
+# defaults to ``os.cpu_count()`` -- 12 cores on upstream's macOS image.  This
+# fork's OS lanes are the free hosted images (4-core Windows, 3-core macOS), and a
+# lane that spawns its own timed children (nested PowerShell trees, the
+# flock/gateway-boot probes in ``tests/nastech_cli/test_browse_schema_drift.py``)
+# starves those children into their deadlines.  Rewrite the whole expression
+# rather than leaving the rows upstream's: the cap has to hold after every sync,
+# and a hand-edit on the fork is regenerated away.  The ``||`` arm is macOS-only --
+# the matrix ``include`` rows carry the ``macos``/``windows`` markers -- and the
+# output matches this same pattern, so the rule is its own fixed point.
+_OS_MARKED_WORKERS_RE = re.compile(
     r"(?m)^(?P<prefix>[ \t]*NASTECH_TEST_WORKERS:[ \t]*)"
-    r"\$\{\{[ \t]*matrix\.marker == 'windows'[ \t]*&&.*?\|\|[ \t]*''[ \t]*\}\}[ \t]*$"
+    r"\$\{\{[ \t]*matrix\.marker == 'windows'[ \t]*&&.*?\|\|[ \t]*'(?P<other>\d*)'"
+    r"[ \t]*\}\}[ \t]*$"
 )
 _OS_WINDOWS_WORKERS = 4
+_OS_MACOS_WORKERS = 2
 
 
 def _normalize_os_test_workers(text: str) -> str:
     def _cap(match_obj: re.Match) -> str:
         return (
             f"{match_obj.group('prefix')}"
-            f"${{{{ matrix.marker == 'windows' && '{_OS_WINDOWS_WORKERS}' || '' }}}}"
+            f"${{{{ matrix.marker == 'windows' && '{_OS_WINDOWS_WORKERS}'"
+            f" || '{_OS_MACOS_WORKERS}' }}}}"
         )
 
-    return _OS_WINDOWS_WORKERS_RE.sub(_cap, text)
+    return _OS_MARKED_WORKERS_RE.sub(_cap, text)
 
 
 # Standard runners need a little more wall-clock allowance for the complete
