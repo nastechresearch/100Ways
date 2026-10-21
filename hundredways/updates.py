@@ -38,6 +38,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .assets import OwnedAssets
+from .profiling import stage_table as _stage_table
+from .profiling import write_profile as _write_profile
 from .forkcheck import (
     ForkCheckReport,
     SourceDeltaReport,
@@ -6008,6 +6010,7 @@ def update_report_md(result: "UpdateResult") -> str:
     ]
     for i, s in enumerate(result.stages, 1):
         lines.append(f"| {i} | {s.name} | {s.status} | {s.detail} |")
+    lines += ["", *_stage_table(result.stages)]
     lines += [
         "",
         "## Brand",
@@ -6193,7 +6196,8 @@ class UpdateManager:
         self.fork_root = fork_root
 
     def run(self, keep_failed: bool = True, zip_path: str = "",
-            project_name: str = "nastech-agent", notify=None) -> UpdateResult:
+            project_name: str = "nastech-agent", notify=None,
+            profile_path: str = "") -> UpdateResult:
         stages: list[StageResult] = []
 
         def stage(name: str, fn, detail: str = "") -> object:
@@ -6604,6 +6608,11 @@ class UpdateManager:
             manifest_stage.status = "fail"
             manifest_stage.detail = f"manifest write failed: {exc}"
         result.stages = stages
+
+        # Written before a failed snapshot is discarded: where the minutes went
+        # matters most on the run that did not pass.
+        if profile_path:
+            _write_profile(profile_path, stages, run=str(result.number))
 
         if not passed and not keep_failed:
             shutil.rmtree(dest)
