@@ -6208,13 +6208,13 @@ class UpdateManager:
                         pass
 
         def _preserve() -> list[str]:
-            # Keep the engine-owned registry inside the snapshot before fork
-            # preservation.  This makes the visual pack reviewable in the
-            # published candidate and lets preserve_fork_files protect it from
-            # an older registry in the fork checkout.
-            if self.owned and self.owned.count and os.path.isdir(self.owned.root):
-                registry_dest = os.path.join(dest, "config", "owned-assets")
-                shutil.copytree(self.owned.root, registry_dest, dirs_exist_ok=True)
+            # ``config/owned-assets/`` is 100Ways' *own* tooling registry: it
+            # is the source of the brand substitution applied above by
+            # ``apply_owned_assets``, and it must never be part of the product
+            # tree.  Emitting it here (or letting fork preservation carry the
+            # fork's stale copy back in) is what put 100Ways' internal
+            # ``config/`` directory inside nastech-agent, which upstream
+            # Hermes does not have at all.  Keep it in 100Ways.
             preserved = preserve_fork_files(
                 self.fork_root,
                 dest,
@@ -6223,6 +6223,7 @@ class UpdateManager:
                 obsolete_upstream_paths=source_delta.obsolete_mapped,
                 owned_paths=set(self.owned.mapping) if self.owned else set(),
                 allow_unclassified_fork_files=bool(baseline_sha),
+                owned_targets_materialized=bool(self.owned and self.owned.count),
             )
             # Fork-preserved skills are invisible to the upstream-derived skill
             # catalogs; re-sync the catalogs so the docs-contract tests pass,
