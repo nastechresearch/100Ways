@@ -71,6 +71,66 @@ def test_ci_policy_allows_publication_only_in_344_workflow(tmp_path):
     assert audit_workflow_security(str(tmp_path)) == []
 
 
+def test_ci_policy_allows_the_telegram_window_to_publish(tmp_path):
+    workflows = Path(tmp_path) / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "stage-telegram-window.yml").write_text(
+        "on:\n  workflow_dispatch:\n    inputs:\n      hop:\n        type: string\n"
+        "permissions:\n  contents: write\n  pull-requests: write\n  actions: write\n"
+        "jobs:\n  window:\n    steps:\n"
+        "      - run: |\n"
+        "          git push origin telegram-edit-1\n"
+        "          gh pr create --base main --title from-chat\n"
+    )
+
+    assert audit_workflow_security(str(tmp_path)) == []
+
+
+def test_ci_policy_blocks_a_publication_path_started_by_a_timer(tmp_path):
+    # Listing a path is not a free pass: a window nobody asked for is a PR nobody
+    # reviewed, so the chat path stays dispatch-only.
+    workflows = Path(tmp_path) / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "stage-telegram-window.yml").write_text(
+        "on:\n  schedule:\n    - cron: '*/15 * * * *'\n"
+        "jobs:\n  window:\n    steps:\n      - run: gh pr create --base main\n"
+    )
+
+    issues = audit_workflow_security(str(tmp_path))
+
+    assert {issue.code for issue in issues} == {"publication-trigger-not-allowed"}
+    assert "schedule" in issues[0].detail
+
+
+def test_ci_policy_blocks_a_publication_path_that_merges(tmp_path):
+    workflows = Path(tmp_path) / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "stage-update-pr.yml").write_text(
+        "on:\n  workflow_call:\njobs:\n  p:\n    steps:\n"
+        "      - run: gh pr merge 12 --admin\n"
+    )
+    (workflows / "stage-telegram-window.yml").write_text(
+        "on:\n  workflow_dispatch:\njobs:\n  p:\n    steps:\n"
+        "      - run: gh pr merge 13\n"
+    )
+
+    codes = {issue.code for issue in audit_workflow_security(str(tmp_path))}
+
+    assert codes == {"publication-path-may-not-merge"}
+
+
+def test_ci_policy_reads_the_trigger_block_not_its_prose(tmp_path):
+    workflows = Path(tmp_path) / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "stage-telegram-window.yml").write_text(
+        "on:\n  workflow_dispatch:\n"
+        "# someone suggested a schedule: cadence and a push: trigger here\n"
+        "jobs:\n  p:\n    steps:\n      - run: gh pr create --base main\n"
+    )
+
+    assert audit_workflow_security(str(tmp_path)) == []
+
+
 def test_repository_workflows_have_no_blocking_publication_policy_violations():
     root = Path(__file__).resolve().parents[1]
 

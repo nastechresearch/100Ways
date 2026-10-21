@@ -14,6 +14,8 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 
+from .operation_safety import redact_telegram_text
+
 
 @dataclass
 class NotifyConfig:
@@ -33,7 +35,7 @@ class Notification:
 
     def render(self) -> str:
         icon = {"info": "ℹ️", "warn": "⚠️", "error": "🚨"}.get(self.level, "ℹ️")
-        return f"{icon} *{self.title}*\n\n{self.body}"
+        return f"{icon} {self.title}\n\n{self.body}"
 
 
 class Notifier:
@@ -55,31 +57,22 @@ class Notifier:
     # -- Telegram -----------------------------------------------------------
 
     def _telegram(self, n: Notification) -> None:
-        import httpx
+        self.send_telegram(n.render())
 
-        token = self.cfg.telegram_token
-        chat_id = self.cfg.telegram_chat_id
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        httpx.post(
-            url,
-            json={
-                "chat_id": chat_id,
-                "text": n.render(),
-                "parse_mode": "Markdown",
-                "disable_web_page_preview": True,
-            },
-            timeout=15,
-        )
+    def send_telegram(self, text: str) -> None:
+        """Deliver plain text: markdown markup turns a starred subject into a 400.
 
-    def send_telegram(self, text: str, parse_mode: str = "Markdown") -> None:
+        Commit subjects, file names and error lines all carry ``*`` and ``_`` on a
+        normal run, and Telegram rejects unbalanced entities -- the whole
+        notification would be dropped.  Credential-shaped text is redacted first.
+        """
         import httpx
 
         httpx.post(
             f"https://api.telegram.org/bot{self.cfg.telegram_token}/sendMessage",
             json={
                 "chat_id": self.cfg.telegram_chat_id,
-                "text": text,
-                "parse_mode": parse_mode,
+                "text": redact_telegram_text(text),
                 "disable_web_page_preview": True,
             },
             timeout=15,
