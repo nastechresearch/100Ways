@@ -148,6 +148,20 @@ jobs:
               json.dump(context, fh)
           PY
 
+      # A window job cannot afford to re-derive this: upstream's history is about
+      # 1.3 GB and stage-telegram-window.yml may run up to eight hops per chain.
+      # Publishing both files into the cached directory is what lets a window
+      # answer from the numbers this run just reported.
+      - name: Publish decision and context for Telegram windows
+        if: ${{ inputs.notify }}
+        env:
+          DECISION: ${{ runner.temp }}/commit-stream.json
+          CONTEXT: ${{ runner.temp }}/telegram-context.json
+        run: |
+          set -euo pipefail
+          cp "$DECISION" telegram-state/decision.json
+          cp "$CONTEXT" telegram-state/telegram-context.json
+
       - name: Send Telegram commit-stream status
         if: ${{ inputs.notify }}
         env:
