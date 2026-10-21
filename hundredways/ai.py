@@ -221,6 +221,28 @@ class AIEngine:
         except Exception as exc:
             return self._fallback_stage_review(stage, context) + f" [AI unavailable: {exc}]"
 
+    def narrative(self, context: str) -> str:
+        """One short prose paragraph to sit beside a verified summary.
+
+        Returns "" rather than a fallback string: an unreachable model must
+        leave the narrative deterministic, not put error text in front of a
+        reviewer.
+        """
+        if not self.available:
+            return ""
+        try:
+            return self._chat(
+                "You write one short paragraph of plain prose to accompany the "
+                "summary of a verified fork-sync update, using only the facts "
+                "given. Do not restate a count, a gate result, or an action that "
+                "was performed, and do not mention merging, tagging, releasing or "
+                "deploying. 2-3 sentences, no markdown.",
+                context,
+                model=self.model_for_stage("summary"),
+            )
+        except Exception:
+            return ""
+
     # -- deterministic fallbacks --------------------------------------------
 
     @staticmethod
