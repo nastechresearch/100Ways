@@ -252,14 +252,19 @@ def verify_final_candidate(
     )
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """Write final candidate conformance evidence and exit nonzero on mismatch."""
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Verify final branded candidate conformance")
     parser.add_argument("--source", required=True)
     parser.add_argument("--candidate", required=True)
     parser.add_argument("--owned-assets-root", default="")
     parser.add_argument("--fork-root", default="")
     parser.add_argument("--output", required=True)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Write final candidate conformance evidence and exit nonzero on mismatch."""
+    parser = build_parser()
     args = parser.parse_args(argv)
     allowed_extra_paths: tuple[str, ...] = ()
     manifest_path = Path(args.candidate) / "manifest.json"
