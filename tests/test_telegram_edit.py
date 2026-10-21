@@ -387,6 +387,10 @@ def test_a_quiet_window_ends_the_chain_without_disturbing_anyone(tmp_path, monke
 def test_the_renewal_key_is_recorded_so_a_hop_is_not_queued_twice(tmp_path, monkeypatch):
     queued = FakeDispatch()
     monkeypatch.setattr(telegram_agent, "dispatch_workflow", queued)
+    # The key buckets the wall clock to the minute, so a call that straddles a minute
+    # boundary legitimately produces two keys.  Pin the clock: the dedupe is what this
+    # test is about, not the calendar.
+    monkeypatch.setattr(telegram_agent.time, "time", lambda: 1_700_000_000.0)
     runtime = edit_runtime(tmp_path)
     memory = {"offset": 9, "events": []}
     runtime.hop = 0
