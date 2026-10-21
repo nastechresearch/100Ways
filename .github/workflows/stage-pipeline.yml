@@ -54,6 +54,12 @@ jobs:
       - name: Install 100ways
         run: pip install -e .
 
+      - name: Build Rust filesystem accelerator
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          cargo build --manifest-path rust/brandfast/Cargo.toml --release
+          echo "HUNDREDWAYS_BRANDFAST=$GITHUB_WORKSPACE/rust/brandfast/target/release/brandfast" >> "$GITHUB_ENV"
+
       - name: Install candidate test search prerequisite
         run: |
           set -euo pipefail
@@ -68,7 +74,7 @@ jobs:
           rm -rf "$RG_TARBALL" "ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl"
           rg --version
 
-      - name: Shallow clone of the fork (owned-assets registry)
+      - name: Shallow clone of the fork (preserved fork-local files)
         run: |
           git clone --depth=1 \
             https://github.com/nastechresearch/nastech-agent.git nastech-agent
@@ -160,12 +166,17 @@ jobs:
               key=lambda value: int(value.rsplit("#", 1)[-1]),
           )
           snapshot = os.path.join(updates, candidates[-1])
+          # The owned-asset registry lives in this 100Ways checkout, never in
+          # the branded tree, so the weekly audit reads it from here explicitly.
           report = build_weekly_report(
               os.path.join(updates, "hermes-agent"),
               snapshot,
               os.environ["HUNDREDWAYS_STATE_DIR"],
               mode="snapshot",
               ref=os.environ["HUNDREDWAYS_UPSTREAM_SHA"] or "origin/main",
+              owned_assets_root=os.path.join(
+                  os.environ["GITHUB_WORKSPACE"], "config", "owned-assets"
+              ),
           )
           write_weekly_report(os.environ["HUNDREDWAYS_WEEKLY_REPORT"], report)
           with open(os.environ["HUNDREDWAYS_DECISION"], "w", encoding="utf-8") as fh:

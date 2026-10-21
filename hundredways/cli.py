@@ -494,7 +494,10 @@ class Cli:
             print(f"owned-assets registry: {owned.count} target paths in {owned.root}")
         else:
             print("owned-assets registry: none found (expected at config/owned-assets/)")
-        fork_root = self.args.fork_root or self.repo
+        upstream_only = bool(self.args.upstream_only)
+        fork_root = "" if upstream_only else (self.args.fork_root or self.repo)
+        if upstream_only:
+            print("strict upstream-only mode: no fork-local files or custom reconcile patches")
         if fork_root and os.path.isdir(fork_root):
             print(f"fork-root: {fork_root} (fork-consistency check enabled)")
         else:
@@ -502,6 +505,7 @@ class Cli:
         mgr = UpdateManager(updates_dir, hermes_url=self.args.hermes_url,
                             rules=self.rules, owned=owned, ai=AIEngine(),
                             fork_root=fork_root,
+                            upstream_only=upstream_only,
                             source_provenance_url=self.args.source_provenance_url)
         zip_path = self.args.zip or ""
         if zip_path and zip_path.endswith(os.sep):
@@ -546,7 +550,11 @@ class Cli:
         upstream_repo = self.args.hermes_repo or hermes_path(updates_dir)
 
         if self.args.mode == "snapshot":
-            owned = OwnedAssets(repo=self.repo)
+            owned = (
+                OwnedAssets(root=self.args.owned_assets_root)
+                if self.args.owned_assets_root
+                else OwnedAssets(repo=self.repo)
+            )
             mgr = UpdateManager(
                 updates_dir,
                 hermes_url=self.args.hermes_url,
@@ -554,6 +562,7 @@ class Cli:
                 owned=owned,
                 ai=AIEngine(),
                 fork_root=self.args.fork_root or self.repo,
+                upstream_only=bool(self.args.upstream_only),
             )
             snapshot = mgr.run(project_name=self.args.project_name)
             if not snapshot.gate:
@@ -575,6 +584,7 @@ class Cli:
             self.args.state_dir,
             mode=self.args.mode,
             ref=self.args.upstream_ref,
+            owned_assets_root=self.args.owned_assets_root,
         )
         report_path = self.args.report or os.path.join(self.args.state_dir, "weekly-full-sync-report.md")
         write_weekly_report(report_path, report)
@@ -755,6 +765,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fork-root", default="",
                    help="nastech-agent fork checkout to diff against (default: --repo); "
                         "enables the preserve + forkcheck stages")
+    p.add_argument("--upstream-only", action="store_true",
+                   help="strict parity mode: emit only transformed Hermes files plus approved owned assets; "
+                        "do not preserve fork-local files or apply custom reconcile patches")
     p.add_argument("--owned-assets-root", default="",
                     help="explicit config/owned-assets directory managed by 100Ways; "
                          "overrides the registry located in --repo")
@@ -772,8 +785,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--upstream-ref", default="origin/main", help="upstream ref to fetch and verify")
     p.add_argument("--branded-root", default="", help="existing branded tree for report mode; default: --repo")
     p.add_argument("--fork-root", default="", help="NasTech fork root preserved during snapshot mode")
+    p.add_argument("--upstream-only", action="store_true",
+                   help="strict parity mode for snapshot mode: do not preserve fork-local files or custom patches")
     p.add_argument("--project-name", default="nastech-agent", help="snapshot project name")
     p.add_argument("--state-dir", default="", help="state directory for the upstream ledger and reports")
+    p.add_argument("--owned-assets-root", default="",
+                   help="100Ways config/owned-assets registry audited in place of "
+                        "<branded-root>/config/owned-assets (never part of the product tree)")
     p.add_argument("--report", default="", help="output markdown report path")
     p.add_argument("--record", action="store_true", help="record a passing report in the upstream ledger")
     p.add_argument("--require-pass", action="store_true", help="exit nonzero when any weekly gate fails")

@@ -191,6 +191,36 @@ def test_pipeline_runs_15_stages(tmp_path):
     assert by_name["manifest"].status == "ok"
 
 
+def test_upstream_only_mode_drops_fork_local_code_and_registry(tmp_path):
+    hermes = _hermes_repo(tmp_path)
+    fork = tmp_path / "nastech-agent"
+    (fork / "config" / "owned-assets").mkdir(parents=True)
+    (fork / "config" / "owned-assets" / "manifest.json").write_text("{}\n")
+    (fork / "nastech_custom.py").write_text("not part of upstream\n")
+
+    result = UpdateManager(
+        str(tmp_path / "Updates-Commits"),
+        hermes_url=hermes,
+        fork_root=str(fork),
+        upstream_only=True,
+    ).run()
+
+    assert result.gate
+    assert not (tmp_path / "Updates-Commits" / "Nastech-Update#1" / "nastech_custom.py").exists()
+    assert not (tmp_path / "Updates-Commits" / "Nastech-Update#1" / "config").exists()
+    assert result.fork.preserved == []
+    assert result.reconcile.fixed == []
+    manifest = json.loads(
+        (tmp_path / "Updates-Commits" / "Nastech-Update#1" / "manifest.json").read_text()
+    )
+    assert manifest["policy"] == {
+        "upstream_only": True,
+        "fork_local_preservation": False,
+        "custom_reconcile_patches": False,
+        "owned_assets_allowed": True,
+    }
+
+
 def test_folder_and_file_names_are_branded(tmp_path):
     hermes = _hermes_repo(tmp_path)
     updates_dir = str(tmp_path / "Updates-Commits")
