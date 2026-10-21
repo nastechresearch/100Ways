@@ -380,6 +380,7 @@ def test_runner_labels_normalize_to_standard_hosted():
         "runs-on: ubuntu-latest-32-core\n"
         "runner: windows-latest-32-core\n"
         "runs-on: ubuntu-latest-32-arm-core\n"
+        "runs-on: windows-latest-32-arm-core\n"
         "runs-on: macos-14-xlarge-core\n"  # no digits before core -> untouched
     )
     out = rules.transform_text(text)
@@ -389,6 +390,25 @@ def test_runner_labels_normalize_to_standard_hosted():
     assert "-core" not in out.split("macos")[0]
     # the non-matching line survives verbatim
     assert "macos-14-xlarge-core" in out
+
+
+def test_arm_windows_runner_keeps_arm64():
+    # An arm64 Windows row is an architecture requirement. Landing it on the
+    # x64 image builds a win32-x64 payload inside a win32-arm64 package, which
+    # the bundle's own audit rejects, so it must take the standard arm64 tier.
+    rules = BrandingRules()
+    text = (
+        "runs-on: windows-latest-32-arm-core\n"
+        "runner: windows-latest-32-arm-core\n"
+        "runs-on: ${{ inputs.arch == 'arm64' && 'windows-latest-32-arm-core' "
+        "|| 'blacksmith-32vcpu-windows-2025' }}\n"
+    )
+    out = rules.transform_text(text)
+    assert "runs-on: windows-11-arm\n" in out
+    assert "runner: windows-11-arm\n" in out
+    assert "&& 'windows-11-arm' || 'windows-latest' " in out
+    # idempotent: a branded tree re-brands to itself
+    assert rules.transform_text(out) == out
 
 
 def test_blacksmith_runner_labels_normalize_to_standard_hosted():
@@ -401,6 +421,7 @@ def test_blacksmith_runner_labels_normalize_to_standard_hosted():
         "runs-on: blacksmith-4vcpu-ubuntu-2404-arm\n"
         "runner: blacksmith-32vcpu-windows-2025\n"
         "runner: blacksmith-2vcpu-windows-2025\n"
+        "runner: blacksmith-32vcpu-windows-2025-arm\n"
         "runs-on: blacksmith-12vcpu-macos-latest\n"
         "runs-on: blacksmith-6vcpu-macos-latest\n"
     )
@@ -413,6 +434,7 @@ def test_blacksmith_runner_labels_normalize_to_standard_hosted():
         "runs-on: ubuntu-24.04-arm\n"
         "runner: windows-latest\n"
         "runner: windows-latest\n"
+        "runner: windows-11-arm\n"
         "runs-on: macos-latest\n"
         "runs-on: macos-latest\n"
     )

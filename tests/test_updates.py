@@ -344,10 +344,11 @@ def test_ci_runner_budgets_normalize_free_runner_timeouts(tmp_path):
         "          - name: Windows-only tests\n"
         "            runner: windows-latest\n"
         "            marker: windows\n"
-        "          - name: Windows-only tests (arm64)\n"
-        "            runner: windows-latest\n"
+        "          - name: Windows-only tests (arm64, 1/2)\n"
+        "            runner: windows-11-arm\n"
         "            marker: windows\n"
-        "            timeout: 60\n",
+        "            timeout: 60\n"
+        "            slice: 1/2\n",
         encoding="utf-8",
     )
     (wf / "windows-install-update-e2e.yml").write_text(
@@ -380,7 +381,8 @@ def test_ci_runner_budgets_normalize_free_runner_timeouts(tmp_path):
         "tests/e2e/core/windows_update/_machine.py",
     }
     os_yml = (wf / "tests-os.yml").read_text(encoding="utf-8")
-    assert "            timeout: 45\n" in os_yml
+    # The Windows rows keep upstream's own budgets; only the per-file cap grows.
+    assert "            timeout: 45\n" not in os_yml
     assert "            timeout: 60\n" in os_yml  # arm64 row untouched
     assert "          NASTECH_TEST_FILE_TIMEOUT: '900'\n" in os_yml
     install = (wf / "windows-install-update-e2e.yml").read_text(encoding="utf-8")
@@ -489,12 +491,12 @@ def _free_runner_workflow_tree(tmp_path):
         "            runner: windows-latest\n"
         "            marker: windows\n"
         "          - name: Windows-only tests (arm64, 1/2)\n"
-        "            runner: windows-latest\n"
+        "            runner: windows-11-arm\n"
         "            marker: windows\n"
         "            timeout: 60\n"
         "            slice: 1/2\n"
         "          - name: Windows-only tests (arm64, 2/2)\n"
-        "            runner: windows-latest\n"
+        "            runner: windows-11-arm\n"
         "            marker: windows\n"
         "            timeout: 60\n"
         "            slice: 2/2\n",
@@ -507,21 +509,35 @@ def test_free_runner_parallelism_uses_one_worker_per_core(tmp_path):
     """Eight 4-core slices replace two oversubscribed 8-worker slices."""
     candidate, wf = _free_runner_workflow_tree(tmp_path)
     changed = _reconcile_free_runner_parallelism(str(candidate))
-    assert set(changed) == {
-        ".github/workflows/tests.yml",
-        ".github/workflows/tests-os.yml",
-    }
+    assert set(changed) == {".github/workflows/tests.yml"}
     tests_yml = (wf / "tests.yml").read_text(encoding="utf-8")
     assert "    name: Run tests (${{ matrix.slice }}/8)\n" in tests_yml
     assert "        slice: [1, 2, 3, 4, 5, 6, 7, 8]\n" in tests_yml
     assert "          NASTECH_TEST_SLICE: ${{ matrix.slice }}/8\n" in tests_yml
     assert "          NASTECH_TEST_WORKERS: 4\n" in tests_yml
     os_yml = (wf / "tests-os.yml").read_text(encoding="utf-8")
-    # The arm64 rows normalise to windows-latest, so they only re-ran the
-    # plain row's x64 tests; the plain row stays and is now the only one.
-    assert "(arm64" not in os_yml
+    # The arm64 rows run on the native windows-11-arm image, so they are real
+    # coverage and the rule must leave upstream's matrix alone.
+    assert os_yml.count("runner: windows-11-arm") == 2
     assert "          - name: Windows-only tests\n" in os_yml
     assert _reconcile_free_runner_parallelism(str(candidate)) == []
+
+
+def test_free_runner_parallelism_stops_when_arm_rows_land_on_x64(tmp_path):
+    """The label must not fall back to the x64 image.
+
+    There it re-ran the plain row's tests, and the rule that used to delete the
+    duplicate quietly dropped arm64 Windows coverage instead.
+    """
+    candidate, wf = _free_runner_workflow_tree(tmp_path)
+    path = wf / "tests-os.yml"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "runner: windows-11-arm", "runner: windows-latest"),
+        encoding="utf-8",
+    )
+    with pytest.raises(FreeRunnerParallelismError, match="arm64"):
+        _reconcile_free_runner_parallelism(str(candidate))
 
 
 def test_free_runner_parallelism_stops_when_the_python_matrix_moves(tmp_path):

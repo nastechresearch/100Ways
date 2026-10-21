@@ -3297,33 +3297,19 @@ def _reconcile_budget_write(dst: str, rel: str, text: str) -> None:
 def _reconcile_ci_runner_budgets(dst: str) -> list[str]:
     """Give the branded Windows/Python lanes a free-runner wall-clock budget.
 
-    Upstream's ``tests-os.yml`` Windows matrix row inherits the job's 30-minute
-    default (``timeout-minutes: ${{ matrix.timeout || 30 }}``) and its
-    ``windows-install-update-e2e.yml`` lane assumes a 32-core host.  On the free
-    4-core runners the per-file cap and the lane timeout must both grow, or a
-    lane that has already proven the behaviour is cancelled mid-run.  The
-    matching Russian-doll limits in the harness (``_machine.py``) grow with it.
+    Upstream's ``tests-os.yml`` Windows rows assume a 32-core host: on the free
+    4-core images a file that drives the desktop-update hand-off needs the
+    per-file cap raised to the same 900 s the ``e2e-windows`` lane already uses,
+    or it is killed at the 300 s default.  ``windows-install-update-e2e.yml``
+    likewise needs a lane timeout that fits a 4-core runner.  The matching
+    Russian-doll limits in the harness (``_machine.py``) grow with it.
     """
     fixed: list[str] = []
 
     rel = ".github/workflows/tests-os.yml"
     text = _reconcile_budget_read(dst, rel)
     if text is not None:
-        updated = text.replace(
-            "          - name: Windows-only tests\n"
-            "            runner: windows-latest\n"
-            "            marker: windows\n"
-            "          - name: Windows-only tests (arm64)\n",
-            "          - name: Windows-only tests\n"
-            "            runner: windows-latest\n"
-            "            marker: windows\n"
-            "            # The Windows row shares the 4-core runner with 4 workers; a file\n"
-            "            # that drives the desktop-update hand-off spawns PowerShell trees\n"
-            "            # and can exceed the 300 s default. 45 min leaves room for one\n"
-            "            # 900 s per-file cap (plus the default single retry).\n"
-            "            timeout: 45\n"
-            "          - name: Windows-only tests (arm64)\n",
-        )
+        updated = text
         slice_env = "          NASTECH_TEST_SLICE: ${{ matrix.slice || '' }}\n"
         # Scope the presence check to the ``os-tests`` step's env block: the
         # ``e2e-windows`` job below already sets ``NASTECH_TEST_FILE_TIMEOUT``,
@@ -8091,10 +8077,12 @@ class FreeRunnerParallelismError(ValueError):
 # Upstream runs the Python suite on two 32-core slices at 32 workers each and
 # adds native arm64 Windows rows to the OS matrix. This repo has no Blacksmith
 # account, so every lane lands on a free 4-core hosted image. Eight 4-core
-# Python slices restore upstream's 32 cores at one worker per core; the two
-# ``(arm64, ...)`` Windows rows normalise to ``windows-latest`` (x64), so the
-# plain Windows row already runs the same marked set and the slices duplicate
-# it. Both edits are exact literals, so a normalised tree is a fixed point.
+# Python slices restore upstream's 32 cores at one worker per core. The
+# ``(arm64, ...)`` Windows rows stay: ``_normalize_runner`` sends them to the
+# standard ``windows-11-arm`` image, so they run the marked set on real arm64
+# hardware instead of duplicating the x64 row the way they did while the label
+# normalised to ``windows-latest``. Both edits are exact literals, so a
+# normalised tree is a fixed point.
 _FREE_PYTHON_TEST_NAME = "    name: Run tests (${{ matrix.slice }}/8)\n"
 _FREE_PYTHON_SLICE_MATRIX = "        slice: [1, 2, 3, 4, 5, 6, 7, 8]\n"
 _FREE_PYTHON_SLICE_ENV = "          NASTECH_TEST_SLICE: ${{ matrix.slice }}/8\n"
@@ -8105,19 +8093,14 @@ _UPSTREAM_PYTHON_SLICE_MATRIX = "        slice: [1, 2]\n"
 _UPSTREAM_PYTHON_SLICE_ENV = "          NASTECH_TEST_SLICE: ${{ matrix.slice }}/2\n"
 _UPSTREAM_PYTHON_TEST_WORKERS = "          NASTECH_TEST_WORKERS: 8\n"
 
-_WINDOWS_PLAIN_ROW = (
-    "          - name: Windows-only tests\n"
-    "            runner: windows-latest\n"
-    "            marker: windows\n"
-)
 _WINDOWS_ARM64_SLICE_ROWS = (
     "          - name: Windows-only tests (arm64, 1/2)\n"
-    "            runner: windows-latest\n"
+    "            runner: windows-11-arm\n"
     "            marker: windows\n"
     "            timeout: 60\n"
     "            slice: 1/2\n"
     "          - name: Windows-only tests (arm64, 2/2)\n"
-    "            runner: windows-latest\n"
+    "            runner: windows-11-arm\n"
     "            marker: windows\n"
     "            timeout: 60\n"
     "            slice: 2/2\n"
@@ -8184,20 +8167,16 @@ def _reconcile_free_runner_parallelism(dst: str) -> list[str]:
     rel = ".github/workflows/tests-os.yml"
     text = _reconcile_budget_read(dst, rel)
     if text is not None:
-        if _WINDOWS_ARM64_SLICE_ROWS in text:
-            if _WINDOWS_PLAIN_ROW not in text:
-                raise FreeRunnerParallelismError(
-                    f"{rel} has the (arm64, 1/2)/(arm64, 2/2) duplicate rows but "
-                    "not the plain Windows row that already runs their union. "
-                    "Removing them now would drop Windows coverage; re-derive "
-                    "_reconcile_free_runner_parallelism against the current matrix.")
-            _reconcile_budget_write(dst, rel, text.replace(_WINDOWS_ARM64_SLICE_ROWS, "", 1))
-            fixed.append(rel)
-        elif "Windows-only tests (arm64" in text:
+        # Nothing to rewrite: the arm64 rows are upstream's own and now land on
+        # a native image. This branch only catches the regression, where a
+        # runner-label change sends them back to x64 and the matrix silently
+        # runs the same Windows set three times.
+        if _WINDOWS_ARM64_SLICE_ROWS not in text and "Windows-only tests (arm64" in text:
             raise FreeRunnerParallelismError(
-                f"{rel} still labels a Windows row arm64 in a shape this rule does "
-                "not recognise. On the free image every such row normalises to "
-                "windows-latest (x64), so it duplicates the plain row; re-derive "
-                "the exact matrix block instead of leaving the duplicate to run.")
+                f"{rel} labels a Windows arm64 row in a shape this rule does not "
+                "recognise. If it normalises to an x64 image it duplicates the "
+                "plain Windows row, which is why the rule used to delete it; the "
+                "arm64 legs are real coverage now, so re-derive the exact matrix "
+                "block against upstream instead of dropping the rows.")
 
     return fixed
