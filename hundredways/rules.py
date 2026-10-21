@@ -170,9 +170,20 @@ def _normalize_runner(match_obj: re.Match) -> str:
         # An arm64 label is an architecture requirement, not a size hint: an
         # win32-arm64 job on an x64 host builds a win32-x64 payload and the
         # bundle's own audit rejects the package (``audit-bundle-arch.mjs:
-        # 659 binaries do not match --arch=arm64``, run 39513836846).  Windows
+        # 659 binaries do not match --arch=arm64``, run 39508427430).  Windows
         # has the standard ``windows-11-arm`` tier for that; macOS does not, so
         # a macOS arm row keeps its base label and still runs natively.
+        #
+        # Native hardware is necessary but not yet sufficient here: upstream
+        # ships ``dependency_injector`` abi3 wheels for win32 and win_amd64
+        # only, so an arm64 bundle compiles it and the free image's MSVC ARM64
+        # toolset fails (``LNK1104: cannot open file
+        # ...containers.cp314-win_arm64.exp``, run 39539131670) where upstream's
+        # paid ``windows-latest-32-arm-core`` gets through (run 39383704420).
+        # The label is still the honest one -- on x64 the lane cannot produce a
+        # package at all, while on arm64 it fails somewhere a toolchain or a
+        # wheel can fix -- and no fork release is blocked by it, because the
+        # lane table leaves the unsigned ``windows`` lane out of ``DEFAULT``.
         if base.startswith("ubuntu"):
             return "ubuntu-24.04-arm"
         return "windows-11-arm" if base.startswith("windows") else base
