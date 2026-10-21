@@ -9,7 +9,7 @@ the leg dies in the driver's first ``git`` command with ``fatal: cannot change
 to '.../.nastech/nastech-agent': No such file or directory`` (nastech-agent run
 39542501628, jobs 119033266029 / 119033266322, exit 128).
 
-These tests pin the three things the fix has to guarantee:
+These tests pin what the fix has to guarantee:
 
 * ``_reconcile_fork_release_baselines`` patches **both** samplers -- a release
   run reads ``scripts/releases/pick_tags.py``, a dispatch reads
@@ -21,18 +21,23 @@ These tests pin the three things the fix has to guarantee:
   -- an empty tree ships no installer, so it says nothing about who published
   the tag and stays a candidate.  Upstream's own sampling assertions still hold
   against the patched file, which is the guard against this filter quietly
-  narrowing what a release verifies.
+  narrowing what a release verifies;
+* reading a tag's tree never writes a tag ref.  Upstream pins that the shell
+  picker fetches only the tags it selected, so the probe judges candidates in a
+  scratch ref outside ``refs/tags`` and deletes it.
 
 ``tests/fixtures/release_baselines`` holds both shapes the samplers have had:
 ``legacy`` (what the fork ships today) and ``tip`` (what the next sync brings).
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
 import shutil
 import subprocess
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -205,6 +210,80 @@ def test_dispatched_from_reconcile_tree():
     source = Path(updates.__file__).read_text(encoding="utf-8")
     dispatch = source.split("def reconcile_tree", 1)[1].split("\ndef ", 1)[0]
     assert "_reconcile_fork_release_baselines" in dispatch
+
+
+def test_injected_python_is_the_form_the_fork_lints_for():
+    """Injected lines are linted as fork code, so they have to pass as such.
+
+    ``Python lints / ruff enforcement (blocking)`` is a bare ``ruff check .`` and
+    reports PLW1510 for a ``subprocess.run`` with no explicit ``check=``; the
+    code-health ratchet reports HX006 for a subprocess call with no ``timeout=``,
+    and a file main finds clean carries a cap of zero findings.  Both are
+    blocking, so a sync that writes either form reddens the candidate it just
+    produced (nastech-agent PR #162, run 39561394100, jobs 119093345460 and
+    119093345334).
+    """
+    module = ast.parse(textwrap.dedent(updates._PICK_TAGS_BASELINES))
+    calls = [node for node in ast.walk(module)
+             if isinstance(node, ast.Call) and ast.unparse(node.func) == "subprocess.run"]
+    assert len(calls) == 4, "the probe, the ref check, the fetch and the cleanup"
+    for call in calls:
+        named = {keyword.arg for keyword in call.keywords}
+        missing = {"check", "timeout"} - named
+        assert not missing, (
+            f"line {call.lineno} of the block injected into {_PICK_TAGS} runs a "
+            f"subprocess without {sorted(missing)}; the fork's blocking lints "
+            "reject that form, so the sync reddens its own candidate")
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_the_tree_probe_materializes_only_what_it_picks(shape, tmp_path):
+    """The probe reads every candidate's tree without leaving a tag ref behind.
+
+    Upstream's ``tests/scripts/test_pick_release_tags.py`` pins that a pick on a
+    tagless checkout leaves ``git tag --list`` equal to the tags it selected --
+    unselected releases are never fetched.  Judging a tag's tree needs its
+    objects, so the probe fetches into a ref outside ``refs/tags`` and deletes
+    it; fetching the tag itself broke that assertion and failed the fork's own
+    test lane (nastech-agent run 39561394100, shard 8/8, on
+    ``test_picking_reads_origin_not_local_tags``).
+    """
+    releases = [UNBRANDED, BRANDED_OLD, BRANDED, NO_INSTALLER]
+    tree = _tree(shape, tmp_path / f"probe-{shape}")
+    assert updates._reconcile_fork_release_baselines(str(tree)) == [_PICK_TAGS, _SHELL]
+    repos = _seed_repo(tmp_path / f"repo-{shape}", releases)
+    repo = repos / ("tagless" if shape == "tip" else "clone")
+    before = set(_git(repo, "tag", "--list").stdout.split())
+    picks = _shell_picks(tree / _SHELL, repo, 2)
+    assert set(picks) <= set(_git(repo, "tag", "--list").stdout.split())
+    if shape == "tip":
+        # Four candidates were read, two were picked: only the picks are refs.
+        assert set(_git(repo, "tag", "--list").stdout.split()) == set(picks)
+    else:
+        assert set(_git(repo, "tag", "--list").stdout.split()) == before
+    assert not _git(repo, "for-each-ref", "--format=%(refname)",
+                    "refs/nastech-baseline-probe").stdout.split()
+
+
+def test_python_probe_fetches_no_wider_ref_set_than_the_pick_already_did(tmp_path):
+    """The python sampler's own fetch set is the filter's ceiling, not a leak.
+
+    The tip sampler date-sorts by fetching every candidate it kept, so a pick of
+    two from four fork-eligible tags materializes four refs -- that is upstream's
+    code, not the probe's.  What the probe must not add is a ref for the tag it
+    dropped: the inherited release is judged in a scratch ref and left unfetched.
+    """
+    tree = _tree("tip", tmp_path / "tree-tip")
+    assert updates._reconcile_fork_release_baselines(str(tree)) == [_PICK_TAGS, _SHELL]
+    repos = _seed_repo(tmp_path / "repo-tip", [UNBRANDED, BRANDED_OLD, BRANDED, NO_INSTALLER])
+    picker = _load(tree / _PICK_TAGS, "probe_pick_tip")
+    picked = picker.pick_tags(repos / "tagless", 2)
+    assert set(picked) == {"v2026.8.11", "v2026.9.24"}
+    refs = set(_git(repos / "tagless", "tag", "--list").stdout.split())
+    assert refs == {"v2026.8.11", "v2026.9.18", "v2026.9.24"}
+    assert UNBRANDED[0] not in refs
+    assert not _git(repos / "tagless", "for-each-ref", "--format=%(refname)",
+                    "refs/nastech-baseline-probe").stdout.split()
 
 
 # ---------------------------------------------------------------------------

@@ -7689,6 +7689,12 @@ def _reconcile_fork_lane_release_surface(dst: str) -> list[str]:
 # ---------------------------------------------------------------------------
 # The release baselines a fork can actually update from
 # ---------------------------------------------------------------------------
+# The block this rule injects is linted as fork code, not as engine code: the
+# fork's blocking ``ruff check .`` enforces PLW1510 (``subprocess.run`` needs an
+# explicit ``check=``) and its code-health ratchet enforces HX006 (a subprocess
+# call without ``timeout=``) on every line the sync adds.  So each call declares
+# both, the way the file's own ``_git`` helper does.
+#
 # ``install-e2e.yml`` does not pin the "old version" it upgrades from: a release
 # run samples them at runtime through ``scripts/releases/pick_tags.py`` and a
 # dispatch through ``scripts/sandbox/pick-release-tags.sh``, then drives each one
@@ -7735,27 +7741,39 @@ _PICK_TAGS_BASELINES = '''    # NasTech: an update leg has to start from an inst
     # does not own and then dies in the driver's first git command.  The tag's
     # own tree decides, and only a tree that ships the installer says anything,
     # so a tag with no scripts/install.sh stays a candidate.  Tree lookups only,
-    # so the blobless checkout this job uses is enough, and a tag the checkout
-    # does not carry is fetched for the probe rather than guessed at.
+    # so the blobless checkout this job uses is enough.  A tag the checkout does
+    # not carry is fetched into a ref outside refs/tags and dropped again, not
+    # materialized as a tag: a pick brings down only the refs it selected, which
+    # is the contract upstream's own picker test checks, and the probe looks at
+    # every candidate rather than only the picks.
     def _fork_baseline(tag: str) -> bool:
         def probe(*args: str) -> str:
             listed = subprocess.run(["git", "-C", str(repo), "ls-tree", *args],
-                                    capture_output=True, text=True, timeout=120)
+                                    capture_output=True, text=True, timeout=120,
+                                    check=False)
             if listed.returncode:
                 raise ValueError(f"cannot read the tree of release tag {tag}: "
                                  f"{listed.stderr.strip()}")
             return listed.stdout
 
-        if subprocess.run(["git", "-C", str(repo), "rev-parse", "-q", "--verify",
-                           f"refs/tags/{tag}"], capture_output=True).returncode:
+        probe_ref = f"refs/nastech-baseline-probe/{tag}"
+        present = not subprocess.run(["git", "-C", str(repo), "rev-parse", "-q", "--verify",
+                                      f"refs/tags/{tag}"], capture_output=True, timeout=120,
+                                     check=False).returncode
+        treeish = tag if present else probe_ref
+        if not present:
             fetched = subprocess.run(["git", "-C", str(repo), "fetch", "--quiet", "--no-tags",
-                                      "origin", f"+refs/tags/{tag}:refs/tags/{tag}"],
-                                     capture_output=True, text=True, timeout=120)
+                                      "origin", f"+refs/tags/{tag}:{probe_ref}"],
+                                     capture_output=True, text=True, timeout=120,
+                                     check=False)
             if fetched.returncode:
                 raise ValueError(f"cannot fetch release tag {tag}: {fetched.stderr.strip()}")
-        if not probe(tag, "--", "scripts/install.sh").strip():
-            return True
-        return bool(probe("-d", tag, "--", "nastech_cli").strip())
+        updatable = (not probe(treeish, "--", "scripts/install.sh").strip()
+                     or bool(probe("-d", treeish, "--", "nastech_cli").strip()))
+        if not present:
+            subprocess.run(["git", "-C", str(repo), "update-ref", "-d", probe_ref],
+                           capture_output=True, timeout=120, check=False)
+        return updatable
 
     tags = [tag for tag in tags if _fork_baseline(tag)]
 
@@ -7769,17 +7787,25 @@ _PICK_SHELL_BASELINES = '''# NasTech: an update leg has to start from an install
 # installer says anything -- a tag with no scripts/install.sh stays a candidate.
 # Tree lookups only, so a blobless checkout is enough.  Upstream's own empty-list
 # diagnostic keeps the last word, so a checkout with no tags at all still reads
-# as the checkout problem it is rather than as a fork-boundary one.
+# as the checkout problem it is rather than as a fork-boundary one.  A tag the
+# checkout does not carry is fetched into a ref outside refs/tags and dropped
+# again, never materialized as a tag: this script fetches only the refs it
+# picked, and the probe has to look at every candidate without breaking that.
 if [ "${#tags[@]}" -gt 0 ]; then
   baselines=()
   for tag in "${tags[@]}"; do
-    git -C "$REPO" rev-parse -q --verify "refs/tags/$tag" >/dev/null ||
-      git -C "$REPO" fetch --quiet --no-tags origin "+refs/tags/$tag:refs/tags/$tag"
-    if [ -z "$(git -C "$REPO" ls-tree "$tag" -- scripts/install.sh)" ]; then
+    if git -C "$REPO" rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+      treeish="$tag"
+    else
+      treeish="refs/nastech-baseline-probe/$tag"
+      git -C "$REPO" fetch --quiet --no-tags origin "+refs/tags/$tag:$treeish"
+    fi
+    if [ -z "$(git -C "$REPO" ls-tree "$treeish" -- scripts/install.sh)" ]; then
       baselines+=("$tag")
-    elif [ -n "$(git -C "$REPO" ls-tree -d "$tag" -- nastech_cli)" ]; then
+    elif [ -n "$(git -C "$REPO" ls-tree -d "$treeish" -- nastech_cli)" ]; then
       baselines+=("$tag")
     fi
+    [ "$treeish" = "$tag" ] || git -C "$REPO" update-ref -d "$treeish"
   done
   [ "${#baselines[@]}" -gt 0 ] || {
     echo "error: no release tag here is an install this fork can drive" >&2
