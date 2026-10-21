@@ -32,6 +32,7 @@ from hundredways.updates import (
     NastechSuitePinError,
     TermuxAptKeyDocError,
     UpdateManager,
+    UnsignedDarwinBuildEnvError,
     WindowsRealGitLocateError,
     _BROWSE_BUDGET_EDITS,
     _BROWSE_BUDGET_TEST_REL,
@@ -5300,3 +5301,29 @@ def test_unsigned_darwin_build_env_unsets_empty_certificate(tmp_path):
 
 def test_unsigned_darwin_build_env_absent_workflow_is_a_no_op(tmp_path):
     assert _reconcile_unsigned_darwin_build_env(str(tmp_path)) == []
+
+
+def test_unsigned_darwin_build_env_stops_when_the_step_moves(tmp_path):
+    """A reworded upstream step must stop the sync, not silently lose the guard.
+
+    Without the raise the next branded update re-derives the workflow from
+    upstream, ships the empty ``CSC_LINK`` again and every build-only darwin
+    dispatch fails at packaging.
+    """
+    candidate = tmp_path / "candidate"
+    wf = candidate / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / "desktop-bundled-release.yml").write_text(
+        "jobs:\n"
+        "  build-darwin-arm64-release:\n"
+        "    steps:\n"
+        "      - name: Build and package\n"
+        "        env:\n"
+        "          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}\n"
+        "        run: |\n"
+        "          # Notarization is slow, so keep DEBUG on.\n"
+        "          python scripts/bundles/desktop.py --variant bundled\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(UnsignedDarwinBuildEnvError, match="Re-derive the anchor"):
+        _reconcile_unsigned_darwin_build_env(str(candidate))

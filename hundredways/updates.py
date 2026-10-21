@@ -3394,6 +3394,10 @@ def _reconcile_ci_runner_budgets(dst: str) -> list[str]:
     return fixed
 
 
+class UnsignedDarwinBuildEnvError(ValueError):
+    """The macOS bundle build step moved, so the unsigned guard could not apply."""
+
+
 def _reconcile_unsigned_darwin_build_env(dst: str) -> list[str]:
     """Keep an absent Apple certificate out of the macOS bundle build env.
 
@@ -3405,6 +3409,11 @@ def _reconcile_unsigned_darwin_build_env(dst: str) -> list[str]:
     39508427430, both darwin legs).  The step must unset the pair when no
     certificate exists; publishing runs still stop earlier at the
     signing-credentials gate, and the signed/notarized verify step still runs.
+
+    Raises :class:`UnsignedDarwinBuildEnvError` when the workflow is present but
+    carries neither the anchor nor the guard: silently returning would ship the
+    empty-certificate build again, and the fork would only learn at the next
+    desktop release.
     """
     rel = ".github/workflows/desktop-bundled-release.yml"
     text = _reconcile_budget_read(dst, rel)
@@ -3431,8 +3440,16 @@ def _reconcile_unsigned_darwin_build_env(dst: str) -> list[str]:
         "          # Sign + notarize of a bundled-payload app runs long (Apple scans\n"
         "          # every Mach-O) — raise the fd limit and let DEBUG show progress.\n"
     )
-    if anchor not in text:
+    if replacement in text:
         return []
+    if anchor not in text:
+        raise UnsignedDarwinBuildEnvError(
+            f"{rel} matches neither the anchored 'Build and package' step nor the "
+            "guard this rule injects, so the Apple signing vars would ship as "
+            "empty strings again and every build-only darwin dispatch would fail "
+            "with \"<project dir> not a file\". Re-derive the anchor against "
+            "upstream's current workflow; do not drop the guard to get a green "
+            "sync.")
     _reconcile_budget_write(dst, rel, text.replace(anchor, replacement))
     return [rel]
 
