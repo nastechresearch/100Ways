@@ -27,6 +27,11 @@ dashboard  Serve the live web dashboard (write access requires HUNDREDWAYS_ADMIN
 pull       Fetch upstream + write report + record achievement.
 achievements  List achievements and unlock state.
 profile    Rank a run's stages by cost, or compare two runs and name what got slower.
+narrative  Build the PR title + body a reviewer reads, from the run's own manifest.
+pubconfig  Predict which credential names a future run would read as an empty string.
+why-red    Sort the reds in a check-runs payload into the class that owns the fix.
+telegram   Show the command menu, resolve one command line, or send a probe.
+lintsim    Run the fork's own lint contract over a candidate tree before publishing it.
 readme     Regenerate README.md from the ways + achievements + owned-asset registries.
 release    Verify the code table and incoming codes.
 admin      Compile/verify the admin password into its system-only token.
@@ -47,7 +52,9 @@ from .assets import OwnedAssets
 from .brandaudit import create_issues, plan_issues, render_issues_markdown, run_audit, write_json
 from .codes import CODE_DETAILS, code_name
 from .dashboard import serve as serve_dashboard
+from .forklint import report_lines, run_fork_lint, summarize
 from .git_ops import ensure_branch
+from .narrative import body_from_manifest, garnish, title_from_manifest
 from .notifier import Notification, notifier_from_env
 from .port import new_upstream_commits, port_commits
 from .profiling import (
@@ -58,11 +65,24 @@ from .profiling import (
     regressions,
     total_ms,
 )
+from .pubconfig import (
+    ActionsInventory,
+    PublisherConfigurationError,
+    analyze_root,
+    fetch_inventory,
+    render as render_pubconfig,
+)
+from .pubconfig import to_json as pubconfig_json
+from .red_classifier import classify_runs
+from .red_classifier import render as render_verdicts
 from .release import release_check_table, release_summary, release_verify_incoming
 from .research import research as run_research
 from .rules import BrandingRules
 from .scanner import classify_path
 from .security import verify_token
+from .telegram_agent import send_message as send_telegram
+from .telegram_commands import LEVELS, grants, lookup, menu, parse, usage_for
+from .telegram_transport import TelegramDeliveryError
 from .updates import DEFAULT_HERMES_URL, UpdateManager, default_updates_dir, hermes_path
 from .weekly_sync import build_weekly_report, save_ledger, write_weekly_report
 from .verify import _git, _git_ok, verify_rebrand
@@ -668,6 +688,172 @@ class Cli:
             sys.exit(1)
         print("forkcheck: PASS")
 
+    # -- verbs for capabilities that shipped without one ---------------------
+
+    def cmd_narrative(self) -> None:
+        """Build the title and body a reviewer reads, from a manifest alone."""
+        manifest = _read_json(self.args.manifest)
+        summary = _read_text(self.args.summary)
+        paragraph = garnish(manifest, engine=AIEngine()) if self.args.ai else ""
+        if self.args.ai and not paragraph:
+            print(
+                "narrative: the model offered no paragraph, so the text stays the engine's own",
+                file=sys.stderr,
+            )
+        title = title_from_manifest(manifest)
+        body = body_from_manifest(manifest, summary, paragraph=paragraph)
+        if self.args.title_out:
+            with open(self.args.title_out, "w", encoding="utf-8") as fh:
+                fh.write(title + "\n")
+        if self.args.body_out:
+            with open(self.args.body_out, "w", encoding="utf-8") as fh:
+                fh.write(body + "\n")
+        print(title)
+        print()
+        print(body)
+
+    def cmd_pubconfig(self) -> None:
+        """Say which credential names a future run would read as an empty string."""
+        tree = self.args.tree or self.repo
+        if not os.path.isdir(tree):
+            print(f"no fork tree to read workflows from: {tree} (pass --tree)", file=sys.stderr)
+            sys.exit(2)
+        try:
+            if self.args.fetch:
+                if not self.args.project:
+                    print("--fetch needs --project org/name", file=sys.stderr)
+                    sys.exit(2)
+                inventory = fetch_inventory(self.args.project)
+            elif self.args.inventory:
+                inventory = _inventory_from_json(self.args.inventory)
+            else:
+                print(
+                    "say where the provided names are: "
+                    "--fetch --project org/name, or --inventory FILE",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+        except (PublisherConfigurationError, OSError, ValueError) as exc:
+            print(f"cannot read the repository's Actions settings: {exc}", file=sys.stderr)
+            sys.exit(1)
+        findings = analyze_root(tree, inventory)
+        print(render_pubconfig(findings, repo=self.args.project, inventory=inventory))
+        if self.args.json_out:
+            with open(self.args.json_out, "w", encoding="utf-8") as fh:
+                fh.write(pubconfig_json(findings, repo=self.args.project))
+        urgent = [finding for finding in findings if finding.actionable]
+        if urgent:
+            print(
+                f"pubconfig: {len(urgent)} name(s) a run can still consume; a lane will go red "
+                "on hardware that is configured at all",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    def cmd_why_red(self) -> None:
+        """Sort the reds in a check-runs payload into the class that owns the fix."""
+        verdicts = classify_runs(
+            _read_json(self.args.runs),
+            upstream_runs=_read_json(self.args.upstream_runs) if self.args.upstream_runs else None,
+            upstream_changed_files=(
+                _read_lines(self.args.changed_files) if self.args.changed_files else None
+            ),
+            baseline_sha=self.args.baseline,
+            current_sha=self.args.current,
+            checkout_path=self.args.checkout,
+        )
+        if not verdicts:
+            print("why-red: no red check in that payload")
+            return
+        print(render_verdicts(verdicts))
+
+    def cmd_telegram(self) -> None:
+        """Inspect, or prove, the commanded surface — without a chat session."""
+        action = self.args.telegram_action
+        if action == "menu":
+            print(menu())
+            return
+        if action == "check":
+            request = parse(self.args.message)
+            command = lookup(request)
+            if command is None:
+                print(
+                    f"nothing in {self.args.message!r} names a command; "
+                    "it is answered by the model or by the help line"
+                )
+                return
+            print(f"{command.name} — {command.summary}")
+            print(f"  needs: {command.level}")
+            print(f"  arguments: {' '.join(request.words) or '(none)'}")
+            print(f"  usage: {usage_for(command)}")
+            print(
+                "  who may run it: "
+                + ", ".join(
+                    f"{level} {'yes' if grants(level, command.level) else 'no'}" for level in LEVELS
+                )
+            )
+            return
+        token = self.args.token or os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        chat = self.args.chat_id or os.environ.get("TELEGRAM_CHAT_ID", "")
+        if not (token and chat):
+            print("telegram test needs a bot token and a chat id (--token/--chat-id or the env)",
+                  file=sys.stderr)
+            sys.exit(1)
+        try:
+            send_telegram(token, chat, self.args.message)
+        except TelegramDeliveryError as exc:
+            print(f"not delivered: {exc}", file=sys.stderr)
+            sys.exit(1)
+        print(f"delivered to chat {chat}")
+
+    def cmd_lintsim(self) -> None:
+        """Run the fork's own lint contract over a candidate tree, before publishing it."""
+        issues = run_fork_lint(self.args.fork or self.repo, self.args.candidate, self.args.upstream)
+        for line in report_lines(issues):
+            print(line)
+        summary = summarize(issues)
+        print(summary.line())
+        if not summary.passed:
+            sys.exit(1)
+
+
+def _read_json(path: str) -> dict:
+    with open(path, encoding="utf-8") as fh:
+        payload = json.load(fh)
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path}: expected a JSON object")
+    return payload
+
+
+def _read_text(path: str) -> str:
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _read_lines(path: str) -> list[str]:
+    with open(path, encoding="utf-8") as fh:
+        return [line.strip() for line in fh if line.strip() and not line.startswith("#")]
+
+
+def _inventory_from_json(path: str) -> ActionsInventory:
+    """Rebuild a provided-name inventory from a snapshot file.
+
+    The keys are the dataclass's own field names, so one job that holds an Actions-settings
+    token can hand the same answer to a job that does not.  Names only, never values.
+    """
+    payload = _read_json(path)
+    environments: dict[str, tuple[frozenset[str], frozenset[str]]] = {}
+    for name, scopes in (payload.get("environments") or {}).items():
+        environments[str(name)] = (
+            frozenset(scopes.get("secrets") or ()),
+            frozenset(scopes.get("vars") or ()),
+        )
+    return ActionsInventory(
+        repo_secrets=frozenset(payload.get("repo_secrets") or ()),
+        repo_vars=frozenset(payload.get("repo_vars") or ()),
+        environments=environments,
+    )
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="100ways", description=__doc__)
@@ -835,6 +1021,67 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--updates-dir", default="", help="Updates-Commits dir (default: sibling of the repo)")
     p.add_argument("--hermes-url", default=DEFAULT_HERMES_URL, help="Hermes remote or local path")
     p.set_defaults(func="cmd_forkcheck")
+
+    p = sub.add_parser("narrative", help="build the PR title + body from a sync manifest")
+    p.add_argument("--manifest", required=True, help="the update manifest JSON the pipeline writes")
+    p.add_argument("--summary", required=True, help="markdown summary file to sit under the title")
+    p.add_argument("--title-out", default="", help="write the title here (CI emits it into the PR)")
+    p.add_argument("--body-out", default="", help="write the body here")
+    p.add_argument("--ai", action="store_true", help="add the model's one paragraph when reachable")
+    p.set_defaults(func="cmd_narrative")
+
+    p = sub.add_parser(
+        "pubconfig",
+        help="predict which credential names a future run would read as an empty string",
+    )
+    p.add_argument(
+        "--tree", default="", help="fork checkout holding .github/workflows (default: --repo)"
+    )
+    p.add_argument(
+        "--project", default="", help="org/repo the settings belong to, for the report header"
+    )
+    p.add_argument(
+        "--fetch", action="store_true", help="read live settings through gh (needs a token)"
+    )
+    p.add_argument(
+        "--inventory",
+        default="",
+        help="snapshot JSON of provided names, from a job that already fetched them",
+    )
+    p.add_argument("--json-out", default="", help="write the machine-readable verdicts here")
+    p.set_defaults(func="cmd_pubconfig")
+
+    p = sub.add_parser("why-red", help="sort the reds in a check-runs payload by who owns the fix")
+    p.add_argument("--runs", required=True, help="fork commits/{sha}/check-runs JSON")
+    p.add_argument(
+        "--upstream-runs", default="", help="the same payload for upstream's matching run"
+    )
+    p.add_argument(
+        "--changed-files",
+        default="",
+        help="upstream file delta since --baseline, one path per line",
+    )
+    p.add_argument("--baseline", default="", help="upstream commit the candidate synced from")
+    p.add_argument("--current", default="", help="candidate head sha")
+    p.add_argument("--checkout", default="", help="local checkout to measure sizes against")
+    p.set_defaults(func="cmd_why_red")
+
+    p = sub.add_parser("telegram", help="the commanded surface: menu, resolve a line, send a probe")
+    p.add_argument(
+        "telegram_action",
+        choices=["menu", "check", "test"],
+        help="menu prints what a commander may say; check resolves one line offline; test sends",
+    )
+    p.add_argument("--message", default="100ways CLI probe", help="text for check / test")
+    p.add_argument("--token", default="", help="bot token (default: TELEGRAM_BOT_TOKEN)")
+    p.add_argument("--chat-id", default="", help="chat id (default: TELEGRAM_CHAT_ID)")
+    p.set_defaults(func="cmd_telegram")
+
+    p = sub.add_parser("lintsim", help="run the fork's own lint contract over a candidate tree")
+    p.add_argument("--candidate", required=True, help="branded tree that would be published")
+    p.add_argument("--fork", default="", help="fork checkout defining the checks (default: --repo)")
+    p.add_argument("--upstream", default="", help="upstream checkout for the inflation prediction")
+    p.set_defaults(func="cmd_lintsim")
 
     return parser
 
