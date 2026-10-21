@@ -244,14 +244,18 @@ def scan_snapshot(
     return issues
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--snapshot", required=True)
     parser.add_argument("--upstream", required=True)
     parser.add_argument("--expected-upstream-sha", required=True)
     parser.add_argument("--fork-root", required=True)
     parser.add_argument("--output", required=True)
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     issues = scan_snapshot(
         args.snapshot, args.upstream, args.expected_upstream_sha, args.fork_root
     )

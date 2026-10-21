@@ -73,6 +73,22 @@ jobs:
           git clone --depth=1 \
             https://github.com/nastechresearch/nastech-agent.git nastech-agent
 
+      # The publication-readiness scan simulates the fork's blocking `ruff check .`, and
+      # an absent ruff is reported as UNAVAILABLE, which is blocking -- so the version the
+      # fork itself pins has to be the one installed here.  The pin comes from the fork's
+      # own pyproject.toml, the same file its lint lane resolves pins from
+      # (scripts.code_health --print-pins), so this step follows the fork when it bumps.
+      - name: Install the ruff the fork pins
+        run: |
+          set -euo pipefail
+          PIN=$(python3 -c 'from hundredways.forklint import read_fork_ruff_pin; print(read_fork_ruff_pin("nastech-agent"))')
+          if [ -z "$PIN" ]; then
+            echo "::error::nastech-agent/pyproject.toml pins no ruff, so the fork's blocking ruff check cannot be simulated here"
+            exit 1
+          fi
+          python3 -m pip install "ruff==$PIN"
+          ruff --version
+
       - name: Clone upstream source once
         env:
           HUNDREDWAYS_HERMES_URL: ${{ inputs.hermes_url }}
@@ -213,6 +229,7 @@ jobs:
             --snapshot "$SNAPSHOT" \
             --upstream "$HUNDREDWAYS_UPDATES_DIR/hermes-agent" \
             --expected-upstream-sha "$EXPECTED_UPSTREAM_SHA" \
+            --fork-root nastech-agent \
             --output "$HUNDREDWAYS_READINESS"
           echo "readiness=PASS" >> "$GITHUB_OUTPUT"
           echo "- Publication readiness: **PASS**" >> "$GITHUB_STEP_SUMMARY"

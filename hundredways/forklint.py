@@ -42,6 +42,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
+from typing import Mapping, Sequence
 
 from .rules import BrandingRules
 from .secrets import redact
@@ -257,6 +258,157 @@ def _workflow_step(workflow: str, script: str) -> _WorkflowStep | None:
 def _read(path: str) -> str:
     with open(path, encoding="utf-8", errors="replace") as handle:
         return handle.read()
+
+
+# ---------------------------------------------------------------------------
+# The pipeline's own wiring, read instead of remembered
+# ---------------------------------------------------------------------------
+
+# One engine module run as ``python -m hundredways.<module>`` from a workflow step.
+_MODULE_RUN_RE = re.compile(r"python3?[ \t]+-m[ \t]+(?P<module>hundredways\.[A-Za-z0-9_.]+)")
+_STEP_NAME_RE = re.compile(r"^[ \t]*(?:-[ \t]+)?name:[ \t]*(?P<name>.*\S)[ \t]*$")
+_LONG_FLAG_RE = re.compile(r"(?P<flag>--[A-Za-z][A-Za-z0-9-]*)(?:=.*)?$")
+
+
+@dataclass(frozen=True)
+class ModuleInvocation:
+    """A step's call of an engine module: what it ran, with which arguments, where."""
+
+    module: str
+    argv: tuple[str, ...]
+    step: str
+    line: int
+
+    @property
+    def flags(self) -> tuple[str, ...]:
+        """The long flags this call passes, with any ``=value`` form split off."""
+        return tuple(
+            _LONG_FLAG_RE.match(token).group("flag")
+            for token in self.argv
+            if _LONG_FLAG_RE.match(token)
+        )
+
+
+def _argv(tail: str) -> tuple[str, ...]:
+    """The shell tokens after a module name, with quotes unwrapped and comments dropped.
+
+    A step writes ``--snapshot "$SNAPSHOT"``: the quotes belong to the shell, not to the
+    value, and a token that names a subcommand keeps naming it once they are removed.
+    """
+    body = re.split(r"\s#", tail, 1)[0]
+    return tuple(stripped for token in body.split() if (stripped := token.strip("\"'")))
+
+
+def module_invocations(workflow: str) -> tuple[ModuleInvocation, ...]:
+    """Every ``-m hundredways.*`` call in a workflow, with the arguments it passes.
+
+    Continuation lines are folded into one call first.  A step that spreads its flags
+    over five backslash-terminated lines is a single invocation to GitHub, and a guard
+    that read only the line carrying ``-m`` would report every folded flag as missing.
+    """
+    lines = workflow.splitlines()
+    found: list[ModuleInvocation] = []
+    for start, end in _step_blocks(workflow):
+        name = next(
+            (
+                match.group("name")
+                for line in lines[start:end]
+                if (match := _STEP_NAME_RE.match(line))
+            ),
+            "",
+        )
+        index = start
+        while index < end:
+            match = _MODULE_RUN_RE.search(lines[index])
+            if match is None:
+                index += 1
+                continue
+            parts = [lines[index]]
+            while parts[-1].rstrip().endswith("\\") and index + len(parts) < end:
+                parts.append(lines[index + len(parts)])
+            folded = " ".join(part.rstrip().rstrip("\\") for part in parts)
+            tail = folded[folded.index(match.group("module")) + len(match.group("module")):]
+            found.append(
+                ModuleInvocation(
+                    module=match.group("module"),
+                    argv=_argv(tail),
+                    step=name,
+                    line=index,
+                )
+            )
+            index += len(parts)
+    return tuple(found)
+
+
+def required_flags(parser: argparse.ArgumentParser) -> tuple[str, ...]:
+    """The option strings a parser refuses to run without.
+
+    ``_actions`` is private, and it is still the only honest way to ask: argparse prints
+    a ``required=True`` option in ``format_help()`` exactly like an optional one, so a
+    guard that read the help text could not tell a flag the scan cannot start without
+    from one it can do without.
+    """
+    return tuple(
+        action.option_strings[0]
+        for action in parser._actions
+        if action.required and action.option_strings
+    )
+
+
+def _subparsers(parser: argparse.ArgumentParser) -> Mapping[str, argparse.ArgumentParser]:
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return action.choices
+    return {}
+
+
+def running_parser(
+    parser: argparse.ArgumentParser, argv: Sequence[str]
+) -> argparse.ArgumentParser:
+    """The parser that actually gates this call, which for a subcommand is its own.
+
+    ``--repo`` is one flag's name at two depths, and a value can look like a command
+    (``--repo update``), so the walk consumes each flag's value before deciding whether
+    a bare token names a subcommand.
+    """
+    by_flag: dict[str, argparse.Action] = {}
+    for action in parser._actions:
+        for option in action.option_strings:
+            by_flag[option] = action
+    choices = _subparsers(parser)
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        index += 1
+        if token.startswith("-"):
+            name, separator, _value = token.partition("=")
+            action = by_flag.get(name)
+            if action is None or separator:
+                continue
+            if action.nargs != 0:
+                index += 1
+            continue
+        if token in choices:
+            return running_parser(choices[token], argv[index:])
+    return parser
+
+
+def required_flag_gaps(
+    invocation: ModuleInvocation, parser: argparse.ArgumentParser
+) -> tuple[str, ...]:
+    """Required flags this step never passes -- each one is an argparse exit 2 in CI.
+
+    The pipeline runs its scans from the workflow file, not from a wrapper that could
+    hold the contract, so an argument added to a scan and not added to the step that
+    calls it stays invisible until ~20 minutes of pipeline have run.  This is the check
+    that sees it on the branch instead.
+    """
+    gating = running_parser(parser, invocation.argv)
+    wanted = list(required_flags(parser))
+    if gating is not parser:
+        wanted.extend(flag for flag in required_flags(gating) if flag not in wanted)
+    passed = invocation.flags
+    return tuple(flag for flag in wanted if flag not in passed)
 
 
 # ---------------------------------------------------------------------------
