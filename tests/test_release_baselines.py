@@ -28,11 +28,13 @@ These tests pin the three things the fix has to guarantee:
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
 import shutil
 import subprocess
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -205,6 +207,30 @@ def test_dispatched_from_reconcile_tree():
     source = Path(updates.__file__).read_text(encoding="utf-8")
     dispatch = source.split("def reconcile_tree", 1)[1].split("\ndef ", 1)[0]
     assert "_reconcile_fork_release_baselines" in dispatch
+
+
+def test_injected_python_is_the_form_the_fork_lints_for():
+    """Injected lines are linted as fork code, so they have to pass as such.
+
+    ``Python lints / ruff enforcement (blocking)`` is a bare ``ruff check .`` and
+    reports PLW1510 for a ``subprocess.run`` with no explicit ``check=``; the
+    code-health ratchet reports HX006 for a subprocess call with no ``timeout=``,
+    and a file main finds clean carries a cap of zero findings.  Both are
+    blocking, so a sync that writes either form reddens the candidate it just
+    produced (nastech-agent PR #162, run 39561394100, jobs 119093345460 and
+    119093345334).
+    """
+    module = ast.parse(textwrap.dedent(updates._PICK_TAGS_BASELINES))
+    calls = [node for node in ast.walk(module)
+             if isinstance(node, ast.Call) and ast.unparse(node.func) == "subprocess.run"]
+    assert len(calls) == 3, "the probe, the ref check and the fetch"
+    for call in calls:
+        named = {keyword.arg for keyword in call.keywords}
+        missing = {"check", "timeout"} - named
+        assert not missing, (
+            f"line {call.lineno} of the block injected into {_PICK_TAGS} runs a "
+            f"subprocess without {sorted(missing)}; the fork's blocking lints "
+            "reject that form, so the sync reddens its own candidate")
 
 
 # ---------------------------------------------------------------------------

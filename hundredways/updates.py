@@ -7689,6 +7689,12 @@ def _reconcile_fork_lane_release_surface(dst: str) -> list[str]:
 # ---------------------------------------------------------------------------
 # The release baselines a fork can actually update from
 # ---------------------------------------------------------------------------
+# The block this rule injects is linted as fork code, not as engine code: the
+# fork's blocking ``ruff check .`` enforces PLW1510 (``subprocess.run`` needs an
+# explicit ``check=``) and its code-health ratchet enforces HX006 (a subprocess
+# call without ``timeout=``) on every line the sync adds.  So each call declares
+# both, the way the file's own ``_git`` helper does.
+#
 # ``install-e2e.yml`` does not pin the "old version" it upgrades from: a release
 # run samples them at runtime through ``scripts/releases/pick_tags.py`` and a
 # dispatch through ``scripts/sandbox/pick-release-tags.sh``, then drives each one
@@ -7740,17 +7746,20 @@ _PICK_TAGS_BASELINES = '''    # NasTech: an update leg has to start from an inst
     def _fork_baseline(tag: str) -> bool:
         def probe(*args: str) -> str:
             listed = subprocess.run(["git", "-C", str(repo), "ls-tree", *args],
-                                    capture_output=True, text=True, timeout=120)
+                                    capture_output=True, text=True, timeout=120,
+                                    check=False)
             if listed.returncode:
                 raise ValueError(f"cannot read the tree of release tag {tag}: "
                                  f"{listed.stderr.strip()}")
             return listed.stdout
 
         if subprocess.run(["git", "-C", str(repo), "rev-parse", "-q", "--verify",
-                           f"refs/tags/{tag}"], capture_output=True).returncode:
+                           f"refs/tags/{tag}"], capture_output=True, timeout=120,
+                          check=False).returncode:
             fetched = subprocess.run(["git", "-C", str(repo), "fetch", "--quiet", "--no-tags",
                                       "origin", f"+refs/tags/{tag}:refs/tags/{tag}"],
-                                     capture_output=True, text=True, timeout=120)
+                                     capture_output=True, text=True, timeout=120,
+                                     check=False)
             if fetched.returncode:
                 raise ValueError(f"cannot fetch release tag {tag}: {fetched.stderr.strip()}")
         if not probe(tag, "--", "scripts/install.sh").strip():
