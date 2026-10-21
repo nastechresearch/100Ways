@@ -32,6 +32,7 @@ from hundredways.updates import (
     NastechSuitePinError,
     TermuxAptKeyDocError,
     UpdateManager,
+    UnsignedDarwinBuildEnvError,
     WindowsRealGitLocateError,
     _BROWSE_BUDGET_EDITS,
     _BROWSE_BUDGET_TEST_REL,
@@ -118,6 +119,7 @@ from hundredways.updates import (
     _reconcile_test_endpoint_defaults,
     _reconcile_ui_scope_pins,
     _reconcile_uv_lock_file,
+    _reconcile_unsigned_darwin_build_env,
     _reconcile_vercel_prepare,
     _reconcile_windows_boot_lifecycle_race,
     _NASTECH_UI_INTEGRITY,
@@ -5248,3 +5250,80 @@ def test_reconcile_browse_ddl_budget_guard_runs_from_reconcile_tree(tmp_path):
     result = reconcile_tree(str(tree))
     assert _BROWSE_RECONCILE_REL in result.fixed
     assert _BROWSE_DDL_GUARDED in _ddl_text(tree)
+
+
+def test_unsigned_darwin_build_env_unsets_empty_certificate(tmp_path):
+    """Build-only darwin runs must not hand electron-builder an empty CSC_LINK.
+
+    electron-builder reads a present-but-empty ``CSC_LINK`` as a certificate
+    path, resolves ``''`` to the project directory and throws ``<dir> not a
+    file`` before packaging (run 39508427430, both darwin legs).
+    """
+    candidate = tmp_path / "candidate"
+    wf = candidate / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    path = wf / "desktop-bundled-release.yml"
+    path.write_text(
+        "jobs:\n"
+        "  build-darwin-arm64-release:\n"
+        "    steps:\n"
+        "      - name: Require signing credentials when publishing\n"
+        "        env:\n"
+        "          CSC_LINK: ${{ secrets.CSC_LINK }}\n"
+        "          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}\n"
+        "        run: |\n"
+        "          missing=()\n"
+        "      - name: Build and package\n"
+        "        env:\n"
+        "          CSC_LINK: ${{ secrets.CSC_LINK }}\n"
+        "          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}\n"
+        "        run: |\n"
+        "          # Sign + notarize of a bundled-payload app runs long (Apple scans\n"
+        "          # every Mach-O) — raise the fd limit and let DEBUG show progress.\n"
+        "          python scripts/bundles/desktop.py --variant bundled\n",
+        encoding="utf-8",
+    )
+
+    changed = _reconcile_unsigned_darwin_build_env(str(candidate))
+
+    assert changed == [".github/workflows/desktop-bundled-release.yml"]
+    text = path.read_text(encoding="utf-8")
+    assert 'if [ -z "$CSC_LINK" ]; then' in text
+    assert "unset CSC_LINK CSC_KEY_PASSWORD" in text
+    assert "export CSC_IDENTITY_AUTO_DISCOVERY=false" in text
+    # The guard belongs to the build step, after the credential gate's run.
+    assert text.index("missing=()") < text.index('if [ -z "$CSC_LINK" ]; then')
+    # Fixed point, and the injected prose carries no upstream brand token.
+    assert _reconcile_unsigned_darwin_build_env(str(candidate)) == []
+    rules = BrandingRules()
+    assert rules.transform_text(text) == text
+
+
+def test_unsigned_darwin_build_env_absent_workflow_is_a_no_op(tmp_path):
+    assert _reconcile_unsigned_darwin_build_env(str(tmp_path)) == []
+
+
+def test_unsigned_darwin_build_env_stops_when_the_step_moves(tmp_path):
+    """A reworded upstream step must stop the sync, not silently lose the guard.
+
+    Without the raise the next branded update re-derives the workflow from
+    upstream, ships the empty ``CSC_LINK`` again and every build-only darwin
+    dispatch fails at packaging.
+    """
+    candidate = tmp_path / "candidate"
+    wf = candidate / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / "desktop-bundled-release.yml").write_text(
+        "jobs:\n"
+        "  build-darwin-arm64-release:\n"
+        "    steps:\n"
+        "      - name: Build and package\n"
+        "        env:\n"
+        "          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}\n"
+        "        run: |\n"
+        "          # Notarization is slow, so keep DEBUG on.\n"
+        "          python scripts/bundles/desktop.py --variant bundled\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(UnsignedDarwinBuildEnvError, match="Re-derive the anchor"):
+        _reconcile_unsigned_darwin_build_env(str(candidate))

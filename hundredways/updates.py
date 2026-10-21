@@ -3394,6 +3394,66 @@ def _reconcile_ci_runner_budgets(dst: str) -> list[str]:
     return fixed
 
 
+class UnsignedDarwinBuildEnvError(ValueError):
+    """The macOS bundle build step moved, so the unsigned guard could not apply."""
+
+
+def _reconcile_unsigned_darwin_build_env(dst: str) -> list[str]:
+    """Keep an absent Apple certificate out of the macOS bundle build env.
+
+    Build-only dispatches (``upload_release=false``) carry no Apple secrets, so
+    the branded ``Build and package`` step exported ``CSC_LINK`` and
+    ``CSC_KEY_PASSWORD`` as empty strings.  electron-builder reads a
+    present-but-empty ``CSC_LINK`` as a certificate path, resolves ``''`` to the
+    project directory and dies with ``<dir> not a file`` before packaging (run
+    39508427430, both darwin legs).  The step must unset the pair when no
+    certificate exists; publishing runs still stop earlier at the
+    signing-credentials gate, and the signed/notarized verify step still runs.
+
+    Raises :class:`UnsignedDarwinBuildEnvError` when the workflow is present but
+    carries neither the anchor nor the guard: silently returning would ship the
+    empty-certificate build again, and the fork would only learn at the next
+    desktop release.
+    """
+    rel = ".github/workflows/desktop-bundled-release.yml"
+    text = _reconcile_budget_read(dst, rel)
+    if text is None:
+        return []
+    anchor = (
+        "          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}\n"
+        "        run: |\n"
+        "          # Sign + notarize of a bundled-payload app runs long (Apple scans\n"
+        "          # every Mach-O) — raise the fd limit and let DEBUG show progress.\n"
+    )
+    replacement = (
+        "          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}\n"
+        "        run: |\n"
+        "          # Build-only dispatches carry no Apple credentials. electron-builder\n"
+        "          # treats a present-but-empty CSC_LINK as a certificate path, resolves\n"
+        "          # '' to this project directory, and dies with \"<dir> not a file\"\n"
+        "          # before packaging; keep the signing vars out of its environment.\n"
+        "          if [ -z \"$CSC_LINK\" ]; then\n"
+        "            echo \"::notice::no signing certificate configured; building unsigned\"\n"
+        "            unset CSC_LINK CSC_KEY_PASSWORD\n"
+        "            export CSC_IDENTITY_AUTO_DISCOVERY=false\n"
+        "          fi\n"
+        "          # Sign + notarize of a bundled-payload app runs long (Apple scans\n"
+        "          # every Mach-O) — raise the fd limit and let DEBUG show progress.\n"
+    )
+    if replacement in text:
+        return []
+    if anchor not in text:
+        raise UnsignedDarwinBuildEnvError(
+            f"{rel} matches neither the anchored 'Build and package' step nor the "
+            "guard this rule injects, so the Apple signing vars would ship as "
+            "empty strings again and every build-only darwin dispatch would fail "
+            "with \"<project dir> not a file\". Re-derive the anchor against "
+            "upstream's current workflow; do not drop the guard to get a green "
+            "sync.")
+    _reconcile_budget_write(dst, rel, text.replace(anchor, replacement))
+    return [rel]
+
+
 # The branded Python lane's slice job name is templated
 # (``Run tests (${{ matrix.slice }}/2)``) and the e2e lane is unnamed (its job
 # key is ``e2e``), so the rules' literal ``name: Run tests`` pass never fires
@@ -5558,6 +5618,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
         result.total += 1
         result.fixed.append(rel)
     for rel in _reconcile_free_runner_parallelism(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    for rel in _reconcile_unsigned_darwin_build_env(dst):
         result.total += 1
         result.fixed.append(rel)
     for rel in _reconcile_python_test_timeout(dst):
