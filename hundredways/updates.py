@@ -5557,6 +5557,12 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     for rel in _reconcile_fork_lane_release_surface(dst):
         result.total += 1
         result.fixed.append(rel)
+    # Both release-tag samplers read the repo's tag list, which for a fork also
+    # holds the source project's releases; those cannot be updated from, so the
+    # sampling that the install/update gate is built on is re-derived here too.
+    for rel in _reconcile_fork_release_baselines(dst):
+        result.total += 1
+        result.fixed.append(rel)
     name = _root_package_name(dst, "pyproject.toml", "package.json")
     if name:
         if _reconcile_uv_lock(dst, name):
@@ -7691,6 +7697,141 @@ def _reconcile_fork_lane_release_surface(dst: str) -> list[str]:
                              "claim's test policy' and the desktop-channel expectation "
                              "goes the other way"):
             changed.append(rel)
+    return changed
+
+
+# ---------------------------------------------------------------------------
+# The release baselines a fork can actually update from
+# ---------------------------------------------------------------------------
+# ``install-e2e.yml`` does not pin the "old version" it upgrades from: a release
+# run samples them at runtime through ``scripts/releases/pick_tags.py`` and a
+# dispatch through ``scripts/sandbox/pick-release-tags.sh``, then drives each one
+# through the real installer and the real updater.  Sampling from the repo's own
+# tag list is upstream's design, and upstream's tag list is upstream's releases.
+#
+# A fork does not get that.  Creating the fork copied the source project's
+# release tags into it, and those refs name commits whose trees were never
+# branded.  nastech-agent carries 39 of them (``v2026.3.12`` .. ``v2026.8.3``)
+# beside its own five (``v2026.8.11`` .. ``v2026.9.18`` plus ``v0.21.5``), so the
+# "oldest" every one of those samplers ask for is a tag the fork never published
+# and a checkout the fork's updater has no interest in: the installer of such a
+# tag clones a repository this fork does not own -- not even redirected, because
+# ``arm_source_redirect`` only rewrites this fork's own URLs -- and writes it to
+# the source project's install root, after which the driver's very first ``git``
+# command dies with ``fatal: cannot change to '.../.nastech/nastech-agent': No
+# such file or directory`` (run 39542501628, jobs 119033266029 and
+# 119033266322, exit 128).  ``stable-release.yml`` asks for ``tag-count: 3``, so
+# two of the three baselines a release samples are of that kind and the fork's
+# install/update gate cannot go green.
+#
+# This is a fork boundary, not a defect to chase: no upgrade path exists from an
+# install this fork never made, and the engine cannot brand a tag that points at
+# somebody else's commit.  So the samplers keep upstream's mechanism -- newest,
+# oldest and a spread -- and judge each candidate from its own tree, dropping the
+# ones that could not have come from this fork.  A tag says nothing unless its
+# tree ships ``scripts/install.sh``, so an empty or unrelated tree is kept rather
+# than dropped for want of a signal; that is also what keeps upstream's own
+# sampling tests green against the patched file.  Both probes are tree lookups,
+# so the blobless ``fetch-tags`` checkout the pick job uses is enough, and a tag
+# the checkout does not carry is fetched for the probe instead of guessed at.
+
+_PICK_TAGS = "scripts/releases/pick_tags.py"
+_PICK_RELEASE_TAGS = "scripts/sandbox/pick-release-tags.sh"
+_FORK_BASELINE_MARK = "# NasTech: an update leg has to start from an install this fork can drive."
+_PICK_TAGS_ANCHOR = ('    if not tags:\n'
+                     '        raise ValueError("No released baseline tags remain")\n')
+_PICK_SHELL_ANCHOR = 'total="${#tags[@]}"\n'
+
+_PICK_TAGS_BASELINES = '''    # NasTech: an update leg has to start from an install this fork can drive.
+    # A fork inherits the source project's release tags, and those name commits
+    # whose trees were never branded: that installer writes a checkout this
+    # fork's updater never looks in, so the leg clones a repository the fork
+    # does not own and then dies in the driver's first git command.  The tag's
+    # own tree decides, and only a tree that ships the installer says anything,
+    # so a tag with no scripts/install.sh stays a candidate.  Tree lookups only,
+    # so the blobless checkout this job uses is enough, and a tag the checkout
+    # does not carry is fetched for the probe rather than guessed at.
+    def _fork_baseline(tag: str) -> bool:
+        def probe(*args: str) -> str:
+            listed = subprocess.run(["git", "-C", str(repo), "ls-tree", *args],
+                                    capture_output=True, text=True, timeout=120)
+            if listed.returncode:
+                raise ValueError(f"cannot read the tree of release tag {tag}: "
+                                 f"{listed.stderr.strip()}")
+            return listed.stdout
+
+        if subprocess.run(["git", "-C", str(repo), "rev-parse", "-q", "--verify",
+                           f"refs/tags/{tag}"], capture_output=True).returncode:
+            fetched = subprocess.run(["git", "-C", str(repo), "fetch", "--quiet", "--no-tags",
+                                      "origin", f"+refs/tags/{tag}:refs/tags/{tag}"],
+                                     capture_output=True, text=True, timeout=120)
+            if fetched.returncode:
+                raise ValueError(f"cannot fetch release tag {tag}: {fetched.stderr.strip()}")
+        if not probe(tag, "--", "scripts/install.sh").strip():
+            return True
+        return bool(probe("-d", tag, "--", "nastech_cli").strip())
+
+    tags = [tag for tag in tags if _fork_baseline(tag)]
+
+'''
+
+_PICK_SHELL_BASELINES = '''# NasTech: an update leg has to start from an install this fork can drive.  The
+# tags copied in when this repo was forked name commits whose trees were never
+# branded: that installer writes a checkout the fork's updater never looks in,
+# so the leg clones a repository the fork does not own and dies in the driver's
+# first git command.  The tag's own tree decides, and only a tree that ships the
+# installer says anything -- a tag with no scripts/install.sh stays a candidate.
+# Tree lookups only, so a blobless checkout is enough.  Upstream's own empty-list
+# diagnostic keeps the last word, so a checkout with no tags at all still reads
+# as the checkout problem it is rather than as a fork-boundary one.
+if [ "${#tags[@]}" -gt 0 ]; then
+  baselines=()
+  for tag in "${tags[@]}"; do
+    git -C "$REPO" rev-parse -q --verify "refs/tags/$tag" >/dev/null ||
+      git -C "$REPO" fetch --quiet --no-tags origin "+refs/tags/$tag:refs/tags/$tag"
+    if [ -z "$(git -C "$REPO" ls-tree "$tag" -- scripts/install.sh)" ]; then
+      baselines+=("$tag")
+    elif [ -n "$(git -C "$REPO" ls-tree -d "$tag" -- nastech_cli)" ]; then
+      baselines+=("$tag")
+    fi
+  done
+  [ "${#baselines[@]}" -gt 0 ] || {
+    echo "error: no release tag here is an install this fork can drive" >&2
+    exit 1
+  }
+  tags=("${baselines[@]}")
+fi
+
+'''
+
+
+class ForkReleaseBaselineError(ValueError):
+    """A release-tag sampler no longer has the anchor the fork filter goes at."""
+
+
+def _reconcile_fork_release_baselines(dst: str) -> list[str]:
+    """Keep only baselines this fork's own installer could have produced.
+
+    Applied to both samplers, because a dispatch that samples a different set
+    than a release run is how a maintainer ends up chasing a leg the release
+    gate never asked for.  Returns the changed relative paths; a sampler whose
+    anchor moved raises, rather than shipping a release lane that silently
+    samples the source project's tags again.
+    """
+    changed: list[str] = []
+    for rel, anchor, block in ((_PICK_TAGS, _PICK_TAGS_ANCHOR, _PICK_TAGS_BASELINES),
+                               (_PICK_RELEASE_TAGS, _PICK_SHELL_ANCHOR, _PICK_SHELL_BASELINES)):
+        text = _sgl_read(dst, rel)
+        if text is None or _FORK_BASELINE_MARK in text:
+            continue
+        if text.count(anchor) != 1:
+            raise ForkReleaseBaselineError(
+                f"{rel} no longer holds exactly one copy of {anchor!r}, the point "
+                "_reconcile_fork_release_baselines samples fork-published baselines "
+                "at; re-derive it against the current file, or the release lane goes "
+                "back to sampling tags this fork cannot update from.")
+        _sgl_write(dst, rel, text.replace(anchor, block + anchor, 1))
+        changed.append(rel)
     return changed
 
 
