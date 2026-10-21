@@ -167,8 +167,15 @@ def _normalize_test_timeout(text: str) -> str:
 def _normalize_runner(match_obj: re.Match) -> str:
     base, _, arm = match_obj.group(1), match_obj.group(2), match_obj.group(3)
     if arm:
-        # Standard hosted arm64 label; windows/macos have no arm hosted tier.
-        return "ubuntu-24.04-arm" if base.startswith("ubuntu") else base
+        # An arm64 label is an architecture requirement, not a size hint: an
+        # win32-arm64 job on an x64 host builds a win32-x64 payload and the
+        # bundle's own audit rejects the package (``audit-bundle-arch.mjs:
+        # 659 binaries do not match --arch=arm64``, run 39513836846).  Windows
+        # has the standard ``windows-11-arm`` tier for that; macOS does not, so
+        # a macOS arm row keeps its base label and still runs natively.
+        if base.startswith("ubuntu"):
+            return "ubuntu-24.04-arm"
+        return "windows-11-arm" if base.startswith("windows") else base
     return base
 
 
@@ -203,6 +210,11 @@ def _normalize_blacksmith(match_obj: re.Match) -> str:
     os_name, arm = match_obj.group(2), match_obj.group(4)
     if os_name == "ubuntu":
         return "ubuntu-24.04-arm" if arm else "ubuntu-latest"
+    if os_name == "windows":
+        # Same architecture rule as ``_normalize_runner``: upstream has moved
+        # its ARM rows onto blacksmith labels before, and an arm64 Windows lane
+        # landing on the x64 image fails its own bundle-architecture audit.
+        return "windows-11-arm" if arm else "windows-latest"
     return f"{os_name}-latest"
 
 
