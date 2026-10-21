@@ -25,6 +25,7 @@ from .rules import (
     preserved_repo_url_spans,
 )
 from .skill_policy import SkillPolicyIssue, audit_skill_firewall
+from .tree_index import FileIndex
 from .visual_assets import VisualIssue, compare_owned_to_upstream
 
 
@@ -315,7 +316,11 @@ def _allowed_brand_occurrence(token: str, line: str, path: str) -> bool:
     return False
 
 
-def audit_first_party_brand(root: str, rules: BrandingRules | None = None) -> list[AuditIssue]:
+def audit_first_party_brand(
+    root: str,
+    rules: BrandingRules | None = None,
+    index: FileIndex | None = None,
+) -> list[AuditIssue]:
     """Enforce the zero-upstream-brand policy on every shipped text and path.
 
     The matcher deliberately permits punctuation around a token so compound
@@ -323,21 +328,22 @@ def audit_first_party_brand(root: str, rules: BrandingRules | None = None) -> li
     on either side still protect ordinary English words such as "synchronous".
     Reports, manifests, lockfiles, contributor emails, and generated outputs
     are candidate files too and cannot bypass this audit.
+
+    ``index`` lets a caller share one tree snapshot across the weekly audits;
+    it must already reflect the branded tree, never a state from before a write.
     """
     rules = rules or BrandingRules()
     pattern = re.compile(r"(?i)(?<![a-z0-9])(hermes|nousresearch|nous)(?![a-z0-9])")
+    index = index or FileIndex(root)
     issues: list[AuditIssue] = []
-    for path in Path(root).rglob("*"):
-        if not path.is_file() or ".git" in path.parts or "node_modules" in path.parts:
-            continue
-        rel = str(path.relative_to(root))
+    for entry in index.files():
+        rel = entry.rel
         for match in pattern.finditer(rel):
             token = match.group(1).lower()
             if not _allowed_brand_occurrence(token, rel, rel):
                 issues.append(AuditIssue("first-party-brand-path", rel, f"prohibited {token!r} token in candidate path"))
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+        text = index.text(rel)
+        if text is None:
             continue
         for number, line in enumerate(text.splitlines(), start=1):
             for match in pattern.finditer(line):
@@ -377,7 +383,9 @@ def audit_cli_banner_identity(root: str) -> list[AuditIssue]:
 
 
 def audit_branding_fixed_point(
-    root: str, rules: BrandingRules | None = None
+    root: str,
+    rules: BrandingRules | None = None,
+    index: FileIndex | None = None,
 ) -> list[AuditIssue]:
     """Require eligible branded text and paths to be a transform fixed point.
 
@@ -387,11 +395,10 @@ def audit_branding_fixed_point(
     deterministic evidence that the candidate was not fully branded.
     """
     rules = rules or BrandingRules()
+    index = index or FileIndex(root)
     issues: list[AuditIssue] = []
-    for path in Path(root).rglob("*"):
-        if not path.is_file() or ".git" in path.parts or "node_modules" in path.parts:
-            continue
-        rel = str(path.relative_to(root))
+    for entry in index.files():
+        rel = entry.rel
         if is_immutable_path(rel) or is_locked_path(rel):
             continue
         transformed_path = rules.transform_path(rel)
@@ -404,9 +411,8 @@ def audit_branding_fixed_point(
                 )
             )
             continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+        text = index.text(rel)
+        if text is None:
             continue
         if rules.transform_text(text) != text:
             issues.append(
@@ -419,18 +425,18 @@ def audit_branding_fixed_point(
     return issues
 
 
-def audit_brand_symbols(root: str) -> list[AuditIssue]:
+def audit_brand_symbols(
+    root: str, index: FileIndex | None = None
+) -> list[AuditIssue]:
     """Block inherited medical-symbol glyphs after the NasTech text transformation."""
+    index = index or FileIndex(root)
     issues: list[AuditIssue] = []
-    for path in Path(root).rglob("*"):
-        if not path.is_file() or ".git" in path.parts or "node_modules" in path.parts:
-            continue
-        rel = str(path.relative_to(root))
+    for entry in index.files():
+        rel = entry.rel
         if is_immutable_path(rel):
             continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+        text = index.text(rel)
+        if text is None:
             continue
         for glyph in ("⚕", "☤"):
             if glyph in text:
@@ -439,35 +445,34 @@ def audit_brand_symbols(root: str) -> list[AuditIssue]:
     return issues
 
 
-def audit_fts5_trigram_fixtures(root: str) -> list[AuditIssue]:
+def audit_fts5_trigram_fixtures(
+    root: str, index: FileIndex | None = None
+) -> list[AuditIssue]:
     """Block branded FTS5 fixtures whose query is not a trigram of their value.
 
     Branding can change an inserted fixture value while leaving an abbreviated
     assertion literal intact.  These tests then fail only in a container run;
     treat that mismatch as a hard brand-integrity error before publication.
     """
+    index = index or FileIndex(root)
     issues: list[AuditIssue] = []
     insert_re = re.compile(r"INSERT INTO docs VALUES \('([^']+)'\)")
     match_re = re.compile(r"MATCH '([^']{3})'")
-    for path in Path(root).rglob("*"):
-        if not path.is_file() or ".git" in path.parts or "node_modules" in path.parts:
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+    for entry in index.files():
+        text = index.text(entry.rel)
+        if text is None:
             continue
         if "fts5" not in text.lower():
             continue
         inserted = set(insert_re.findall(text))
         if not inserted:
             continue
-        valid = {word[index:index + 3] for word in inserted for index in range(len(word) - 2)}
+        valid = {value[offset:offset + 3] for value in inserted for offset in range(len(value) - 2)}
         for token in match_re.findall(text):
             if token not in valid:
-                rel = str(path.relative_to(root))
                 issues.append(AuditIssue(
                     "fts5-trigram-fixture",
-                    rel,
+                    entry.rel,
                     f"MATCH '{token}' is not a trigram of the branded fixture value(s): {sorted(inserted)}",
                 ))
     return issues
@@ -489,46 +494,48 @@ def _version_tuple(value: str) -> tuple[int, ...] | None:
     return tuple(int(item) for item in numbers[:3]) if numbers else None
 
 
-def audit_snapshot_safety(root: str) -> list[AuditIssue]:
+def audit_snapshot_safety(
+    root: str, index: FileIndex | None = None
+) -> list[AuditIssue]:
     """Check for credentials, MIT compliance, unsafe dependency pins, modes and empty source files."""
+    index = index or FileIndex(root)
     issues: list[AuditIssue] = []
-    base = Path(root)
-    license_path = base / "LICENSE"
-    if not license_path.is_file() or not license_path.read_text(encoding="utf-8", errors="ignore").startswith("MIT License"):
+    license_entry = index.entry("LICENSE")
+    if license_entry is None or not license_entry.path.read_text(
+        encoding="utf-8", errors="ignore"
+    ).startswith("MIT License"):
         issues.append(AuditIssue("license-mit", "LICENSE", "repository license must retain the MIT License text"))
     allowed_empty = {".gitkeep", ".keep", "__init__.py"}
     ignored_suffixes = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".woff2", ".pdf", ".zip"}
-    for path in base.rglob("*"):
-        if not path.is_file() or ".git" in path.parts or "node_modules" in path.parts:
-            continue
-        rel = str(path.relative_to(base))
-        if path.suffix.lower() not in ignored_suffixes and path.stat().st_size == 0 and path.name not in allowed_empty:
+    for entry in index.files():
+        rel = entry.rel
+        if entry.suffix.lower() not in ignored_suffixes and entry.size == 0 and entry.name not in allowed_empty:
             issues.append(AuditIssue("unexpected-empty-file", rel, "empty file may indicate incomplete source transformation"))
-        if path.suffix == ".sh" and not os.access(path, os.X_OK):
+        if entry.suffix == ".sh" and not os.access(entry.path, os.X_OK):
             issues.append(AuditIssue("script-not-executable", rel, "shell scripts must have an executable bit"))
-        if path.suffix.lower() in ignored_suffixes:
+        if entry.suffix.lower() in ignored_suffixes:
             continue
-        try:
-            content = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+        content = index.text(rel)
+        if content is None:
             continue
         if any(pattern.search(content) for pattern in _SECRET_PATTERNS):
             issues.append(AuditIssue("credential-signal", rel, "credential-like value detected"))
-    dependency_files = list(base.rglob("package-lock.json")) + list(base.rglob("uv.lock"))
-    for package_file in dependency_files:
-        if "node_modules" in package_file.parts:
-            continue
+    dependency_entries = [
+        *index.files(matching="package-lock.json"),
+        *index.files(matching="uv.lock"),
+    ]
+    for dependency in dependency_entries:
         try:
-            content = package_file.read_text(encoding="utf-8")
+            content = dependency.path.read_text(encoding="utf-8")
         except OSError:
             continue
-        for dependency, floor in _MIN_SAFE_DEPENDENCIES.items():
-            if package_file.name == "uv.lock":
-                match = re.search(rf'name = "{re.escape(dependency)}".*?version = "([0-9][0-9.]+)"', content, re.DOTALL)
+        for dependency_name, floor in _MIN_SAFE_DEPENDENCIES.items():
+            if dependency.name == "uv.lock":
+                match = re.search(rf'name = "{re.escape(dependency_name)}".*?version = "([0-9][0-9.]+)"', content, re.DOTALL)
             else:
-                match = re.search(rf'node_modules/{re.escape(dependency)}"\s*:\s*\{{.*?"version"\s*:\s*"([0-9][0-9.]+)"', content, re.DOTALL)
+                match = re.search(rf'node_modules/{re.escape(dependency_name)}"\s*:\s*\{{.*?"version"\s*:\s*"([0-9][0-9.]+)"', content, re.DOTALL)
             if match and (version := _version_tuple(match.group(1))) and version < floor:
-                issues.append(AuditIssue("dependency-vulnerability-pattern", str(package_file.relative_to(base)), f"{dependency} {match.group(1)} is below the minimum safe version {'.'.join(map(str, floor))}"))
+                issues.append(AuditIssue("dependency-vulnerability-pattern", dependency.rel, f"{dependency_name} {match.group(1)} is below the minimum safe version {'.'.join(map(str, floor))}"))
     return issues
 
 
@@ -606,20 +613,24 @@ def build_weekly_report(
         changed_areas=changed_areas,
     )
     reconcile_nested_lockfile_roots(branded_root)
+    # Every audit below only reads, so they share one snapshot taken after the
+    # last write to the tree.  ``upstream_repo`` is a separate read-only tree.
+    branded_index = FileIndex(branded_root)
+    upstream_index = FileIndex(upstream_repo)
     report.lock_issues = audit_nested_lockfiles(branded_root)
-    report.brand_issues = audit_first_party_brand(branded_root)
-    report.brand_issues.extend(audit_branding_fixed_point(branded_root))
-    report.brand_issues.extend(audit_brand_symbols(branded_root))
+    report.brand_issues = audit_first_party_brand(branded_root, index=branded_index)
+    report.brand_issues.extend(audit_branding_fixed_point(branded_root, index=branded_index))
+    report.brand_issues.extend(audit_brand_symbols(branded_root, index=branded_index))
     report.brand_issues.extend(audit_cli_banner_identity(branded_root))
-    report.brand_issues.extend(audit_fts5_trigram_fixtures(branded_root))
+    report.brand_issues.extend(audit_fts5_trigram_fixtures(branded_root, index=branded_index))
     report.asset_issues = audit_owned_assets(branded_root)
     report.visual_issues = audit_visual_assets(branded_root, upstream_repo)
     report.ci_issues = audit_workflow_security(
         branded_root, enforce_publication_policy=False
     )
     report.skill_issues = audit_skill_firewall(branded_root)
-    candidate_security = audit_snapshot_safety(branded_root)
-    upstream_security = audit_snapshot_safety(upstream_repo)
+    candidate_security = audit_snapshot_safety(branded_root, index=branded_index)
+    upstream_security = audit_snapshot_safety(upstream_repo, index=upstream_index)
     report.security_issues, report.inherited_security_issues = partition_inherited_security_issues(
         candidate_security,
         upstream_security,

@@ -21,6 +21,7 @@ from .assets import OwnedAssets
 from .forkcheck import SourceDeltaReport, preserve_fork_files, source_tree_delta
 from .integrity import audit_candidate_tree, tree_digest
 from .rules import BrandingRules
+from .tree_index import FileIndex
 from .updates import (
     _reconcile_assets_worker_config,
     _reconcile_assets_worker_index,
@@ -215,19 +216,14 @@ def verify_final_candidate(
             owned,
             reconciled_bytes,
         )
-        expected_paths = {
-            path.relative_to(expected).as_posix()
-            for path in expected.rglob("*")
-            if path.is_file()
-        }
+        # A FileIndex is a snapshot, so it is built only now that every write to
+        # the rebuilt expected tree has landed.
+        expected_paths = {entry.rel for entry in FileIndex(expected).entries}
 
     for result in verified.failed:
         issues.append(ConformanceIssue("source-parity", result.mapped_path, result.note))
-    candidate_paths = {
-        path.relative_to(candidate_path).as_posix()
-        for path in candidate_path.rglob("*")
-        if path.is_file()
-    }
+    candidate_index = FileIndex(candidate_path)
+    candidate_paths = {entry.rel for entry in candidate_index.entries}
     allowed = set(allowed_extra_paths) | _REPORT_PATHS
     for path in sorted(candidate_paths - expected_paths):
         if path in allowed or path.startswith("config/owned-assets/"):
@@ -251,7 +247,7 @@ def verify_final_candidate(
         verified.total,
         verified.passed,
         tuple(sorted(reconciled_bytes)),
-        tree_digest(candidate_path),
+        candidate_index.digest(),
         tuple(issues),
     )
 

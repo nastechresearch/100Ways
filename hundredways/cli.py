@@ -26,6 +26,7 @@ report     Write a markdown gap report to config/reports.
 dashboard  Serve the live web dashboard (write access requires HUNDREDWAYS_ADMIN_TOKEN).
 pull       Fetch upstream + write report + record achievement.
 achievements  List achievements and unlock state.
+profile    Rank a run's stages by cost, or compare two runs and name what got slower.
 readme     Regenerate README.md from the ways + achievements + owned-asset registries.
 release    Verify the code table and incoming codes.
 admin      Compile/verify the admin password into its system-only token.
@@ -49,6 +50,14 @@ from .dashboard import serve as serve_dashboard
 from .git_ops import ensure_branch
 from .notifier import Notification, notifier_from_env
 from .port import new_upstream_commits, port_commits
+from .profiling import (
+    format_comparison,
+    improvements,
+    ranked,
+    read_profile,
+    regressions,
+    total_ms,
+)
 from .release import release_check_table, release_summary, release_verify_incoming
 from .research import research as run_research
 from .rules import BrandingRules
@@ -506,7 +515,8 @@ class Cli:
         zip_path = self.args.zip or ""
         if zip_path and zip_path.endswith(os.sep):
             zip_path = ""
-        result = mgr.run(zip_path=zip_path, project_name=self.args.project_name)
+        result = mgr.run(zip_path=zip_path, project_name=self.args.project_name,
+                         profile_path=self.args.profile)
         if self.args.emit_outputs:
             with open(self.args.emit_outputs, "w") as fh:
                 json.dump({
@@ -529,6 +539,10 @@ class Cli:
         if result.zip_path:
             print(f"zip: {result.zip_path}")
         print(f"snapshot: {result.dir}")
+        top = ", ".join(
+            f"{item.name} {item.duration_ms / 1000:.1f}s" for item in ranked(result.stages)[:3]
+        )
+        print(f"stage time: {total_ms(result.stages) / 1000:.1f}s total, slowest: {top}")
         if self.args.state_dir:
             ach = Achievements(self.args.state_dir)
             unlocked = ach.apply_event("pull")
@@ -538,6 +552,34 @@ class Cli:
         if not result.gate:
             print("GATE FAILED - snapshot kept for inspection", file=sys.stderr)
             sys.exit(1)
+
+    def cmd_profile(self) -> None:
+        """Rank one run's stages, or compare two runs and name what moved."""
+        current = read_profile(self.args.current)
+        if not self.args.against:
+            measured = total_ms(current)
+            print(f"{measured / 1000:.2f}s measured over {len(current)} stages")
+            for item in ranked(current):
+                share = (item.duration_ms / measured * 100.0) if measured else 0.0
+                print(f"  {item.name:<16}{item.duration_ms / 1000:>9.2f}s{share:>8.1f}%  {item.status}")
+            return
+        baseline = read_profile(self.args.against)
+        for line in format_comparison(baseline, current):
+            print(line)
+        slower = regressions(baseline, current)
+        faster = improvements(baseline, current)
+        if slower:
+            print("regressed:")
+            for delta in slower:
+                print(f"  {delta.name}: {delta.before_ms / 1000:.2f}s -> "
+                      f"{delta.after_ms / 1000:.2f}s ({delta.ratio:.1f}x)")
+        else:
+            print("no stage got materially slower")
+        if faster:
+            print("improved:")
+            for delta in faster:
+                print(f"  {delta.name}: {delta.before_ms / 1000:.2f}s -> "
+                      f"{delta.after_ms / 1000:.2f}s")
 
     def cmd_weekly_full_sync(self) -> None:
         """Run or audit a complete weekly branded snapshot; never push or merge."""
@@ -761,7 +803,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--emit-outputs", default="",
                    help="write JSON {update_number, upstream_sha, gate} to this file "
                         "(CI emits these into $GITHUB_OUTPUT)")
+    p.add_argument("--profile", default="",
+                   help="write stage timing JSON here (a directory becomes <dir>/stage-profile.json); "
+                        "feed it back to `profile --against` to catch a regression")
     p.set_defaults(func="cmd_update")
+
+    p = sub.add_parser("profile", help="rank a run's stage costs, or compare two runs")
+    p.add_argument("current", help="stage-profile.json from the run to inspect")
+    p.add_argument("--against", default="",
+                   help="an earlier stage-profile.json to compare against")
+    p.set_defaults(func="cmd_profile")
 
     p = sub.add_parser("weekly-full-sync", help="weekly complete rebrand audit or snapshot; never pushes or merges")
     p.add_argument("--mode", choices=["report", "snapshot"], default="report",
