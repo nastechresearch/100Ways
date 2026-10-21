@@ -4,9 +4,15 @@
 
 ## Telegram commands
 
-The reply keyboard provides `Status`, `Progress`, `Errors`, `Remaining`, `PR status`, and `Help`. Free-form questions may be answered by Ollama Cloud using `gemma4:31b-cloud` when `OLLAMA_API_KEY` is available. AI responses are informational only and cannot authorize or execute a merge, tag, release, deployment, or gate bypass.
+Commands come from one registry (`hundredways/telegram_commands.py`) that declares each name, its aliases, its argument budget and the trust level it requires, so the menu a commander sees is generated from the same rows the dispatcher answers from. The reply keyboard provides `Status`, `Progress`, `Errors`, `Remaining`, `Gates`, `PR status`, `Help` and `Whoami`. Aliases such as `/PR_Status@BotName`, `what-is receipt` and `reload` resolve to the same canonical command, and a malformed command gets its usage line instead of an AI guess.
 
-Conversation memory is bounded to the latest 40 redacted events and is stored in a short-lived Actions cache. The update cursor is persisted so a later scheduled window does not repeatedly answer the same Telegram update. The bot only accepts messages from the configured `TELEGRAM_CHAT_ID`.
+Three levels exist and each is named by Telegram ids in Actions secrets: `read` is the configured chat, widened by `TELEGRAM_ALLOW_CHATS`; `TELEGRAM_OPERATORS` adds the command audit and re-read verbs; `TELEGRAM_ADMINS` additionally holds the level the write verbs require. An unset list grants nothing, so a deployment that configures no allowlist is read-only. `Whoami` reports the chat id, the user id and the level the bot actually granted, which is how an operator finds the id to allowlist. Messages from a chat that is not allowlisted are not answered at all.
+
+Free-form questions may be answered by Ollama Cloud using `gemma4:31b-cloud` when `OLLAMA_API_KEY` is available. AI responses are informational only and cannot authorize or execute a merge, tag, release, deployment, or gate bypass. No command merges, tags, releases or deploys; the strongest verb available can only open work for a human to review.
+
+Notifications and answers are delivered as plain text. Telegram rejects unbalanced Markdown entities, and a commit subject containing `*` or `_` is ordinary on a real run, so markup would silently drop the whole message.
+
+Conversation memory is bounded to the latest 40 redacted events and is stored in a short-lived Actions cache. Each line records who asked, the level they held and the command they used. The update cursor is persisted so a later scheduled window does not repeatedly answer the same Telegram update, and a scheduled status message is skipped when nothing the chat cares about changed since the last delivery.
 
 ## Public Pages boundary
 

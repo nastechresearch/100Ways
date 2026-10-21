@@ -39,7 +39,8 @@ def test_telegram_status_commands_are_structured_and_safe():
     assert reply_keyboard()["keyboard"] == [
         ["Status", "Progress"],
         ["Errors", "Remaining"],
-        ["PR status", "Help"],
+        ["Gates", "PR status"],
+        ["Help", "Whoami"],
     ]
 
 
