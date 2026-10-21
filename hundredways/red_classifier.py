@@ -1,7 +1,11 @@
 """Sort a red CI check on the rebrand fork into the one class that owns the fix.
 
-The fork's CI can only go red three ways, and each has a different owner:
+The fork's CI can only go red four ways, and each has a different owner:
 
+* ``PUBLISHER_CONFIGURATION`` -- a lane that pre-flights its own signing inputs goes red
+  because this repository has never had them set: no Apple certificate, no Azure Trusted
+  Signing variables.  Nothing in the tree is wrong and no sync fixes it; the owner of the
+  fix is the repo's Actions settings.
 * ``RUNNER_CAPACITY`` -- the org has no paid runner, so the brand transform rewrites every
   upstream ``runs-on`` down to a free hosted image and drops its vCPU count.  An assertion
   against an absolute wall clock then fails here and passes upstream on the same commit.
@@ -15,9 +19,11 @@ The fork's CI can only go red three ways, and each has a different owner:
 Classifying is safe to automate because each call is gated on a *measured* precondition,
 read at call time from :mod:`hundredways.red_evidence`: the image the transform was obliged
 to substitute, the cap out of the file that enforces it, the chain's size with the brand
-tokens reversed, and the upstream file delta.  Precedence is divergence, then brand
-inflation, then capacity -- strongest evidence first and cheapest-to-be-wrong last, because
-a false "it is only the runner" is how a real divergence ships.
+tokens reversed, the upstream file delta, and the inputs a step printed with nothing after
+the colon.  Precedence is publisher configuration, then divergence, then brand inflation,
+then capacity -- strongest evidence first and cheapest-to-be-wrong last, because a false
+"it is only the runner" is how a real divergence ships, and an unset credential outranks
+even a divergence: it is not a fact about the tree at all.
 
 What this module refuses to do: claim a class whose precondition is missing (it returns
 ``UNKNOWN`` and names the missing fact), drop a lane that did not pass (a job that reports
@@ -28,11 +34,15 @@ Evidence is composed from names and measured numbers only, and every rendered li
 engine's canonical secret shapes.
 
 There is no allowlist of failing test names anywhere in the decision path -- such a list rots
-the day upstream renames a test.  The only two name-shaped patterns here are
-:data:`_AGGREGATE_HINTS`, which decides whether a check-run is a red at all (a job that reports
-on other jobs has no product outcome to classify), and :data:`_SIZE_LINT_TEXT`, which only
-words an ``UNKNOWN`` for a lint whose budget cannot be measured.  Neither can select a class,
-and both read *job* names, never test names.
+the day upstream renames a test.  The name-shaped patterns here are :data:`_AGGREGATE_HINTS`,
+which decides whether a check-run is a red at all (a job that reports on other jobs has no
+product outcome to classify), :data:`_SIZE_LINT_TEXT`, which only words an ``UNKNOWN`` for a
+lint whose budget cannot be measured, and ``red_evidence._MISSING_INPUT_CLAIM``, which matches
+the wording a workflow uses for its own pre-flight and can select
+``PUBLISHER_CONFIGURATION`` only when the same log shows those very identifiers printed with
+nothing after the colon.  The first two read *job* names, never test names; the third reads
+the error stream, and a log that contradicts it -- an identifier shown carrying a value --
+refuses the class.
 """
 
 from __future__ import annotations
@@ -59,6 +69,7 @@ _AGGREGATE_HINTS = ("required checks", "aggregate", "detect affected")
 
 
 class RedClass(str, Enum):
+    PUBLISHER_CONFIGURATION = "PUBLISHER_CONFIGURATION"
     RUNNER_CAPACITY = "RUNNER_CAPACITY"
     BRAND_INFLATION = "BRAND_INFLATION"
     GENUINE_DIVERGENCE = "GENUINE_DIVERGENCE"
@@ -66,6 +77,7 @@ class RedClass(str, Enum):
 
 
 OWNERS: Mapping[RedClass, str] = {
+    RedClass.PUBLISHER_CONFIGURATION: "the repo owner — this repo's Actions settings",
     RedClass.RUNNER_CAPACITY: "nobody — hardware",
     RedClass.BRAND_INFLATION: "100Ways brand transform",
     RedClass.GENUINE_DIVERGENCE: "upstream sync",
@@ -250,6 +262,9 @@ def classify(check: FailedCheck, facts: SyncFacts) -> Verdict:
     files = check.implicated_files
     claims = evidence.wall_clock_claims(check.log)
     missing: list[str] = []
+    configuration = _publisher_configuration(check, facts, missing)
+    if configuration is not None:
+        return configuration
     if not facts.delta_known:
         missing.append(
             f"no upstream file delta for {check.name or facts.lane or 'this check'}: "
@@ -274,6 +289,59 @@ def classify(check: FailedCheck, facts: SyncFacts) -> Verdict:
             "budget in the handed tree measures over its own cap"
         )
     return _unknown(check, facts, missing)
+
+
+def _publisher_configuration(
+    check: FailedCheck, facts: SyncFacts, missing: list[str]
+) -> Verdict | None:
+    """A lane that pre-flighted its own configured inputs and found them unset.
+
+    Ranked above divergence because it is not a fact about the tree: the code that runs the
+    check is the code that reports the gap, and syncing it changes nothing.  The claim is
+    only accepted when the same log shows those identifiers printed with nothing after the
+    colon -- and a log that shows one of them carrying a value refuses the class, because a
+    red that says "unset" next to a set input is some other red wearing a familiar coat.
+    """
+    claims = evidence.missing_inputs(check.log)
+    if not claims:
+        return None
+    corroborated = [claim for claim in claims if claim.corroborated]
+    if not corroborated:
+        contradicted = claims[0]
+        missing.append(
+            f"this red says {len(contradicted.names)} {contradicted.kind} are unread on the "
+            f"{contradicted.environment} environment, but the same log shows "
+            f"{len(contradicted.bound)} of them carrying a value, so that is not the reason"
+        )
+        return None
+    claim = max(corroborated, key=lambda item: len(item.unbound))
+    lines = [
+        f"the run's own pre-flight names {len(claim.names)} unread {claim.kind} on the "
+        f"{claim.environment} environment: {', '.join(claim.names[:8])}"
+        + (f" and {len(claim.names) - 8} more" if len(claim.names) > 8 else ""),
+        f"{len(claim.unbound)} of those {len(claim.names)} appear in this log printed with "
+        "nothing after the colon, which is what an unset input looks like in a step's own "
+        "environment dump",
+        f"this red reports {len(check.test_ids)} test id(s) and names "
+        f"{len(check.implicated_files)} file(s), so there is no assertion here for a "
+        "product fix to satisfy",
+    ]
+    if facts.upstream_succeeded:
+        lines.append(
+            f"upstream's own {facts.lane} lane ran on {facts.upstream_image or 'its runner'} "
+            f"and reported {len(facts.upstream_failed_tests)} failing test id(s)"
+        )
+    return Verdict(
+        check=check.name,
+        kind=RedClass.PUBLISHER_CONFIGURATION,
+        evidence=tuple(lines),
+        owner=OWNERS[RedClass.PUBLISHER_CONFIGURATION],
+        action=(
+            f"Set the {len(claim.names)} {claim.kind} named above on the "
+            f"{claim.environment} environment of this repository, then re-run {check.name}. "
+            "Names only -- no value is quoted here, and none belongs in a report."
+        ),
+    )
 
 
 def _divergence(

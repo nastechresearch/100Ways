@@ -566,3 +566,86 @@ def _measure(kind: str, members: tuple[str, ...], cap: int, texts: dict[str, str
     branded = sum(len(texts[member]) for member in members)
     upstream = sum(len(unbrand(texts[member])) for member in members)
     return SizeReport(kind, members, branded, upstream, cap)
+
+
+# ---------------------------------------------------------------------------
+# Configured inputs the run could not read
+# ---------------------------------------------------------------------------
+
+# The fork's release lanes pre-flight their own signing inputs and print what is unset.
+# Measured shapes, from run 39582399772 of ``desktop-bundled-release.yml``:
+#
+#   required signing/notarization credentials are missing from release-signing: CSC_LINK ...
+#   required Azure Trusted Signing vars are missing from release-signing: AZURE_SIGN_...
+#
+# The wording is the workflow's, so a lane that words it differently is not recognised here
+# and lands UNKNOWN: no class is better than a wrong one.  ``[^\n:]*?`` cannot cross the
+# timestamp colon, which is what keeps the ``echo "::error::...${missing[*]}"`` source line
+# (a template, not a measurement) out of the results.
+_MISSING_INPUT_CLAIM = re.compile(
+    r"[^\n:]*?\b(?P<kind>credentials|vars|variables|secrets|inputs)\b"
+    r"[^\n:]* are missing from (?P<environment>[A-Za-z0-9._-]+):"
+    r"[ \t]*(?P<names>[A-Z][A-Z0-9_]*(?:[ \t]+[A-Z][A-Z0-9_]*)+)"
+)
+
+# ``  CSC_LINK: `` -- an input the step printed with nothing after the colon.  A secret that
+# is set shows a value or GitHub's mask, so it lands in ``bound`` and refuses the call.  The
+# prefix is the log's own timestamp, which every Actions line carries before the indentation.
+_INPUT_BINDING = re.compile(
+    r"^[^\n]*[ \t](?P<name>[A-Z][A-Za-z0-9_]{2,}):[ \t]*(?P<value>.*?)[ \t]*$", re.MULTILINE
+)
+
+
+@dataclass(frozen=True)
+class MissingInputs:
+    """One pre-flight's statement that configured inputs are unreadable, and what agrees."""
+
+    environment: str
+    kind: str
+    names: tuple[str, ...]
+    unbound: tuple[str, ...]
+    bound: tuple[str, ...]
+
+    @property
+    def corroborated(self) -> bool:
+        """Nothing this claim names is shown carrying a value anywhere in the log."""
+        return not self.bound
+
+
+def input_bindings(text: str) -> tuple[frozenset[str], frozenset[str]]:
+    """(names bound to nothing, names bound to something) read off a step's own dump."""
+    unbound: set[str] = set()
+    bound: set[str] = set()
+    for match in _INPUT_BINDING.finditer(text):
+        if match.group("value"):
+            bound.add(match.group("name"))
+        else:
+            unbound.add(match.group("name"))
+    return frozenset(unbound), frozenset(bound)
+
+
+def missing_inputs(text: str) -> tuple[MissingInputs, ...]:
+    """Every configured-input pre-flight in a job log, checked against the log's own bindings.
+
+    Only identifiers are ever returned.  A value -- masked or not -- is read only to decide
+    whether it contradicts the claim, and it does not leave this function.
+    """
+    unbound, bound = input_bindings(text)
+    seen: set[tuple[str, str, tuple[str, ...]]] = set()
+    found: list[MissingInputs] = []
+    for match in _MISSING_INPUT_CLAIM.finditer(text):
+        names = tuple(match.group("names").split())
+        key = (match.group("environment"), match.group("kind"), names)
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(
+            MissingInputs(
+                environment=match.group("environment"),
+                kind=match.group("kind"),
+                names=names,
+                unbound=tuple(name for name in names if name in unbound),
+                bound=tuple(name for name in names if name in bound),
+            )
+        )
+    return tuple(found)

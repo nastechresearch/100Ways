@@ -396,3 +396,98 @@ def test_the_dossier_battery_renders_as_three_classes_and_no_invention():
     ):
         assert not re.search(shape, rendered, re.IGNORECASE), shape
     assert "No verdict moves a cap, a budget, or a guard" in rendered
+
+
+# ---------------------------------------------------------------------------
+# Class 4, measured off the fork's own release dispatch (run 39582399772)
+# ---------------------------------------------------------------------------
+
+DARWIN_LANE = "bundled darwin-arm64 (darwin-arm64, macos-15)"
+WINDOWS_LANE = "bundled win32-x64 (win32-x64, windows-latest)"
+RESULT_LANE = "bundled darwin-arm64 result"
+
+# Both verbatim from the job logs, including the line the workflow's own `echo` prints
+# before it: a template (`${missing[*]}`) is not a measurement and must not parse.
+DARWIN_LOG = (
+    "2026-10-21T10:15:31.9610360Z   PYTHONDONTWRITEBYTECODE: 1\n"
+    "2026-10-21T10:15:31.9610640Z   CSC_LINK: \n"
+    "2026-10-21T10:15:31.9610930Z   CSC_KEY_PASSWORD: \n"
+    "2026-10-21T10:15:31.9611230Z   APPLE_API_KEY_P8: \n"
+    "2026-10-21T10:15:31.9611460Z   APPLE_API_KEY_ID: \n"
+    "2026-10-21T10:15:31.9611760Z   APPLE_API_ISSUER: \n"
+    "2026-10-21T10:15:31.9612060Z ##[endgroup]\n"
+    "2026-10-21T10:15:32.0460390Z ##[error]required signing/notarization credentials are "
+    "missing from release-signing: CSC_LINK CSC_KEY_PASSWORD APPLE_API_KEY_P8 "
+    "APPLE_API_KEY_ID APPLE_API_ISSUER\n"
+    "2026-10-21T10:15:32.0465950Z ##[error]Process completed with exit code 1.\n"
+)
+WINDOWS_LOG = (
+    "2026-10-21T10:27:41.5372800Z   echo \"::error::required Azure Trusted Signing vars are "
+    "missing from release-signing: ${missing[*]}\"\n"
+    "2026-10-21T10:27:41.5397656Z   AZURE_SIGN_ENDPOINT: \n"
+    "2026-10-21T10:27:41.5397881Z   AZURE_SIGN_ACCOUNT: \n"
+    "2026-10-21T10:27:41.5398093Z   AZURE_SIGN_PROFILE: \n"
+    "2026-10-21T10:27:41.5937729Z ##[error]required Azure Trusted Signing vars are missing "
+    "from release-signing: AZURE_SIGN_ENDPOINT AZURE_SIGN_ACCOUNT AZURE_SIGN_PROFILE\n"
+    "2026-10-21T10:27:41.5964056Z ##[error]Process completed with exit code 1.\n"
+)
+DOWNSTREAM_LOG = (
+    "2026-10-21T10:15:42.4773025Z ##[error]selected native build did not succeed, or the "
+    "other trust branch was not skipped\n"
+    "2026-10-21T10:15:42.4793099Z ##[error]Process completed with exit code 1.\n"
+)
+
+
+def test_the_dossiers_mac_preflight_is_publisher_configuration():
+    verdicts = rc.classify_runs(
+        _payload(_fork(DARWIN_LANE, DARWIN_LOG, "macos-15")), upstream_changed_files=[]
+    )
+    assert len(verdicts) == 1
+    verdict = verdicts[0]
+    assert verdict.kind is rc.RedClass.PUBLISHER_CONFIGURATION
+    joined = " ".join(verdict.evidence)
+    assert "5 unread credentials" in joined
+    assert "release-signing" in joined
+    assert verdict.owner.startswith("the repo owner")
+
+
+def test_the_dossiers_windows_preflight_is_publisher_configuration():
+    """The Azure red words itself differently -- `vars`, not `credentials` -- and reads the same."""
+    verdicts = rc.classify_runs(
+        _payload(_fork(WINDOWS_LANE, WINDOWS_LOG, "windows-latest")), upstream_changed_files=[]
+    )
+    verdict = verdicts[0]
+    assert verdict.kind is rc.RedClass.PUBLISHER_CONFIGURATION
+    assert "3 unread vars" in " ".join(verdict.evidence)
+    # The `${missing[*]}` source line is a template: it must not be counted as a second claim.
+    assert "$" not in " ".join(verdict.evidence)
+
+
+def test_the_downstream_result_job_still_refuses_a_class():
+    """Known limit, recorded: a job that reports on other jobs names no measurement of its own."""
+    verdicts = rc.classify_runs(
+        _payload(_fork(RESULT_LANE, DOWNSTREAM_LOG, "macos-15")), upstream_changed_files=[]
+    )
+    assert verdicts[0].kind is rc.RedClass.UNKNOWN
+
+
+def test_one_release_dispatch_sorts_into_configuration_and_nothing_else():
+    verdicts = rc.classify_runs(
+        _payload(
+            _fork(DARWIN_LANE, DARWIN_LOG, "macos-15"),
+            _fork(WINDOWS_LANE, WINDOWS_LOG, "windows-latest"),
+            _fork(RESULT_LANE, DOWNSTREAM_LOG, "macos-15"),
+        ),
+        upstream_changed_files=["desktop-bundled-release.yml"],
+        baseline_sha=BASELINE,
+        current_sha=CURRENT,
+    )
+    kinds = [verdict.kind for verdict in verdicts]
+    assert kinds.count(rc.RedClass.PUBLISHER_CONFIGURATION) == 2
+    assert kinds.count(rc.RedClass.GENUINE_DIVERGENCE) == 0
+    assert kinds.count(rc.RedClass.UNKNOWN) == 1
+    rendered = rc.render(verdicts)
+    assert "PUBLISHER_CONFIGURATION 2" in rendered
+    for name in ("CSC_LINK", "AZURE_SIGN_ENDPOINT"):
+        assert name in rendered
+    assert "***" not in rendered

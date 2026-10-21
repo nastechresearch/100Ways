@@ -1090,3 +1090,133 @@ def test_unknown_names_every_precondition_that_did_not_measure_out():
     assert len(verdict.evidence) == 5
     assert verdict.owner == "the person reading this red"
     assert "Fill in the missing fact" in verdict.action
+
+
+# ---------------------------------------------------------------------------
+# Publisher configuration: the red that no file in the tree owns
+# ---------------------------------------------------------------------------
+
+SIGNING_LOG = (
+    "2026-10-21T10:15:31.9610360Z   PYTHONDONTWRITEBYTECODE: 1\n"
+    "2026-10-21T10:15:31.9610640Z   CSC_LINK: \n"
+    "2026-10-21T10:15:31.9610930Z   CSC_KEY_PASSWORD: \n"
+    "2026-10-21T10:15:31.9611230Z   APPLE_API_KEY_P8: \n"
+    "2026-10-21T10:15:31.9611460Z   APPLE_API_KEY_ID: \n"
+    "2026-10-21T10:15:31.9611760Z   APPLE_API_ISSUER: \n"
+    "2026-10-21T10:15:32.0460390Z ##[error]required signing/notarization credentials are "
+    "missing from release-signing: CSC_LINK CSC_KEY_PASSWORD APPLE_API_KEY_P8 "
+    "APPLE_API_KEY_ID APPLE_API_ISSUER\n"
+    "2026-10-21T10:15:32.0465950Z ##[error]Process completed with exit code 1.\n"
+)
+RELEASE_LANE = "bundled darwin-arm64 (darwin-arm64, macos-15)"
+
+
+def _signing_log(**overrides: str) -> str:
+    text = SIGNING_LOG
+    for name, value in overrides.items():
+        text = text.replace(f"  {name}: \n", f"  {name}: {value}\n")
+    return text
+
+
+def _release_facts(**kwargs) -> rc.SyncFacts:
+    defaults = {
+        "lane": RELEASE_LANE,
+        "fork_image": "macos-15",
+        "upstream_changed_files": [],
+        "upstream_succeeded": None,
+    }
+    return rc.SyncFacts(**{**defaults, **kwargs})
+
+
+def test_an_unset_signing_credential_is_configuration_not_a_product_red():
+    check = rc.FailedCheck.from_check_run(_fork_run(RELEASE_LANE, SIGNING_LOG, "macos-15"))
+    verdict = rc.classify(check, _release_facts())
+    assert verdict.kind is rc.RedClass.PUBLISHER_CONFIGURATION
+    assert verdict.owner == "the repo owner — this repo's Actions settings"
+    assert "release-signing" in verdict.action
+    assert "re-run" in verdict.action
+
+
+def test_the_configuration_call_outranks_a_divergence_in_the_same_file():
+    """Syncing cannot set a credential, so a delta touching the lane's own workflow stays put."""
+    check = rc.FailedCheck.from_check_run(_fork_run(RELEASE_LANE, SIGNING_LOG, "macos-15"))
+    verdict = rc.classify(
+        check, _release_facts(upstream_changed_files=["desktop-bundled-release.yml"])
+    )
+    assert verdict.kind is rc.RedClass.PUBLISHER_CONFIGURATION
+    assert not any("upstream changed" in line for line in verdict.evidence)
+
+
+def test_the_configuration_verdict_names_the_environment_and_counts_the_inputs():
+    check = rc.FailedCheck.from_check_run(_fork_run(RELEASE_LANE, SIGNING_LOG, "macos-15"))
+    verdict = rc.classify(check, _release_facts())
+    joined = " ".join(verdict.evidence)
+    assert "5 unread credentials" in joined
+    assert "release-signing environment" in joined
+    assert "CSC_LINK" in joined
+    assert "nothing after the colon" in joined
+
+
+def test_a_named_input_shown_carrying_a_value_refuses_the_class():
+    """The falsification: a log that contradicts its own pre-flight is some other red."""
+    log = _signing_log(CSC_LINK="p12-data-here")
+    check = rc.FailedCheck.from_check_run(_fork_run(RELEASE_LANE, log, "macos-15"))
+    verdict = rc.classify(check, _release_facts())
+    assert verdict.kind is rc.RedClass.UNKNOWN
+    assert any("carrying a value" in line for line in verdict.evidence)
+
+
+def test_a_masked_value_counts_as_configured_not_missing():
+    """GitHub prints a set secret as ``***``; that is a value, and the call must refuse it."""
+    log = _signing_log(APPLE_API_ISSUER="***")
+    check = rc.FailedCheck.from_check_run(_fork_run(RELEASE_LANE, log, "macos-15"))
+    assert rc.classify(check, _release_facts()).kind is rc.RedClass.UNKNOWN
+
+
+def test_no_value_of_a_named_input_reaches_the_report():
+    log = _signing_log(CSC_KEY_PASSWORD="hunter2-not-a-secret")
+    check = rc.FailedCheck.from_check_run(_fork_run(RELEASE_LANE, log, "macos-15"))
+    verdict = rc.classify(check, _release_facts())
+    assert verdict.kind is rc.RedClass.UNKNOWN
+    assert "hunter2" not in " ".join(verdict.evidence + (verdict.action,))
+
+
+def test_prose_about_missing_credentials_selects_nothing():
+    """A human sentence is not a pre-flight: without the env and the name list there is no call."""
+    log = "the signing credentials are missing from this run, which is expected on a fork\n"
+    check = rc.FailedCheck.from_check_run(_fork_run(RELEASE_LANE, log, "macos-15"))
+    verdict = rc.classify(check, _release_facts())
+    assert verdict.kind is not rc.RedClass.PUBLISHER_CONFIGURATION
+
+
+def test_a_capacity_red_still_reads_as_capacity_with_the_new_class_present(tmp_path):
+    """Adding a class must not swallow the dossier's own reds."""
+    check = rc.FailedCheck.from_check_run(
+        _fork_run("tests (3.14, ubuntu-latest)", OFF_LOOP_LOG, "ubuntu-latest")
+    )
+    verdict = rc.classify(check, _off_loop_facts())
+    assert verdict.kind is rc.RedClass.RUNNER_CAPACITY
+
+
+def test_configuration_is_reachable_through_the_payload_surface():
+    verdicts = rc.classify_runs(
+        _payload(_fork_run(RELEASE_LANE, SIGNING_LOG, "macos-15")),
+        upstream_changed_files=[],
+    )
+    assert [verdict.kind for verdict in verdicts] == [rc.RedClass.PUBLISHER_CONFIGURATION]
+    rendered = rc.render(verdicts)
+    assert "PUBLISHER_CONFIGURATION 1" in rendered
+    assert "CSC_LINK" in rendered
+    assert "release-signing" in rendered
+
+
+def test_missing_inputs_returns_identifiers_and_never_their_values():
+    from hundredways import red_evidence as evidence
+
+    claims = evidence.missing_inputs(_signing_log(APPLE_API_KEY_P8="a-value-123"))
+    assert len(claims) == 1
+    claim = claims[0]
+    assert claim.names[0] == "CSC_LINK"
+    assert claim.bound == ("APPLE_API_KEY_P8",)
+    assert "a-value-123" not in repr(claim)
+    assert evidence.input_bindings(SIGNING_LOG)[0] >= {"CSC_LINK", "APPLE_API_ISSUER"}
