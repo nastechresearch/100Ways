@@ -12,10 +12,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
+import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 from urllib.request import Request, urlopen
 
 from .commit_stream import CommitStreamDecision, format_telegram_status
@@ -25,6 +27,7 @@ from .telegram_commands import (
     LEVELS,
     OPERATE,
     READ,
+    REGISTRY,
     Access,
     Command,
     Request as CommandRequest,
@@ -34,6 +37,24 @@ from .telegram_commands import (
     menu,
     parse,
     usage_for,
+)
+from .telegram_transport import (
+    MAX_CHAIN_HOPS,
+    MAX_WINDOW_SECONDS,
+    ProposalStore,
+    apply_block,
+    call_api,
+    context_excerpt,
+    dispatch_workflow,
+    edit_rejection,
+    land_proposal,
+    new_proposal,
+    normalize_path,
+    parse_block,
+    path_rejection,
+    plan_renewal,
+    py_compiles,
+    TelegramDeliveryError,
 )
 
 BUTTONS = (
@@ -75,6 +96,7 @@ def load_memory(path: str | Path) -> dict[str, Any]:
     return {
         "offset": int(data.get("offset", 0) or 0),
         "events": events[-MAX_MEMORY_EVENTS:] if isinstance(events, list) else [],
+        "window_key": str(data.get("window_key", ""))[:64],
     }
 
 
@@ -85,6 +107,7 @@ def save_memory(path: str | Path, memory: dict[str, Any]) -> None:
     safe = {
         "offset": int(memory.get("offset", 0) or 0),
         "events": memory.get("events", [])[-MAX_MEMORY_EVENTS:],
+        "window_key": str(memory.get("window_key", ""))[:64],
     }
     target.write_text(json.dumps(safe, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -115,18 +138,7 @@ def _record(
 
 
 def _api(token: str, method: str, payload: dict[str, Any]) -> dict[str, Any]:
-    body = json.dumps(payload).encode("utf-8")
-    request = Request(
-        f"https://api.telegram.org/bot{token}/{method}",
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urlopen(request, timeout=TELEGRAM_TIMEOUT_SECONDS) as response:
-        result = json.loads(response.read().decode("utf-8"))
-    if not result.get("ok"):
-        raise RuntimeError(f"Telegram {method} failed")
-    return result
+    return call_api(token, method, payload)
 
 
 def send_message(token: str, chat_id: str, text: str, *, keyboard: bool = True) -> None:
@@ -346,6 +358,164 @@ def format_whoami(request: CommandRequest, access: Access, level: str | None) ->
     return "\n".join(lines)
 
 
+def _proposal_file(state_path: str) -> Path:
+    return Path(state_path).with_name("proposals.json") if state_path else Path("proposals.json")
+
+
+def load_proposals(path: str | Path) -> ProposalStore:
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ProposalStore()
+    return ProposalStore(raw if isinstance(raw, dict) else None)
+
+
+def save_proposals(path: str | Path, store: ProposalStore) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(store.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _header(title: str) -> list[str]:
+    return ["NASTECH / 100WAYS", title, "────────────────────"]
+
+
+def format_pending(store: ProposalStore) -> str:
+    lines = _header("PROPOSED EDITS")
+    waiting = store.open()
+    if not waiting:
+        return "\n".join([*lines, "Nothing is waiting. Edit proposes, apply lands it as a PR."])
+    for proposal in waiting:
+        lines.append(f"• {proposal.id} {proposal.path} ({len(proposal.search)}-line anchor)")
+    lines.append("")
+    lines.append("apply <id> verifies it and opens a PR; cancel <id> drops it.")
+    return "\n".join(lines)
+
+
+def handle_edit(call: Call) -> str:
+    path, _, instruction = _first(call.args).partition(" ")
+    if not instruction.strip():
+        return usage_for(REGISTRY["edit"])
+    clean = normalize_path(path)
+    blocked = path_rejection(clean)
+    if blocked:
+        return "\n".join([*_header("EDIT REFUSED"), blocked])
+    target = Path(call.runtime.workspace) / clean if call.runtime.workspace else None
+    if target is None or not target.is_file():
+        return "\n".join([*_header("EDIT REFUSED"), f"{clean} is not a file in this engine checkout."])
+    try:
+        current = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        return "\n".join([*_header("EDIT REFUSED"), f"Could not read {clean}: {type(error).__name__}"])
+    engine = call.runtime.model()
+    if engine is None or not getattr(engine, "available", False):
+        return "\n".join(
+            [
+                *_header("EDIT REFUSED"),
+                "No OLLAMA_API_KEY is set for this run, so no change was proposed.",
+                "A proposal is drafted by the model and verified by the checks; neither is faked.",
+            ]
+        )
+    block = parse_block(engine.edit_block(clean, context_excerpt(current, instruction), instruction))
+    if block is None:
+        return "\n".join(
+            [*_header("EDIT REFUSED"), "The model returned no SEARCH/REPLACE block; nothing was proposed."]
+        )
+    proposed = apply_block(current, block)
+    if proposed is None:
+        return "\n".join(
+            [
+                *_header("EDIT REFUSED"),
+                f"That search text does not appear exactly once in {clean}, so it was not applied.",
+                "Quote the current lines verbatim, or run Status to see what the tree holds now.",
+            ]
+        )
+    rejection = edit_rejection(clean, current, proposed)
+    if rejection:
+        return "\n".join([*_header("EDIT REFUSED"), rejection])
+    if not py_compiles(clean, proposed):
+        return "\n".join([*_header("EDIT REFUSED"), "The proposed edit does not compile; nothing was stored."])
+    proposal = new_proposal(
+        path=clean,
+        instruction=instruction,
+        block=block,
+        current=current,
+        proposed=proposed,
+        author=call.request.user_id,
+    )
+    call.runtime.proposals.add(proposal)
+    save_proposals(_proposal_file(call.runtime.state_path), call.runtime.proposals)
+    return "\n".join(
+        (
+            *_header(f"PROPOSED EDIT {proposal.id}"),
+            f"{clean} by user {proposal.author or 'unknown'}",
+            "",
+            proposal.preview,
+            "",
+            f"Nothing has been written. Send: apply {proposal.id}",
+            BOUNDARY_LINE,
+        )
+    )
+
+
+def handle_apply(call: Call) -> str:
+    proposal = call.runtime.proposals.get(_first(call.args))
+    if proposal is None:
+        return "No proposed edit with that id. Send pending to list them."
+    if proposal.status != "proposed":
+        return f"{proposal.id} is already {proposal.status}."
+    if proposal.author and proposal.author != call.request.user_id:
+        return f"Only the commander who proposed {proposal.id} can land it."
+    if not call.runtime.workspace or not call.runtime.test_command:
+        return "This run has no engine checkout or check command, so an edit cannot be verified."
+    target = Path(call.runtime.workspace) / proposal.path
+    try:
+        current = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return f"{proposal.path} is no longer readable in the checkout; the edit was not applied."
+    outcome = land_proposal(
+        proposal=proposal,
+        workspace=Path(call.runtime.workspace),
+        runner=call.runtime.runner,
+        repo=call.runtime.repo,
+        test_command=call.runtime.test_command,
+        current_text=current,
+    )
+    call.runtime.proposals.mark(proposal.id, "opened" if outcome.ok else "refused", note=outcome.text)
+    save_proposals(_proposal_file(call.runtime.state_path), call.runtime.proposals)
+    return "\n".join(
+        (
+            *_header(f"EDIT {'OPENED FOR REVIEW' if outcome.ok else 'REFUSED'}"),
+            outcome.text,
+            BOUNDARY_LINE,
+        )
+    )
+
+
+def handle_cancel(call: Call) -> str:
+    proposal = call.runtime.proposals.mark(_first(call.args), "cancelled")
+    if proposal is None:
+        return "No proposed edit with that id. Send pending to list them."
+    save_proposals(_proposal_file(call.runtime.state_path), call.runtime.proposals)
+    return f"Cancelled {proposal.id}: {proposal.path} was not written and no branch was pushed."
+
+
+def handle_stay(call: Call) -> str:
+    try:
+        requested = int(_first(call.args))
+    except ValueError:
+        return usage_for(REGISTRY["stay"])
+    requested = min(max(requested, 0), MAX_WINDOW_SECONDS)
+    if not requested:
+        return "stay needs a positive number of seconds, up to " + str(MAX_WINDOW_SECONDS) + "."
+    call.runtime.requested_seconds = requested
+    call.runtime.extra_seconds = requested
+    return (
+        f"Listening again for {requested}s even if this window is quiet "
+        f"(hop {call.runtime.hop + 1}, ceiling {MAX_CHAIN_HOPS} hops)."
+    )
+
+
 def format_help() -> str:
     lines = ["NASTECH / 100WAYS", "TELEGRAM COMMANDS", "────────────────────", menu()]
     lines.extend([
@@ -388,6 +558,14 @@ def _ollama_answer(question: str, context: dict[str, Any], api_key: str) -> str:
     return str(content).strip() or "AI returned no answer. Use Status or Help instead."
 
 
+def _subprocess_runner(command: Sequence[str]) -> tuple[int, str]:
+    """Run a git/gh command for a landing step and return its exit code and output."""
+    completed = subprocess.run(
+        list(command), capture_output=True, text=True, timeout=900, check=False
+    )
+    return completed.returncode, (completed.stdout + completed.stderr)[-4_000:]
+
+
 @dataclass
 class Runtime:
     """Everything a command may answer from, plus the files to re-read on demand.
@@ -402,6 +580,23 @@ class Runtime:
     access: Access = field(default_factory=Access)
     decision_path: str = ""
     context_path: str = ""
+    proposals: ProposalStore = field(default_factory=ProposalStore)
+    state_path: str = ""
+    workspace: str = ""
+    repo: str = ""
+    workflow: str = ""
+    ref: str = "main"
+    github_token: str = ""
+    runner: Callable[[Sequence[str]], tuple[int, str]] = _subprocess_runner
+    test_command: tuple[str, ...] = ()
+    engine: Any = None
+    hop: int = 0
+    window_seconds: int = 900
+    started_at: float = 0.0
+    traffic: int = 0
+    requested_seconds: int = 0
+    extra_seconds: int = 0
+    last_window_key: str = ""
 
     def reload(self) -> str:
         reloaded: list[str] = []
@@ -412,6 +607,25 @@ class Runtime:
             self.context = _load_context(self.context_path)
             reloaded.append("context")
         return ", ".join(reloaded) if reloaded else "no on-disk state to reload"
+
+    @property
+    def elapsed(self) -> float:
+        return max(0.0, time.time() - (self.started_at or time.time()))
+
+    def model(self) -> Any:
+        """The configured AI engine, or None when there is nothing to ask.
+
+        Built on first use because importing and validating the provider is a
+        per-deployment concern: a status-only deployment never needs it.
+        """
+        if self.engine is None:
+            try:
+                from .ai import AIEngine
+
+                self.engine = AIEngine()
+            except Exception:
+                return None
+        return self.engine
 
 
 @dataclass(frozen=True)
@@ -446,6 +660,11 @@ HANDLERS: dict[str, Callable[[Call], str]] = {
     "explain": lambda call: format_explain(_first(call.args)),
     "log": lambda call: format_log(call.runtime.memory, _first(call.args)),
     "refresh": lambda call: f"Reloaded {call.runtime.reload()}.\n{format_progress(call.decision)}",
+    "stay": handle_stay,
+    "pending": lambda call: format_pending(call.runtime.proposals),
+    "edit": handle_edit,
+    "apply": handle_apply,
+    "cancel": handle_cancel,
     "whoami": lambda call: format_whoami(
         call.request,
         call.runtime.access,
@@ -516,9 +735,19 @@ def poll(
     access: Access | None = None,
     decision_path: str = "",
     context_path: str = "",
+    hop: int = 0,
+    workspace: str = "",
+    repo: str = "",
+    workflow: str = "",
+    ref: str = "main",
+    github_token: str = "",
+    test_command: Sequence[str] = (),
+    runner: Callable[[Sequence[str]], tuple[int, str]] | None = None,
 ) -> None:
     """Poll Telegram for a bounded window and answer the chats this deployment trusts."""
-    deadline = time.time() + min(max(seconds, 0), MAX_POLL_SECONDS)
+    window = min(max(seconds, 0), MAX_POLL_SECONDS)
+    started = time.time()
+    deadline = started + window
     memory = load_memory(state_path)
     granted = access if access is not None else Access.from_env(default_chat=chat_id)
     runtime = Runtime(
@@ -528,6 +757,19 @@ def poll(
         access=granted,
         decision_path=decision_path,
         context_path=context_path,
+        proposals=load_proposals(_proposal_file(str(state_path))),
+        state_path=str(state_path),
+        workspace=workspace,
+        repo=repo,
+        workflow=workflow,
+        ref=ref,
+        github_token=github_token,
+        runner=runner or _subprocess_runner,
+        test_command=tuple(test_command),
+        hop=max(int(hop), 0),
+        window_seconds=window,
+        started_at=started,
+        last_window_key=str(memory.get("window_key", "")),
     )
     while time.time() < deadline:
         result = _api(
@@ -550,16 +792,89 @@ def poll(
                 # An unknown chat is answered by nobody, so the bot never advertises itself.
                 save_memory(state_path, memory)
                 continue
+            runtime.traffic += 1
             _record(memory, "user", request.raw, who=request.user_id, level=level, command=request.name)
             answer = dispatch(request, runtime, level=level)
+            if runtime.extra_seconds:
+                deadline = min(deadline + runtime.extra_seconds, started + MAX_POLL_SECONDS)
+                runtime.extra_seconds = 0
             if not answer and ollama_key:
                 answer = _ollama_answer(request.raw, runtime.context, ollama_key)
             if not answer:
                 answer = "I can answer status questions. Send Help for the commands."
             _record(memory, "assistant", answer, who=request.user_id, level=level, command=request.name)
-            send_message(token, request.chat_id, answer)
+            try:
+                send_message(token, request.chat_id, answer)
+            except TelegramDeliveryError as error:
+                # The answer stays in the audit even when Telegram will not take it;
+                # failing the job over a delivery refusal would lose the window too.
+                _record(memory, "system", f"not delivered: {error}", who=request.user_id, level=level)
             save_memory(state_path, memory)
         save_memory(state_path, memory)
+    _renew(runtime, token, chat_id, memory, state_path)
+
+
+def _tell(token: str, chat_id: str, text: str) -> None:
+    """Say something to the owning chat, if this deployment has one to talk to."""
+    if not (token and chat_id):
+        return
+    try:
+        send_message(token, chat_id, text)
+    except TelegramDeliveryError:
+        pass
+
+
+def _renew(runtime: Runtime, token: str, chat_id: str, memory: dict[str, Any], state_path: str | Path) -> None:
+    """Queue the next window only when the chat is actually using these.
+
+    An always-on poll loop would spend the repository's free runner minutes to keep
+    a chat open that nobody is reading, so a quiet window closes the chain and the
+    scheduled monitor takes over.  The key is recorded in the cached state: a second
+    dispatch for the same hop in the same minute is a duplicate, not a retry.
+    """
+    if not (runtime.workflow and runtime.repo and runtime.github_token):
+        # A deployment that did not grant dispatch rights gets no renewal chatter at
+        # all; the scheduled monitor is its only window and that is the honest answer.
+        return
+    plan = plan_renewal(
+        hop=runtime.hop,
+        elapsed_seconds=runtime.elapsed,
+        window_seconds=runtime.window_seconds,
+        saw_traffic=runtime.traffic > 0,
+        requested_seconds=runtime.requested_seconds,
+    )
+    if plan.renewal is None:
+        if runtime.traffic:
+            _tell(token, chat_id, f"Listening window closed: {plan.reason}.")
+        return
+    key = f"{plan.renewal.hop}-{int(time.time() // 60)}"
+    if key == runtime.last_window_key:
+        _tell(token, chat_id, f"Window {plan.renewal.hop} is already queued for this minute; not queueing twice.")
+        return
+    inputs = {**plan.renewal.inputs, "key": key, "reason": plan.reason}
+    try:
+        dispatch_workflow(
+            token=runtime.github_token,
+            repo=runtime.repo,
+            workflow=runtime.workflow,
+            ref=runtime.ref,
+            inputs=inputs,
+        )
+    except (ValueError, RuntimeError, OSError) as error:
+        _tell(
+            token,
+            chat_id,
+            f"Could not queue the next window: {redact_telegram_text(str(error))[:200]}",
+        )
+        return
+    runtime.last_window_key = key
+    memory["window_key"] = key
+    save_memory(state_path, memory)
+    _tell(
+        token,
+        chat_id,
+        f"Window {plan.renewal.hop} queued for {inputs['seconds']}s ({plan.reason}). Send anything and I will answer.",
+    )
 
 
 def main() -> int:
@@ -571,6 +886,13 @@ def main() -> int:
     parser.add_argument("--state", default="telegram-state/interaction.json")
     parser.add_argument("--seconds", type=int, default=900)
     parser.add_argument("--ollama-key", default=os.environ.get("OLLAMA_API_KEY", ""))
+    parser.add_argument("--hop", type=int, default=int(os.environ.get("HUNDREDWAYS_WINDOW_HOP", "0") or 0))
+    parser.add_argument("--workspace", default=os.getcwd())
+    parser.add_argument("--repo", default=os.environ.get("HUNDREDWAYS_REPO", "nastechresearch/100Ways"))
+    parser.add_argument("--workflow", default=os.environ.get("HUNDREDWAYS_WINDOW_WORKFLOW", ""))
+    parser.add_argument("--ref", default=os.environ.get("GITHUB_REF_NAME", "main"))
+    parser.add_argument("--github-token", default=os.environ.get("GITHUB_TOKEN", ""))
+    parser.add_argument("--test-command", default=os.environ.get("HUNDREDWAYS_TEST_COMMAND", ""))
     args = parser.parse_args()
     if not args.token or not args.chat_id:
         return 0
@@ -586,6 +908,13 @@ def main() -> int:
         ollama_key=args.ollama_key,
         decision_path=args.decision,
         context_path=args.context,
+        hop=args.hop,
+        workspace=args.workspace,
+        repo=args.repo,
+        workflow=args.workflow,
+        ref=args.ref,
+        github_token=args.github_token,
+        test_command=tuple(shlex.split(args.test_command)) if args.test_command else (),
     )
     return 0
 

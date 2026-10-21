@@ -14,6 +14,18 @@ Notifications and answers are delivered as plain text. Telegram rejects unbalanc
 
 Conversation memory is bounded to the latest 40 redacted events and is stored in a short-lived Actions cache. Each line records who asked, the level they held and the command they used. The update cursor is persisted so a later scheduled window does not repeatedly answer the same Telegram update, and a scheduled status message is skipped when nothing the chat cares about changed since the last delivery.
 
+## Windows that renew themselves
+
+The scheduled monitor can only answer inside its own run, so a question asked ten minutes later would get silence. `stage-telegram-window.yml` is a `workflow_dispatch` job that opens a bounded poll window and, when the chat is actually using it, queues the next window one hop further along. `hundredways/telegram_transport.py::plan_renewal` owns that decision: a quiet window closes the chain, `stay` asks for a longer one, and the chain stops at `MAX_CHAIN_HOPS` (8) or `MAX_CHAIN_SECONDS` (90 minutes) whatever the chat says. The job is serialized under `concurrency: telegram-window` and never cancelled mid-window, because two pollers sharing one bot consume the same `getUpdates` offset and the second would silently swallow the first operator's messages.
+
+A window does not re-derive the commit stream. Upstream's history is about 1.3 GB, so `stage-commit-stream.yml` publishes its decision and context into `telegram-state/` before saving the cache, and a window answers from the numbers the last scheduled run reported. Dispatching the next window needs `actions: write`; without it the agent says nothing about windows rather than failing the job.
+
+## Editing engine code from the chat
+
+`edit`, `apply`, `cancel` and `pending` are the Edit level: an admin proposes a literal SEARCH/REPLACE block against a file under `hundredways/`, and the strongest outcome available is a pull request against the dispatched ref. The path is refused before the file is read or the model is asked; the modules that judge the pipeline (`ci_policy`, `integrity`, `operation_safety`, `prepublish`, `prompt_gate`, `receipts`, `verify`) cannot be edited from chat at all. A block must match exactly once, the result must compile, must stay under `MAX_EDIT_BYTES`, must not be secret-shaped, and an argument carrying `merge`, `rebase`, `--admin`, `--force` or `--no-verify` is rejected before anything runs.
+
+A proposal is only landed by its own author, and landing means: write the file, run the suite, and only if it is green create a branch, push that branch and open the PR. Any failing step restores the file and pushes nothing. The generated PR body states that opening it does not authorize a merge, tag, release or deployment. Two limits are inherited from GitHub and worth knowing before trusting the surface: a pull request opened with `GITHUB_TOKEN` does not start workflows, so a chat-landed PR shows no checks until a human comments or pushes to it; and the job's own static guard is `ci_policy.audit_workflow_security`, which lists the two paths allowed to push and open PRs, pins each to the events that may start it, and refuses either if it contains a merge.
+
 ## Public Pages boundary
 
 The Pages payload uses schema `100ways.public-status.v1`. It contains abbreviated commit refs, public run links, sanitized gate labels, status history, and explicit publication boundaries. It must never contain tokens, chat IDs, raw logs, private artifacts, or credentials. Pages never becomes a write or approval surface.

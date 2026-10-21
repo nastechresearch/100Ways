@@ -17,7 +17,19 @@ class WorkflowPolicyIssue:
 
 _ACTION_LINE = re.compile(r"^\s*(?:-\s*)?uses:\s*([^\s#]+)", re.MULTILINE)
 _FULL_SHA = re.compile(r"@[0-9a-f]{40}(?:\s|$|#)")
-_PUBLICATION_WORKFLOW = "stage-update-pr.yml"
+_PUBLICATION_WORKFLOWS: dict[str, tuple[str, ...]] = {
+    # The candidate path from #344.  It force-pushes the machine-generated
+    # candidate branch by design, so no rule here forbids that.
+    "stage-update-pr.yml": ("workflow_call",),
+    # The chat path: a poll window whose /apply verb runs the engine suite and
+    # then pushes one branch and opens one PR against the dispatched ref.  It is
+    # listed rather than left to hide inside hundredways/telegram_transport.py,
+    # where this static audit could not see it.  Dispatch-only and merge-free.
+    "stage-telegram-window.yml": ("workflow_dispatch",),
+}
+_MERGE_IN_A_PUBLICATION_PATH = re.compile(
+    r"\bgh\s+pr\s+merge\b|--admin\b", re.IGNORECASE
+)
 
 # The system is deliberately PR-only. These expressions cover GitHub CLI and
 # common deployment actions without attempting to interpret arbitrary shell.
@@ -94,6 +106,42 @@ def _joined_shell(text: str) -> str:
     return "\n".join(joined)
 
 
+def _triggers(text: str) -> set[str]:
+    """Return the events a workflow can be started by, read from its ``on:`` block.
+
+    A publication path is only safe while something has to press the button, so
+    the trigger set is part of what the audit pins down rather than a detail of
+    the file's prose.
+    """
+    lines = text.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        if re.match(r"^on\s*:", line):
+            start = index
+            break
+    if start is None:
+        return set()
+    found: set[str] = set()
+    for line in lines[start + 1 :]:
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent == 0:
+            break
+        if line.lstrip().startswith("#"):
+            continue
+        if indent != 2:
+            continue
+        listed = re.match(r"\s*-\s*([A-Za-z_][\w-]*)", line)
+        if listed:
+            found.add(listed.group(1))
+            continue
+        named = re.match(r"\s*([A-Za-z_][\w-]*)\s*:", line)
+        if named:
+            found.add(named.group(1))
+    return found
+
+
 def audit_workflow_security(
     root: str, *, enforce_publication_policy: bool = True
 ) -> list[WorkflowPolicyIssue]:
@@ -101,8 +149,11 @@ def audit_workflow_security(
 
     The engine's own workflows are fail-closed for release, tag, deployment,
     issue, dispatch, self-approval, and unauthorized publication commands.
-    Candidate snapshots retain their inherited workflow inventory as review
-    evidence; their source workflows are not executable by this engine.
+    Pushing and opening a pull request is confined to the named paths in
+    ``_PUBLICATION_WORKFLOWS``, each of which may only start from its listed
+    events and may never merge what it opened.  Candidate snapshots retain their
+    inherited workflow inventory as review evidence; their source workflows are
+    not executable by this engine.
     """
     base = Path(root)
     workflow_dir = base / ".github" / "workflows"
@@ -173,14 +224,36 @@ def audit_workflow_security(
                 if pattern.search(text):
                     issues.append(WorkflowPolicyIssue(code, rel, detail))
 
-            if workflow.name != _PUBLICATION_WORKFLOW and _PUBLISH_COMMAND.search(text):
+            if workflow.name not in _PUBLICATION_WORKFLOWS and _PUBLISH_COMMAND.search(
+                text
+            ):
                 issues.append(
                     WorkflowPolicyIssue(
                         "unauthorized-publication-path",
                         rel,
                         "candidate PR creation and push are reserved for "
-                        f"{_PUBLICATION_WORKFLOW} (#344)",
+                        f"{', '.join(sorted(_PUBLICATION_WORKFLOWS))} (#344)",
                     )
                 )
+            if workflow.name in _PUBLICATION_WORKFLOWS:
+                allowed = _PUBLICATION_WORKFLOWS[workflow.name]
+                for trigger in sorted(_triggers(text) - set(allowed)):
+                    issues.append(
+                        WorkflowPolicyIssue(
+                            "publication-trigger-not-allowed",
+                            rel,
+                            f"{workflow.name} publishes, so it may not start from "
+                            f"'{trigger}'; allowed: {', '.join(allowed)}",
+                        )
+                    )
+                if _MERGE_IN_A_PUBLICATION_PATH.search(text):
+                    issues.append(
+                        WorkflowPolicyIssue(
+                            "publication-path-may-not-merge",
+                            rel,
+                            "a publication path may open a pull request but never "
+                            "merge one, with or without --admin",
+                        )
+                    )
 
     return issues
