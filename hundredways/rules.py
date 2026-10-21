@@ -345,6 +345,69 @@ def preserved_repo_url_spans(
     return tuple(spans)
 
 
+# ---------------------------------------------------------------------------
+# External service identifiers.  A name that lives inside a service somebody
+# else runs is as little ours to rename as somebody else's repository: the
+# branded spelling is an object the service has never heard of, so the feature
+# resolves a 404 at runtime instead of failing to build.
+# ---------------------------------------------------------------------------
+
+# DocSearch's index is selected by the ``indexName`` of the app its committed
+# ``appId``/``apiKey`` pair can read, so branding that one word while the pair
+# stays inherited splits the triple.  Both the JS object form the fork actually
+# ships (``indexName: 'hermes docs'``) and the JSON form a crawler config would
+# use (``"indexName": "hermes docs"``) are matched; an unquoted YAML value is
+# not, because there the boundary of the name is ambiguous.
+ALGOLIA_INDEX_NAME_RE = re.compile(
+    r"""(?<![A-Za-z0-9_-])["']?indexName["']?[ \t]*:[ \t]*"""
+    r"""(?P<quote>["'])(?P<value>[^"'\n]+)(?P=quote)"""
+)
+
+# Indices that exist in the app the site's DocSearch credentials point at.
+# Measured 2026-10-21 against ``GET /1/indexes`` for appId ``2JLBVEYZN5``, which
+# answers exactly ``hermes docs`` and ``hermes docs.tmp``; the fork owns nothing
+# there, and the docs-search monitor has been red on every run since the index
+# name was branded.
+PROVISIONED_ALGOLIA_INDICES: frozenset[str] = frozenset({"hermes docs"})
+
+
+def provisioned_algolia_indices() -> frozenset[str]:
+    """Index names the fork may brand *to*, i.e. names that really exist.
+
+    ``HUNDREDWAYS_ALGOLIA_INDICES`` is a comma list an owner fills in once they
+    have created their own Algolia app, indexed the fork's docs domain, and put
+    that app's id and search-only key in the site config.  Until then the only
+    reachable object is the inherited index, so that name has to survive.
+    """
+    raw = os.environ.get("HUNDREDWAYS_ALGOLIA_INDICES", "")
+    extra = {item.strip().lower() for item in raw.split(",") if item.strip()}
+    return {name.lower() for name in PROVISIONED_ALGOLIA_INDICES} | extra
+
+
+def preserved_algolia_index_spans(
+    line: str, rules: "BrandingRules | None" = None
+) -> tuple[re.Match, ...]:
+    """``indexName`` values in ``line`` that branding must leave verbatim.
+
+    A value is preserved when it names an index the configured app really has
+    and branding would move it to a name that app has never heard of -- the
+    same test the repository rule makes of an owner, made here of a service's
+    object list.  An index nobody has provisioned is not protected: branding an
+    unknown string is the ordinary policy.
+    """
+    rules = rules if rules is not None else BrandingRules()
+    provisioned = provisioned_algolia_indices()
+    spans: list[re.Match] = []
+    for match in ALGOLIA_INDEX_NAME_RE.finditer(line):
+        value = match.group("value")
+        if value.lower() not in provisioned:
+            continue
+        if rules.brand_service_name(value).lower() in provisioned:
+            continue
+        spans.append(match)
+    return tuple(spans)
+
+
 # Placeholder sentinels used to carry a preserved URL through the token pass.
 # They live in a private-use block and hold no digits, so no normalizer can
 # rewrite them and no brand token can match inside them.
@@ -417,6 +480,10 @@ class BrandingRules:
         """The branded form of a single repository identifier."""
         return self._apply_tokens(path)
 
+    def brand_service_name(self, value: str) -> str:
+        """The branded form of a single external service object name."""
+        return self._apply_tokens(value)
+
     def preserves_repo_path(self, path: str) -> bool:
         """True when branding must leave this repository identifier verbatim.
 
@@ -468,7 +535,9 @@ class BrandingRules:
         if not preserve_foreign_repos:
             return self._apply_tokens(text)
         spans: list[str] = []
-        identifiers: list[str] = []
+        # ``None`` marks a stashed span with no owner to brand into -- an
+        # external service's object name, restored exactly as it was found.
+        identifiers: list[str | None] = []
 
         def _stash(match: re.Match) -> str:
             spans.append(match.group(0))
@@ -476,17 +545,35 @@ class BrandingRules:
             return _mask(len(spans) - 1)
 
         working = GITHUB_REPO_RE.sub(_stash, text)
+        provisioned = provisioned_algolia_indices()
+
+        def _stash_index(match: re.Match) -> str:
+            value = match.group("value")
+            if value.lower() not in provisioned:
+                # No evidence this index exists, so there is nothing to protect:
+                # branding it is the ordinary policy for an unknown string.
+                return match.group(0)
+            if self.brand_service_name(value).lower() in provisioned:
+                return match.group(0)
+            spans.append(match.group(0))
+            identifiers.append(None)
+            return _mask(len(spans) - 1)
+
+        working = ALGOLIA_INDEX_NAME_RE.sub(_stash_index, working)
         if not spans:
             return self._apply_tokens(working)
         branded = self._apply_tokens(working)
         covered = [(m.start(), m.end()) for m in GITHUB_REPO_RE.finditer(text)]
         for index, original in enumerate(spans):
-            keep = (
-                original
-                if self.preserves_repo_path(original)
-                and not self._bare_also_branded(text, identifiers[index], covered)
-                else self.brand_repo_path(original)
-            )
+            identifier = identifiers[index]
+            if identifier is None:
+                keep = original
+            elif self.preserves_repo_path(original) and not self._bare_also_branded(
+                text, identifier, covered
+            ):
+                keep = original
+            else:
+                keep = self.brand_repo_path(original)
             branded = branded.replace(_mask(index), keep)
         return branded
 

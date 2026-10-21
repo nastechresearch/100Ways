@@ -22,6 +22,7 @@ from .rules import (
     BrandingRules,
     is_immutable_path,
     is_locked_path,
+    preserved_algolia_index_spans,
     preserved_repo_url_spans,
 )
 from .skill_policy import SkillPolicyIssue, audit_skill_firewall
@@ -306,6 +307,13 @@ def _allowed_brand_occurrence(token: str, line: str, path: str) -> bool:
     # inside one is inherited, not a first-party leak.  Mirrors
     # hundredways.brandscan._allowed; tests/test_brandscan.py asserts no drift.
     if any(token.lower() in match.group(0).lower() for match in preserved_repo_url_spans(line)):
+        return True
+    # Same reasoning for a service object name: an Algolia index the app really
+    # has cannot be renamed, only lost.  Mirrors brandscan._allowed.
+    if any(
+        token.lower() in match.group("value").lower()
+        for match in preserved_algolia_index_spans(line)
+    ):
         return True
     if path == "package-lock.json" and token == "hermes":
         return "hermes-parser" in lower or "hermes-estree" in lower
