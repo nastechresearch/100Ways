@@ -32,14 +32,15 @@ from .integrity import sha256_file
 
 PRUNED_DIRS = frozenset({".git", "node_modules"})
 
-# The byte ceiling is the real bound: a branded tree is ~4000 files and a few
-# megabytes, so one pass can hold the whole working set and the later passes read
-# from RAM.  Caching without a ceiling would let a single 2 MB fixture, or the
-# tree itself, stay resident as Python strings for the rest of the run; on an
-# eviction the caller simply reads the file again, which is what every audit did
-# before an index existed.
-_CACHE_MAX_ENTRIES = 65536
-_CACHE_MAX_CHARS = 128 * 1024 * 1024
+# Two ceilings, because either dimension can run away on its own: a tree of huge
+# files is bounded by the character count, a very wide tree by the entry count.
+# Sized so one pass over a real branded tree (~4000 files, a few tens of
+# megabytes) stays resident -- every audit walks the same sorted order, so a
+# ceiling below the working set evicts the exact entry the next audit asks for
+# and the cache stops saving any read.  An eviction is not an error: the caller
+# re-reads the file, which is what every audit did before an index existed.
+_CACHE_MAX_ENTRIES = 8192
+_CACHE_MAX_CHARS = 32 * 1024 * 1024
 
 
 @dataclass(frozen=True)
