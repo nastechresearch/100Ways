@@ -52,7 +52,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install 100ways
-        run: pip install -e .
+        # The ai extra is what lets the review narrative ask Ollama for one prose
+        # paragraph; without it the narrative silently stays deterministic-only.
+        run: pip install -e ".[ai]"
 
       - name: Install candidate test search prerequisite
         run: |
@@ -238,12 +240,20 @@ jobs:
         env:
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
           HUNDREDWAYS_SUMMARY: ${{ runner.temp }}/SYNC-SUMMARY.md
+          HUNDREDWAYS_TITLE: ${{ runner.temp }}/SYNC-TITLE.md
+          HUNDREDWAYS_PR_BODY: ${{ runner.temp }}/SYNC-PR-BODY.md
           EXPECTED_UPSTREAM_SHA: ${{ steps.direct-source.outputs.sha }}
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+          HUNDREDWAYS_AI_PROVIDER: ollama-cloud
+          HUNDREDWAYS_AI_BASE_URL: https://ollama.com/v1
+          HUNDREDWAYS_AI_MODEL: gemma4:31b-cloud
         run: |
           set -euo pipefail
           python3 - <<'PYEOF'
           import json
           import os
+          from pathlib import Path
+          from hundredways.narrative import evidence_from_manifest, garnish, write_narrative
           from hundredways.sync_summary import write_sync_summary
 
           updates = os.environ["HUNDREDWAYS_UPDATES_DIR"]
@@ -256,12 +266,6 @@ jobs:
                   baseline = json.load(fh).get("upstream_sha", "")
           except (OSError, ValueError):
               baseline = ""
-          verification = (
-              ("Direct source provenance", "Passed"),
-              ("Brand and asset integrity", "Passed"),
-              ("Dependency, security, and publication-readiness scans", "Passed"),
-              ("Full verification and fork-consistency checks", "Passed"),
-          )
           write_sync_summary(
               os.environ["HUNDREDWAYS_SUMMARY"],
               upstream_repo=os.path.join(updates, "hermes-agent"),
@@ -269,9 +273,20 @@ jobs:
               upstream_sha=manifest["upstream_sha"],
               files_changed=sum(int(manifest.get("diff", {}).get(key, 0)) for key in ("renamed", "rewritten", "missing")),
               changed_areas=manifest.get("changed_areas", {}),
-              verification=verification,
+              verification=evidence_from_manifest(manifest),
               commit_subjects=manifest.get("commit_subjects", ()),
           )
+          # The committed summary stays deterministic.  Advisory model prose is
+          # appended only to the review PR body, never to a file in the tree.
+          summary = Path(os.environ["HUNDREDWAYS_SUMMARY"]).read_text(encoding="utf-8")
+          title = write_narrative(
+              os.environ["HUNDREDWAYS_TITLE"],
+              os.environ["HUNDREDWAYS_PR_BODY"],
+              manifest=manifest,
+              summary_markdown=summary,
+              paragraph=garnish(manifest),
+          )
+          print(f"review title: {title} ({len(title)} chars)")
           PYEOF
 
       - name: Repackage the exact verified tree
@@ -356,4 +371,6 @@ jobs:
             ${{ runner.temp }}/candidate-conformance.json
             ${{ runner.temp }}/gate_receipt.json
             ${{ runner.temp }}/SYNC-SUMMARY.md
+            ${{ runner.temp }}/SYNC-TITLE.md
+            ${{ runner.temp }}/SYNC-PR-BODY.md
           if-no-files-found: error
