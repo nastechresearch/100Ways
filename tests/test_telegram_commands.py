@@ -203,6 +203,13 @@ def test_the_prefixed_alias_is_the_other_source_of_an_allowlist():
     assert access.admins == frozenset({"9"})
 
 
+def test_the_secret_name_this_environment_already_uses_also_widens_read():
+    access = Access.from_env(default_chat="42", env={"TELEGRAM_ALLOWED_CHAT_IDS": "77, 88"})
+
+    assert access.chats == frozenset({"42", "77", "88"})
+    assert access.level_for("88", "1") == READ
+
+
 def test_an_operate_command_denies_a_reader_with_a_callable_hint():
     answer = dispatch(ask("log 5"), runtime(), level=READ)
 

@@ -217,7 +217,8 @@ def _ids(value: str) -> frozenset[str]:
 class Access:
     """Who this bot answers to, and how far it will go.
 
-    The configured chat is the read surface, widened only by ``TELEGRAM_ALLOW_CHATS``.
+    The configured chat is the read surface, widened only by ``TELEGRAM_ALLOW_CHATS``
+    (``TELEGRAM_ALLOWED_CHAT_IDS`` is read as the same knob).
     An empty operator or admin list means nobody holds that level, so a deployment
     that sets no allowlists is read-only rather than open.  Chat membership gates every
     level: a stranger sending your admin id to another chat still gets nothing.
@@ -231,7 +232,7 @@ class Access:
     def from_env(cls, *, default_chat: str = "", env: dict[str, str] | None = None) -> "Access":
         source = env if env is not None else os.environ
         chats = {str(default_chat).strip()} if str(default_chat).strip() else set()
-        chats |= _allow(source, "TELEGRAM_ALLOW_CHATS")
+        chats |= _allow(source, "TELEGRAM_ALLOW_CHATS", "TELEGRAM_ALLOWED_CHAT_IDS")
         return cls(
             chats=frozenset(chats),
             operators=_allow(source, "TELEGRAM_OPERATORS"),
@@ -248,5 +249,14 @@ class Access:
         return READ
 
 
-def _allow(source: dict[str, str], name: str) -> frozenset[str]:
-    return _ids(source.get(f"HUNDREDWAYS_{name}", "") or source.get(name, ""))
+def _allow(source: dict[str, str], *names: str) -> frozenset[str]:
+    """Union every accepted spelling of an allowlist secret.
+
+    ``TELEGRAM_ALLOWED_CHAT_IDS`` is the name this repository's environment already
+    carries, so an operator who filled that in should not have to discover that the
+    engine renamed the knob.
+    """
+    joined = ",".join(
+        source.get(f"HUNDREDWAYS_{name}", "") or source.get(name, "") for name in names
+    )
+    return _ids(joined)
