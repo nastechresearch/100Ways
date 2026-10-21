@@ -41,6 +41,12 @@ REAL_TREE = os.environ.get("NASTECH_AGENT_TREE")
 
 LANE_PATHS = ("scripts/releases/optional_platforms.py", "scripts/releases/stable.py",
               "scripts/releases/store.py", ".github/workflows/stable-release.yml")
+# A fork checkout that moved to the lane table carries lanes.py instead of
+# optional_platforms.py, so the fixed-point check reads both shapes.  The five
+# files that read the lane default are part of the same surface: a drift there
+# is the fork's release tests asserting a policy the shipped tree does not have.
+_RELEASE_SURFACE = (*LANE_PATHS, updates._LANES_MODULE,
+                    *(rel for rel, _marker, _edits in updates._FORK_LANE_RELEASE))
 ALL_APPLE = {"CSC_LINK": "x", "CSC_KEY_PASSWORD": "x", "APPLE_API_KEY_P8": "x",
              "APPLE_API_KEY_ID": "x", "APPLE_API_ISSUER": "x"}
 ALL_WINDOWS = {"AZURE_SIGN_ENDPOINT": "x", "AZURE_SIGN_ACCOUNT": "x", "AZURE_SIGN_PROFILE": "x",
@@ -65,6 +71,13 @@ def tree(tmp_path):
 
 def _reconcile(dst):
     return updates._reconcile_signing_gated_release_lanes(str(dst))
+
+
+def _reconcile_lane_surface(dst):
+    """Both lane rules: the table itself, then the files that read its default."""
+    changed = list(updates._reconcile_signing_gated_release_lanes(str(dst)))
+    changed.extend(updates._reconcile_fork_lane_release_surface(str(dst)))
+    return changed
 
 
 def _import_fork(dst):
@@ -182,25 +195,50 @@ def test_reconcile_fails_loudly_when_an_anchor_moved(tree):
 
 
 def test_reconcile_matches_the_real_fork(tmp_path):
+    """The tree the fork ships must already be a fixed point of the reconcile.
+
+    A first pass that rewrites anything means the fork's checked-in release lane
+    policy and the engine's disagree, so the next generated sync would quietly
+    move the fork off the policy its signing accounts support.
+    """
     if not REAL_TREE:
         pytest.skip("set NASTECH_AGENT_TREE to the fork checkout to compare against it")
     dst = tmp_path / "real"
-    shutil.copytree(REAL_TREE, dst)
-    assert _reconcile(dst) == list(LANE_PATHS)
-    assert _reconcile(dst) == []
+    for rel in _RELEASE_SURFACE:
+        source = Path(REAL_TREE) / rel
+        if source.is_file():
+            target = dst / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+    lanes = dst / updates._LANES_MODULE
+    if not lanes.is_file() and not (dst / "scripts/releases/optional_platforms.py").is_file():
+        pytest.fail(f"{REAL_TREE} carries neither {updates._LANES_MODULE} nor "
+                    "scripts/releases/optional_platforms.py, so it is not a fork "
+                    "checkout of the release surface")
+    assert _reconcile_lane_surface(dst) == []
+    assert _reconcile_lane_surface(dst) == []
+    if lanes.is_file():
+        # The rule keys off its own marker comment, so re-running it cannot see a
+        # hand-edit to the set beside the marker. Compare the shipped block to
+        # the engine's literal instead: that is what a sync has to reproduce.
+        assert updates._LANES_DEFAULT_FORK in lanes.read_text(encoding="utf-8"), (
+            "the fork's checked-in default lane set is not the set the engine "
+            "derives, so the next sync would move it back")
     # The real workflow is the one that ships, so its reconciled YAML must load:
     # a bad indent or a swallowed newline here is a broken release workflow.
     import yaml
 
     doc = yaml.safe_load((dst / ".github/workflows/stable-release.yml").read_text(encoding="utf-8"))
-    assert [name for name, job in doc["jobs"].items()
-            if any("INCLUDE_TERMUX" in step.get("env", {}) for step in job.get("steps", []))], \
-        "no gate step reads INCLUDE_TERMUX"
-    for name, job in doc["jobs"].items():
-        for step in job.get("steps", []):
-            block = step.get("env", {})
-            if "INCLUDE_MACOS_ARM64" in block:
-                assert block["INCLUDE_MACOS_ARM64"] == LANE_OUTPUTS[0]
+    admit = doc["jobs"]["admit"]
+    assert any("scripts.releases.stable admit" in str(step.get("run", ""))
+               for step in admit["steps"]), "admit no longer derives the lane set"
+    assert admit["outputs"]["lanes"] == "${{ steps.admit.outputs.lanes }}"
+    # The fork's narrowed DEFAULT has to reach the legs it gates: a Windows
+    # candidate that stopped reading the lane set would demand Azure signing
+    # credentials this org does not have.
+    body = (dst / ".github/workflows/stable-release.yml").read_text(encoding="utf-8")
+    assert "fromJSON(needs.admit.outputs.lanes).windows" in body, \
+        "no job reads the Windows lane from the claim"
 
 
 # --- upstream's lane table ------------------------------------------------
