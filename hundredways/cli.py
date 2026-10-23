@@ -35,6 +35,11 @@ lintsim    Run the fork's own lint contract over a candidate tree before publish
 urls       Find broken, fake, off-brand and placeholder links in a tree.
 surface    Measure the surface upstream exposes, and what moved since a baseline.
 verify-report  Write the one document saying what was measured and what was not.
+errors     Report which lane turned red, which cleared, and which one nobody owns yet.
+issues     Draft the issues the measured findings earn; open them only with --apply.
+discuss    Draft the questions the engine is not allowed to answer for a human.
+suggest    The next actions for what was measured, as a list or a bounded table.
+table      Lay one measured family out so it fits the messages it will be sent in.
 readme     Regenerate README.md from the ways + achievements + owned-asset registries.
 release    Verify the code table and incoming codes.
 admin      Compile/verify the admin password into its system-only token.
@@ -47,6 +52,7 @@ import argparse
 import json
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from .achievements import Achievements
@@ -66,6 +72,24 @@ from .brandaudit import create_issues, plan_issues, render_issues_markdown, run_
 from .codes import CODE_DETAILS, code_name
 from .coverage import coverage as ways_coverage
 from .dashboard import serve as serve_dashboard
+from .delivery import (
+    deliver,
+    deduplicate,
+    open_discussion_keys,
+    open_issue_keys,
+    plan as plan_delivery,
+    plan_json as delivery_json,
+    render_plan,
+    render_suggestions,
+)
+from .errorfeed import (
+    ErrorFeedError,
+    load_state,
+    render as render_feed,
+    save_state,
+)
+from .errorfeed import observe as observe_errors
+from .errorfeed import to_json as to_json_feed
 from .forklint import report_lines, run_fork_lint, summarize
 from .git_ops import ensure_branch
 from .narrative import body_from_manifest, garnish, title_from_manifest
@@ -96,6 +120,7 @@ from .scanner import classify_path
 from .security import verify_token
 from .telegram_agent import send_message as send_telegram
 from .telegram_commands import LEVELS, grants, lookup, menu, parse, usage_for
+from .telegram_tables import BLOCK, GRID, MAX_PAGES, TableError, answer, build
 from .telegram_transport import TelegramDeliveryError
 from .updates import DEFAULT_HERMES_URL, UpdateManager, default_updates_dir, hermes_path
 from .urlcheck import (
@@ -976,6 +1001,281 @@ class Cli:
             print(f"verify-report: red on {', '.join(blockers)}", file=sys.stderr)
             sys.exit(1)
 
+    # -- delivery ------------------------------------------------------------
+
+    def _run_facts(self) -> dict:
+        """The classifier's upstream-side inputs, read exactly the way ``why-red`` reads them."""
+        facts: dict = {}
+        if self.args.upstream_runs:
+            facts["upstream_runs"] = _read_json(self.args.upstream_runs)
+        if self.args.changed_files:
+            facts["upstream_changed_files"] = _read_lines(self.args.changed_files)
+        if self.args.baseline_sha:
+            facts["baseline_sha"] = self.args.baseline_sha
+        if self.args.current:
+            facts["current_sha"] = self.args.current
+        if self.args.checkout:
+            facts["checkout_path"] = self.args.checkout
+        return facts
+
+    def _plan_inputs(self) -> dict:
+        """Every family the delivery planner reads, assembled from the flags actually given.
+
+        A family whose input was not passed stays ``None``, so the plan reports it as not
+        measured.  An empty list is only produced by a measurement that ran and found
+        nothing -- which is the difference a commander has to be able to see.
+        """
+        from .forkcheck import walk_files
+
+        tree = self.args.tree or self.repo
+        inputs: dict = {}
+        if self.args.runs:
+            inputs["verdicts"] = classify_runs(_read_json(self.args.runs), **self._run_facts())
+        if self.args.tree:
+            # Opt-in like every other family here: the fork checkout holds hundreds of
+            # thousands of files, so a delivery verb that scanned it by default would be
+            # a minute late and would report links as measured when nobody asked.
+            inputs["urls"] = scan_url_tree(
+                tree, UrlPolicy.load(self.args.policy or URL_POLICY_PATH), rules=self.rules
+            )
+        if self.args.surface_baseline:
+            inputs["deltas"] = diff_surface(
+                load_baseline(self.args.surface_baseline),
+                scan_surface(tree, [
+                    token.strip()
+                    for token in (self.args.ignore or "").split(",")
+                    if token.strip()
+                ]),
+            )
+        if self.args.inventory:
+            inputs["credentials"] = analyze_root(tree, _inventory_from_json(self.args.inventory))
+        if self.args.upstream:
+            inputs["orphans"] = find_orphans(
+                walk_files(tree), walk_files(self.args.upstream), self.rules
+            )
+        if self.args.state:
+            inputs["feed"] = observe_errors(
+                _read_json(self.args.runs),
+                previous=load_state(self.args.state) if os.path.isfile(self.args.state) else None,
+                **self._run_facts(),
+            )
+        return inputs
+
+    def _plan_inputs_guarded(self) -> dict:
+        """The measurements the given flags ask for, with an unreadable input as exit 2."""
+        try:
+            return self._plan_inputs()
+        except (OSError, ValueError, BaselineError, ErrorFeedError) as exc:
+            print(f"nothing can be planned: {exc}", file=sys.stderr)
+            sys.exit(2)
+
+    def _delivery_plan(self):
+        return plan_delivery(**self._plan_inputs_guarded())
+
+    def cmd_errors(self) -> None:
+        """Report what changed between check-runs payloads -- including what cannot be proved."""
+        if not self.args.runs:
+            print("errors needs --runs: the check-runs payload of this cycle", file=sys.stderr)
+            sys.exit(2)
+        try:
+            feed = observe_errors(
+                _read_json(self.args.runs),
+                previous=self._previous_state(),
+                **self._run_facts(),
+            )
+        except (OSError, ValueError, ErrorFeedError) as exc:
+            print(f"the feed cannot be read: {exc}", file=sys.stderr)
+            sys.exit(2)
+        print(render_feed(feed, limit=self.args.limit))
+        if self.args.json_out:
+            with open(self.args.json_out, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(to_json_feed(feed), indent=2, sort_keys=True) + "\n")
+        if self.args.record:
+            if not self.args.state:
+                print("--record needs --state: there is no path to record the cycle at",
+                      file=sys.stderr)
+                sys.exit(2)
+            save_state(feed, self.args.state)
+            print(f"feed state recorded: {self.args.state}")
+
+    def _previous_state(self) -> dict | None:
+        """The last cycle's reds, or ``None`` when no state was recorded -- not an empty dict."""
+        if not self.args.state:
+            return None
+        if not os.path.isfile(self.args.state):
+            return None
+        return load_state(self.args.state)
+
+    def cmd_issues(self) -> None:
+        """Draft the issues a measured finding earns, and open them only when told to."""
+        plan = self._delivery_plan()
+        if self.args.dedupe:
+            project = self.args.project
+            if not project:
+                print("--dedupe needs --project owner/name", file=sys.stderr)
+                sys.exit(2)
+            plan, dropped = deduplicate(plan, open_issue_keys(project))
+            if dropped:
+                print(f"already asked for: {', '.join(dropped)}")
+        for draft in plan.issues:
+            print(f"[{draft.severity}] {draft.key}: {draft.title}")
+        print(
+            f"planned: {len(plan.issues)} issue(s), {len(plan.suggestions)} suggestion(s); "
+            f"measured {', '.join(plan.measured) or 'nothing'}"
+        )
+        if plan.skipped:
+            print(f"not measured: {', '.join(plan.skipped)}")
+        if self.args.out:
+            with open(self.args.out, "w", encoding="utf-8") as fh:
+                fh.write(render_plan(plan))
+        if self.args.json_out:
+            with open(self.args.json_out, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(delivery_json(plan), indent=2, sort_keys=True) + "\n")
+        if not self.args.apply:
+            return
+        if not self.args.project:
+            print("--apply needs --project owner/name", file=sys.stderr)
+            sys.exit(2)
+        result = deliver(self.args.project, plan, apply=True, kinds=("issues",))
+        for item in result["issues"]:
+            print(f"  {item}")
+        if result["errors"]:
+            print(f"issues: {len(result['errors'])} write(s) failed", file=sys.stderr)
+            sys.exit(1)
+
+    def cmd_discuss(self) -> None:
+        """Draft the questions the engine is not allowed to answer for a human."""
+        plan = self._delivery_plan()
+        if self.args.category:
+            plan = replace(plan, discussions=tuple(
+                replace(draft, category=self.args.category) for draft in plan.discussions
+            ))
+        if self.args.dedupe and self.args.project:
+            plan, dropped = deduplicate(plan, open_discussion_keys(self.args.project))
+            if dropped:
+                print(f"already asked: {', '.join(dropped)}")
+        if not plan.discussions:
+            print(
+                "no discussion to open: the families measured raised no question "
+                f"({', '.join(plan.measured) or 'nothing'} measured, "
+                f"{', '.join(plan.skipped) or 'nothing'} skipped)"
+            )
+        for draft in plan.discussions:
+            print(f"[{draft.key}] {draft.title}")
+        if self.args.out:
+            with open(self.args.out, "w", encoding="utf-8") as fh:
+                fh.write(render_plan(plan))
+        if not self.args.apply:
+            return
+        if not self.args.project:
+            print("--apply needs --project owner/name", file=sys.stderr)
+            sys.exit(2)
+        result = deliver(self.args.project, plan, apply=True, kinds=("discussions",))
+        for item in result["discussions"]:
+            print(f"  {item}")
+        if result["errors"]:
+            print(f"discussions: {len(result['errors'])} write(s) failed", file=sys.stderr)
+            sys.exit(1)
+
+    def cmd_suggest(self) -> None:
+        """The next actions, in the order the engine measured them -- never a guess."""
+        plan = self._delivery_plan()
+        if self.args.table:
+            pages = answer(
+                build(
+                    "100WAYS / NEXT ACTIONS",
+                    ("kind", "action", "owner"),
+                    [(tip.kind, tip.text, tip.owner) for tip in plan.suggestions],
+                    notes=(f"{len(plan.suggestions)} action(s)",),
+                ),
+                style=BLOCK if self.args.style == BLOCK else GRID,
+                max_pages=self.args.pages or MAX_PAGES,
+            )
+            for page in pages:
+                print(page)
+            return
+        print(render_suggestions(plan, limit=self.args.limit))
+
+    def cmd_table(self) -> None:
+        """One measured family as a table that fits the messages it will be sent in."""
+        inputs = self._plan_inputs_guarded()
+        try:
+            title, columns, rows = _table_source(
+                self.args.source, inputs, plan_delivery(**inputs)
+            )
+        except TableError as exc:
+            print(str(exc), file=sys.stderr)
+            sys.exit(2)
+        pages = answer(
+            build(title, columns, rows),
+            style=BLOCK if self.args.style == BLOCK else GRID,
+            max_pages=self.args.pages or MAX_PAGES,
+        )
+        for page in pages:
+            print(page)
+
+
+_TABLE_SOURCES = {
+    "ci": ("verdicts", "--runs"),
+    "urls": ("urls", "--tree"),
+    "surface": ("deltas", "--surface-baseline"),
+    "credentials": ("credentials", "--inventory"),
+    "orphans": ("orphans", "--upstream"),
+    "feed": ("feed", "--state"),
+    "suggestions": (None, None),
+}
+
+
+def _table_source(
+    name: str, inputs: dict, plan
+) -> tuple[str, tuple[str, ...], list[tuple[str, ...]]]:
+    """One measured family, as a title and a rectangle of its own numbers.
+
+    A family that was not measured is an error rather than an empty table: a table of
+    zero rows printed under a heading reads as "checked and clean".
+    """
+    field, flag = _TABLE_SOURCES[name]
+    if field is not None and field not in inputs:
+        raise TableError(f"source {name!r} needs {flag}: nothing was measured for it")
+    if name == "ci":
+        rows = [
+            (v.check or "(unnamed run)", v.kind.value, v.owner, v.action)
+            for v in inputs["verdicts"]
+        ]
+        return "100WAYS / CI REDS", ("lane", "class", "owner", "next"), rows
+    if name == "urls":
+        rows = [
+            (item.link.path, str(item.link.line), item.status, item.link.url)
+            for item in inputs["urls"]
+        ]
+        return "100WAYS / LINKS", ("path", "line", "status", "url"), rows
+    if name == "surface":
+        rows = [
+            (item.field, item.kind, item.value, item.classification)
+            for item in inputs["deltas"]
+        ]
+        return "100WAYS / SURFACE MOVES", ("field", "kind", "name", "class"), rows
+    if name == "credentials":
+        rows = [
+            (
+                item.name,
+                item.verdict,
+                ", ".join(item.scopes) or "-",
+                "yes" if item.actionable else "no",
+            )
+            for item in inputs["credentials"]
+        ]
+        return "100WAYS / CREDENTIAL NAMES", ("name", "verdict", "scope", "actionable"), rows
+    if name == "orphans":
+        rows = [(item.path, item.kind, item.evidence) for item in inputs["orphans"]]
+        return "100WAYS / ORPHANS", ("path", "kind", "evidence"), rows
+    if name == "feed":
+        rows = [(item.lane, item.kind, item.cls or "-", item.stamp or "not in payload")
+                for item in inputs["feed"].events]
+        return "100WAYS / ERROR FEED", ("lane", "event", "class", "at"), rows
+    rows = [(tip.kind, tip.text, tip.owner) for tip in plan.suggestions]
+    return "100WAYS / NEXT ACTIONS", ("kind", "action", "owner"), rows
+
 
 def _read_json(path: str) -> dict:
     with open(path, encoding="utf-8") as fh:
@@ -1291,6 +1591,91 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--policy", default="", help="path to a URL policy")
     p.add_argument("--threshold", type=float, default=0.99, help="parity gate threshold")
     p.set_defaults(func="cmd_verify_report")
+
+    def measure(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        """The inputs every delivery verb can be handed, with nothing measured by default."""
+        p.add_argument("--runs", default="", help="this cycle's commits/{sha}/check-runs JSON")
+        p.add_argument("--upstream-runs", default="", help="the same payload for upstream")
+        p.add_argument("--changed-files", default="", help="upstream delta paths, one per line")
+        p.add_argument("--baseline-sha", default="", help="upstream commit the sync started from")
+        p.add_argument("--current", default="", help="candidate head sha")
+        p.add_argument("--checkout", default="", help="local checkout to measure sizes against")
+        p.add_argument("--tree", default="", help="tree to read links and surface from")
+        p.add_argument("--policy", default="", help="path to a URL policy")
+        p.add_argument(
+            "--surface-baseline", default="", help="surface JSON to diff the current surface from"
+        )
+        p.add_argument("--ignore", default="", help="comma-separated kind:name labels decided")
+        p.add_argument("--inventory", default="", help="provided credential names JSON")
+        p.add_argument("--upstream", default="", help="upstream checkout, for the orphan pass")
+        p.add_argument(
+            "--state",
+            default="",
+            help="error-feed state JSON to compare against (and to record with --record)",
+        )
+        p.add_argument("--json-out", default="", help="write the machine form here")
+        p.add_argument("--limit", type=int, default=0, help="print at most this many lines")
+        p.add_argument("--pages", type=int, default=0, help="cap chat pages (0: the default cap)")
+        p.add_argument(
+            "--style",
+            choices=["block", "grid"],
+            default="block",
+            help="block reads in any font; grid needs a monospace one",
+        )
+        return p
+
+    p = measure(
+        sub.add_parser(
+            "errors",
+            help="what turned red, what cleared, and what a partial read cannot prove",
+        )
+    )
+    p.add_argument(
+        "--record",
+        action="store_true",
+        help="save this cycle's reds at --state so the next cycle can report a change",
+    )
+    p.set_defaults(func="cmd_errors")
+
+    p = measure(
+        sub.add_parser("issues", help="draft the issues the measured findings earn (dry run)")
+    )
+    p.add_argument("--project", default="", help="owner/name to read or write issues in")
+    p.add_argument(
+        "--apply", action="store_true", help="create them with gh -- off unless asked"
+    )
+    p.add_argument("--dedupe", action="store_true", help="skip keys the repo already has open")
+    p.add_argument("--out", default="", help="write the full markdown plan here")
+    p.set_defaults(func="cmd_issues")
+
+    p = measure(
+        sub.add_parser(
+            "discuss", help="draft the questions the engine must not answer for a human"
+        )
+    )
+    p.add_argument("--project", default="", help="owner/name to read or write discussions in")
+    p.add_argument(
+        "--category", default="", help="discussion category (default: the repo's own)"
+    )
+    p.add_argument("--apply", action="store_true", help="create them with gh -- off unless asked")
+    p.add_argument("--dedupe", action="store_true", help="skip keys the board already has")
+    p.add_argument("--out", default="", help="write the full markdown plan here")
+    p.set_defaults(func="cmd_discuss")
+
+    p = measure(sub.add_parser("suggest", help="the next actions, ordered as they were measured"))
+    p.add_argument(
+        "--table", action="store_true", help="answer as a paginated table instead of a list"
+    )
+    p.set_defaults(func="cmd_suggest")
+
+    p = measure(sub.add_parser("table", help="print one measured family as a bounded table"))
+    p.add_argument(
+        "--source",
+        choices=sorted(_TABLE_SOURCES),
+        default="ci",
+        help="which measurement to lay out",
+    )
+    p.set_defaults(func="cmd_table")
 
     return parser
 

@@ -72,6 +72,11 @@ def local(tmp_path, *argv: str) -> Cli:
         (["urls", "--tree", "tree"], "cmd_urls"),
         (["surface", "--tree", "tree"], "cmd_surface"),
         (["verify-report", "--out", "v.md"], "cmd_verify_report"),
+        (["errors", "--runs", "r.json"], "cmd_errors"),
+        (["issues"], "cmd_issues"),
+        (["discuss"], "cmd_discuss"),
+        (["suggest"], "cmd_suggest"),
+        (["table", "--source", "urls"], "cmd_table"),
     ],
 )
 def test_each_new_verb_dispatches_to_a_real_method(argv, func):
@@ -90,6 +95,11 @@ def test_every_verb_that_parses_is_documented_in_the_help():
         "urls",
         "surface",
         "verify-report",
+        "errors",
+        "issues",
+        "discuss",
+        "suggest",
+        "table",
     ):
         assert f"  {verb}" in help_text, f"{verb} parses but --help does not advertise it"
         assert f"\n{verb:<10}" in cli_module.__doc__, f"{verb} is missing from the command list"
@@ -657,3 +667,317 @@ def test_verify_report_ignores_a_gate_it_was_not_asked_to_measure(tmp_path, caps
     out = capsys.readouterr().out
     assert "parity gate" not in capsys.readouterr().err
     assert "not verified: " in out
+
+
+# -- delivery: errors, issues, discuss, suggest, table -----------------------
+
+
+def _runs_file(tmp_path, *names, total=None) -> str:
+    payload = {
+        "total_count": len(names) if total is None else total,
+        "check_runs": [
+            {
+                "id": 501,
+                "name": lane,
+                "conclusion": "failure",
+                "runner_name": "ubuntu-latest",
+                "output": {"title": "Process completed with exit code 1.", "text": ""},
+                "updated_at": "2026-10-21T03:04:05Z",
+            }
+            for lane in names
+        ],
+    }
+    path = tmp_path / "runs.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return str(path)
+
+
+def _fork_tree(tmp_path):
+    """A fork tree with one Nastech-only file and the upstream that does not brand it."""
+    fork = tmp_path / "fork"
+    fork.mkdir()
+    (fork / "nastech-only.py").write_text("X = 1\n", encoding="utf-8")
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    (upstream / "keep.py").write_text("Y = 2\n", encoding="utf-8")
+    return fork, upstream
+
+
+def test_errors_is_a_report_not_a_gate(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+
+    invoke(["errors", "--runs", _runs_file(tmp_path, "Python tests")]).cmd_errors()
+
+    out = capsys.readouterr().out
+    assert "first 1" in out and "1 movement(s)" in out
+    assert "The feed reports what changed" in out
+
+
+def test_errors_refuses_without_the_payload_of_this_cycle(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit) as stop:
+        invoke(["errors"]).cmd_errors()
+
+    assert stop.value.code == 2
+
+
+def test_errors_reports_a_lane_it_cannot_account_for(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    state = tmp_path / "feed.json"
+    state.write_text(
+        json.dumps({"schema": "100ways.errorfeed/v1", "reds": {"gone-lane": "UNKNOWN"}}),
+        encoding="utf-8",
+    )
+
+    invoke(["errors", "--runs", _runs_file(tmp_path, "Python tests", total=61),
+            "--state", str(state)]).cmd_errors()
+
+    out = capsys.readouterr().out
+    assert "unproved 1" in out
+    assert "resolved" not in out, "a truncated read may not claim a clearance"
+    assert "--paginate" in out
+
+
+def test_errors_records_a_cycle_the_next_cycle_can_compare_against(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    runs = _runs_file(tmp_path, "Python tests")
+    state = tmp_path / "feed.json"
+
+    invoke(["errors", "--runs", runs, "--record", "--state", str(state)]).cmd_errors()
+    capsys.readouterr()
+    invoke(["errors", "--runs", runs, "--state", str(state)]).cmd_errors()
+
+    assert "ongoing 1" in capsys.readouterr().out
+    assert json.loads(state.read_text(encoding="utf-8"))["schema"] == "100ways.errorfeed/v1"
+
+
+def test_errors_needs_a_path_to_record_at(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit) as stop:
+        invoke(["errors", "--runs", _runs_file(tmp_path, "Python tests"), "--record"]).cmd_errors()
+
+    assert stop.value.code == 2
+
+
+def test_errors_refuses_a_state_file_that_is_not_a_feed(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "other.json").write_text('{"schema": "something.else", "reds": {}}',
+                                         encoding="utf-8")
+
+    with pytest.raises(SystemExit) as stop:
+        invoke(["errors", "--runs", _runs_file(tmp_path, "x"),
+                "--state", "other.json"]).cmd_errors()
+
+    assert stop.value.code == 2
+    assert "nothing can be planned" not in capsys.readouterr().err
+
+
+def test_errors_writes_the_machine_form_it_printed(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+
+    invoke(["errors", "--runs", _runs_file(tmp_path, "Python tests"),
+            "--json-out", "feed.json"]).cmd_errors()
+
+    payload = json.loads((tmp_path / "feed.json").read_text(encoding="utf-8"))
+    assert payload["counts"] == {"first": 1}
+    assert payload["events"][0]["at"] == "2026-10-21T03:04:05Z"
+
+
+def test_issues_drafts_from_a_link_the_policy_judged(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli_module, "deliver", lambda *a, **k: pytest.fail("no write"))
+    root = _link_tree(tmp_path, "https://hermes-agent.nousresearch.com/docs")
+
+    invoke(["--repo", str(tmp_path), "issues", "--tree", str(root)]).cmd_issues()
+
+    out = capsys.readouterr().out
+    assert "[blocking] urls-brand-violation:" in out
+    assert "measured ci" not in out, "no check runs were handed, so ci stays unmeasured"
+    assert "not measured: ci, surface, credentials, orphans, feed" in out
+
+
+def test_issues_writes_the_document_it_offers_to_write(tmp_path, monkeypatch, capsys):
+    root = _link_tree(tmp_path, "https://example.com/todo")
+    monkeypatch.chdir(tmp_path)
+
+    invoke(["--repo", str(tmp_path), "issues", "--tree", str(root),
+            "--out", "plan.md", "--json-out", "plan.json"]).cmd_issues()
+
+    document = Path("plan.md").read_text(encoding="utf-8")
+    assert "## issue [blocking] Links: 1 placeholder link(s) to fix" in document
+    payload = json.loads(Path("plan.json").read_text(encoding="utf-8"))
+    assert [draft["key"] for draft in payload["issues"]] == ["urls-placeholder"]
+    assert "-- 100ways:issue:urls-placeholder" in document
+
+
+def test_issues_apply_needs_a_project(tmp_path, monkeypatch):
+    root = _link_tree(tmp_path, "https://hermes-agent.nousresearch.com/docs")
+
+    with pytest.raises(SystemExit) as stop:
+        invoke(["--repo", str(tmp_path), "issues", "--tree", str(root),
+                "--apply"]).cmd_issues()
+
+    assert stop.value.code == 2
+
+
+def test_issues_apply_asks_for_the_issue_family_only(tmp_path, monkeypatch):
+    seen = {}
+
+    def record(repo, result, apply=False, kinds=()):
+        seen.update({"repo": repo, "apply": apply, "kinds": tuple(kinds),
+                     "issues": len(result.issues)})
+        return {"repo": repo, "apply": apply, "kinds": list(kinds), "planned": 1,
+                "issues": [], "discussions": [], "errors": []}
+
+    monkeypatch.setattr(cli_module, "deliver", record)
+    root = _link_tree(tmp_path, "https://hermes-agent.nousresearch.com/docs")
+
+    invoke(["--repo", str(tmp_path), "issues", "--tree", str(root),
+            "--apply", "--project", "o/r"]).cmd_issues()
+
+    assert seen == {"repo": "o/r", "apply": True, "kinds": ("issues",), "issues": 1}
+
+
+def test_issues_dedupes_against_the_open_list_and_says_what_it_dropped(tmp_path, monkeypatch,
+                                                                       capsys):
+    monkeypatch.setattr(
+        cli_module, "open_issue_keys", lambda repo: frozenset({"urls-brand-violation"})
+    )
+    root = _link_tree(tmp_path, "https://hermes-agent.nousresearch.com/docs")
+
+    invoke(["--repo", str(tmp_path), "issues", "--tree", str(root), "--dedupe",
+            "--project", "o/r"]).cmd_issues()
+
+    out = capsys.readouterr().out
+    assert "already asked for: urls-brand-violation" in out
+    assert "planned: 0 issue(s)" in out
+
+
+def test_dedupe_without_a_project_refuses_to_claim_nothing_exists(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli_module, "open_issue_keys",
+                        lambda repo: pytest.fail("a dedupe must name the repo it read"))
+    root = _link_tree(tmp_path, "https://hermes-agent.nousresearch.com/docs")
+
+    with pytest.raises(SystemExit) as stop:
+        invoke(["--repo", str(tmp_path), "issues", "--tree", str(root), "--dedupe"]).cmd_issues()
+
+    assert stop.value.code == 2
+
+
+def test_discuss_asks_the_question_the_engine_may_not_answer(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli_module, "deliver", lambda *a, **k: pytest.fail("no write"))
+    fork, upstream = _fork_tree(tmp_path)
+
+    invoke(["--repo", str(tmp_path), "discuss", "--tree", str(fork),
+            "--upstream", str(upstream)]).cmd_discuss()
+
+    out = capsys.readouterr().out
+    assert "[orphans-unexplained]" in out
+    assert "Nothing was created" not in out, "the CLI says so in the document, not the summary"
+
+
+def test_discuss_carries_the_category_the_operator_named(tmp_path, monkeypatch):
+    fork, upstream = _fork_tree(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    invoke(["--repo", str(tmp_path), "discuss", "--tree", str(fork), "--upstream", str(upstream),
+            "--category", "surface-decisions", "--out", "ask.md"]).cmd_discuss()
+
+    assert "- category: surface-decisions" in Path("ask.md").read_text(encoding="utf-8")
+
+
+def test_discuss_says_so_when_the_measured_families_raised_no_question(tmp_path, monkeypatch,
+                                                                       capsys):
+    root = tmp_path / "quiet"
+    root.mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    invoke(["--repo", str(tmp_path), "discuss", "--tree", str(root)]).cmd_discuss()
+
+    assert "no discussion to open" in capsys.readouterr().out
+
+
+def test_a_delivery_verb_never_scans_a_tree_it_was_not_handed(tmp_path, monkeypatch, capsys):
+    """--tree is opt-in: the default checkout is a fork of hundreds of thousands of files.
+
+    Measuring links whenever ``--repo`` happens to be a directory made ``suggest`` read
+    the whole fork -- minutes of work, and a family reported as measured that nobody
+    asked for. A delivery verb reads only the families its flags name.
+    """
+
+    def no_scan(*args, **kwargs):  # pragma: no cover - the call itself is the failure
+        raise AssertionError("a tree was scanned without --tree")
+
+    monkeypatch.setattr(cli_module, "scan_url_tree", no_scan)
+    runs = _runs_file(tmp_path, "Python tests (3.13)")
+
+    invoke(["--repo", str(tmp_path), "suggest", "--runs", runs]).cmd_suggest()
+
+    out = capsys.readouterr().out
+    assert "not measured, so nothing to suggest there: urls" in out
+
+
+def test_suggest_lists_only_actions_the_measurements_support(tmp_path, monkeypatch, capsys):
+    root = _link_tree(tmp_path, "https://example.com/todo")
+
+    invoke(["--repo", str(tmp_path), "suggest", "--tree", str(root)]).cmd_suggest()
+
+    out = capsys.readouterr().out
+    assert "next action(s)" in out
+    assert "[urls]" in out
+    assert "[ci]" not in out, "no check runs were read, so no CI action may be offered"
+
+
+def test_suggest_can_answer_as_a_table(tmp_path, monkeypatch, capsys):
+    root = _link_tree(tmp_path, "https://example.com/todo")
+
+    invoke(["--repo", str(tmp_path), "suggest", "--tree", str(root), "--table",
+            "--style", "grid"]).cmd_suggest()
+
+    out = capsys.readouterr().out
+    assert "100WAYS / NEXT ACTIONS" in out
+    assert out.splitlines()[2].split() == ["kind", "action", "owner"]
+
+
+def test_table_refuses_a_family_that_was_never_measured(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "tree"
+    root.mkdir()
+
+    with pytest.raises(SystemExit) as stop:
+        invoke(["--repo", str(tmp_path), "table", "--source", "ci",
+                "--tree", str(root)]).cmd_table()
+
+    assert stop.value.code == 2
+    assert "nothing was measured for it" in capsys.readouterr().err
+
+
+def test_table_prints_a_measured_family(tmp_path, monkeypatch, capsys):
+    invoke(["--repo", str(tmp_path), "table", "--source", "ci",
+            "--runs", _runs_file(tmp_path, "Python tests")]).cmd_table()
+
+    out = capsys.readouterr().out
+    assert "100WAYS / CI REDS" in out
+    assert "Python tests" in out
+
+
+def test_table_stays_inside_the_messages_it_was_given(tmp_path, monkeypatch, capsys):
+    root = _link_tree(tmp_path, "https://example.com/todo")
+
+    invoke(["--repo", str(tmp_path), "table", "--source", "orphans", "--tree", str(root),
+            "--upstream", str(tmp_path / "nowhere")]).cmd_table()
+
+    pages = capsys.readouterr().out.split("\n")
+    assert "100WAYS / ORPHANS" in pages[0]
+
+
+def test_a_delivery_verb_reports_an_unreadable_input_rather_than_planning_on_air(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit) as stop:
+        invoke(["issues", "--runs", "no-such-payload.json", "--tree", str(tmp_path)]).cmd_issues()
+
+    assert stop.value.code == 2
+    assert "nothing can be planned" in capsys.readouterr().err

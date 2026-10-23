@@ -394,3 +394,175 @@ def test_the_poll_loop_persists_a_bounded_redacted_audit(monkeypatch, tmp_path):
 
 def test_response_for_still_answers_a_trusted_command_line():
     assert "Pending: 11/50" in telegram_agent.response_for("Progress", decision(), {})
+
+
+# --- the delivery commands: suggest, table, issues, discuss ------------------
+
+
+def measured_context(**overrides) -> dict:
+    """A run that classified reds, judged links and recorded a feed -- and nothing more."""
+    from hundredways.adapters import Orphan, SurfaceDelta
+    from hundredways.errorfeed import observe
+    from hundredways.pubconfig import LIVE_MISSING, Finding
+    from hundredways.red_classifier import RedClass, Verdict
+    from hundredways.urlcheck import BROKEN, Link, UrlFinding
+
+    context = {
+        "red_verdicts": [
+            Verdict("Python tests (3.13)", RedClass.UNKNOWN, ("no fact",), "the reader",
+                    "read the log for the lane"),
+        ],
+        "url_findings": [
+            UrlFinding(Link("https://example.com/todo", "README.md", 3, 1, ""), BROKEN,
+                       "404", "replace it with the real page"),
+        ],
+        "surface_deltas": [SurfaceDelta("added", "cli-verb", "", "doctor")],
+        "credential_findings": [
+            Finding("STORE_ID", "secret", LIVE_MISSING, ("release",), (), gate="release")
+        ],
+        "orphans": [Orphan("nastech/only.py", "unclassified", "no upstream twin", "confirm")],
+        "error_feed": observe(
+            {
+                "total_count": 1,
+                "check_runs": [
+                    {
+                        "id": 1,
+                        "name": "Python tests (3.13)",
+                        "conclusion": "failure",
+                        "runner_name": "ubuntu-latest",
+                        "output": {"title": "", "text": ""},
+                        "updated_at": "2026-10-21T03:04:05Z",
+                    }
+                ],
+            }
+        ),
+        "gates": ["brand parity: PASS"],
+        "last_error": "",
+        "failed_step": "",
+    }
+    context.update(overrides)
+    return context
+
+
+def delivery_runtime(**overrides) -> Runtime:
+    values = {"context": measured_context()}
+    values.update(overrides)
+    return runtime(**values)
+
+
+def test_suggest_lists_the_actions_the_run_measured():
+    answer = dispatch(ask("suggest"), delivery_runtime(), level=READ)
+
+    assert "NEXT ACTIONS" in answer
+    assert "[ci]" in answer and "[urls]" in answer and "[credentials]" in answer
+    assert "read the log for the lane" in answer
+
+
+def test_suggest_says_which_families_this_run_never_measured():
+    answer = dispatch(
+        ask("suggest"),
+        delivery_runtime(context=measured_context(url_findings=None, red_verdicts=None)),
+        level=READ,
+    )
+
+    assert "not measured, so nothing suggested there: ci, urls" in answer
+    assert "[ci]" not in answer and "[urls]" not in answer
+
+
+def test_an_unmeasured_run_does_not_read_as_a_clean_one():
+    answer = dispatch(ask("suggest"), delivery_runtime(context={}), level=READ)
+
+    assert "Not measured this run: ci, urls, surface, credentials, orphans, feed" in answer
+    assert "\n1. [" not in answer, "an unmeasured run may not present an action"
+
+
+def test_issues_are_offered_as_drafts_and_say_nothing_was_created():
+    answer = dispatch(ask("issues"), delivery_runtime(), level=OPERATE)
+
+    assert "ISSUES THIS WOULD OPEN" in answer
+    assert "Nothing was created" in answer
+    assert "--apply" in answer
+
+
+def test_a_reader_may_not_even_be_offered_the_write_verbs():
+    for command in ("issues", "discuss"):
+        answer = dispatch(ask(command), delivery_runtime(), level=READ)
+        assert "PERMISSION REQUIRED" in answer, command
+        assert "ISSUES THIS WOULD OPEN" not in answer
+
+
+def test_discuss_asks_the_questions_the_engine_will_not_answer():
+    answer = dispatch(ask("discuss"), delivery_runtime(), level=OPERATE)
+
+    assert "QUESTIONS THIS WOULD ASK" in answer
+    assert "upstream name(s)" in answer or "no upstream twin" in answer
+    assert "decision, not a finding" in answer
+
+
+def test_table_answers_one_page_of_the_family_it_was_named():
+    from hundredways.telegram_tables import CHAT_LIMIT
+
+    answer = dispatch(ask("table issues"), delivery_runtime(), level=READ)
+
+    assert len(answer) <= CHAT_LIMIT + 64, "the transport adds its footer inside the limit"
+    assert "ISSUES TO OPEN" in answer
+
+
+def test_a_table_and_the_plan_it_came_from_count_the_same_rows():
+    from hundredways.delivery import plan_table
+    from hundredways.telegram_agent import _delivery_view
+
+    result = _delivery_view(measured_context())
+    for kind in ("suggestions", "issues", "discussions"):
+        assert f"{plan_table(result, kind).row_count} row(s)" in dispatch(
+            ask(f"table {kind}"), delivery_runtime(), level=READ
+        )
+
+
+def test_an_unknown_table_family_returns_the_usage_line_not_an_empty_table():
+    answer = dispatch(ask("table wikis"), delivery_runtime(), level=READ)
+
+    assert "suggestions|issues|discussions" in answer
+    assert "100WAYS /" not in answer
+
+
+def test_a_bulky_answer_is_cut_at_a_whole_row_and_says_so():
+    from hundredways.urlcheck import BROKEN, Link, UrlFinding
+
+    context = measured_context(
+        url_findings=[
+            UrlFinding(Link(f"https://example.com/{n}", "README.md", n, 1, ""), BROKEN,
+                       "404", f"replace link {n} with something real and long enough to matter")
+            for n in range(1, 90)
+        ]
+    )
+    answer = dispatch(ask("table suggestions"), delivery_runtime(context=context), level=READ)
+
+    assert len(answer) <= telegram_agent.CHAT_LIMIT + 64
+    assert "withheld to fit 1 message(s)" in answer
+
+
+def test_a_credential_shaped_value_never_reaches_the_chat():
+    secret = "ghp_" + "A" * 36
+    from hundredways.urlcheck import Link, UrlFinding, BROKEN
+
+    context = measured_context(
+        url_findings=[UrlFinding(Link(secret, "R.md", 1, 1, ""), BROKEN, secret, secret)]
+    )
+    answers = [
+        dispatch(ask(command), delivery_runtime(context=context), level=OPERATE)
+        for command in ("suggest", "table", "issues", "discuss")
+    ]
+
+    assert secret not in " ".join(answers)
+    assert "[REDACTED]" in " ".join(answers)
+
+
+def test_errors_folds_in_the_cycle_comparison_only_when_one_was_recorded():
+    with_feed = dispatch(ask("errors"), delivery_runtime(), level=READ)
+    without = dispatch(ask("errors"), runtime(), level=READ)
+
+    assert "CYCLE COMPARISON" in with_feed
+    assert "Python tests (3.13): first" in with_feed
+    assert "No cycle comparison was recorded" in without
+    assert "CYCLE COMPARISON" not in without
