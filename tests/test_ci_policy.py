@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from hundredways.ci_policy import audit_workflow_security
 
 
@@ -232,3 +234,48 @@ def test_weekly_gate_uses_immutable_update_source_sha():
 
     assert "HUNDREDWAYS_UPSTREAM_SHA: ${{ steps.update.outputs.upstream_sha }}" in workflow
     assert 'ref=os.environ["HUNDREDWAYS_UPSTREAM_SHA"] or "origin/main"' in workflow
+
+
+def _pipeline_step(name: str) -> tuple[dict[str, str], str]:
+    """One stage-pipeline step's ``run`` body, read from the workflow that ships it."""
+    yaml = pytest.importorskip("yaml", reason="pyyaml is a dev extra (base installs have none)")
+    root = Path(__file__).resolve().parents[1]
+    doc = yaml.safe_load((root / ".github" / "workflows" / "stage-pipeline.yml").read_text())
+    step = next(s for s in doc["jobs"]["pipeline"]["steps"] if s.get("name") == name)
+    return step, step["run"]
+
+
+def test_stage_pipeline_audits_the_owned_asset_policy_on_the_shipped_tree():
+    """The policy is measured on the exact candidate that gets packaged, mid-stage."""
+    step, run = _pipeline_step("Audit the candidate against the owned-asset policy")
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github" / "workflows" / "stage-pipeline.yml").read_text()
+    conformance = workflow.index("Verify final branded candidate against exact Hermes source")
+    audit = workflow.index("Audit the candidate against the owned-asset policy")
+
+    assert step["env"]["HUNDREDWAYS_UPDATES_DIR"] == "${{ runner.temp }}/Updates-Commits"
+    assert step["env"]["HUNDREDWAYS_ASSET_AUDIT"].endswith("asset-policy.json")
+    assert '--tree "$SNAPSHOT"' in run
+    assert '--upstream "$HUNDREDWAYS_UPDATES_DIR/hermes-agent"' in run
+    # both trees, or the audit says so rather than reporting an empty finding list
+    assert "--json-out" in run
+    assert 'if [ "$status" -gt 1 ]' in run
+    assert conformance < audit
+    assert "${{ runner.temp }}/asset-policy.json" in workflow
+
+
+def test_the_asset_audit_blocks_only_on_a_class_the_registry_lost():
+    """art-unclaimed is advisory: the fork ships 15 unowned files today.
+
+    Failing the stage on those would halt every sync over a brand decision the
+    engine cannot make, while class-unowned means a rename already swallowed the
+    whole registry, so only that one is allowed to stop the pipeline.
+    """
+    _, run = _pipeline_step("Audit the candidate against the owned-asset policy")
+    guard = run[run.index("if hard:") :]
+
+    assert 'hard = groups.get("class-unowned", [])' in run
+    assert "raise SystemExit" in guard
+    assert "art-unclaimed (advisory)" in run
+    for line in run[run.index("art = groups"): run.index("if hard:")].splitlines():
+        assert "raise" not in line
