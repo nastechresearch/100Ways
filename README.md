@@ -5,15 +5,15 @@ into the Nastech fork while keeping parity and the brand intact.
 
 ## At a glance
 
-- 212 ways across 10 strategy categories
+- 216 ways across 10 strategy categories
 - 16 achievements, 2 unlocked
 - 22 owned-asset registry entries (see config/owned-assets/)
 - 19 pipeline stages per update run
-- 39 CLI verbs and 22 Telegram commands
+- 40 CLI verbs and 22 Telegram commands
 
 ## Ways
 
-### brand (20 ways)
+### brand (22 ways)
 
 - Anchored token regex
 - Compounds before short forms
@@ -35,6 +35,8 @@ into the Nastech fork while keeping parity and the brand intact.
 - Package metadata rebrand
 - Banner/branding text
 - Logo byte copy
+- Declared art classes
+- Attributed art leak
 
 ### detect (21 ways)
 
@@ -83,7 +85,7 @@ into the Nastech fork while keeping parity and the brand intact.
 - Rename-only diff
 - Binary-safe diff
 
-### gate (23 ways)
+### gate (24 ways)
 
 - Parity threshold
 - Zero hard failures
@@ -108,6 +110,7 @@ into the Nastech fork while keeping parity and the brand intact.
 - Open-draft dedup
 - Proven-complete gate
 - Documentation bar
+- Withheld verdict
 
 ### notify (25 ways)
 
@@ -206,7 +209,7 @@ into the Nastech fork while keeping parity and the brand intact.
 - Sample statistics
 - Manifest index
 
-### verify (23 ways)
+### verify (24 ways)
 
 - Brand round-trip
 - Sampled spot check
@@ -231,6 +234,7 @@ into the Nastech fork while keeping parity and the brand intact.
 - Shipped-link audit
 - Red ownership
 - Documented surface
+- Unclaimed identity art
 
 ### watch (20 ways)
 
@@ -289,6 +293,7 @@ into the Nastech fork while keeping parity and the brand intact.
 - `telegram` — the commanded surface: menu, resolve a line, send a probe
 - `lintsim` — run the fork's own lint contract over a candidate tree
 - `urls` — find broken, fake, off-brand and placeholder links in a tree
+- `assets` — measure the owned-asset policy against the registry
 - `surface` — measure the CLI, workflow, env, entry-point and signature surface
 - `verify-report` — write the one document saying what was measured and what was not
 - `errors` — what turned red, what cleared, and what a partial read cannot prove

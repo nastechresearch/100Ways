@@ -67,6 +67,13 @@ from .adapters import (
 )
 from .ai import AIEngine
 from .analyzer import analyze
+from .assetforge import (
+    AssetPolicy,
+    POLICY_PATH as ASSET_POLICY_PATH,
+    audit_asset_policy,
+    render as render_assets,
+    to_json as assets_json,
+)
 from .assets import OwnedAssets
 from .brandaudit import create_issues, plan_issues, render_issues_markdown, run_audit, write_json
 from .codes import CODE_DETAILS, code_name
@@ -94,6 +101,7 @@ from .forklint import report_lines, run_fork_lint, summarize
 from .git_ops import ensure_branch
 from .narrative import body_from_manifest, garnish, title_from_manifest
 from .notifier import Notification, notifier_from_env
+from .policy import PolicyError
 from .port import new_upstream_commits, port_commits
 from .profiling import (
     format_comparison,
@@ -909,6 +917,36 @@ class Cli:
             )
             sys.exit(1)
 
+    def cmd_assets(self) -> None:
+        """Measure the owned-asset policy against the registry, and trees only if given."""
+        try:
+            policy = AssetPolicy.load(self.args.policy)
+        except PolicyError as exc:
+            print(f"the asset policy cannot be read: {exc}", file=sys.stderr)
+            sys.exit(2)
+        tree = self.args.tree
+        if tree and not os.path.isdir(tree):
+            print(f"no tree to measure the policy against: {tree}", file=sys.stderr)
+            sys.exit(2)
+        upstream = self.args.upstream
+        if upstream and not os.path.isdir(upstream):
+            print(f"no upstream checkout to attribute art against: {upstream}", file=sys.stderr)
+            sys.exit(2)
+        issues = audit_asset_policy(
+            policy, OwnedAssets(repo=self.repo), tree, upstream, self.rules
+        )
+        policy_path = self.args.policy or ASSET_POLICY_PATH
+        for line in render_assets(issues, tree, policy_path, upstream):
+            print(line)
+        if self.args.json_out:
+            payload = json.dumps(assets_json(issues, tree, upstream), indent=2, sort_keys=True)
+            with open(self.args.json_out, "w", encoding="utf-8") as fh:
+                fh.write(payload + "\n")
+        blocked = [issue for issue in issues if issue.severity == "block"]
+        if blocked:
+            print(f"assets: {len(blocked)} finding(s) block a release", file=sys.stderr)
+            sys.exit(1)
+
     def cmd_surface(self) -> None:
         """Measure the surface upstream actually exposes, and what moved since a baseline."""
         tree = self.args.tree or self.repo
@@ -1593,6 +1631,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--json-out", default="", help="write the machine-readable findings here")
     p.set_defaults(func="cmd_urls")
+
+    p = sub.add_parser("assets", help="measure the owned-asset policy against the registry")
+    p.add_argument(
+        "--tree",
+        default="",
+        help="candidate tree to walk (omit to audit policy and registry alone)",
+    )
+    p.add_argument(
+        "--policy",
+        default="",
+        help="path to an asset policy (default: the engine's own config/asset-policy.yml)",
+    )
+    p.add_argument(
+        "--upstream",
+        default="",
+        help="upstream checkout, to prove unclaimed art is upstream's bytes",
+    )
+    p.add_argument("--json-out", default="", help="write the machine-readable findings here")
+    p.set_defaults(func="cmd_assets")
 
     p = sub.add_parser(
         "surface", help="measure the CLI, workflow, env, entry-point and signature surface"

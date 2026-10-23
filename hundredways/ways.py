@@ -261,6 +261,11 @@ WAYS: list[Way] = [
     Way("detect.live-inventory", "Live command inventory", "detect", "verbs and commands are read off the parser and the command registry, so no second list can go stale", uses="readme.surface"),
     Way("verify.documented-surface", "Documented surface", "verify", "an item counts as documented only when the line describing it is in the README, and a blank help string counts as nothing", uses="readme.measure_coverage"),
     Way("gate.coverage-bar", "Documentation bar", "gate", "a README that stops describing the shipped surface fails the stage that measures it", uses="readme.measure_coverage"),
+    # ---- owned art: what the registry must claim, not only what it does ----------
+    Way("brand.asset-policy", "Declared art classes", "brand", "a YAML names the pixel classes the fork must own, so the manifest is checked against intent and not only itself", uses="assetforge.AssetPolicy"),
+    Way("verify.art-unclaimed", "Unclaimed identity art", "verify", "art inside a required class that no manifest target names is found by walking the tree, not assumed from the registry", uses="assetforge.audit_asset_policy"),
+    Way("brand.proved-leak", "Attributed art leak", "brand", "unclaimed art only blocks a release when an upstream checkout proves a path brands into it; otherwise it stays a review", uses="assetforge.branded_paths"),
+    Way("gate.withheld-verdict", "Withheld verdict", "gate", "a class nobody walked is reported as unmeasured rather than passing as clean", uses="assetforge.render"),
 ]
 
 
