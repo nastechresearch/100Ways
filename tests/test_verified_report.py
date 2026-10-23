@@ -23,7 +23,7 @@ from hundredways.receipts import sha256_file
 from hundredways.urlcheck import URL_POLICY_PATH, UrlFinding, UrlPolicy, classify, extract_links
 from hundredways.verified_report import SECTIONS, build
 from hundredways.verify import FileResult, VerifyReport
-from hundredways.ways import Way
+from hundredways.ways import Way, build_registry
 from hundredways.weekly_sync import AuditIssue, WeeklyFullSyncReport
 
 HEADING = re.compile(r"^## (\w[\w '-]*)$", re.MULTILINE)
@@ -290,7 +290,7 @@ def test_the_ways_section_counts_the_live_registry():
     section = build(ways=rows).section("Ways")
     built = sum(1 for row in rows if row.status == "built")
     catalog_only = sum(1 for row in rows if row.status == "catalog-only")
-    assert len(rows) == 200  # the invariant: the report may not blur the registry size
+    assert len(rows) == build_registry().count  # the report may not blur the registry size
     assert f"total={len(rows)}" in section
     assert f"built={built}" in section
     assert f"catalog-only={catalog_only}" in section
