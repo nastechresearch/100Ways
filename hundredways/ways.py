@@ -78,7 +78,7 @@ WAYS: list[Way] = [
     Way("verify.token-audit", "Forbidden token audit", "verify", "scan for brand tokens that must never survive", uses="analyzer._VIOLATION_TOKENS"),
     Way("verify.english-guard", "English word guard", "verify", "assert venous/anonymous/thermometer survive branding"),
     Way("verify.path-parity", "Path twin check", "verify", "every upstream path must have a mapped nastech twin"),
-    Way("verify.orphan-flag", "Orphan flag", "verify", "every nastech-only file must be explainable or flagged"),
+    Way("verify.orphan-flag", "Orphan flag", "verify", "every nastech-only file must be explainable or flagged", uses="adapters.find_orphans"),
     Way("verify.merge-verify", "Merge result verify", "verify", "verify the merge commit's tree, not a cherry-pick"),
     # ---- port: how we land the work ------------------------------------------
     Way("port.patch-apply", "Rebranded patch apply", "port", "rebrand patch text then git apply --3way", uses="port._port_one", default=True),
