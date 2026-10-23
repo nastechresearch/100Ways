@@ -5,7 +5,7 @@ into the Nastech fork while keeping parity and the brand intact.
 
 ## At a glance
 
-- 209 ways across 10 strategy categories
+- 212 ways across 10 strategy categories
 - 16 achievements, 2 unlocked
 - 22 owned-asset registry entries (see config/owned-assets/)
 - 19 pipeline stages per update run
@@ -36,7 +36,7 @@ into the Nastech fork while keeping parity and the brand intact.
 - Banner/branding text
 - Logo byte copy
 
-### detect (20 ways)
+### detect (21 ways)
 
 - Polling loop
 - Push webhook
@@ -58,6 +58,7 @@ into the Nastech fork while keeping parity and the brand intact.
 - Webhook with fallback
 - Selector event loop
 - Multi-host heartbeat
+- Live command inventory
 
 ### diff (20 ways)
 
@@ -82,7 +83,7 @@ into the Nastech fork while keeping parity and the brand intact.
 - Rename-only diff
 - Binary-safe diff
 
-### gate (22 ways)
+### gate (23 ways)
 
 - Parity threshold
 - Zero hard failures
@@ -106,6 +107,7 @@ into the Nastech fork while keeping parity and the brand intact.
 - Two-approval gate
 - Open-draft dedup
 - Proven-complete gate
+- Documentation bar
 
 ### notify (25 ways)
 
@@ -204,7 +206,7 @@ into the Nastech fork while keeping parity and the brand intact.
 - Sample statistics
 - Manifest index
 
-### verify (22 ways)
+### verify (23 ways)
 
 - Brand round-trip
 - Sampled spot check
@@ -228,6 +230,7 @@ into the Nastech fork while keeping parity and the brand intact.
 - Path depth parity
 - Shipped-link audit
 - Red ownership
+- Documented surface
 
 ### watch (20 ways)
 

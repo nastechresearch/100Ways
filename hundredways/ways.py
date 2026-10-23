@@ -257,6 +257,10 @@ WAYS: list[Way] = [
     # ---- verify (third decade): how we prove a port is faithful -----------------
     Way("verify.shipped-link", "Shipped-link audit", "verify", "every https link read from the shipped tree judged by policy; a link nobody probed judges nothing", uses="urlcheck.scan_tree"),
     Way("verify.red-owner", "Red ownership", "verify", "each CI red classified from its own payload evidence, with the owner the class names", uses="red_classifier.classify_runs"),
+    # ---- self-documentation: the README is measured, not hoped for ---------------
+    Way("detect.live-inventory", "Live command inventory", "detect", "verbs and commands are read off the parser and the command registry, so no second list can go stale", uses="readme.surface"),
+    Way("verify.documented-surface", "Documented surface", "verify", "an item counts as documented only when the line describing it is in the README, and a blank help string counts as nothing", uses="readme.measure_coverage"),
+    Way("gate.coverage-bar", "Documentation bar", "gate", "a README that stops describing the shipped surface fails the stage that measures it", uses="readme.measure_coverage"),
 ]
 
 
