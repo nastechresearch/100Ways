@@ -220,7 +220,7 @@ def _urls(findings: Sequence[Any] | None) -> _Measurement | None:
     probed, unprobed = urlcheck.probe_tally(findings)
     lines = [
         f"- measured: urlcheck over {len(findings)} link(s); "
-        f"{probed} answered a probe, {unprobed} did not",
+        f"{probed} answered by the network, {unprobed} not looked at",
     ]
     if probed == 0 and findings:
         lines.append(
@@ -244,9 +244,10 @@ def _urls(findings: Sequence[Any] | None) -> _Measurement | None:
         lines.append(f"      {item.detail}")
         if item.suggestion:
             lines.append(f"      -> {item.suggestion}")
+    verdicts = [item for item in findings if item.status in urlcheck.DECIDED]
     return _Measurement(
-        f"urls {len(findings)} link(s), {unprobed} unprobed, "
-        f"{len(findings) - tally[urlcheck.OK]} finding(s)",
+        f"urls {len(findings)} link(s): {len(verdicts)} verdict(s), "
+        f"{probed} answered by the network, {unprobed} not looked at",
         tuple(lines),
     )
 

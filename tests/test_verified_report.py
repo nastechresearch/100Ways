@@ -254,11 +254,15 @@ def test_the_delta_section_names_surface_deltas_with_the_class_they_need():
 
 
 def test_the_urls_section_says_when_nothing_was_probed():
-    section = build(urls=urls()).section("URLs")
+    report = build(urls=urls())
+    section = report.section("URLs")
     assert "no network probe" in section
     assert "BRAND_VIOLATION" in section
     assert "nastech-agent.nastechresearch.com" in section  # the suggestion it names
+    assert "0 answered by the network, 3 not looked at" in section
     assert "verified" not in section.lower()
+    # A link nobody looked at is neither a verdict nor a pass, and the headline says so.
+    assert "3 link(s): 2 verdict(s)" in report.section("Summary")
 
 
 def test_the_lint_section_repeats_the_verdict_the_summary_made():
