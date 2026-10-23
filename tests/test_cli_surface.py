@@ -981,3 +981,44 @@ def test_a_delivery_verb_reports_an_unreadable_input_rather_than_planning_on_air
 
     assert stop.value.code == 2
     assert "nothing can be planned" in capsys.readouterr().err
+
+
+# -- the README coverage gate -------------------------------------------------
+
+def _shipped_readme() -> Path:
+    return Path(cli_module.__file__).resolve().parents[1] / "README.md"
+
+
+def test_the_readme_verb_exposes_the_coverage_gate():
+    args = build_parser().parse_args(["--repo", "/nowhere", "readme", "--check-coverage"])
+
+    assert args.check_coverage is True
+    assert args.min == 0.7  # the bar the README is promised to clear
+
+
+def test_check_coverage_scores_the_shipped_bytes_and_writes_nothing(tmp_path, capsys):
+    """The gate measures the file that ships, not a copy the verb just made."""
+    from hundredways.readme import measure_coverage, surface
+
+    target = _shipped_readme()
+    before = target.read_bytes()
+    cov = measure_coverage(before.decode("utf-8"), surface())
+
+    invoke(["--repo", str(tmp_path), "readme", "--check-coverage"]).cmd_readme()
+
+    out = capsys.readouterr().out
+    assert f"README coverage: {cov.documented}/{cov.total} of the command surface" in out
+    assert "nothing was written" in out
+    assert target.read_bytes() == before
+
+
+def test_a_bar_the_shipped_readme_cannot_clear_is_a_red(tmp_path, capsys):
+    before = _shipped_readme().read_bytes()
+
+    with pytest.raises(SystemExit) as stop:
+        argv = ["--repo", str(tmp_path), "readme", "--check-coverage", "--min", "1.01"]
+        invoke(argv).cmd_readme()
+
+    assert stop.value.code == 1
+    assert "is under the 101% bar" in capsys.readouterr().err
+    assert _shipped_readme().read_bytes() == before

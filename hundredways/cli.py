@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""100Ways - rebrand-safe upstream sync engine with 200 named strategies.
+"""100Ways - rebrand-safe upstream sync engine with 200+ named strategies.
 
 Watches the upstream Hermes repo, ports commits onto the Nastech fork while
 enforcing branding rules, verifies file-to-file parity, and notifies Telegram
@@ -7,7 +7,7 @@ and the opencode agent of anything that needs attention.
 
 Commands
 --------
-ways       Browse the 200 ways: list, show, pick a strategy per category.
+ways       Browse the ways registry: list, show, pick a strategy per category.
 update     Pull real Hermes, brand the whole tree, verify, save Nastech-Update#N.
 forkcheck  Diff a snapshot against the nastech-agent fork (byte-identity + brand-clean).
 check      One-shot: fetch upstream, report new commits + gaps.
@@ -412,15 +412,39 @@ class Cli:
             print(f" {code:>3}  {meta.name:<11}  {meta.meaning}")
 
     def cmd_readme(self) -> None:
-        """Regenerate README.md from the ways + achievements + owned-asset registries."""
-        from .readme import ReadmeInputs, render_readme
+        """Regenerate README.md, or measure the copy that ships."""
+        from .readme import ReadmeInputs, measure_coverage, render_readme, surface
 
-        state_dir = self.args.state_dir or os.path.join(os.path.dirname(os.path.abspath(self.repo)), "100ways-state")
-        owned = OwnedAssets(repo=self.repo)
         target = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "README.md"))
+        items = surface()
+        if self.args.check_coverage:
+            bar = self.args.min
+            # Measured against the shipped bytes: regenerating first would score the
+            # copy the generator just wrote, which certifies nothing.
+            try:
+                with open(target, encoding="utf-8") as fh:
+                    shipped = fh.read()
+            except OSError as exc:
+                print(f"cannot read {target}: {exc}", file=sys.stderr)
+                sys.exit(2)
+            cov = measure_coverage(shipped, items)
+            for name in cov.missing:
+                print(f"  [UNDOCUMENTED] {name}", file=sys.stderr)
+            head = f"README coverage: {cov.documented}/{cov.total} of the command surface"
+            print(f"{head} ({cov.ratio:.1%})")
+            if cov.ratio < bar:
+                print(f"COVERAGE: {cov.ratio:.1%} is under the {bar:.0%} bar", file=sys.stderr)
+                sys.exit(1)
+            print(f"COVERAGE: meets the {bar:.0%} bar; nothing was written")
+            return
+        state_dir = self.args.state_dir or os.path.join(
+            os.path.dirname(os.path.abspath(self.repo)), "100ways-state"
+        )
+        owned = OwnedAssets(repo=self.repo)
         content = render_readme(ReadmeInputs(
             state_dir=state_dir,
             owned_count=owned.count,
+            surface=items,
         ))
         with open(target, "w", encoding="utf-8") as fh:
             fh.write(content + "\n")
@@ -1361,7 +1385,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--require-clean", action="store_true", help="exit 1 when any finding remains")
     p.set_defaults(func="cmd_audit")
 
-    p = sub.add_parser("ways", help="browse the 200 ways")
+    p = sub.add_parser("ways", help="browse the ways registry")
     p.add_argument("way_action", nargs="?", default="list", choices=["list", "show", "count", "defaults", "coverage"])
     p.add_argument("way_id", nargs="?", default="", help="way id for 'show', e.g. brand.token-regex")
     p.set_defaults(func="cmd_ways")
@@ -1421,6 +1445,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("readme", help="regenerate README.md from the registries")
     p.add_argument("--state-dir", default="", help="state dir (default: repo-sibling 100ways-state)")
+    p.add_argument(
+        "--check-coverage",
+        action="store_true",
+        help="score the shipped README against the live command surface; writes nothing",
+    )
+    p.add_argument(
+        "--min",
+        type=float,
+        default=0.7,
+        metavar="RATIO",
+        help="coverage bar for --check-coverage (default: 0.7)",
+    )
     p.set_defaults(func="cmd_readme")
 
     p = sub.add_parser("release", help="verify the code table and incoming codes")
