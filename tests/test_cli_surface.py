@@ -53,6 +53,11 @@ def invoke(argv: list[str]) -> Cli:
     return Cli(build_parser().parse_args(argv))
 
 
+def local(tmp_path, *argv: str) -> Cli:
+    """A verb run against a throwaway tree, the way a bare checkout would."""
+    return invoke(["--repo", str(tmp_path), *argv])
+
+
 # -- the surface exists ------------------------------------------------------
 
 
@@ -64,6 +69,9 @@ def invoke(argv: list[str]) -> Cli:
         (["why-red", "--runs", "r.json"], "cmd_why_red"),
         (["telegram", "menu"], "cmd_telegram"),
         (["lintsim", "--candidate", "tree"], "cmd_lintsim"),
+        (["urls", "--tree", "tree"], "cmd_urls"),
+        (["surface", "--tree", "tree"], "cmd_surface"),
+        (["verify-report", "--out", "v.md"], "cmd_verify_report"),
     ],
 )
 def test_each_new_verb_dispatches_to_a_real_method(argv, func):
@@ -73,7 +81,16 @@ def test_each_new_verb_dispatches_to_a_real_method(argv, func):
 
 def test_every_verb_that_parses_is_documented_in_the_help():
     help_text = build_parser().format_help()
-    for verb in ("narrative", "pubconfig", "why-red", "telegram", "lintsim"):
+    for verb in (
+        "narrative",
+        "pubconfig",
+        "why-red",
+        "telegram",
+        "lintsim",
+        "urls",
+        "surface",
+        "verify-report",
+    ):
         assert f"  {verb}" in help_text, f"{verb} parses but --help does not advertise it"
         assert f"\n{verb:<10}" in cli_module.__doc__, f"{verb} is missing from the command list"
 
@@ -484,3 +501,159 @@ def test_lintsim_lints_the_repo_it_was_given_when_no_fork_is_named(tmp_path, mon
     invoke(["--repo", str(tmp_path), "lintsim", "--candidate", str(tmp_path)]).cmd_lintsim()
 
     assert seen["fork"] == str(tmp_path)
+
+
+# -- urls --------------------------------------------------------------------
+
+
+def _link_tree(tmp_path, url: str) -> Path:
+    root = tmp_path / "tree"
+    root.mkdir()
+    (root / "README.md").write_text(f"See {url} for details.\n", encoding="utf-8")
+    return root
+
+
+def test_urls_fails_on_a_link_the_brand_map_still_rewrites(tmp_path, capsys):
+    root = _link_tree(tmp_path, "https://hermes-agent.nousresearch.com/docs")
+    cli = invoke(["--repo", str(tmp_path), "urls", "--tree", str(root)])
+
+    with pytest.raises(SystemExit) as stop:
+        cli.cmd_urls()
+
+    assert stop.value.code == 1
+    out = capsys.readouterr().out
+    assert "BRAND_VIOLATION" in out
+    assert "nastech-agent.nastechresearch.com" in out  # the fix it names
+
+
+def test_urls_calls_an_offline_run_offline_instead_of_a_pass(tmp_path, capsys):
+    root = _link_tree(tmp_path, "https://nastechresearch.com/store")
+
+    invoke(["--repo", str(tmp_path), "urls", "--tree", str(root)]).cmd_urls()
+
+    out = capsys.readouterr().out
+    assert "not probed" in out
+    assert "UNREACHABLE=1" in out  # named as not-judged, never as a pass
+    assert "no finding" not in out
+
+
+def test_urls_writes_the_machine_form_of_every_verdict(tmp_path):
+    root = _link_tree(tmp_path, "https://example.com/docs")
+    cli = local(tmp_path, "urls", "--tree", str(root), "--json-out", str(tmp_path / "u.json"))
+
+    with pytest.raises(SystemExit) as stop:
+        cli.cmd_urls()
+
+    assert stop.value.code == 1, "a placeholder link is a verdict, not a shrug"
+    payload = json.loads((tmp_path / "u.json").read_text(encoding="utf-8"))
+    assert payload[0]["status"] == "PLACEHOLDER"
+    assert payload[0]["probed"] is False
+    assert payload[0]["path"] == "README.md"
+
+
+def test_urls_refuses_to_invent_a_tree(tmp_path):
+    cli = invoke(["--repo", str(tmp_path), "urls", "--tree", str(tmp_path / "absent")])
+
+    with pytest.raises(SystemExit) as stop:
+        cli.cmd_urls()
+
+    assert stop.value.code == 2
+
+
+# -- surface -----------------------------------------------------------------
+
+VERB_APP = "import argparse\np = argparse.ArgumentParser()\np.add_subparsers().add_parser('run')\n"
+ENV_APP = "import os\n\nKEY = os.environ['ORACLE_KEY']\n"
+
+
+def test_surface_saves_a_baseline_and_finds_nothing_to_report(tmp_path, capsys):
+    root = tmp_path / "tree"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "app.py").write_text(VERB_APP, encoding="utf-8")
+    baseline = tmp_path / "surface.json"
+
+    local(tmp_path, "surface", "--tree", str(root), "--save", str(baseline)).cmd_surface()
+
+    assert baseline.is_file()
+    assert "cli_verbs=1" in capsys.readouterr().out
+
+    invoke(
+        ["--repo", str(tmp_path), "surface", "--tree", str(root), "--baseline", str(baseline)]
+    ).cmd_surface()
+
+    assert "unchanged" in capsys.readouterr().out
+
+
+def test_surface_exits_when_upstream_moved_something_the_fork_must_decide(tmp_path, capsys):
+    root = tmp_path / "tree"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "app.py").write_text(VERB_APP, encoding="utf-8")
+    baseline = tmp_path / "surface.json"
+    invoke(
+        ["--repo", str(tmp_path), "surface", "--tree", str(root), "--save", str(baseline)]
+    ).cmd_surface()
+    capsys.readouterr()
+    (root / "pkg" / "env.py").write_text(ENV_APP, encoding="utf-8")
+    cli = local(tmp_path, "surface", "--tree", str(root), "--baseline", str(baseline))
+
+    with pytest.raises(SystemExit) as stop:
+        cli.cmd_surface()
+
+    assert stop.value.code == 1, "an env var is a decision, not an automatic adopt"
+    out = capsys.readouterr().out
+    assert "env-var added: ORACLE_KEY [rule]" in out
+
+
+def test_surface_names_a_baseline_it_cannot_trust(tmp_path, capsys):
+    root = tmp_path / "tree"
+    root.mkdir()
+    bad = tmp_path / "surface.json"
+    bad.write_text('{"schema": "other/v9"}', encoding="utf-8")
+    cli = invoke(["--repo", str(tmp_path), "surface", "--tree", str(root), "--baseline", str(bad)])
+
+    with pytest.raises(SystemExit) as stop:
+        cli.cmd_surface()
+
+    assert stop.value.code == 2
+    assert "schema" in capsys.readouterr().err
+
+
+# -- verify-report -----------------------------------------------------------
+
+
+def test_verify_report_writes_the_document_and_admits_what_it_skipped(tmp_path, capsys):
+    root = tmp_path / "tree"
+    root.mkdir()
+    out = tmp_path / "verified.md"
+
+    local(tmp_path, "verify-report", "--tree", str(root), "--out", str(out)).cmd_verify_report()
+
+    text = out.read_text(encoding="utf-8")
+    assert "## Gates" in text
+    assert "## Receipts" in text
+    assert "not verified: " in text
+    spoken = capsys.readouterr().out
+    assert "measured: Summary, URLs, Ways" in spoken
+    assert "not verified: Delta, Gates" in spoken
+
+
+def test_verify_report_gates_on_the_measurements_it_actually_made(tmp_path, capsys):
+    root = _link_tree(tmp_path, "https://hermes-agent.nousresearch.com/docs")
+    cli = invoke(["--repo", str(tmp_path), "verify-report", "--tree", str(root)])
+
+    with pytest.raises(SystemExit) as stop:
+        cli.cmd_verify_report()
+
+    assert stop.value.code == 1
+    assert "links" in capsys.readouterr().err
+
+
+def test_verify_report_ignores_a_gate_it_was_not_asked_to_measure(tmp_path, capsys):
+    root = tmp_path / "tree"
+    root.mkdir()
+
+    invoke(["--repo", str(tmp_path), "verify-report", "--tree", str(root)]).cmd_verify_report()
+
+    out = capsys.readouterr().out
+    assert "parity gate" not in capsys.readouterr().err
+    assert "not verified: " in out

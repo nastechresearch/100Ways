@@ -32,6 +32,9 @@ pubconfig  Predict which credential names a future run would read as an empty st
 why-red    Sort the reds in a check-runs payload into the class that owns the fix.
 telegram   Show the command menu, resolve one command line, or send a probe.
 lintsim    Run the fork's own lint contract over a candidate tree before publishing it.
+urls       Find broken, fake, off-brand and placeholder links in a tree.
+surface    Measure the surface upstream exposes, and what moved since a baseline.
+verify-report  Write the one document saying what was measured and what was not.
 readme     Regenerate README.md from the ways + achievements + owned-asset registries.
 release    Verify the code table and incoming codes.
 admin      Compile/verify the admin password into its system-only token.
@@ -44,13 +47,24 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 
 from .achievements import Achievements
+from .adapters import (
+    RULE,
+    BaselineError,
+    diff_surface,
+    find_orphans,
+    load_baseline,
+    save_baseline,
+    scan_surface,
+)
 from .ai import AIEngine
 from .analyzer import analyze
 from .assets import OwnedAssets
 from .brandaudit import create_issues, plan_issues, render_issues_markdown, run_audit, write_json
 from .codes import CODE_DETAILS, code_name
+from .coverage import coverage as ways_coverage
 from .dashboard import serve as serve_dashboard
 from .forklint import report_lines, run_fork_lint, summarize
 from .git_ops import ensure_branch
@@ -84,10 +98,20 @@ from .telegram_agent import send_message as send_telegram
 from .telegram_commands import LEVELS, grants, lookup, menu, parse, usage_for
 from .telegram_transport import TelegramDeliveryError
 from .updates import DEFAULT_HERMES_URL, UpdateManager, default_updates_dir, hermes_path
-from .weekly_sync import build_weekly_report, save_ledger, write_weekly_report
-from .verify import _git, _git_ok, verify_rebrand
+from .urlcheck import (
+    DECIDED,
+    URL_POLICY_PATH,
+    UrlPolicy,
+    findings_to_json,
+    probe_tally,
+    render as render_urls,
+    scan_tree as scan_url_tree,
+)
+from .verified_report import build as build_verified_report
+from .verify import _git, _git_ok, gate_passes, verify_rebrand
 from .watcher import Watcher, WatcherConfig
 from .ways import build_registry
+from .weekly_sync import build_weekly_report, save_ledger, write_weekly_report
 
 DEFAULT_REPO = os.environ.get("HUNDREDWAYS_REPO", os.environ.get("SYNCBRIDGE_REPO", "/home/nascode/Documents/A1/nastech-agent"))
 DEFAULT_HERMES = os.environ.get("HUNDREDWAYS_HERMES", "/home/nascode/Documents/A1/hermes-agent")
@@ -816,6 +840,142 @@ class Cli:
         if not summary.passed:
             sys.exit(1)
 
+    def cmd_urls(self) -> None:
+        """Judge every link in a tree by syntax and policy, and live only if asked."""
+        tree = self.args.tree or self.repo
+        if not os.path.isdir(tree):
+            print(f"no tree to read links from: {tree} (pass --tree)", file=sys.stderr)
+            sys.exit(2)
+        policy = UrlPolicy.load(self.args.policy or URL_POLICY_PATH)
+        findings = scan_url_tree(tree, policy, probe=self.args.probe, rules=self.rules)
+        print(render_urls(findings, *probe_tally(findings)))
+        if self.args.json_out:
+            with open(self.args.json_out, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(findings_to_json(findings), indent=2, sort_keys=True) + "\n")
+        decided = [item for item in findings if item.status in DECIDED]
+        if decided:
+            print(
+                f"urls: {len(decided)} link(s) judged unfit to ship (see the statuses above)",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    def cmd_surface(self) -> None:
+        """Measure the surface upstream actually exposes, and what moved since a baseline."""
+        tree = self.args.tree or self.repo
+        if not os.path.isdir(tree):
+            print(f"no tree to read surface from: {tree} (pass --tree)", file=sys.stderr)
+            sys.exit(2)
+        ignore = [token.strip() for token in self.args.ignore.split(",") if token.strip()]
+        surface = scan_surface(tree, ignore)
+        print(
+            "surface: "
+            + ", ".join(f"{name}={count}" for name, count in sorted(surface.counts.items()))
+        )
+        for unparsed in surface.unparsed:
+            print(f"  unparsed {unparsed}")
+        if self.args.save:
+            save_baseline(surface, self.args.save)
+            print(f"baseline written: {self.args.save}")
+        if not self.args.baseline:
+            return
+        try:
+            before = load_baseline(self.args.baseline)
+        except BaselineError as exc:
+            print(f"cannot read the surface baseline: {exc}", file=sys.stderr)
+            sys.exit(2)
+        deltas = diff_surface(before, surface)
+        if not deltas:
+            print("surface unchanged since the baseline")
+            return
+        decisions = 0
+        for item in sorted(
+            deltas, key=lambda delta: (delta.field, delta.kind, delta.before, delta.after)
+        ):
+            moved = (
+                f"{item.before} -> {item.after}"
+                if item.kind == "changed"
+                else (item.after or item.before)
+            )
+            print(f"  {item.field} {item.kind}: {moved} [{item.classification}]")
+            if item.classification == RULE:
+                decisions += 1
+        print(f"{len(deltas)} movement(s), {decisions} needing an engine rule")
+        if decisions:
+            sys.exit(1)
+
+    def cmd_verify_report(self) -> None:
+        """Write the one document that names what was measured and what was not.
+
+        Cheap local measurements run by default; each expensive one is opt-in, and an
+        input that was not asked for leaves its section saying ``not verified`` rather
+        than being guessed at.
+        """
+        from .forkcheck import walk_files
+
+        tree = self.args.tree or self.repo
+        threshold = self.args.threshold
+        inputs: dict[str, object] = {"ways": ways_coverage(), "threshold": threshold}
+        if os.path.isdir(tree):
+            inputs["urls"] = scan_url_tree(
+                tree, UrlPolicy.load(self.args.policy or URL_POLICY_PATH), rules=self.rules
+            )
+        if self.args.parity:
+            inputs["parity"] = verify_rebrand(tree, BIRTH_PARENT, BIRTH_COMMIT, self.rules)
+        if self.args.gaps:
+            _git(tree, "fetch", "upstream")
+            inputs["gaps"] = analyze(
+                _git_ok(tree, "rev-parse", DEFAULT_UPSTREAM).strip(),
+                _git_ok(tree, "rev-parse", "HEAD").strip(),
+                tree,
+                self.rules,
+            )
+        if self.args.baseline:
+            inputs["surface"] = diff_surface(load_baseline(self.args.baseline), scan_surface(tree))
+        if self.args.inventory:
+            inputs["credentials"] = analyze_root(tree, _inventory_from_json(self.args.inventory))
+        if self.args.lint:
+            inputs["lint"] = summarize(run_fork_lint(tree, self.args.lint, self.args.upstream))
+        if self.args.upstream:
+            inputs["orphans"] = find_orphans(
+                walk_files(tree), walk_files(self.args.upstream), self.rules
+            )
+        if self.args.receipts:
+            inputs["receipts"] = sorted(
+                str(path) for path in Path(self.args.receipts).glob("*.json")
+            )
+        report = build_verified_report(**inputs)
+        if self.args.out:
+            parent = os.path.dirname(os.path.abspath(self.args.out))
+            os.makedirs(parent, exist_ok=True)
+            with open(self.args.out, "w", encoding="utf-8") as fh:
+                fh.write(report.text)
+            print(f"verified report written: {self.args.out}")
+        else:
+            print(report.text, end="")
+        print(f"measured: {', '.join(report.measured)}")
+        if report.missing:
+            print(f"not verified: {', '.join(report.missing)}")
+        blockers: list[str] = []
+        parity = inputs.get("parity")
+        if parity is not None and not gate_passes(parity, threshold):
+            blockers.append("parity gate")
+        lint = inputs.get("lint")
+        if lint is not None and not lint.passed:
+            blockers.append("fork-lint")
+        credentials = inputs.get("credentials") or []
+        if any(getattr(item, "actionable", False) for item in credentials):
+            blockers.append("credential names")
+        urls = inputs.get("urls") or []
+        if any(item.status in DECIDED for item in urls):
+            blockers.append("links")
+        orphans = inputs.get("orphans") or ()
+        if any(item.kind == "deleted-twin" for item in orphans):
+            blockers.append("deleted-twin orphans")
+        if blockers:
+            print(f"verify-report: red on {', '.join(blockers)}", file=sys.stderr)
+            sys.exit(1)
+
 
 def _read_json(path: str) -> dict:
     with open(path, encoding="utf-8") as fh:
@@ -1082,6 +1242,55 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fork", default="", help="fork checkout defining the checks (default: --repo)")
     p.add_argument("--upstream", default="", help="upstream checkout for the inflation prediction")
     p.set_defaults(func="cmd_lintsim")
+
+    p = sub.add_parser("urls", help="find broken, fake, off-brand and placeholder links in a tree")
+    p.add_argument("--tree", default="", help="tree to read links from (default: --repo)")
+    p.add_argument(
+        "--policy",
+        default="",
+        help="path to a URL policy (default: the engine's own config/url-policy.yml)",
+    )
+    p.add_argument(
+        "--probe",
+        action="store_true",
+        help="make a live request per link, within the policy's budgets (off by default)",
+    )
+    p.add_argument("--json-out", default="", help="write the machine-readable findings here")
+    p.set_defaults(func="cmd_urls")
+
+    p = sub.add_parser(
+        "surface", help="measure the CLI, workflow, env, entry-point and signature surface"
+    )
+    p.add_argument("--tree", default="", help="checkout to read (default: --repo)")
+    p.add_argument(
+        "--baseline",
+        default="",
+        help="surface JSON to diff against; its absence is reported, not assumed",
+    )
+    p.add_argument("--save", default="", help="write the current surface to this baseline path")
+    p.add_argument(
+        "--ignore",
+        default="",
+        help="comma-separated kind:name labels (e.g. cli-verb:probe) marked as decided",
+    )
+    p.set_defaults(func="cmd_surface")
+
+    p = sub.add_parser(
+        "verify-report",
+        help="write the one document saying what was measured and what was not",
+    )
+    p.add_argument("--tree", default="", help="fork checkout to measure (default: --repo)")
+    p.add_argument("--out", default="", help="markdown path to write the document to")
+    p.add_argument("--parity", action="store_true", help="run the parity gate")
+    p.add_argument("--gaps", action="store_true", help="run the gap analysis (fetches upstream)")
+    p.add_argument("--baseline", default="", help="surface JSON to diff the current surface from")
+    p.add_argument("--inventory", default="", help="provided credential names JSON (enables creds)")
+    p.add_argument("--lint", default="", help="candidate tree to run the fork's lint contract on")
+    p.add_argument("--upstream", default="", help="upstream checkout, for the orphan pass")
+    p.add_argument("--receipts", default="", help="directory of *.json receipts to digest")
+    p.add_argument("--policy", default="", help="path to a URL policy")
+    p.add_argument("--threshold", type=float, default=0.99, help="parity gate threshold")
+    p.set_defaults(func="cmd_verify_report")
 
     return parser
 

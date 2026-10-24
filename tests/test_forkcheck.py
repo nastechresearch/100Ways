@@ -10,11 +10,11 @@ import subprocess
 
 from hundredways.forkcheck import (
     ForkCheckReport,
-    _walk,
     fork_consistency,
     preserve_fork_files,
     scan_brand_violations,
     source_tree_delta,
+    walk_files,
 )
 from hundredways.rules import BrandingRules
 from hundredways.updates import STAGES, UpdateManager, brand_tree
@@ -170,7 +170,7 @@ def test_collision_safe_contributor_alias_is_relocated_without_duplicate(tmp_pat
     preserved = preserve_fork_files(str(fork), branded, str(upstream), rules)
     report = fork_consistency(str(fork), branded, str(upstream), rules)
 
-    email_files = sorted(_walk(os.path.join(branded, "contributors", "emails")))
+    email_files = sorted(walk_files(os.path.join(branded, "contributors", "emails")))
     assert len(email_files) == 2
     assert all("--case-" in path for path in email_files)
     assert preserved == []
@@ -386,7 +386,7 @@ def test_walk_uses_git_tracked_files_in_a_checkout(tmp_path):
     subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "c"], check=True)
     (repo / "uncommitted.txt").write_text("dirty\n")
-    files = _walk(str(repo))
+    files = walk_files(str(repo))
     assert "tracked.txt" in files
     assert "uncommitted.txt" not in files
     assert "website/node_modules/dep.js" not in files
@@ -398,7 +398,7 @@ def test_walk_skips_node_modules_in_a_plain_tree(tmp_path):
         "web/node_modules/pkg/index.js": "junk\n",
         "web/__pycache__/x.pyc": "junk\n",
     })
-    files = _walk(str(tree))
+    files = walk_files(str(tree))
     assert "a.txt" in files
     assert "web/node_modules/pkg/index.js" not in files
     assert "web/__pycache__/x.pyc" not in files

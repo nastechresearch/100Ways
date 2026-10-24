@@ -106,12 +106,14 @@ def _joined_shell(text: str) -> str:
     return "\n".join(joined)
 
 
-def _triggers(text: str) -> set[str]:
+def workflow_triggers(text: str) -> set[str]:
     """Return the events a workflow can be started by, read from its ``on:`` block.
 
     A publication path is only safe while something has to press the button, so
     the trigger set is part of what the audit pins down rather than a detail of
-    the file's prose.
+    the file's prose.  Surface discovery (:mod:`hundredways.adapters`) reads the
+    same block for the same reason: two parsers of one ``on:`` block agree only
+    by luck.
     """
     lines = text.splitlines()
     start = None
@@ -237,7 +239,7 @@ def audit_workflow_security(
                 )
             if workflow.name in _PUBLICATION_WORKFLOWS:
                 allowed = _PUBLICATION_WORKFLOWS[workflow.name]
-                for trigger in sorted(_triggers(text) - set(allowed)):
+                for trigger in sorted(workflow_triggers(text) - set(allowed)):
                     issues.append(
                         WorkflowPolicyIssue(
                             "publication-trigger-not-allowed",
