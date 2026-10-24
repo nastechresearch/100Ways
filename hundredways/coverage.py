@@ -1,4 +1,4 @@
-"""Ways coverage: which of the 200 ways have a live engine consumer.
+"""Ways coverage: which catalogued ways have a live engine consumer.
 
 The registry (``ways.py``) promises a named strategy for every sub-problem.
 Not every promise is a running piece of the engine yet.  ``ways coverage``

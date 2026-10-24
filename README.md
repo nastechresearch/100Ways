@@ -5,14 +5,15 @@ into the Nastech fork while keeping parity and the brand intact.
 
 ## At a glance
 
-- 209 ways across 10 strategy categories
+- 216 ways across 10 strategy categories
 - 16 achievements, 2 unlocked
 - 22 owned-asset registry entries (see config/owned-assets/)
 - 19 pipeline stages per update run
+- 40 CLI verbs and 22 Telegram commands
 
 ## Ways
 
-### brand (20 ways)
+### brand (22 ways)
 
 - Anchored token regex
 - Compounds before short forms
@@ -34,8 +35,10 @@ into the Nastech fork while keeping parity and the brand intact.
 - Package metadata rebrand
 - Banner/branding text
 - Logo byte copy
+- Declared art classes
+- Attributed art leak
 
-### detect (20 ways)
+### detect (21 ways)
 
 - Polling loop
 - Push webhook
@@ -57,6 +60,7 @@ into the Nastech fork while keeping parity and the brand intact.
 - Webhook with fallback
 - Selector event loop
 - Multi-host heartbeat
+- Live command inventory
 
 ### diff (20 ways)
 
@@ -81,7 +85,7 @@ into the Nastech fork while keeping parity and the brand intact.
 - Rename-only diff
 - Binary-safe diff
 
-### gate (22 ways)
+### gate (24 ways)
 
 - Parity threshold
 - Zero hard failures
@@ -105,6 +109,8 @@ into the Nastech fork while keeping parity and the brand intact.
 - Two-approval gate
 - Open-draft dedup
 - Proven-complete gate
+- Documentation bar
+- Withheld verdict
 
 ### notify (25 ways)
 
@@ -203,7 +209,7 @@ into the Nastech fork while keeping parity and the brand intact.
 - Sample statistics
 - Manifest index
 
-### verify (22 ways)
+### verify (24 ways)
 
 - Brand round-trip
 - Sampled spot check
@@ -227,6 +233,8 @@ into the Nastech fork while keeping parity and the brand intact.
 - Path depth parity
 - Shipped-link audit
 - Red ownership
+- Documented surface
+- Unclaimed identity art
 
 ### watch (20 ways)
 
@@ -250,6 +258,74 @@ into the Nastech fork while keeping parity and the brand intact.
 - Lockfile mutual exclusion
 - Log rotation
 - Graceful shutdown
+
+## CLI verbs
+
+- `check` — one-shot watch cycle
+- `watch` — live watch loop
+- `plan` — list unported upstream commits
+- `port` — port upstream commits (dry-run unless --apply)
+- `analyze` — file-to-file gap analysis
+- `audit` — brand-coverage audit: discover future brand spellings, residue, and secrets
+- `ways` — browse the ways registry
+- `research` — search open source for ideas to steal
+- `diff` — two-phase diff: live upstream vs local Hermes, then branded vs Nastech
+- `scan` — scan file formats
+- `notify` — send a test notification
+- `status` — repo + rules state
+- `verify` — parity gate vs the birth commit (exit 1 on fail)
+- `ship` — verify parity then prepare the sync branch for shipping
+- `report` — write a markdown gap report to config/reports
+- `dashboard` — serve the live web dashboard
+- `pull` — fetch upstream + write report + record achievement
+- `achievements` — list achievements and unlock state
+- `codes` — print the gap code legend
+- `readme` — regenerate README.md from the registries
+- `release` — verify the code table and incoming codes
+- `admin` — compile/verify the admin password into its system token
+- `update` — pull real Hermes -> brand whole tree -> verify -> save Nastech-Update#N
+- `profile` — rank a run's stage costs, or compare two runs
+- `weekly-full-sync` — weekly complete rebrand audit or snapshot; never pushes or merges
+- `forkcheck` — diff the branded snapshot against the nastech-agent fork
+- `narrative` — build the PR title + body from a sync manifest
+- `pubconfig` — predict which credential names a future run would read as an empty string
+- `why-red` — sort the reds in a check-runs payload by who owns the fix
+- `telegram` — the commanded surface: menu, resolve a line, send a probe
+- `lintsim` — run the fork's own lint contract over a candidate tree
+- `urls` — find broken, fake, off-brand and placeholder links in a tree
+- `assets` — measure the owned-asset policy against the registry
+- `surface` — measure the CLI, workflow, env, entry-point and signature surface
+- `verify-report` — write the one document saying what was measured and what was not
+- `errors` — what turned red, what cleared, and what a partial read cannot prove
+- `issues` — draft the issues the measured findings earn (dry run)
+- `discuss` — draft the questions the engine must not answer for a human
+- `suggest` — the next actions, ordered as they were measured
+- `table` — print one measured family as a bounded table
+
+## Telegram commands
+
+- `/status` — Gate, threshold and the real refs behind this run _(read)_
+- `/progress` — Pending commits and the subjects detected this cycle _(read)_
+- `/errors` — The latest failed step, and what changed since the last cycle _(read)_
+- `/remaining` — What is left before a PR may be created or updated _(read)_
+- `/gates` — Every verification gate and its recorded outcome _(read)_
+- `/suggest` — The next actions this run measured, in the order it measured them _(read)_
+- `/table` — One measured family as a table that fits one message _(read)_
+- `/issues` — The issues the findings would earn; nothing is created from chat _(operate)_
+- `/discuss` — The questions the engine will not answer for you; nothing is created _(operate)_
+- `/pr status` — The review PR this run produced _(read)_
+- `/commit` — Explain one detected commit _(read)_
+- `/search` — Find commit subjects matching a phrase _(read)_
+- `/explain` — What a pipeline term means in this fork _(read)_
+- `/log` — The last commands this chat was given _(operate)_
+- `/refresh` — Re-read the run state from disk before answering _(read)_
+- `/stay` — Keep listening for another bounded window _(operate)_
+- `/pending` — The edits proposed from chat that have not landed _(operate)_
+- `/edit` — Propose a literal change to an engine rule module _(edit)_
+- `/apply` — Verify a proposed edit, push its branch and open it for review _(edit)_
+- `/cancel` — Drop a proposed edit without writing anything _(edit)_
+- `/whoami` — The ids this bot sees and what you are allowed to do _(read)_
+- `/help` — This menu _(read)_
 
 ## Achievements
 

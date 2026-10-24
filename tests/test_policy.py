@@ -239,9 +239,17 @@ def test_the_reader_agrees_with_the_real_yaml_parser(text):
     assert parse(text) == yaml.safe_load(text)
 
 
-def test_the_shipped_policy_file_loads_under_the_real_parser():
+@pytest.mark.parametrize(
+    "path", sorted((REPO / "config").glob("*.yml")), ids=lambda item: item.name
+)
+def test_every_shipped_policy_loads_under_the_real_parser(path):
+    """Every policy in config/ is written in the subset, not just the first one.
+
+    A new policy file is only as safe as this loop: the claim in each file's own
+    header is that ``yaml.safe_load`` and ``policy.parse`` agree on it.
+    """
     yaml = pytest.importorskip(
         "yaml", reason="pyyaml is a dev extra (base installs have none)"
     )
-    text = (REPO / "config" / "url-policy.yml").read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8")
     assert parse(text) == yaml.safe_load(text)
