@@ -245,6 +245,18 @@ WAYS: list[Way] = [
     Way("watch.lockfile", "Lockfile mutual exclusion", "watch", "a lockfile ensures one watcher per repo at a time"),
     Way("watch.rotate-logs", "Log rotation", "watch", "rotate cycle logs by size and keep only recent tails"),
     Way("watch.graceful", "Graceful shutdown", "watch", "drain the current cycle before stopping on SIGTERM"),
+    # ---- notify (third decade): how a measurement reaches a person --------------
+    Way("notify.measured-drafts", "Draft per measurement", "notify", "issues and discussions drafted only from families that were measured; an unmeasured family drafts nothing", uses="delivery.plan"),
+    Way("notify.forge-discussion", "Forge discussion", "notify", "a question with no known answer posted to Discussions only when told to, body sent as JSON on stdin", uses="delivery.create_discussions"),
+    Way("notify.chat-table", "Bounded chat table", "notify", "a measured table rendered to the message limit, breaking between whole rows and naming any it withholds", uses="telegram_tables.answer"),
+    Way("notify.next-action", "Next-action list", "notify", "one line per finding with the owner already named, printable in chat or in an issue", uses="delivery.render_suggestions"),
+    Way("notify.cycle-delta", "Cycle delta feed", "notify", "report what moved since the last cycle, not a snapshot of this one", uses="errorfeed.observe"),
+    # ---- gate (third decade): what blocks a write -------------------------------
+    Way("gate.dedup-open", "Open-draft dedup", "gate", "a marker already on an open issue is not asked for a second time", uses="delivery.deduplicate"),
+    Way("gate.proven-complete", "Proven-complete gate", "gate", "a lane is called cleared only when the read provably listed every check run", uses="errorfeed.observe"),
+    # ---- verify (third decade): how we prove a port is faithful -----------------
+    Way("verify.shipped-link", "Shipped-link audit", "verify", "every https link read from the shipped tree judged by policy; a link nobody probed judges nothing", uses="urlcheck.scan_tree"),
+    Way("verify.red-owner", "Red ownership", "verify", "each CI red classified from its own payload evidence, with the owner the class names", uses="red_classifier.classify_runs"),
 ]
 
 

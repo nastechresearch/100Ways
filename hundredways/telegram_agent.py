@@ -21,7 +21,10 @@ from typing import Any, Callable, Sequence
 from urllib.request import Request, urlopen
 
 from .commit_stream import CommitStreamDecision, format_telegram_status
+from .delivery import SUGGESTIONS, TABLE_KINDS, Plan, plan, plan_table
+from .errorfeed import KINDS as FEED_KINDS
 from .operation_safety import bound_telegram_text, redact_telegram_text
+from .telegram_tables import CHAT_LIMIT, TableError, answer
 from .telegram_commands import (
     EDIT,
     LEVELS,
@@ -194,17 +197,133 @@ def format_remaining(decision: CommitStreamDecision, context: dict[str, Any]) ->
 def format_errors(context: dict[str, Any]) -> str:
     error = str(context.get("last_error") or "No recorded error in this run.")
     step = str(context.get("failed_step") or "Unknown step")
-    return "\n".join(
-        (
-            "NASTECH / 100WAYS",
-            "ERROR REPORT",
-            "────────────────────",
-            f"Step: {step}",
-            f"Error: {error[:1500]}",
-            "",
-            "The failure blocks publication until the next verified run passes.",
+    lines = [
+        "NASTECH / 100WAYS",
+        "ERROR REPORT",
+        "────────────────────",
+        f"Step: {step}",
+        f"Error: {error[:1500]}",
+    ]
+    feed = context.get("error_feed")
+    if feed is None:
+        lines.append(
+            "The failure blocks publication until the next verified run passes. "
+            "No cycle comparison was recorded, so nothing here is claimed about what "
+            "cleared -- run 100ways errors --runs ... --state ... for that."
         )
+        return "\n".join(lines)
+    moved = ", ".join(f"{kind} {feed.count(kind)}" for kind in FEED_KINDS if feed.count(kind))
+    lines.append("")
+    lines.append(f"CYCLE COMPARISON: {len(feed.events)} movement(s) ({moved or 'none'})")
+    for event in feed.events[:MAX_LOG_LINES]:
+        lines.append(f"• {event.lane}: {event.kind} [{event.cls}]")
+    if len(feed.events) > MAX_LOG_LINES:
+        lines.append(f"• {len(feed.events) - MAX_LOG_LINES} further movements in the feed.")
+    if not feed.complete:
+        lines.append(f"• this read was partial: {feed.partial_reason}")
+    if feed.unowned:
+        lines.append(f"• {len(feed.unowned)} lane(s) still have no owner.")
+    lines.append(BOUNDARY_LINE)
+    return "\n".join(lines)
+
+
+def _delivery_view(context: dict[str, Any]) -> Plan:
+    """The plan for whatever this run actually measured -- and only that.
+
+    Every family is read from the context by name, so a run that classified reds but never
+    scanned links gets a plan whose ``skipped`` says exactly that.  A chat answer built from
+    it cannot read as a clean repository, which is the whole reason this goes through the
+    planner instead of formatting the context directly.
+    """
+    return plan(
+        verdicts=context.get("red_verdicts"),
+        urls=context.get("url_findings"),
+        deltas=context.get("surface_deltas"),
+        credentials=context.get("credential_findings"),
+        orphans=context.get("orphans"),
+        feed=context.get("error_feed"),
     )
+
+
+def format_suggestions(context: dict[str, Any]) -> str:
+    result = _delivery_view(context)
+    lines = ["NASTECH / 100WAYS", "NEXT ACTIONS", "────────────────────"]
+    if not result.suggestions:
+        lines.append(
+            "Nothing to suggest from what was measured."
+            if not result.skipped
+            else f"Not measured this run: {', '.join(result.skipped)}."
+        )
+        lines.append(BOUNDARY_LINE)
+        return "\n".join(lines)
+    lines.append(f"{len(result.suggestions)} action(s) from: {', '.join(result.measured)}")
+    lines.extend(
+        f"{i}. [{tip.kind}] {tip.text[:200]} -- {tip.owner[:80]}"
+        for i, tip in enumerate(result.suggestions[:MAX_LOG_LINES], start=1)
+    )
+    if len(result.suggestions) > MAX_LOG_LINES:
+        lines.append(
+            f"• {len(result.suggestions) - MAX_LOG_LINES} further actions: 100ways suggest."
+        )
+    if result.skipped:
+        lines.append(f"not measured, so nothing suggested there: {', '.join(result.skipped)}")
+    lines.append(BOUNDARY_LINE)
+    return "\n".join(lines)
+
+
+def format_issues(context: dict[str, Any]) -> str:
+    result = _delivery_view(context)
+    lines = ["NASTECH / 100WAYS", "ISSUES THIS WOULD OPEN", "────────────────────"]
+    if not result.issues:
+        lines.append("No drafted issue: nothing measured earned one.")
+    for draft in result.issues[:MAX_LOG_LINES]:
+        lines.append(f"• [{draft.severity}] {draft.title[:180]}")
+    if len(result.issues) > MAX_LOG_LINES:
+        lines.append(f"• {len(result.issues) - MAX_LOG_LINES} further drafts in the plan.")
+    lines.append(
+        f"measured: {', '.join(result.measured) or 'nothing'}; "
+        f"not measured: {', '.join(result.skipped) or 'nothing'}"
+    )
+    lines.append(
+        "Nothing was created. An operator runs 100ways issues --apply --project owner/name "
+        "to open them, and only then."
+    )
+    lines.append(BOUNDARY_LINE)
+    return "\n".join(lines)
+
+
+def format_discuss(context: dict[str, Any]) -> str:
+    result = _delivery_view(context)
+    lines = ["NASTECH / 100WAYS", "QUESTIONS THIS WOULD ASK", "────────────────────"]
+    if not result.discussions:
+        lines.append("No drafted discussion: the measured families raised no open question.")
+    for draft in result.discussions[:MAX_LOG_LINES]:
+        lines.append(f"• {draft.title[:180]}")
+    lines.append(
+        "A discussion is asked when the engine cannot choose: adopting an upstream name, "
+        "or keeping a fork-only file, is a decision, not a finding."
+    )
+    lines.append(
+        "Nothing was created. An operator runs 100ways discuss --apply --project owner/name."
+    )
+    lines.append(BOUNDARY_LINE)
+    return "\n".join(lines)
+
+
+def format_table(context: dict[str, Any], kind: str) -> str:
+    """One page of the table, sized so the transport's footer still fits."""
+    chosen = kind.strip().casefold() or SUGGESTIONS
+    if chosen not in TABLE_KINDS:
+        return usage_for(REGISTRY["table"])
+    lines = ["NASTECH / 100WAYS", "TABLE", "────────────────────"]
+    result = _delivery_view(context)
+    try:
+        page = answer(plan_table(result, chosen), limit=CHAT_LIMIT, max_pages=1)[0]
+    except TableError as exc:
+        return "\n".join([*lines, str(exc), BOUNDARY_LINE])
+    lines.append(page)
+    lines.append(BOUNDARY_LINE)
+    return "\n".join(lines)
 
 
 def format_pr_status(context: dict[str, Any]) -> str:
@@ -654,6 +773,10 @@ HANDLERS: dict[str, Callable[[Call], str]] = {
     "errors": lambda call: format_errors(call.context),
     "remaining": lambda call: format_remaining(call.decision, call.context),
     "gates": lambda call: format_gates(call.context),
+    "suggest": lambda call: format_suggestions(call.context),
+    "table": lambda call: format_table(call.context, _first(call.args)),
+    "issues": lambda call: format_issues(call.context),
+    "discuss": lambda call: format_discuss(call.context),
     "pr status": lambda call: format_pr_status(call.context),
     "commit": lambda call: format_commit(call.decision, _first(call.args)),
     "search": lambda call: format_search(call.decision, call.args),

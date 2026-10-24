@@ -5,7 +5,7 @@ into the Nastech fork while keeping parity and the brand intact.
 
 ## At a glance
 
-- 200 ways across 10 strategy categories
+- 209 ways across 10 strategy categories
 - 16 achievements, 2 unlocked
 - 22 owned-asset registry entries (see config/owned-assets/)
 - 19 pipeline stages per update run
@@ -81,7 +81,7 @@ into the Nastech fork while keeping parity and the brand intact.
 - Rename-only diff
 - Binary-safe diff
 
-### gate (20 ways)
+### gate (22 ways)
 
 - Parity threshold
 - Zero hard failures
@@ -103,8 +103,10 @@ into the Nastech fork while keeping parity and the brand intact.
 - AI review gate
 - Lockfile pinned
 - Two-approval gate
+- Open-draft dedup
+- Proven-complete gate
 
-### notify (20 ways)
+### notify (25 ways)
 
 - Telegram bot
 - Agent prompt hook
@@ -126,6 +128,11 @@ into the Nastech fork while keeping parity and the brand intact.
 - ntfy topic
 - Tail recap
 - Atom feed publish
+- Draft per measurement
+- Forge discussion
+- Bounded chat table
+- Next-action list
+- Cycle delta feed
 
 ### port (20 ways)
 
@@ -196,7 +203,7 @@ into the Nastech fork while keeping parity and the brand intact.
 - Sample statistics
 - Manifest index
 
-### verify (20 ways)
+### verify (22 ways)
 
 - Brand round-trip
 - Sampled spot check
@@ -218,6 +225,8 @@ into the Nastech fork while keeping parity and the brand intact.
 - Charset clean
 - Env-key audit
 - Path depth parity
+- Shipped-link audit
+- Red ownership
 
 ### watch (20 ways)
 
