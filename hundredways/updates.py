@@ -3664,6 +3664,10 @@ class BrowseBudgetFlockTestError(ValueError):
     reporter records it as an issue and the ``reconcile`` stage fails the update.  Without the
     raise, an upstream reformat of ``test_browse_schema_drift.py`` silently drops the host-aware
     bounds and the fork's macOS lane goes red again on the next sync with nothing to point at.
+    The lane it protects is real and recently red: job 120651211235 reported ``assert
+    5.773591583999973 < (3.0 + 2)`` at ``assert window < budget_s + 2`` on
+    ``RESULT 503 6.121000250000009 5.773591583999973 ...``, with ``assert status == "503"``
+    already passed in front of it.
     """
 
 
@@ -3745,12 +3749,50 @@ def test_stuck_maintenance_holder_gets_busy_retry_not_a_gateway_remedy(tmp_path)
 ''',
     ),
     (
+        """phase = sys.argv[2]
+original = ssr.connect_tracked
+""",
+        """phase = sys.argv[2]
+original = ssr.connect_tracked
+
+# The budgeted phase is slowed on purpose: every sqlite callback sleeps _STEP_S to stand in for a
+# cold multi-GB disk. That injected delay is the work the bound must keep charging; how much the
+# host's scheduler overslept it is a property of the machine, not of the code under test, so the
+# child counts both and reports them. _STEP_S is the fixture's own value, named once so the
+# accounting below cannot drift from the delay it measures.
+_STEP_S = 0.01
+callbacks = 0
+late = 0.0
+""",
+    ),
+    (
+        """    def set_progress_handler(self, handler, n):
+        def slow():
+            time.sleep(0.01)
+            return handler() if handler is not None else 0
+        return self._conn.set_progress_handler(slow, 5)
+""",
+        """    def set_progress_handler(self, handler, n):
+        def slow():
+            global callbacks, late
+            began = time.monotonic()
+            time.sleep(_STEP_S)
+            callbacks += 1
+            late += max(0.0, time.monotonic() - began - _STEP_S)
+            return handler() if handler is not None else 0
+        return self._conn.set_progress_handler(slow, 5)
+""",
+    ),
+    (
         '''    if holding_lock() and (phase == "integrity") == read_only:
         print("slowed", flush=True)  # this process holds gateway.lock and the slow phase begins
 ''',
         '''    if holding_lock() and (phase == "integrity") == read_only:
-        global slowed_at
-        slowed_at = time.monotonic()  # the instant gateway.lock is ours and the budget starts
+        global slowed_at, late_at
+        # The instant gateway.lock is ours the budget starts. `late` is process-wide and keeps
+        # accruing across every slowed phase, so snapshot it here too: the bound below may only
+        # credit the lateness that accrues after this stamp, never lateness an earlier phase paid.
+        slowed_at, late_at = time.monotonic(), late
         print("slowed", flush=True)  # this process holds gateway.lock and the slow phase begins
 ''',
     ),
@@ -3760,13 +3802,15 @@ started = time.monotonic()
 ''',
         '''ssr.connect_tracked = slowed
 slowed_at = None
+late_at = None
 started = time.monotonic()
 ''',
     ),
     (
         '''    print("RESULT 200", time.monotonic() - started, flush=True)
 ''',
-        '''    print("RESULT 200", time.monotonic() - started, -1.0, flush=True)
+        '''    print("RESULT 200", time.monotonic() - started, -1.0, callbacks, late,
+          late_at if late_at is not None else -1.0, flush=True)
 ''',
     ),
     (
@@ -3774,7 +3818,8 @@ started = time.monotonic()
 ''',
         '''    ended = time.monotonic()
     window = ended - slowed_at if slowed_at is not None else -1.0
-    print("RESULT", exc.status_code, ended - started, window, exc.detail, flush=True)
+    print("RESULT", exc.status_code, ended - started, window, callbacks, late,
+          late_at if late_at is not None else -1.0, exc.detail, flush=True)
 ''',
     ),
     (
@@ -3813,8 +3858,9 @@ started = time.monotonic()
     (
         '''    _, status, elapsed, *detail = result.split(" ", 3)
 ''',
-        '''    _, status, elapsed, window, *detail = result.split(" ", 4)
-    elapsed, window = float(elapsed), float(window)
+        '''    _, status, elapsed, window, callbacks, late, late_at, *detail = result.split(" ", 7)
+    elapsed, window, late = float(elapsed), float(window), float(late)
+    late_at, callbacks = float(late_at), int(callbacks)
     detail = " ".join(detail)
     # The child reports two clocks. `window` starts when gateway.lock becomes ours and the budget is
     # armed; `elapsed` also carries interpreter startup and every read before that, which no code in
@@ -3832,7 +3878,19 @@ started = time.monotonic()
         '''    assert float(elapsed) < budget_s + 2, out
     detail = " ".join(detail)
 ''',
-        '''    assert window < budget_s + 2, out
+        '''    # The bound charges what the product's budgeted phase did, not that phase's raw wall
+    # clock. `late` is the seconds this runner overslept the delay the fixture injects, counted
+    # at the injection itself -- but it is process-wide and the child can stamp more than once,
+    # so `late_at` is its value at the stamp and only `late - late_at`, the lateness that
+    # demonstrably accrued inside THIS window, may be credited: every millisecond of the
+    # simulated slow disk stays charged while the host's scheduler is not, and lateness an
+    # earlier phase paid cannot excuse a window it is not part of. Credited only while the
+    # child's account is coherent (the phase ran callbacks and its within-window lateness fits
+    # inside the window it claims); otherwise the raw window is charged, exactly as upstream
+    # bounds it, because an unproven subtraction is not evidence.
+    late_in = late - late_at
+    charge = window - late_in if callbacks > 0 and 0.0 <= late_in <= window else window
+    assert charge < budget_s + 2, out
     assert boot_ok, f"boot refused a browse that gave up inside its budget: {boot_error} / {out}"
 ''',
     ),
@@ -3860,6 +3918,26 @@ def _reconcile_browse_budget_flock_tests(dst: str) -> bool:
     ``budget + 2`` has not proven the invariant either way, and a red fork that says "skipped,
     this machine is too slow" is worth more than a green one that asserts nothing.
 
+    Charging the window alone is still not enough, because that phase is slowed on purpose: the
+    fixture sleeps inside every sqlite callback to stand in for a cold disk, and a contended host
+    oversleeps the delay it asks for.  Job 120651211235 (macOS-only, slice 2/2) shows the order
+    that gives away -- ``assert status == "503"`` passed, then ``assert window < budget_s + 2``
+    failed with ``assert 5.773591583999973 < (3.0 + 2)`` on frame ``RESULT 503 6.121000250000009
+    5.773591583999973 ...``: the product honoured its budget, only the wall-clock bound crossed.
+    And ``startup`` there was ``6.121 - 5.774 = 0.35 s``, far inside the ``2.0 s`` margin, so the
+    startup skip correctly stayed silent rather than excuse a phase the host itself delayed.  The
+    child therefore reports its own work as well: how many budget callbacks it ran, and how far
+    past the delay it injects it actually slept.  Because that lateness counter is process-wide
+    while the window is re-stamped at every qualifying connect, the child snapshots the counter
+    at the stamp too and reports it as ``late_at``, so the parent credits only the lateness that
+    demonstrably accrued inside the window it charges -- never oversleep an earlier phase paid
+    for, which could otherwise zero the charge of a genuinely slow phase and turn the bound into
+    a green test that asserts nothing.  The parent bounds the phase with that account --
+    every injected millisecond of the simulated disk stays charged, only provable within-window
+    scheduler lateness is credited, and an incoherent account charges the raw window -- so a slow
+    host with a correct product passes on evidence while a browse that genuinely runs past its
+    budget accrues injected delay as it goes and still fails.
+
     ``pytest.skip`` is already this suite's idiom for host-capability gaps (``test_backup.py``
     skips on ``chmod`` semantics, ``test_agent_import.py`` on POSIX-only modes), so the lane still
     runs and still fails on a real regression.
@@ -3874,9 +3952,12 @@ def _reconcile_browse_budget_flock_tests(dst: str) -> bool:
                 f"{_BROWSE_BUDGET_TEST_REL} no longer matches rewrite "
                 f"#{index} of _reconcile_browse_budget_flock_tests, so the flock-budget tests "
                 "keep upstream's absolute-second bounds. On the free 3-core macOS runner those "
-                "bounds measure process hand-off instead of the browse budget: the lane fails "
-                "with 'RESULT 503 <elapsed> ...' and a spurious OwnershipConflict from boot's "
-                "reserve wait. Re-derive the pairs against upstream's current file, then re-run."
+                "bounds measure process hand-off instead of the browse budget: run 39357736243 "
+                "failed 'assert 5.285 < 3.0 + 2' on RESULT 503 5.285 taken from process start, "
+                "and job 120651211235 (macOS-only 2/2) failed 'assert 5.773591583999973 < "
+                "(3.0 + 2)' on the budgeted window alone, after 'assert status == \"503\"' had "
+                "already passed, so the product honoured the budget and only the wall-clock "
+                "bound crossed. Re-derive the pairs against upstream's current file, then re-run."
             )
         edited = edited.replace(before, after, 1)
     _reconcile_budget_write(dst, _BROWSE_BUDGET_TEST_REL, edited)
