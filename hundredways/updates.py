@@ -1333,6 +1333,90 @@ def _split_prompt_surface_tiers(text: str) -> dict[str, str]:
     return tiers
 
 
+class SetThemeCatalogLineError(ValueError):
+    """The branded ``set_theme`` description no longer matches the shape this rule rewrites.
+
+    A ``ValueError`` on purpose (see :class:`ChannelReaderUserAgentError`): the conformance
+    reporter records it and the ``reconcile`` stage fails the update.  Silently returning here
+    would put the one-character brand delta back into the catalog line and move the failure to
+    two of the fork's own guards on the next candidate, days later, with nothing to point at.
+    """
+
+
+# ``tools/tool_search_catalog.py`` renders each builtin tool's catalog line with
+# ``_short_desc(description, CATALOG_SUMMARY_MAX_CHARS)`` and that budget is 80.  Upstream's
+# ``set_theme`` first sentence is *exactly* 80 characters --
+# "Change how the Hermes desktop app looks: accent colour, light/dark mode, layout." --
+# so it survives the clip whole.  Branding ``Hermes`` -> ``Nastech`` costs one character, the
+# branded sentence is 81, and ``_short_desc`` then clips it on the word boundary and appends
+# the ellipsis.  Two fork guards fire and both are right:
+#   * ``tests/tools/test_tool_search.py`` ->
+#     ``TestCatalogListing::test_builtin_catalog_lines_are_whole_first_sentences`` refuses any
+#     catalog line ending in "…" ("a clipped one hides what the tool does");
+#   * ``tests/ci/test_prompt_surface.py`` re-renders and byte-compares the committed snapshot,
+#     which still carries the unclipped line, and reports
+#     ``tools/stale: tool_search.desktop.claude.json`` plus ``stale: surfaces.json``.
+# The budget is the product's, not this fork's: widening ``CATALOG_SUMMARY_MAX_CHARS`` to 81
+# would buy back a character for the brand at the cost of every tool's catalog line.  Dropping
+# the redundant " app" from this one description keeps the branded sentence whole (77
+# characters), so the live render is unclipped again and the snapshot's copy of the same line
+# is rewritten to match it.  ``_reconcile_prompt_surface_snapshot`` runs after this and
+# recomputes ``surfaces.json`` from the files it just edited.
+# (measured 2026-10-24 on candidate ``7f790c348`` / upstream ``5894e750c3``, jobs
+# 120743383196 and 120743383269; both reproduce on Linux, so neither is a capacity red).
+_SET_THEME_SOURCE_REL = "tools/set_theme_tool.py"
+_SET_THEME_LONG = "Change how the Nastech desktop app looks:"
+_SET_THEME_SHORT = "Change how the Nastech desktop looks:"
+#: The snapshot embeds the same sentence inside the tool_search catalog listing.
+_SET_THEME_SNAPSHOT_DIR = "tests/fixtures/prompt_surface/tools"
+#: tools/tool_search_catalog.CATALOG_SUMMARY_MAX_CHARS -- the fork's own budget, mirrored here
+#: only so the tests can prove the rewrite lands under it.  It is never widened.
+_SET_THEME_CATALOG_BUDGET = 80
+
+
+def _reconcile_set_theme_catalog_line(dst: str) -> list[str]:
+    """Keep ``set_theme``'s catalog line a whole first sentence after the brand delta.
+
+    Rewrites the branded description in :data:`_SET_THEME_SOURCE_REL` and every committed
+    prompt-surface tool schema that quotes it.  Returns the repo-relative paths changed; a
+    second pass is a no-op because the short form is what the render then produces.
+    """
+    fixed: list[str] = []
+    text = _reconcile_budget_read(dst, _SET_THEME_SOURCE_REL)
+    if text is None:
+        return fixed
+    if _SET_THEME_LONG in text:
+        _reconcile_budget_write(
+            dst, _SET_THEME_SOURCE_REL, text.replace(_SET_THEME_LONG, _SET_THEME_SHORT, 1)
+        )
+        fixed.append(_SET_THEME_SOURCE_REL)
+    elif _SET_THEME_SHORT not in text:
+        raise SetThemeCatalogLineError(
+            f"{_SET_THEME_SOURCE_REL} carries neither {_SET_THEME_LONG!r} nor its replacement, "
+            "so the brand-length guard no longer applies. Branding adds a character to "
+            "set_theme's first sentence, and if that sentence reaches "
+            f"{_SET_THEME_CATALOG_BUDGET + 1} characters the catalog clips it: "
+            "test_builtin_catalog_lines_are_whole_first_sentences goes red and "
+            "test_committed_prompt_surface_is_current reports the snapshot stale. Update the "
+            "needles in _reconcile_set_theme_catalog_line to upstream's new shape, then re-run."
+        )
+    try:
+        names = sorted(os.listdir(os.path.join(dst, *_SET_THEME_SNAPSHOT_DIR.split("/"))))
+    except OSError:
+        return fixed
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        rel = f"{_SET_THEME_SNAPSHOT_DIR}/{name}"
+        body = _reconcile_budget_read(dst, rel)
+        if body is None or _SET_THEME_LONG not in body:
+            continue
+        _reconcile_budget_write(dst, rel, body.replace(_SET_THEME_LONG, _SET_THEME_SHORT))
+        if rel not in fixed:
+            fixed.append(rel)
+    return fixed
+
+
 def _reconcile_prompt_surface_snapshot(dst: str) -> list[str]:
     """Re-align the committed prompt-surface snapshot after branding.
 
@@ -5767,6 +5851,13 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_gateway_plugin_gate_native_ticket(dst):
         result.total += 1
         result.fixed.append("nastech_cli/web_server.py")
+    # Brand-length guard on set_theme's catalog line.  Must run before the prompt-surface
+    # reconcile below: that step recomputes surfaces.json from the tool schemas on disk, so
+    # the description and its snapshot copy have to be shortened first or the manifest counts
+    # describe the pre-fix text.
+    for rel in _reconcile_set_theme_catalog_line(dst):
+        result.total += 1
+        result.fixed.append(rel)
     # Prompt-surface LAST: it counts characters in the rendered prompts, and
     # _reconcile_domains above rewrites the domain hosts inside those prompt
     # files.  Computing it any earlier leaves surfaces.json describing the
