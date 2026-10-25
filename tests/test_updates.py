@@ -944,7 +944,8 @@ def test_windows_suspend_observation_adds_no_wall_clock_sleep():
 
     ``_WINDOWS_SUSPEND_WAIT`` is text the fork receives as its own source, so the fork
     measures it in its next PR: a new literal sleep is a blocking finding there, and a
-    slower race here.  88 is the fork's own ruff line length.
+    slower race here.  The 88-char bound is ruff's default; the fork does not select
+    E501, but injected source should still read like its neighbours.
     """
     assert "time.sleep" not in _WINDOWS_SUSPEND_WAIT
     assert f"timeout={_WINDOWS_SUSPEND_BUDGET_S}," in _WINDOWS_SUSPEND_WAIT
