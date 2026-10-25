@@ -241,9 +241,10 @@ def credential_gates() -> tuple[CredentialGate, ...]:
 
     ``SIGNING_GATED_LANES`` carries the desktop lanes and the names each needs; lanes
     that share a name set share one decision, so they are merged into one gate rather
-    than reported three times.  The Store submission is gated separately -- the
-    engine folds ``STORE_CREDENTIALS`` into ``scripts/releases/store.py``, where an
-    unconfigured set raises ``StoreError`` and the sequencer warns -- so it is added
+    than reported three times.  The Store submission is gated separately -- the engine
+    lists every name the lane consumes in ``STORE_CREDENTIALS``, while the smaller
+    ``STORE_REST_CREDENTIALS`` is what folds into ``scripts/releases/store.py``, where
+    an unconfigured set raises ``StoreError`` and the sequencer warns -- so it is added
     as its own gate and marked *not* workflow-admitted, because no ``admit`` output
     reads it.  A gate with no names is not a credential gate at all.
     """

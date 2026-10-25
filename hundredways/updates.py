@@ -5774,6 +5774,13 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     for rel in _reconcile_prompt_surface_snapshot(dst):
         result.total += 1
         result.fixed.append(rel)
+    # Credential-gate completeness LAST, after every rule above has finished writing
+    # the workflows it audits: the Store lane's gate has to list every name the lane
+    # consumes or a pubconfig pre-flight admits a run that then reads an empty
+    # credential far from its cause.  Read-only -- it records no fixed path -- and it
+    # raises :class:`StoreLaneGateError` when a consumed Store credential escapes the
+    # gate, or when the parser cannot see the lane it is supposed to measure.
+    _reconcile_store_gate_covers_the_lane(dst)
     result.fixed.sort()
     return result
 
@@ -6683,8 +6690,34 @@ APPLE_SIGNING_CREDENTIALS = ("CSC_LINK", "CSC_KEY_PASSWORD", "APPLE_API_KEY_P8",
 WINDOWS_SIGNING_CREDENTIALS = ("AZURE_SIGN_ENDPOINT", "AZURE_SIGN_ACCOUNT",
                                "AZURE_SIGN_PROFILE", "AZURE_SIGN_PUBLISHER",
                                "AZURE_CLIENT_ID", "AZURE_TENANT_ID")
-STORE_CREDENTIALS = ("MS_STORE_PRODUCT_ID", "MS_STORE_TENANT_ID",
-                     "MS_STORE_CLIENT_ID", "MS_STORE_CLIENT_SECRET")
+# Every name the Store lane consumes, read from the lane's own steps in
+# ``desktop-bundled-release.yml``: the five names the ``stable-store`` job's ``env``
+# binds (``origin/main`` 2487-2497, transcribed into ``tests/fixtures/store_lane/``)
+# -- the four the Partner Center submission itself takes plus the seller account
+# ``msstore reconfigure`` is configured with (2513).  The set is what ``pubconfig``
+# folds into the gate that refuses a run up front, so a name the lane reads and this
+# list omits is a hole the gate can be satisfied around;
+# ``_reconcile_store_gate_covers_the_lane`` fails the sync when that happens.  Written
+# one name per line because a hand-wrapped tuple is what ``ruff format`` produces, and
+# a gate edit must not add formatter drift.
+STORE_CREDENTIALS = (
+    "MS_STORE_PRODUCT_ID",
+    "MS_STORE_SELLER_ID",
+    "MS_STORE_TENANT_ID",
+    "MS_STORE_CLIENT_ID",
+    "MS_STORE_CLIENT_SECRET",
+)
+# The subset ``scripts/releases/store.py`` reads for itself.  The seller account
+# belongs to the ``msstore`` CLI in the workflow, not to the Partner Center REST
+# call the script makes, so the script's own configured check must not demand it:
+# listing it there would declare a submission unconfigured that the workflow can
+# still complete.  The order is the order the shipped check reports it in.
+STORE_REST_CREDENTIALS = (
+    "MS_STORE_PRODUCT_ID",
+    "MS_STORE_TENANT_ID",
+    "MS_STORE_CLIENT_ID",
+    "MS_STORE_CLIENT_SECRET",
+)
 
 # Windows needs three handoffs and two targets but one decision, so its rows
 # share one claim key and one exclusion.  ``claim_flags``, ``excluded``,
@@ -6767,6 +6800,21 @@ def _signing_lane_env(indent: str = "") -> tuple[str, ...]:
 
 class SigningGatedLaneError(ValueError):
     """A signing-gated lane anchor moved, so the reconcile cannot be applied."""
+
+
+class StoreLaneGateError(ValueError):
+    """The Store lane consumes a credential its gate does not list.
+
+    Measured on ``origin/main`` (2026-10-25): the lane reads five ``MS_STORE_*``
+    names -- the ``stable-store`` job's ``env`` at 2487-2497, with
+    ``MS_STORE_SELLER_ID`` consumed again by the ``msstore reconfigure`` step at 2513
+    -- while the shipped gate listed four, and ``pubconfig`` put the fifth in
+    ``ungated-consumed``, its only such name over the tree's 58 workflows and 181
+    credential references.  Failing the sync beats returning quietly: that verdict
+    means the pre-flight admits a publish-phase run whose Store job reads an empty
+    seller id, and GitHub's empty-string substitution then surfaces inside
+    ``msstore reconfigure`` halfway through the submission instead of up front.
+    """
 
 
 def _sgl_literal(value: str) -> str:
@@ -7163,7 +7211,7 @@ def _reconcile_signing_gated_store(dst: str) -> bool:
     if text is None:
         return False
     before = text
-    credentials = "(" + ", ".join(_sgl_literal(name) for name in STORE_CREDENTIALS) + ")"
+    credentials = "(" + ", ".join(_sgl_literal(name) for name in STORE_REST_CREDENTIALS) + ")"
     text = _sgl_sub(
         text,
         "def check_from_env(env: dict, run=_http_run) -> str:\n",
@@ -7202,6 +7250,114 @@ def _reconcile_signing_gated_store(dst: str) -> bool:
     if text != before:
         _sgl_write(dst, _STORE, text)
     return text != before
+
+
+#: The Store lane's own CLI invocation, as the fork's workflow writes it
+#: (origin/main ``desktop-bundled-release.yml:2513``, ``msstore reconfigure --...``).
+#: The completeness audit uses it as the lane anchor: a workflow that runs ``msstore``
+#: is a Store lane whether or not the parser can still see its credentials.
+_MSSTORE_ANCHOR_RE = re.compile(r"\bmsstore\b")
+
+
+def _store_credential_family(gate: frozenset[str]) -> str:
+    """The name prefix every credential in ``gate`` shares, or ``""`` if none.
+
+    The Store lane's credentials are one family (``MS_STORE_*``), so the family
+    prefix is how the completeness check tells a Store name from a credential a
+    neighbouring job reads (``DOCKERHUB_*``, ``CLOUDFLARE_R2_*``).  It is derived
+    from the gate's own names, never typed here, so a gate rename moves it with
+    the gate.  A prefix that does not end at a name boundary is rejected, because
+    a family short enough to be a bare stem would match names the lane does not
+    own and refuse a lane that is fine.
+    """
+    prefix = os.path.commonprefix(sorted(gate))
+    return prefix if prefix.endswith("_") and len(prefix) >= 3 else ""
+
+
+def _reconcile_store_gate_covers_the_lane(dst: str) -> None:
+    """Refuse a tree whose Store lane reads a credential the gate left out.
+
+    Measured on the branch every sync publishes into (``origin/main``, 2026-10-25):
+    ``desktop-bundled-release.yml:2494`` maps
+    ``MS_STORE_SELLER_ID: ${{ secrets.MS_STORE_SELLER_ID }}`` and ``:2513`` runs
+    ``msstore reconfigure --tenantId … --sellerId "$MS_STORE_SELLER_ID" …``, so the
+    lane consumes five ``MS_STORE_*`` names; ``STORE_CREDENTIALS`` listed four, and
+    the only one missing was the seller id.  :func:`hundredways.pubconfig.analyze_root`
+    over that tree with the fork's real Actions inventory (11 repository secrets, 3
+    repository variables and the 2 ``release-signing`` secrets -- none of them
+    ``MS_STORE_*``) therefore put ``MS_STORE_SELLER_ID`` in ``ungated-consumed`` --
+    the verdict that means exactly "the gate can be fully satisfied while this job
+    reads an empty string" -- and it was the tree's *only* ungated-consumed name.
+    With the fifth name in the gate the same measurement reports
+    ``ungated-consumed 1 -> 0``, ``live-missing`` for the Store family ``4 -> 5``,
+    and the same 24 actionable names, so the pre-flight refuses the same runs, one
+    step earlier and for the honest reason.  No published run has reached the step
+    yet: the Store job is ``skipped`` in runs 39582399772, 39950918422, 40090674912
+    and 40191180790 (a publish-phase dispatch is what runs it), so the mid-publish
+    crash is the mechanism the verdict documents, not an observed red.
+
+    Hand-maintaining the set does not scale, so completeness is proven by reading the
+    workflows with ``pubconfig.load_workflows`` and ``pubconfig.workflow_references``
+    -- the same reader and parser ``pubconfig.analyze`` classifies with -- and
+    asserting every consumed name in the Store credential family is one the gate
+    lists.  The check is one-way (strengthening): a consumed name missing from the
+    gate raises, while a gate name the lane never reads costs only a harmless extra
+    refusal.  It also refuses when the workflow runs ``msstore`` yet the parser reads
+    no name of the family at all, because a blind parser proves nothing and would
+    let the same hole reopen silently.  It fails as :class:`StoreLaneGateError` (a
+    ``ValueError``) rather than returning quietly because a silently short gate *is*
+    the defect.  The limit is honest: only names carrying the family prefix are
+    caught, so a Store credential upstream invents under a different stem still needs
+    a human -- no parser can tell those from a neighbouring job's credential without
+    the same prefix assumption.
+    """
+    workflows = os.path.join(dst, ".github", "workflows")
+    if not os.path.isdir(workflows) or not any(
+        entry.suffix in (".yml", ".yaml") for entry in Path(workflows).iterdir()
+    ):
+        # No CI in this tree, so no Store lane to audit; a real sync always carries
+        # the fork's release workflows here, and an empty directory holds no lane
+        # rather than a hidden one.
+        return
+    from .pubconfig import load_workflows, workflow_references
+
+    gate = frozenset(STORE_CREDENTIALS)
+    prefix = _store_credential_family(gate)
+    if not prefix:
+        raise StoreLaneGateError(
+            "STORE_CREDENTIALS share no name-family prefix, so the completeness "
+            "check cannot tell a Store credential from another job's; refusing to "
+            "guess which consumed names belong to the lane."
+        )
+    consumed: set[str] = set()
+    anchored = False
+    for name, text in load_workflows(dst):
+        anchored = anchored or _MSSTORE_ANCHOR_RE.search(text) is not None
+        consumed.update(
+            reference.name
+            for reference in workflow_references(text, workflow=name)
+            if reference.name.startswith(prefix)
+        )
+    if anchored and not consumed:
+        raise StoreLaneGateError(
+            f"a workflow in {workflows} runs the msstore CLI but no "
+            f"{prefix}* credential parses out of it, so this audit is blind and "
+            "cannot prove STORE_CREDENTIALS covers the lane. Re-derive where the "
+            "lane reads its credentials -- the fork's ``stable-store`` job binds them "
+            "in its ``env`` block and consumes them in the ``msstore reconfigure`` "
+            "step of desktop-bundled-release.yml -- the sync stops rather than "
+            "ship a gate nothing measures."
+        )
+    left_out = sorted(consumed - gate)
+    if left_out:
+        raise StoreLaneGateError(
+            f"the Store lane reads {', '.join(left_out)}, which "
+            f"STORE_CREDENTIALS does not list, so a pubconfig pre-flight admits the "
+            "run with that credential unset and the job gets an empty string where "
+            "the lane needs a value; add the name to STORE_CREDENTIALS. Measured: "
+            f"the gate lists {len(gate)} name(s), the workflows consume "
+            f"{len(consumed)}."
+        )
 
 
 def _reconcile_signing_gated_workflow(dst: str) -> bool:
