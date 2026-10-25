@@ -1634,9 +1634,11 @@ class DocsSearchHydrationGateError(ValueError):
     The measurements that make the gate necessary, kept with the failure so a
     moved anchor is argued against evidence and not guessed at:
 
-    * run 40211574851 (job 12121574...) died on its last step with
-      ``browser check crashed: locator.fill: Timeout 10000ms exceeded`` -- the
-      click returned and the fill then found nothing to fill;
+    * run 40211574851 (job 121223725796, `Docs Search Monitor / probe`,
+      2026-10-25T16:25:10Z) died on its last step with
+      ``browser check crashed: locator.fill: Timeout 10000ms exceeded`` at
+      ``16:25:56`` -- the click returned and the fill then found nothing to
+      fill;
     * under CI's exact build (Playwright 1.62.1 on ``chromium-headless-shell``,
       the file's lines 158-160 unchanged) 2 of 4 runs measured
       ``.DocSearch-Input`` **count 0** at fill time, so the element did not
