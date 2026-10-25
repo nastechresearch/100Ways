@@ -20,23 +20,54 @@ from hundredways.assets import OwnedAssets
 from hundredways.integrity import audit_candidate_tree
 from hundredways.updates import (
     STAGES,
+    AgentsChainCapError,
     AssetsWorkerIndexError,
+    BrowseBudgetDdlError,
+    BrowseBudgetFlockTestError,
     ChannelReaderUserAgentError,
+    ForkLaneReleaseEditError,
+    FreeRunnerParallelismError,
     GatewayAllowlistReloadError,
     GatewayPluginGateError,
+    NastechSuitePinError,
     TermuxAptKeyDocError,
     UpdateManager,
+    UnsignedDarwinBuildEnvError,
     WindowsRealGitLocateError,
+    _BROWSE_BUDGET_EDITS,
+    _BROWSE_BUDGET_TEST_REL,
+    _CONFTEST,
     _DOCS_PUBLIC_ORIGIN,
+    _ENDPOINT_PIN_MARK,
+    _GUEST_IDENTITY_TESTS,
     _HARDENED_PREPARE_SCRIPT,
+    _LANES_DEFAULT_FORK,
+    _RELEASE_CHANNELS_TESTS,
+    _RELEASE_CHANNELS_TESTS_EDITS,
+    _RELEASE_ENTRYPOINT,
+    _RELEASE_ENTRYPOINT_EDITS,
+    _RELEASE_ENTRYPOINT_TESTS,
+    _RELEASE_ENTRYPOINT_TESTS_EDITS,
+    _RELEASE_LANES_TESTS,
+    _RELEASE_LANES_TESTS_EDITS,
+    _STABLE_RELEASE_TESTS,
+    _STABLE_RELEASE_TESTS_EDITS,
     _SKILL_DESC_FULL_NEW,
     _SKILL_DESC_FULL_OLD,
     _PROMPT_SURFACE_CHARS_PER_TOKEN,
     _UPSTREAM_PREPARE_SCRIPT,
+    _BROWSE_DDL_GUARDED,
+    _BROWSE_DDL_UNGUARDED,
+    _BROWSE_RECONCILE_REL,
+    _DEV_GUIDE_DIR,
+    _agents_chain,
+    _reconcile_agents_md_chain_cap,
     _reconcile_assets_worker_config,
     _reconcile_assets_worker_index,
     _reconcile_anon_surface_copy,
     _reconcile_apt_pool_first_char,
+    _reconcile_browse_budget_flock_tests,
+    _reconcile_browse_ddl_budget_guard,
     _reconcile_channel_reader_user_agent,
     _reconcile_ci_runner_budgets,
     _reconcile_connector_test_guest_offline,
@@ -59,11 +90,15 @@ from hundredways.updates import (
     _reconcile_drop_vercel_deploy_job,
     _reconcile_fork_skill_catalogs,
     _reconcile_fork_skill_sidebars,
+    _reconcile_fork_lane_release_surface,
+    _reconcile_free_runner_parallelism,
     _reconcile_gateway_allowlist_live_reload,
     _reconcile_gateway_plugin_gate_native_ticket,
+    _reconcile_guest_identity_stub,
     _reconcile_install_ps1_store_guard_test,
     _reconcile_locale_key_order,
     _reconcile_managed_gateway_wire_headers,
+    _reconcile_nastech_home_env_prefix,
     _reconcile_pinned_source_clones,
     _reconcile_plugin_catalog_sync_exemption,
     _reconcile_plugin_guard_trusted_installer_hosts,
@@ -81,8 +116,10 @@ from hundredways.updates import (
     _reconcile_domains,
     _reconcile_security_contact,
     _reconcile_termux_apt_signing_key,
+    _reconcile_test_endpoint_defaults,
     _reconcile_ui_scope_pins,
     _reconcile_uv_lock_file,
+    _reconcile_unsigned_darwin_build_env,
     _reconcile_vercel_prepare,
     _reconcile_windows_boot_lifecycle_race,
     _NASTECH_UI_INTEGRITY,
@@ -307,10 +344,11 @@ def test_ci_runner_budgets_normalize_free_runner_timeouts(tmp_path):
         "          - name: Windows-only tests\n"
         "            runner: windows-latest\n"
         "            marker: windows\n"
-        "          - name: Windows-only tests (arm64)\n"
-        "            runner: windows-latest\n"
+        "          - name: Windows-only tests (arm64, 1/2)\n"
+        "            runner: windows-11-arm\n"
         "            marker: windows\n"
-        "            timeout: 60\n",
+        "            timeout: 60\n"
+        "            slice: 1/2\n",
         encoding="utf-8",
     )
     (wf / "windows-install-update-e2e.yml").write_text(
@@ -343,7 +381,8 @@ def test_ci_runner_budgets_normalize_free_runner_timeouts(tmp_path):
         "tests/e2e/core/windows_update/_machine.py",
     }
     os_yml = (wf / "tests-os.yml").read_text(encoding="utf-8")
-    assert "            timeout: 45\n" in os_yml
+    # The Windows rows keep upstream's own budgets; only the per-file cap grows.
+    assert "            timeout: 45\n" not in os_yml
     assert "            timeout: 60\n" in os_yml  # arm64 row untouched
     assert "          NASTECH_TEST_FILE_TIMEOUT: '900'\n" in os_yml
     install = (wf / "windows-install-update-e2e.yml").read_text(encoding="utf-8")
@@ -388,7 +427,7 @@ def test_ci_runner_budgets_inserts_file_timeout_when_e2e_job_already_sets_it(tmp
         "      - name: Run ${{ matrix.marker }} tests\n"
         "        run: scripts/run_tests.sh\n"
         "        env:\n"
-        "          NASTECH_TEST_WORKERS: ${{ matrix.marker == 'windows' && '4' || '' }}\n"
+        "          NASTECH_TEST_WORKERS: ${{ matrix.marker == 'windows' && '4' || '2' }}\n"
         "          NASTECH_TEST_SLICE: ${{ matrix.slice || '' }}\n"
         "  e2e-windows:\n"
         "    steps:\n"
@@ -422,6 +461,165 @@ def test_ci_runner_budgets_inserts_file_timeout_when_e2e_job_already_sets_it(tmp
     # Fixed point, and brand-clean for the first-party audit.
     assert _reconcile_ci_runner_budgets(str(candidate)) == []
     assert BrandingRules().transform_text(text) == text
+
+
+def _free_runner_workflow_tree(tmp_path):
+    candidate = tmp_path / "candidate"
+    wf = candidate / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / "tests.yml").write_text(
+        "jobs:\n"
+        "  test:\n"
+        "    name: Run tests (${{ matrix.slice }}/2)\n"
+        "    strategy:\n"
+        "      matrix:\n"
+        "        slice: [1, 2]\n"
+        "    steps:\n"
+        "      - name: Run tests\n"
+        "        env:\n"
+        "          NASTECH_TEST_SLICE: ${{ matrix.slice }}/2\n"
+        "          NASTECH_TEST_WORKERS: 8\n",
+        encoding="utf-8",
+    )
+    (wf / "tests-os.yml").write_text(
+        "jobs:\n"
+        "  os-tests:\n"
+        "    strategy:\n"
+        "      matrix:\n"
+        "        include:\n"
+        "          - name: Windows-only tests\n"
+        "            runner: windows-latest\n"
+        "            marker: windows\n"
+        "          - name: Windows-only tests (arm64, 1/2)\n"
+        "            runner: windows-11-arm\n"
+        "            marker: windows\n"
+        "            timeout: 60\n"
+        "            slice: 1/2\n"
+        "          - name: Windows-only tests (arm64, 2/2)\n"
+        "            runner: windows-11-arm\n"
+        "            marker: windows\n"
+        "            timeout: 60\n"
+        "            slice: 2/2\n",
+        encoding="utf-8",
+    )
+    return candidate, wf
+
+
+def test_free_runner_parallelism_uses_one_worker_per_core(tmp_path):
+    """Eight 4-core slices replace two oversubscribed 8-worker slices."""
+    candidate, wf = _free_runner_workflow_tree(tmp_path)
+    changed = _reconcile_free_runner_parallelism(str(candidate))
+    assert set(changed) == {".github/workflows/tests.yml"}
+    tests_yml = (wf / "tests.yml").read_text(encoding="utf-8")
+    assert "    name: Run tests (${{ matrix.slice }}/8)\n" in tests_yml
+    assert "        slice: [1, 2, 3, 4, 5, 6, 7, 8]\n" in tests_yml
+    assert "          NASTECH_TEST_SLICE: ${{ matrix.slice }}/8\n" in tests_yml
+    assert "          NASTECH_TEST_WORKERS: 4\n" in tests_yml
+    os_yml = (wf / "tests-os.yml").read_text(encoding="utf-8")
+    # The arm64 rows run on the native windows-11-arm image, so they are real
+    # coverage and the rule must leave upstream's matrix alone.
+    assert os_yml.count("runner: windows-11-arm") == 2
+    assert "          - name: Windows-only tests\n" in os_yml
+    assert _reconcile_free_runner_parallelism(str(candidate)) == []
+
+
+def test_free_runner_parallelism_stops_when_arm_rows_land_on_x64(tmp_path):
+    """The label must not fall back to the x64 image.
+
+    There it re-ran the plain row's tests, and the rule that used to delete the
+    duplicate quietly dropped arm64 Windows coverage instead.
+    """
+    candidate, wf = _free_runner_workflow_tree(tmp_path)
+    path = wf / "tests-os.yml"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "runner: windows-11-arm", "runner: windows-latest"),
+        encoding="utf-8",
+    )
+    with pytest.raises(FreeRunnerParallelismError, match="arm64"):
+        _reconcile_free_runner_parallelism(str(candidate))
+
+
+def test_free_runner_parallelism_stops_when_the_python_matrix_moves(tmp_path):
+    candidate, wf = _free_runner_workflow_tree(tmp_path)
+    path = wf / "tests.yml"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("slice: [1, 2]", "slice: [1, 2, 3]"),
+        encoding="utf-8",
+    )
+    with pytest.raises(FreeRunnerParallelismError, match="neither"):
+        _reconcile_free_runner_parallelism(str(candidate))
+
+
+def test_free_runner_parallelism_stops_when_the_windows_rows_move(tmp_path):
+    candidate, wf = _free_runner_workflow_tree(tmp_path)
+    path = wf / "tests-os.yml"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("(arm64, 1/2)", "(arm64, 1/3)"),
+        encoding="utf-8",
+    )
+    with pytest.raises(FreeRunnerParallelismError, match="arm64"):
+        _reconcile_free_runner_parallelism(str(candidate))
+
+
+def _browse_budget_tree(tmp_path, text):
+    """A branded candidate tree carrying ``text`` as the drift-test file."""
+    candidate = tmp_path / "candidate"
+    path = candidate / _BROWSE_BUDGET_TEST_REL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return candidate, path
+
+
+def test_browse_budget_flock_tests_rebuild_the_host_aware_bounds(tmp_path):
+    """Every rewrite pair applies, in order, and the result is a fixed point.
+
+    The fixture is the rule's own pre-image stitched together, so a pair that no longer matches
+    upstream -- or one that overlaps its neighbour's context -- fails here instead of on the
+    fork's macOS lane.
+    """
+    pre = "".join(before for before, _ in _BROWSE_BUDGET_EDITS)
+    expected = "".join(after for _, after in _BROWSE_BUDGET_EDITS)
+    candidate, path = _browse_budget_tree(tmp_path, pre)
+
+    assert _reconcile_browse_budget_flock_tests(str(candidate)) is True
+    text = path.read_text(encoding="utf-8")
+    assert text == expected
+    assert _reconcile_browse_budget_flock_tests(str(candidate)) is False
+    assert path.read_text(encoding="utf-8") == expected
+    # The rewritten file must charge the budgeted window, not the child's whole wall time.
+    assert "assert window < budget_s + 2, out" in text
+    assert 'result.split(" ", 4)' in text
+    assert "assert float(elapsed) < budget_s + 2" not in text
+
+
+@pytest.mark.parametrize("drop", [0, 3, 7, 11])
+def test_browse_budget_flock_tests_fail_loudly_when_upstream_moved(tmp_path, drop):
+    """A rewrite that stopped matching raises; it never no-ops into a silent red lane."""
+    pairs = list(_BROWSE_BUDGET_EDITS)
+    pairs.pop(drop)
+    candidate, _ = _browse_budget_tree(
+        tmp_path, "".join(before for before, _ in pairs) + "\ndef _unrelated():\n    return 1\n"
+    )
+
+    with pytest.raises(BrowseBudgetFlockTestError) as excinfo:
+        _reconcile_browse_budget_flock_tests(str(candidate))
+    message = str(excinfo.value)
+    assert f"rewrite #{drop + 1}" in message
+    assert "_reconcile_browse_budget_flock_tests" in message
+    assert "macOS" in message
+
+
+def test_browse_budget_flock_reconcile_is_registered_in_reconcile_tree(tmp_path):
+    """``reconcile_tree`` must dispatch the new rule, or the fork never receives it."""
+    root = tmp_path / "candidate"
+    path = root / _BROWSE_BUDGET_TEST_REL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(before for before, _ in _BROWSE_BUDGET_EDITS), encoding="utf-8")
+
+    result = reconcile_tree(str(root))
+    assert _BROWSE_BUDGET_TEST_REL in result.fixed
+    assert "def _hold_release_latency(" in path.read_text(encoding="utf-8")
 
 
 def test_new_timeout_reconciles_are_registered_in_reconcile_tree(tmp_path):
@@ -4150,6 +4348,315 @@ def test_reconcile_dead_api_defaults_leaves_live_and_apex_hosts(tmp_path):
         (cli / "auth_constants.py").read_text())
 
 
+# --- the suite's half of the fail-closed defaults -------------------------
+
+_ENDPOINT_SOURCE = '''
+DEFAULT_NASTECH_PORTAL_URL = _nastech_endpoint_default(
+    env="NASTECH_PORTAL_URL",
+    constant="DEFAULT_NASTECH_PORTAL_URL",
+    dead_default="https://portal.nastechresearch.github.io",
+)
+TELEGRAM_ONBOARDING_DEFAULT_URL = _nastech_endpoint_default(
+    env="TELEGRAM_ONBOARDING_DEFAULT_URL",
+    constant="TELEGRAM_ONBOARDING_DEFAULT_URL",
+    dead_default="https://setup.nastechresearch.github.io/nastech-agent",
+)
+'''
+
+_CONFTEST_HEAD = (
+    "import os\n"
+    "\n"
+    '_PRE_SANDBOX_NASTECH_HOME = os.environ.get("NASTECH_HOME", "")\n'
+    "\n"
+    "import json\n"
+)
+
+
+def _suite_tree(tmp_path, source=_ENDPOINT_SOURCE, conftest=_CONFTEST_HEAD):
+    """A branded candidate: fail-closed call sites plus the conftest that must read them."""
+    root = tmp_path / "candidate"
+    (root / "nastech_cli").mkdir(parents=True)
+    (root / "nastech_cli" / "auth_constants.py").write_text(source, encoding="utf-8")
+    (root / "tests").mkdir()
+    (root / "tests" / "conftest.py").write_text(conftest, encoding="utf-8")
+    return root
+
+
+def _pins_of(path):
+    """The ``_NASTECH_TEST_ENDPOINTS`` literal, read back out of a written conftest."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if (isinstance(node, ast.Assign)
+                and [t.id for t in node.targets] == ["_NASTECH_TEST_ENDPOINTS"]):
+            return ast.literal_eval(node.value)
+    raise AssertionError("no _NASTECH_TEST_ENDPOINTS assignment")
+
+
+def test_endpoint_pins_are_derived_from_the_generated_call_sites(tmp_path):
+    """The suite asserts the branded origin each default names as its dead_default.
+
+    ``_reconcile_dead_api_defaults`` makes an unconfigured constant read as a
+    ``.invalid`` origin, which is the correct answer for a user and the wrong one
+    for 99 endpoint-asserting test files (nastech-agent#157 / 100Ways#118).  The
+    pins therefore have to be *read out of* the generated call sites: a list typed
+    in beside this file drifts the moment upstream adds, renames or drops an
+    endpoint, and the failure it produces is a wall of red across the suite.
+    """
+    root = _suite_tree(tmp_path)
+
+    assert _reconcile_test_endpoint_defaults(str(root)) is True
+    path = root / _CONFTEST
+    text = path.read_text(encoding="utf-8")
+    assert _pins_of(path) == {
+        "NASTECH_PORTAL_URL": "https://portal.nastechresearch.github.io",
+        "TELEGRAM_ONBOARDING_DEFAULT_URL": (
+            "https://setup.nastechresearch.github.io/nastech-agent"),
+    }
+    # setdefault, so an operator's own configuration still wins.
+    assert "os.environ.setdefault(_env_key, _env_value)" in text
+    # ahead of every later import: a module-level constant captures the
+    # environment at import time, which is the only moment that matters.
+    assert text.index("_NASTECH_TEST_ENDPOINTS") < text.index("import json")
+    # idempotent, and a second sync re-derives the block from the new call sites
+    assert _reconcile_test_endpoint_defaults(str(root)) is False
+    assert root.joinpath("tests", "conftest.py").read_text(encoding="utf-8") == text
+
+
+def test_endpoint_pins_follow_the_constant_that_names_them(tmp_path):
+    """Renaming an endpoint upstream needs no edit here -- that is the whole point."""
+    root = _suite_tree(
+        tmp_path, source=_ENDPOINT_SOURCE.replace("NASTECH_PORTAL_URL", "NAS_PORTAL_URL"))
+
+    assert _reconcile_test_endpoint_defaults(str(root)) is True
+    assert set(_pins_of(root / _CONFTEST)) == {
+        "NAS_PORTAL_URL", "TELEGRAM_ONBOARDING_DEFAULT_URL"}
+
+
+def test_endpoint_pins_need_no_block_without_a_fail_closed_default(tmp_path):
+    """A tree with no reconciled default gets no block, so the mark stays meaningful."""
+    root = _suite_tree(tmp_path, source='PORTAL = "https://portal.example.test"\n')
+
+    assert _reconcile_test_endpoint_defaults(str(root)) is False
+    assert _ENDPOINT_PIN_MARK not in (root / _CONFTEST).read_text(encoding="utf-8")
+
+
+def test_endpoint_pins_fail_loudly_when_conftest_moved_the_anchor(tmp_path):
+    """Upstream relocating its environment capture must fail the sync, not the suite."""
+    root = _suite_tree(
+        tmp_path,
+        conftest='import os\n\n_PRE_SANDBOX_NASTECH_HOME = os.environ["NASTECH_HOME"]\n')
+
+    with pytest.raises(NastechSuitePinError) as excinfo:
+        _reconcile_test_endpoint_defaults(str(root))
+    message = str(excinfo.value)
+    assert _CONFTEST in message
+    assert "_reconcile_test_endpoint_defaults" in message
+    # nothing half-written
+    assert _ENDPOINT_PIN_MARK not in (root / _CONFTEST).read_text(encoding="utf-8")
+
+
+_HOME_PRE = '''
+
+def _processes_with_nastech_home_under(roots) -> list[int]:
+    found = []
+    for pid in os.listdir("/proc"):
+        try:
+            environ = Path("/proc", pid, "environ").read_bytes().split(b"\\0")
+        except OSError:
+            continue
+        home = next((item[12:] for item in environ if item.startswith(b"NASTECH_HOME=")), None)
+        if home:
+            found.append(int(pid))
+    return found
+'''
+
+
+def test_nastech_home_env_prefix_binds_the_slice_to_its_literal(tmp_path):
+    """Branding lengthened ``HERMES_HOME`` to ``NASTECH_HOME`` and left ``[12:]``.
+
+    The guard that keeps pytest off a real ``NASTECH_HOME`` sliced a leading ``=``
+    and matched no path, so it protected nothing and failed by finding nothing --
+    invisible from the suite, which is why it needs a rule rather than a fix once.
+    """
+    root = _suite_tree(tmp_path)
+    path = root / _CONFTEST
+    path.write_text("import os\nfrom pathlib import Path\n" + _HOME_PRE, encoding="utf-8")
+
+    assert _reconcile_nastech_home_env_prefix(str(root)) is True
+    text = path.read_text(encoding="utf-8")
+    assert "item[12:]" not in text
+    assert 'item.startswith(b"NASTECH_HOME=")' not in text
+    assert "item[len(_NASTECH_HOME_PREFIX):]" in text
+    ast.parse(text)
+    assert _reconcile_nastech_home_env_prefix(str(root)) is False
+    assert path.read_text(encoding="utf-8") == text
+
+
+def test_nastech_home_env_prefix_fails_loudly_when_the_slice_moved(tmp_path):
+    root = _suite_tree(tmp_path)
+    (root / _CONFTEST).write_text(
+        "import os\nfrom pathlib import Path\n"
+        + _HOME_PRE.replace('item[12:]', 'item[13:]'),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(NastechSuitePinError) as excinfo:
+        _reconcile_nastech_home_env_prefix(str(root))
+    assert "rewrite #" in str(excinfo.value)
+    assert "_reconcile_nastech_home_env_prefix" in str(excinfo.value)
+
+
+_GUEST_PRE = '''
+
+def _server(tmp_path, monkeypatch):
+    launch = tmp_path / "launch"
+    launch.mkdir()
+    monkeypatch.setattr(server, '_nastech_home', launch)
+    return server, launch, bee
+'''
+
+
+def test_guest_identity_stub_matches_the_sibling_connector_tests(tmp_path):
+    """The connector RPC path mints a hosted guest before answering ``connectors.list``.
+
+    This fork runs no portal, so the mint always fails and the one connector test
+    without the stub that three of its siblings already carries reaches a
+    ``{'charge'}`` answer where ``{'charge', 'list'}`` is expected.
+    """
+    root = tmp_path / "candidate"
+    path = root / _GUEST_IDENTITY_TESTS
+    path.parent.mkdir(parents=True)
+    path.write_text(_GUEST_PRE, encoding="utf-8")
+
+    assert _reconcile_guest_identity_stub(str(root)) is True
+    text = path.read_text(encoding="utf-8")
+    assert "monkeypatch.setattr('tools.connectors.ensure_guest_identity', lambda: None)" in text
+    assert (
+        "monkeypatch.setattr('tools.connectors.managed.ensure_guest_identity', lambda: None)"
+        in text)
+    ast.parse(text)
+    assert _reconcile_guest_identity_stub(str(root)) is False
+    assert path.read_text(encoding="utf-8") == text
+
+
+def test_suite_pin_reconciles_are_registered_in_reconcile_tree(tmp_path):
+    """``reconcile_tree`` must dispatch the suite rules, or the fork never receives them."""
+    root = _suite_tree(tmp_path)
+    conftest = root / _CONFTEST
+    conftest.write_text(
+        "import os\nfrom pathlib import Path\n" + _CONFTEST_HEAD + _HOME_PRE, encoding="utf-8"
+    )
+    guest = root / _GUEST_IDENTITY_TESTS
+    guest.parent.mkdir(parents=True)
+    guest.write_text(_GUEST_PRE, encoding="utf-8")
+
+    result = reconcile_tree(str(root))
+    assert _CONFTEST in result.fixed
+    assert _GUEST_IDENTITY_TESTS in result.fixed
+    text = conftest.read_text(encoding="utf-8")
+    assert _pins_of(conftest)
+    assert "item[len(_NASTECH_HOME_PREFIX):]" in text
+    assert "ensure_guest_identity" in guest.read_text(encoding="utf-8")
+
+
+# --- fork-lane release surface --------------------------------------------
+
+_FORK_LANE_EDITS = (
+    (_RELEASE_ENTRYPOINT, _RELEASE_ENTRYPOINT_EDITS),
+    (_RELEASE_LANES_TESTS, _RELEASE_LANES_TESTS_EDITS),
+    (_RELEASE_CHANNELS_TESTS, _RELEASE_CHANNELS_TESTS_EDITS),
+    (_STABLE_RELEASE_TESTS, _STABLE_RELEASE_TESTS_EDITS),
+    (_RELEASE_ENTRYPOINT_TESTS, _RELEASE_ENTRYPOINT_TESTS_EDITS),
+)
+
+
+def _lane_release_tree(tmp_path, rel, edits):
+    """A candidate holding one release file at the exact pre-image of its rewrites."""
+    root = tmp_path / "candidate"
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(before for before, _ in edits), encoding="utf-8")
+    return root, path
+
+
+@pytest.mark.parametrize("rel, edits", _FORK_LANE_EDITS, ids=[rel for rel, _ in _FORK_LANE_EDITS])
+def test_fork_lane_release_pairs_apply_once_and_reach_a_fixed_point(tmp_path, rel, edits):
+    """Every pair matches upstream exactly once, in order, and the result stops there.
+
+    These five files read ``lane_set.DEFAULT``, so on a fork that signs no desktop
+    package each of them asserts upstream's full-lane behaviour and fails: the
+    lane table disagrees with its own test, ``require_smokes_match_claim`` refuses a
+    default that cannot produce desktop smoke results, and the release note calls a
+    Termux-only build a partial desktop release.
+    """
+    root, path = _lane_release_tree(tmp_path, rel, edits)
+
+    assert _reconcile_fork_lane_release_surface(str(root)) == [rel]
+    text = path.read_text(encoding="utf-8")
+    assert text == "".join(after for _, after in edits)
+    assert _reconcile_fork_lane_release_surface(str(root)) == []
+    assert path.read_text(encoding="utf-8") == text
+
+
+def test_fork_lane_release_noops_on_a_tree_without_the_release_files(tmp_path):
+    """A pre-lane tree has nothing to align: absence is a no-op, not an error."""
+    assert _reconcile_fork_lane_release_surface(str(tmp_path / "empty")) == []
+
+
+def test_fork_lane_release_default_set_and_its_test_agree(tmp_path):
+    """The lane test may not name a lane set the lane table does not exclude.
+
+    ``_reconcile_signing_gated_defaults`` writes the fork's ``DEFAULT`` and this
+    rule writes the test that asserts it; the two lists are hand-typed in separate
+    constants, so a lane added to one and not the other goes red in the fork's
+    release suite with nothing pointing at the pairing.
+    """
+    root, path = _lane_release_tree(
+        tmp_path, _RELEASE_LANES_TESTS, _RELEASE_LANES_TESTS_EDITS)
+    assert _reconcile_fork_lane_release_surface(str(root)) == [_RELEASE_LANES_TESTS]
+
+    test_names = set(re.findall(
+        r'"([a-z0-9-]+)"',
+        re.search(r"UNSIGNED_LANES = \{([^}]*)\}", path.read_text(encoding="utf-8")).group(1)))
+    source_names = set(re.findall(
+        r'"([a-z0-9-]+)"',
+        re.search(r"lane\.name not in \{([^}]*)\}", _LANES_DEFAULT_FORK, re.S).group(1)))
+    assert test_names == source_names
+    # Termux is the one lane both sides put back in: it needs no signing.
+    assert '"termux"' in _LANES_DEFAULT_FORK
+    assert 'termux' not in test_names
+
+
+@pytest.mark.parametrize("drop", [1, 4])
+def test_fork_lane_release_fails_loudly_when_upstream_moved(tmp_path, drop):
+    """A rewrite that stopped matching raises; it never no-ops into a silent red lane."""
+    pairs = list(_RELEASE_LANES_TESTS_EDITS)
+    pairs.pop(drop)
+    root, _ = _lane_release_tree(tmp_path, _RELEASE_LANES_TESTS, pairs)
+
+    with pytest.raises(ForkLaneReleaseEditError) as excinfo:
+        _reconcile_fork_lane_release_surface(str(root))
+    message = str(excinfo.value)
+    assert f"rewrite #{drop + 1}" in message
+    assert _RELEASE_LANES_TESTS in message
+    assert "_reconcile_fork_lane_release_surface" in message
+
+
+def test_fork_lane_release_runs_from_reconcile_tree(tmp_path):
+    """``reconcile_tree`` must dispatch it, or the fork receives none of the five."""
+    root = tmp_path / "candidate"
+    for rel, edits in _FORK_LANE_EDITS:
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(before for before, _ in edits), encoding="utf-8")
+
+    result = reconcile_tree(str(root))
+    for rel, edits in _FORK_LANE_EDITS:
+        assert rel in result.fixed
+        assert (root / rel).read_text(encoding="utf-8") == "".join(
+            after for _, after in edits)
+
+
 def test_reconcile_security_contact_removes_undeliverable_mailbox(tmp_path):
     """github.io accepts no mail, so the security address must not survive.
 
@@ -4448,3 +4955,391 @@ def test_reconcile_ui_scope_pins_still_fails_closed_without_verified_target(tmp_
     )
     with pytest.raises(UiScopePinError):
         _reconcile_ui_scope_pins(str(tmp_path))
+
+
+# ---------------------------------------------------------------------------
+# The AGENTS.md chain cap that branding alone breaks
+# ---------------------------------------------------------------------------
+
+_AGENTS_CHECKER_REL = "scripts/ci/check_agents_md_size.py"
+_AGENTS_HINTS_REL = "agent/subdirectory_hints.py"
+_AGENTS_ROOT_DECLARATION = "Long-form background: `%s`.\n" % _DEV_GUIDE_DIR
+_AGENTS_GATEWAY_POINTER = (
+    "Applies on top of the root `AGENTS.md`. Long-form: `%sgateway-internals.md`.\n" % _DEV_GUIDE_DIR
+) + ("Long form: `%sgateway-internals.md` § `/login`.\n" % _DEV_GUIDE_DIR)
+
+
+def _agents_chain_tree(tmp_path, *, root, area, chain_max=30_000, root_max=12_000, hint_max=32_000):
+    """A tree whose AGENTS.md chain is measured by the same numbers the fork's CI reads."""
+    checker = tmp_path / _AGENTS_CHECKER_REL
+    checker.parent.mkdir(parents=True, exist_ok=True)
+    checker.write_text("ROOT_MAX_CHARS = %d\nCHAIN_MAX_CHARS = %d\n" % (root_max, chain_max),
+                       encoding="utf-8")
+    hints = tmp_path / _AGENTS_HINTS_REL
+    hints.parent.mkdir(parents=True, exist_ok=True)
+    hints.write_text("_MAX_HINT_CHARS = %d\n" % hint_max, encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text(root, encoding="utf-8")
+    for rel, text in area.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    return tmp_path
+
+
+def _padded(text, size):
+    assert size >= len(text), f"{size} cannot hold a {len(text)}-char header"
+    return text + "g" * (size - len(text))
+
+
+def test_reconcile_agents_md_drops_a_directory_the_root_already_stated(tmp_path):
+    """An area pointer pays 29 chars for a directory the root stated in the same block.
+
+    ``scripts/ci/check_agents_md_size.py`` budgets every ``AGENTS.md`` from the
+    git root down to the agent's directory as the ONE context block an agent
+    loads, and the root is inside every block: it names
+    ``website/docs/developer-guide/`` as where long-form lives.  A pointer that
+    repeats the directory buys nothing, so the rewrite keeps the file and drops
+    the prefix -- which is how ``gateway/AGENTS.md`` already cites that very doc
+    in one of its two pointers.
+    """
+    tree = _agents_chain_tree(tmp_path, root=_AGENTS_ROOT_DECLARATION,
+                              area={"gateway/AGENTS.md": _AGENTS_GATEWAY_POINTER +
+                                    "Long form: `engine-notes.md` § Shapes.\n"})
+
+    assert _reconcile_agents_md_chain_cap(str(tree)) == ["gateway/AGENTS.md"]
+    text = (tree / "gateway/AGENTS.md").read_text(encoding="utf-8")
+    assert _DEV_GUIDE_DIR not in text
+    assert "`gateway-internals.md` § `/login`" in text and "`engine-notes.md`" in text
+    # the root is the declaration: shortening it would strand every bare pointer
+    assert _DEV_GUIDE_DIR in (tree / "AGENTS.md").read_text(encoding="utf-8")
+
+
+def test_reconcile_agents_md_pointer_rewrite_is_a_fixed_point(tmp_path):
+    """A second pass sees bare names only and leaves the file byte-identical."""
+    tree = _agents_chain_tree(tmp_path, root=_AGENTS_ROOT_DECLARATION,
+                              area={"gateway/AGENTS.md": _AGENTS_GATEWAY_POINTER})
+    assert _reconcile_agents_md_chain_cap(str(tree)) == ["gateway/AGENTS.md"]
+    before = (tree / "gateway/AGENTS.md").read_bytes()
+
+    assert _reconcile_agents_md_chain_cap(str(tree)) == []
+    assert (tree / "gateway/AGENTS.md").read_bytes() == before
+
+
+def test_reconcile_agents_md_keeps_pointers_whole_when_the_root_stops_declaring_the_dir(tmp_path):
+    """A bare file name resolves only because the root spells out the directory.
+
+    If upstream removes that declaration the rule must not strand area pointers;
+    it leaves the text alone and lets the chain measurement decide.
+    """
+    tree = _agents_chain_tree(tmp_path, root="No directory is named anywhere here.\n",
+                              area={"gateway/AGENTS.md": _AGENTS_GATEWAY_POINTER})
+
+    assert _reconcile_agents_md_chain_cap(str(tree)) == []
+    assert (tree / "gateway/AGENTS.md").read_text(encoding="utf-8") == _AGENTS_GATEWAY_POINTER
+
+
+def test_reconcile_agents_md_clears_the_branded_chain_overrun(tmp_path):
+    """The exact chain nastech-agent PR #159's lint failed: 11840 + 18182 > 30000.
+
+    Upstream measures the same two files at 29956 -- forty-four under the cap --
+    and the brand adds one character per renamed token, sixty-six of them in
+    this chain, so the identical tree that is green upstream is red in the fork.
+    Two repeated directory prefixes (29 chars each) pay for the overrun and leave
+    the chain under budget without rewording a single sentence of guidance.
+    """
+    root = _padded(_AGENTS_ROOT_DECLARATION, 11_840)
+    area = _padded(_AGENTS_GATEWAY_POINTER, 18_182)
+    tree = _agents_chain_tree(tmp_path, root=root, area={"gateway/AGENTS.md": area})
+    assert len(root) + len(area) == 30_022 > 30_000
+
+    assert _reconcile_agents_md_chain_cap(str(tree)) == ["gateway/AGENTS.md"]
+    after = (tree / "gateway/AGENTS.md").read_text(encoding="utf-8")
+    assert len(root) + len(after) == 29_964
+
+
+def test_reconcile_agents_md_stops_when_a_chain_is_still_over(tmp_path):
+    """Past the repeated prefix there is no redundancy left, only prose.
+
+    The rule must not invent a shorter sentence to squeeze under the cap: it
+    raises so the sync stops for a human, because the only other move -- raising
+    ``CHAIN_MAX_CHARS`` -- raises the size an agent is truncated at.
+    """
+    tree = _agents_chain_tree(tmp_path, root=_padded(_AGENTS_ROOT_DECLARATION, 145),
+                              area={"gateway/AGENTS.md": _padded(_AGENTS_GATEWAY_POINTER, 320)},
+                              chain_max=400)
+
+    with pytest.raises(AgentsChainCapError) as caught:
+        _reconcile_agents_md_chain_cap(str(tree))
+    message = str(caught.value)
+    assert "AGENTS.md + gateway/AGENTS.md" in message
+    assert "chain cap" in message and "instead of raising any number" in message
+    # the rewrite still landed: what stopped the sync is the measured remainder
+    assert _DEV_GUIDE_DIR not in (tree / "gateway/AGENTS.md").read_text(encoding="utf-8")
+
+
+def test_reconcile_agents_md_measures_with_the_budget_ci_reads(tmp_path):
+    """Same tree, a larger CHAIN_MAX_CHARS in the checker: nothing is over.
+
+    The numbers live in ``scripts/ci/check_agents_md_size.py``; taking them from
+    there is what keeps this guard from quietly disagreeing with CI when that
+    file moves -- and a checker that no longer names them is an error, not a
+    silently disabled guard.
+    """
+    root, area = _padded(_AGENTS_ROOT_DECLARATION, 145), _padded(_AGENTS_GATEWAY_POINTER, 320)
+    roomy = _agents_chain_tree(tmp_path / "roomy", root=root,
+                               area={"gateway/AGENTS.md": area}, chain_max=20_000)
+    assert _reconcile_agents_md_chain_cap(str(roomy)) == ["gateway/AGENTS.md"]
+
+    moved = _agents_chain_tree(tmp_path / "moved", root=root, area={"gateway/AGENTS.md": area})
+    (moved / _AGENTS_CHECKER_REL).write_text("ROOT_MAX_CHARS = 12_000\n", encoding="utf-8")
+    with pytest.raises(AgentsChainCapError, match="no CHAIN_MAX_CHARS assignment"):
+        _reconcile_agents_md_chain_cap(str(moved))
+
+    blind = _agents_chain_tree(tmp_path / "blind", root=root, area={"gateway/AGENTS.md": area})
+    (blind / _AGENTS_HINTS_REL).unlink()
+    with pytest.raises(AgentsChainCapError, match="not readable"):
+        _reconcile_agents_md_chain_cap(str(blind))
+
+
+def test_reconcile_agents_md_has_no_chain_to_budget_on_a_tree_without_the_checker(tmp_path):
+    """No budgeting file means CI enforces no chain here: change nothing, raise nothing."""
+    bare = _agents_chain_tree(tmp_path / "bare", root=_AGENTS_ROOT_DECLARATION,
+                              area={"gateway/AGENTS.md": _AGENTS_GATEWAY_POINTER})
+    (bare / _AGENTS_CHECKER_REL).unlink()
+    assert _reconcile_agents_md_chain_cap(str(bare)) == []
+    assert (bare / "gateway/AGENTS.md").read_text(encoding="utf-8") == _AGENTS_GATEWAY_POINTER
+
+    _agents_chain_tree(tmp_path / "signs", root="", area={})
+    no_root = tmp_path / "signs" / "AGENTS.md"
+    no_root.unlink()
+    assert _reconcile_agents_md_chain_cap(str(tmp_path / "signs")) == []
+
+
+def test_agents_chain_is_the_block_one_agent_loads():
+    """Root first, every intermediate that exists, the file itself last."""
+    present = {"AGENTS.md", "apps/desktop/AGENTS.md", "apps/desktop/src/AGENTS.md",
+               "tools/AGENTS.md"}
+    assert _agents_chain("apps/desktop/src/AGENTS.md", present) == [
+        "AGENTS.md", "apps/desktop/AGENTS.md", "apps/desktop/src/AGENTS.md"]
+    assert _agents_chain("tools/AGENTS.md", present) == ["AGENTS.md", "tools/AGENTS.md"]
+    assert _agents_chain("AGENTS.md", present) == ["AGENTS.md"]
+    # a missing intermediate contributes nothing, exactly as in the checker
+    assert _agents_chain("apps/desktop/src/AGENTS.md", {"AGENTS.md", "apps/desktop/src/AGENTS.md"}) == [
+        "AGENTS.md", "apps/desktop/src/AGENTS.md"]
+
+
+def test_reconcile_agents_md_chain_cap_runs_from_reconcile_tree(tmp_path):
+    """``reconcile_tree`` must dispatch the rule, or every sync re-publishes the red chain."""
+    tree = _agents_chain_tree(tmp_path / "candidate", root=_AGENTS_ROOT_DECLARATION,
+                              area={"gateway/AGENTS.md": _AGENTS_GATEWAY_POINTER})
+
+    result = reconcile_tree(str(tree))
+    assert "gateway/AGENTS.md" in result.fixed
+    assert _DEV_GUIDE_DIR not in (tree / "gateway/AGENTS.md").read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# The one armed statement the browse budget's own guard does not cover
+# ---------------------------------------------------------------------------
+
+_DDL_HEAD = (
+    "def _apply_additive_schema(path, budget=None):\n"
+    "    from nastech_cli.sqlite_safe_read import connect_tracked\n"
+    "    budget = budget or _Budget(BROWSE_RECONCILE_BUDGET_S)\n"
+    "    with closing(connect_tracked(path, isolation_level=None)) as conn:\n"
+    "        _reapply_durability_barriers(conn)\n"
+)
+_DDL_TAIL = (
+    "            apply_declared_schema(cursor)\n"
+    "            budget.check()\n"
+    "            conn.execute('COMMIT')\n"
+    "        except BaseException as exc:\n"
+    "            with contextlib.suppress(sqlite3.Error):\n"
+    "                conn.execute('ROLLBACK')\n"
+    "            if budget.expired and isinstance(exc, sqlite3.OperationalError):\n"
+    "                raise BrowseBudgetExceeded(\n"
+    "                    'browse schema catch-up exceeded its time budget') from exc\n"
+    "            raise\n"
+)
+
+
+def _ddl_tree(tmp_path, *, arm=_BROWSE_DDL_UNGUARDED, tail=_DDL_TAIL):
+    """Upstream's browse DDL shape: the budget handler is armed one statement early."""
+    (tmp_path / _BROWSE_RECONCILE_REL).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / _BROWSE_RECONCILE_REL).write_text(_DDL_HEAD + arm + tail, encoding="utf-8")
+    return tmp_path
+
+
+def _ddl_text(tree):
+    return (tree / _BROWSE_RECONCILE_REL).read_text(encoding="utf-8")
+
+
+def test_reconcile_browse_ddl_moves_the_armed_begin_under_its_own_guard(tmp_path):
+    """The transaction-opening statement is the one the expired-budget conversion cannot see.
+
+    ``budget.arm(conn)`` installs the progress handler that raises
+    ``sqlite3.OperationalError('interrupted')`` once ``BROWSE_RECONCILE_BUDGET_S``
+    is gone, and the ``except BaseException`` that turns that into
+    ``BrowseBudgetExceeded`` -- the only path that answers "nothing was changed" --
+    begins after ``BEGIN IMMEDIATE``.  Moving the statement inside the ``try`` is
+    the whole fix: the budget, the busy timeout, the handler cadence and every
+    classifier stay exactly as upstream wrote them.
+    """
+    tree = _ddl_tree(tmp_path)
+
+    assert _reconcile_browse_ddl_budget_guard(str(tree)) == [_BROWSE_RECONCILE_REL]
+    text = _ddl_text(tree)
+    ast.parse(text)
+    assert _BROWSE_DDL_GUARDED in text and _BROWSE_DDL_UNGUARDED not in text
+    # still the first statement of the guarded block, and still ahead of the DDL
+    assert text.index("try:") < text.index("conn.execute('BEGIN IMMEDIATE')")
+    assert text.index("conn.execute('BEGIN IMMEDIATE')") < text.index("apply_declared_schema(cursor)")
+    # the guard it moved under is the one that produces the retryable message
+    assert "raise BrowseBudgetExceeded" in text
+    assert text.count("conn.execute('BEGIN IMMEDIATE')") == 1
+
+
+def test_reconcile_browse_ddl_guard_is_a_fixed_point(tmp_path):
+    """A second sync sees the guarded shape and leaves the file byte-identical."""
+    tree = _ddl_tree(tmp_path)
+    assert _reconcile_browse_ddl_budget_guard(str(tree)) == [_BROWSE_RECONCILE_REL]
+    before = _ddl_text(tree)
+
+    assert _reconcile_browse_ddl_budget_guard(str(tree)) == []
+    assert _ddl_text(tree) == before
+
+
+def test_reconcile_browse_ddl_stops_when_the_anchor_moves(tmp_path):
+    """An armed statement this rule cannot see is the bug returning, quietly.
+
+    The misread is user-facing: an interrupted transaction makes
+    ``nastech_cli/web_server_sessions.py`` answer a clean, untouched store with
+    "Session store schema is unavailable or corrupt", which is PR #159's macOS
+    ``[ddl]`` failure.  So a shape change stops the sync instead of publishing it.
+    """
+    moved = _BROWSE_DDL_UNGUARDED.replace("        conn.execute", "    conn.execute")
+    tree = _ddl_tree(tmp_path, arm=moved)
+    before = _ddl_text(tree)
+
+    with pytest.raises(BrowseBudgetDdlError, match="no longer opens its browse DDL"):
+        _reconcile_browse_ddl_budget_guard(str(tree))
+    assert _ddl_text(tree) == before
+
+
+def test_reconcile_browse_ddl_stops_when_the_guard_loses_what_the_move_needs(tmp_path):
+    """Without the expired-budget conversion the move would classify nothing.
+
+    Either half of the guard can be edited away upstream: the conversion, or the
+    suppressed rollback that keeps a failed ``BEGIN`` from surfacing "cannot
+    rollback - no transaction is active" in place of the real error.
+    """
+    dropped = (
+        "            with contextlib.suppress(sqlite3.Error):\n"
+        "                conn.execute('ROLLBACK')\n",
+        "            if budget.expired and isinstance(exc, sqlite3.OperationalError):\n"
+        "                raise BrowseBudgetExceeded(\n"
+        "                    'browse schema catch-up exceeded its time budget') from exc\n",
+    )
+    for index, arm in enumerate(dropped):
+        assert arm in _DDL_TAIL
+        tree = _ddl_tree(tmp_path / f"guard{index}", tail=_DDL_TAIL.replace(arm, ""))
+        with pytest.raises(BrowseBudgetDdlError, match="no longer has"):
+            _reconcile_browse_ddl_budget_guard(str(tree))
+
+
+def test_reconcile_browse_ddl_has_nothing_to_guard_on_a_tree_without_a_budget(tmp_path):
+    """No armed budget in this file means this rule owns nothing here: no change, no raise."""
+    tree = _ddl_tree(tmp_path, arm="        conn.execute('BEGIN IMMEDIATE')\n        try:\n"
+                                      "            cursor = conn.cursor()\n")
+    text = _ddl_text(tree).replace("budget.arm(conn)", "_Budget(BROWSE_RECONCILE_BUDGET_S)")
+    (tree / _BROWSE_RECONCILE_REL).write_text(text, encoding="utf-8")
+
+    assert _reconcile_browse_ddl_budget_guard(str(tree)) == []
+    assert _ddl_text(tree) == text
+    assert _reconcile_browse_ddl_budget_guard(str(tmp_path / "absent")) == []
+
+
+def test_reconcile_browse_ddl_budget_guard_runs_from_reconcile_tree(tmp_path):
+    """``reconcile_tree`` must dispatch the rule, or every sync re-publishes the corrupt-store 503."""
+    tree = _ddl_tree(tmp_path / "candidate")
+
+    result = reconcile_tree(str(tree))
+    assert _BROWSE_RECONCILE_REL in result.fixed
+    assert _BROWSE_DDL_GUARDED in _ddl_text(tree)
+
+
+def test_unsigned_darwin_build_env_unsets_empty_certificate(tmp_path):
+    """Build-only darwin runs must not hand electron-builder an empty CSC_LINK.
+
+    electron-builder reads a present-but-empty ``CSC_LINK`` as a certificate
+    path, resolves ``''`` to the project directory and throws ``<dir> not a
+    file`` before packaging (run 39508427430, both darwin legs).
+    """
+    candidate = tmp_path / "candidate"
+    wf = candidate / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    path = wf / "desktop-bundled-release.yml"
+    path.write_text(
+        "jobs:\n"
+        "  build-darwin-arm64-release:\n"
+        "    steps:\n"
+        "      - name: Require signing credentials when publishing\n"
+        "        env:\n"
+        "          CSC_LINK: ${{ secrets.CSC_LINK }}\n"
+        "          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}\n"
+        "        run: |\n"
+        "          missing=()\n"
+        "      - name: Build and package\n"
+        "        env:\n"
+        "          CSC_LINK: ${{ secrets.CSC_LINK }}\n"
+        "          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}\n"
+        "        run: |\n"
+        "          # Sign + notarize of a bundled-payload app runs long (Apple scans\n"
+        "          # every Mach-O) — raise the fd limit and let DEBUG show progress.\n"
+        "          python scripts/bundles/desktop.py --variant bundled\n",
+        encoding="utf-8",
+    )
+
+    changed = _reconcile_unsigned_darwin_build_env(str(candidate))
+
+    assert changed == [".github/workflows/desktop-bundled-release.yml"]
+    text = path.read_text(encoding="utf-8")
+    assert 'if [ -z "$CSC_LINK" ]; then' in text
+    assert "unset CSC_LINK CSC_KEY_PASSWORD" in text
+    assert "export CSC_IDENTITY_AUTO_DISCOVERY=false" in text
+    # The guard belongs to the build step, after the credential gate's run.
+    assert text.index("missing=()") < text.index('if [ -z "$CSC_LINK" ]; then')
+    # Fixed point, and the injected prose carries no upstream brand token.
+    assert _reconcile_unsigned_darwin_build_env(str(candidate)) == []
+    rules = BrandingRules()
+    assert rules.transform_text(text) == text
+
+
+def test_unsigned_darwin_build_env_absent_workflow_is_a_no_op(tmp_path):
+    assert _reconcile_unsigned_darwin_build_env(str(tmp_path)) == []
+
+
+def test_unsigned_darwin_build_env_stops_when_the_step_moves(tmp_path):
+    """A reworded upstream step must stop the sync, not silently lose the guard.
+
+    Without the raise the next branded update re-derives the workflow from
+    upstream, ships the empty ``CSC_LINK`` again and every build-only darwin
+    dispatch fails at packaging.
+    """
+    candidate = tmp_path / "candidate"
+    wf = candidate / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / "desktop-bundled-release.yml").write_text(
+        "jobs:\n"
+        "  build-darwin-arm64-release:\n"
+        "    steps:\n"
+        "      - name: Build and package\n"
+        "        env:\n"
+        "          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}\n"
+        "        run: |\n"
+        "          # Notarization is slow, so keep DEBUG on.\n"
+        "          python scripts/bundles/desktop.py --variant bundled\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(UnsignedDarwinBuildEnvError, match="Re-derive the anchor"):
+        _reconcile_unsigned_darwin_build_env(str(candidate))

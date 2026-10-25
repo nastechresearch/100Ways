@@ -63,6 +63,8 @@ def test_allow_list_mirrors_the_weekly_gate(tmp_path):
         ("reports/SYNC-SUMMARY.md", "nous", "> powered by nousresearch"),
         ("reports/SYNC-SUMMARY.md", "nous", "> Powered by Nastech"),
         ("README.md", "hermes", "hermes_cli"),
+        ("website/docusaurus.config.ts", "hermes", "      indexName: 'hermes docs',"),
+        ("README.md", "hermes", "the hermes docs index is searchable"),
     ]
     for path, word, line in cases:
         assert _allowed(path, word, line) == _allowed_brand_occurrence(word, line, path)

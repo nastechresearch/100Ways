@@ -78,7 +78,7 @@ WAYS: list[Way] = [
     Way("verify.token-audit", "Forbidden token audit", "verify", "scan for brand tokens that must never survive", uses="analyzer._VIOLATION_TOKENS"),
     Way("verify.english-guard", "English word guard", "verify", "assert venous/anonymous/thermometer survive branding"),
     Way("verify.path-parity", "Path twin check", "verify", "every upstream path must have a mapped nastech twin"),
-    Way("verify.orphan-flag", "Orphan flag", "verify", "every nastech-only file must be explainable or flagged"),
+    Way("verify.orphan-flag", "Orphan flag", "verify", "every nastech-only file must be explainable or flagged", uses="adapters.find_orphans"),
     Way("verify.merge-verify", "Merge result verify", "verify", "verify the merge commit's tree, not a cherry-pick"),
     # ---- port: how we land the work ------------------------------------------
     Way("port.patch-apply", "Rebranded patch apply", "port", "rebrand patch text then git apply --3way", uses="port._port_one", default=True),
@@ -100,14 +100,14 @@ WAYS: list[Way] = [
     Way("research.sample-import", "Approach import", "research", "pull a repo's approach and record it in the catalog"),
     Way("research.diff-mine", "Open-source PR mining", "research", "read public PRs that solved the same rebrand"),
     Way("research.license-scan", "License audit", "research", "check licenses so we know what is safe to adapt"),
-    Way("research.history-archaeology", "Commit archaeology", "research", "upstream history reveals the rename patterns they used"),
+    Way("research.history-archaeology", "Commit archaeology", "research", "upstream history reveals the rename patterns they used", uses="sync_summary.collect_changes"),
     Way("research.issue-mine", "Issue mining", "research", "GitHub issues mentioning the fork or rebrand"),
     # ---- notify: how we surface events ----------------------------------------
     Way("notify.telegram", "Telegram bot", "notify", "sendMessage to a chat via bot token", uses="notifier.Notifier._telegram", default=True),
     Way("notify.agent", "Agent prompt hook", "notify", "pipe a prompt to the opencode agent", uses="notifier.Notifier._agent"),
     Way("notify.desktop", "Desktop notification", "notify", "notify-send / osascript alert"),
     Way("notify.bell", "Terminal cue", "notify", "visual/audible bell in the terminal"),
-    Way("notify.markdown-file", "Markdown report", "notify", "append a report to a docs file"),
+    Way("notify.markdown-file", "Markdown report", "notify", "append a report to a docs file", uses="sync_summary.write_sync_summary"),
     Way("notify.webhook-out", "Generic webhook", "notify", "POST a JSON payload to any HTTP endpoint"),
     Way("notify.email", "SMTP digest", "notify", "send an email summary"),
     Way("notify.chat-hook", "Chat webhook", "notify", "matrix/discord/slack webhook with markdown"),
@@ -245,6 +245,27 @@ WAYS: list[Way] = [
     Way("watch.lockfile", "Lockfile mutual exclusion", "watch", "a lockfile ensures one watcher per repo at a time"),
     Way("watch.rotate-logs", "Log rotation", "watch", "rotate cycle logs by size and keep only recent tails"),
     Way("watch.graceful", "Graceful shutdown", "watch", "drain the current cycle before stopping on SIGTERM"),
+    # ---- notify (third decade): how a measurement reaches a person --------------
+    Way("notify.measured-drafts", "Draft per measurement", "notify", "issues and discussions drafted only from families that were measured; an unmeasured family drafts nothing", uses="delivery.plan"),
+    Way("notify.forge-discussion", "Forge discussion", "notify", "a question with no known answer posted to Discussions only when told to, body sent as JSON on stdin", uses="delivery.create_discussions"),
+    Way("notify.chat-table", "Bounded chat table", "notify", "a measured table rendered to the message limit, breaking between whole rows and naming any it withholds", uses="telegram_tables.answer"),
+    Way("notify.next-action", "Next-action list", "notify", "one line per finding with the owner already named, printable in chat or in an issue", uses="delivery.render_suggestions"),
+    Way("notify.cycle-delta", "Cycle delta feed", "notify", "report what moved since the last cycle, not a snapshot of this one", uses="errorfeed.observe"),
+    # ---- gate (third decade): what blocks a write -------------------------------
+    Way("gate.dedup-open", "Open-draft dedup", "gate", "a marker already on an open issue is not asked for a second time", uses="delivery.deduplicate"),
+    Way("gate.proven-complete", "Proven-complete gate", "gate", "a lane is called cleared only when the read provably listed every check run", uses="errorfeed.observe"),
+    # ---- verify (third decade): how we prove a port is faithful -----------------
+    Way("verify.shipped-link", "Shipped-link audit", "verify", "every https link read from the shipped tree judged by policy; a link nobody probed judges nothing", uses="urlcheck.scan_tree"),
+    Way("verify.red-owner", "Red ownership", "verify", "each CI red classified from its own payload evidence, with the owner the class names", uses="red_classifier.classify_runs"),
+    # ---- self-documentation: the README is measured, not hoped for ---------------
+    Way("detect.live-inventory", "Live command inventory", "detect", "verbs and commands are read off the parser and the command registry, so no second list can go stale", uses="readme.surface"),
+    Way("verify.documented-surface", "Documented surface", "verify", "an item counts as documented only when the line describing it is in the README, and a blank help string counts as nothing", uses="readme.measure_coverage"),
+    Way("gate.coverage-bar", "Documentation bar", "gate", "a README that stops describing the shipped surface fails the stage that measures it", uses="readme.measure_coverage"),
+    # ---- owned art: what the registry must claim, not only what it does ----------
+    Way("brand.asset-policy", "Declared art classes", "brand", "a YAML names the pixel classes the fork must own, so the manifest is checked against intent and not only itself", uses="assetforge.AssetPolicy"),
+    Way("verify.art-unclaimed", "Unclaimed identity art", "verify", "art inside a required class that no manifest target names is found by walking the tree, not assumed from the registry", uses="assetforge.audit_asset_policy"),
+    Way("brand.proved-leak", "Attributed art leak", "brand", "unclaimed art only blocks a release when an upstream checkout proves a path brands into it; otherwise it stays a review", uses="assetforge.branded_paths"),
+    Way("gate.withheld-verdict", "Withheld verdict", "gate", "a class nobody walked is reported as unmeasured rather than passing as clean", uses="assetforge.render"),
 ]
 
 

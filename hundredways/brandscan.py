@@ -32,6 +32,7 @@ from .rules import (
     BrandingRules,
     is_immutable_path,
     is_locked_path,
+    preserved_algolia_index_spans,
     preserved_repo_url_spans,
 )
 
@@ -88,6 +89,12 @@ def _allowed(path: str, word: str, line: str) -> bool:
     # inside one is inherited, not a first-party leak.  Matches the exemption
     # BrandingRules.transform_text applies when it preserves such a path.
     if any(word in match.group(0).lower() for match in preserved_repo_url_spans(line)):
+        return True
+    # An Algolia index the configured app really has is another object name we
+    # do not own: renaming it leaves the search box querying nothing.
+    if any(
+        word in match.group("value").lower() for match in preserved_algolia_index_spans(line)
+    ):
         return True
     lower = line.lower()
     if path == "package-lock.json" and word == "hermes":

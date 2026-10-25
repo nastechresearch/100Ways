@@ -52,7 +52,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install 100ways
-        run: pip install -e .
+        # The ai extra is what lets the review narrative ask Ollama for one prose
+        # paragraph; without it the narrative silently stays deterministic-only.
+        run: pip install -e ".[ai]"
 
       - name: Install candidate test search prerequisite
         run: |
@@ -72,6 +74,22 @@ jobs:
         run: |
           git clone --depth=1 \
             https://github.com/nastechresearch/nastech-agent.git nastech-agent
+
+      # The publication-readiness scan simulates the fork's blocking `ruff check .`, and
+      # an absent ruff is reported as UNAVAILABLE, which is blocking -- so the version the
+      # fork itself pins has to be the one installed here.  The pin comes from the fork's
+      # own pyproject.toml, the same file its lint lane resolves pins from
+      # (scripts.code_health --print-pins), so this step follows the fork when it bumps.
+      - name: Install the ruff the fork pins
+        run: |
+          set -euo pipefail
+          PIN=$(python3 -c 'from hundredways.forklint import read_fork_ruff_pin; print(read_fork_ruff_pin("nastech-agent"))')
+          if [ -z "$PIN" ]; then
+            echo "::error::nastech-agent/pyproject.toml pins no ruff, so the fork's blocking ruff check cannot be simulated here"
+            exit 1
+          fi
+          python3 -m pip install "ruff==$PIN"
+          ruff --version
 
       - name: Clone upstream source once
         env:
@@ -213,6 +231,7 @@ jobs:
             --snapshot "$SNAPSHOT" \
             --upstream "$HUNDREDWAYS_UPDATES_DIR/hermes-agent" \
             --expected-upstream-sha "$EXPECTED_UPSTREAM_SHA" \
+            --fork-root nastech-agent \
             --output "$HUNDREDWAYS_READINESS"
           echo "readiness=PASS" >> "$GITHUB_OUTPUT"
           echo "- Publication readiness: **PASS**" >> "$GITHUB_STEP_SUMMARY"
@@ -234,16 +253,94 @@ jobs:
           echo "conformance=PASS" >> "$GITHUB_OUTPUT"
           echo "- Final branded-tree conformance: **PASS**" >> "$GITHUB_STEP_SUMMARY"
 
+      # config/asset-policy.yml is the only statement of which classes of pixels a
+      # Nastech release must own outright; the manifest can only say what it claims.
+      # Two findings, two severities of consequence here:
+      #   class-unowned  blocking.  The registry stopped covering a class the policy
+      #                  requires, so every claim under that prefix has quietly
+      #                  stopped landing -- an upstream directory rename does this.
+      #   art-unclaimed  advisory.  Upstream art brands into a required class and no
+      #                  manifest target names it, so their pixels ship under our
+      #                  name.  15 of these are in the fork today (measured
+      #                  2026-10-24 against nastech-agent@24b4c061, bytes verified
+      #                  identical to the upstream twins they brand from), so
+      #                  failing here would halt every sync over a brand decision
+      #                  only the owner can make -- clearing them needs new owned
+      #                  art, not a code change.  The list is written to the job
+      #                  summary; move this to blocking when the count reaches zero.
+      # Exit 2 (unreadable policy, missing tree) stays loud: an audit that did not
+      # run cannot report an empty finding list.
+      - name: Audit the candidate against the owned-asset policy
+        env:
+          HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
+          HUNDREDWAYS_ASSET_AUDIT: ${{ runner.temp }}/asset-policy.json
+        run: |
+          set -euo pipefail
+          SNAPSHOT=$(find "$HUNDREDWAYS_UPDATES_DIR" -maxdepth 1 -type d -name 'Nastech-Update#*' | sort -V | tail -1)
+          test -n "$SNAPSHOT"
+          status=0
+          python3 -m hundredways.cli --repo "$GITHUB_WORKSPACE" assets \
+            --tree "$SNAPSHOT" \
+            --upstream "$HUNDREDWAYS_UPDATES_DIR/hermes-agent" \
+            --json-out "$HUNDREDWAYS_ASSET_AUDIT" || status=$?
+          if [ "$status" -gt 1 ]; then
+            echo "::error::the owned-asset audit did not run (exit $status)"
+            exit "$status"
+          fi
+          python3 - <<'PYEOF'
+          import json
+          import os
+
+          with open(os.environ["HUNDREDWAYS_ASSET_AUDIT"], encoding="utf-8") as handle:
+              audit = json.load(handle)
+          findings = audit["findings"]
+          groups: dict[str, list[dict[str, str]]] = {}
+          for finding in findings:
+              groups.setdefault(finding["code"], []).append(finding)
+          hard = groups.get("class-unowned", [])
+          art = groups.get("art-unclaimed", [])
+          absent = groups.get("class-absent", [])
+          summary = [
+              "## Owned-asset policy over the candidate",
+              f"- findings: **{len(findings)}** "
+              f"(class-unowned {len(hard)}, art-unclaimed {len(art)}, class-absent {len(absent)})",
+              f"- not measured: {', '.join(audit['not_measured']) or 'nothing'}",
+          ]
+          if art:
+              summary.append("")
+              summary.append("| path | role | detail |")
+              summary.append("| --- | --- | --- |")
+              summary.extend(
+                  f"| `{item['path']}` | {item['role']} | {item['detail']} |" for item in art
+              )
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:
+              handle.write("\n".join(summary) + "\n")
+          print(f"art-unclaimed (advisory): {len(art)}")
+          if hard:
+              raise SystemExit(
+                  "required classes lost their registry claims: "
+                  + ", ".join(sorted(item["path"] for item in hard))
+              )
+          PYEOF
+
       - name: Write professional update summary
         env:
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
           HUNDREDWAYS_SUMMARY: ${{ runner.temp }}/SYNC-SUMMARY.md
+          HUNDREDWAYS_TITLE: ${{ runner.temp }}/SYNC-TITLE.md
+          HUNDREDWAYS_PR_BODY: ${{ runner.temp }}/SYNC-PR-BODY.md
           EXPECTED_UPSTREAM_SHA: ${{ steps.direct-source.outputs.sha }}
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+          HUNDREDWAYS_AI_PROVIDER: ollama-cloud
+          HUNDREDWAYS_AI_BASE_URL: https://ollama.com/v1
+          HUNDREDWAYS_AI_MODEL: gemma4:31b-cloud
         run: |
           set -euo pipefail
           python3 - <<'PYEOF'
           import json
           import os
+          from pathlib import Path
+          from hundredways.narrative import evidence_from_manifest, garnish, write_narrative
           from hundredways.sync_summary import write_sync_summary
 
           updates = os.environ["HUNDREDWAYS_UPDATES_DIR"]
@@ -256,12 +353,6 @@ jobs:
                   baseline = json.load(fh).get("upstream_sha", "")
           except (OSError, ValueError):
               baseline = ""
-          verification = (
-              ("Direct source provenance", "Passed"),
-              ("Brand and asset integrity", "Passed"),
-              ("Dependency, security, and publication-readiness scans", "Passed"),
-              ("Full verification and fork-consistency checks", "Passed"),
-          )
           write_sync_summary(
               os.environ["HUNDREDWAYS_SUMMARY"],
               upstream_repo=os.path.join(updates, "hermes-agent"),
@@ -269,9 +360,20 @@ jobs:
               upstream_sha=manifest["upstream_sha"],
               files_changed=sum(int(manifest.get("diff", {}).get(key, 0)) for key in ("renamed", "rewritten", "missing")),
               changed_areas=manifest.get("changed_areas", {}),
-              verification=verification,
+              verification=evidence_from_manifest(manifest),
               commit_subjects=manifest.get("commit_subjects", ()),
           )
+          # The committed summary stays deterministic.  Advisory model prose is
+          # appended only to the review PR body, never to a file in the tree.
+          summary = Path(os.environ["HUNDREDWAYS_SUMMARY"]).read_text(encoding="utf-8")
+          title = write_narrative(
+              os.environ["HUNDREDWAYS_TITLE"],
+              os.environ["HUNDREDWAYS_PR_BODY"],
+              manifest=manifest,
+              summary_markdown=summary,
+              paragraph=garnish(manifest),
+          )
+          print(f"review title: {title} ({len(title)} chars)")
           PYEOF
 
       - name: Repackage the exact verified tree
@@ -354,6 +456,9 @@ jobs:
             ${{ runner.temp }}/weekly-decision.json
             ${{ runner.temp }}/publication-readiness.json
             ${{ runner.temp }}/candidate-conformance.json
+            ${{ runner.temp }}/asset-policy.json
             ${{ runner.temp }}/gate_receipt.json
             ${{ runner.temp }}/SYNC-SUMMARY.md
+            ${{ runner.temp }}/SYNC-TITLE.md
+            ${{ runner.temp }}/SYNC-PR-BODY.md
           if-no-files-found: error

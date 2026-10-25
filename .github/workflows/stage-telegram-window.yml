@@ -1,0 +1,162 @@
+name: stage-telegram-window
+
+# A self-rescheduling poll window.  The scheduled monitor can only answer chat
+# messages inside its own run, so an operator who asks a question ten minutes
+# later gets silence.  This job is the answer: it opens a bounded window, and the
+# agent queues the next window (stage-telegram-window.yml, hop+1) only when the
+# chat is actually using the surface.  hundredways/telegram_transport.py::plan_renewal
+# owns the policy -- a quiet window closes the chain, and hop and wall budgets
+# cap the whole chain no matter what the chat says.
+#
+# It deliberately does NOT re-derive the commit stream.  Upstream's history is
+# about 1.3 GB, and cloning it once per hop would make the cheapest chat surface
+# in the pipeline the most expensive one.  The monitor writes its decision and
+# context into telegram-state/ before saving the cache, so a window answers from
+# the numbers the last scheduled run reported, and the chain costs one restore.
+#
+# Landed edits come from the Edit-level chats and always leave as a pull request
+# against the dispatched ref.  Two limits to know about, both inherited from
+# GitHub rather than chosen here: a PR opened by GITHUB_TOKEN does not start
+# workflows, so a chat-landed PR shows no checks until a human comments or pushes
+# to it; and the checkout is shallow because `land_proposal` only needs a base
+# ref to branch from, never history.
+
+on:
+  workflow_dispatch:
+    inputs:
+      hop:
+        description: Position in the renewal chain (0 for the first window)
+        required: false
+        type: string
+        default: "0"
+      seconds:
+        description: How long this window stays open
+        required: false
+        type: string
+        default: "900"
+      key:
+        description: Dedup key carried from the window that queued this run
+        required: false
+        type: string
+        default: ""
+      reason:
+        description: Why this window was queued
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  # One window at a time, and never cancelled mid-window.  Two pollers sharing a
+  # bot consume the same getUpdates offset, so the second would silently swallow
+  # the first operator's messages; cancelling a live window would drop whatever
+  # is queued but unanswered.
+  group: telegram-window
+  cancel-in-progress: false
+
+jobs:
+  window:
+    runs-on: ubuntu-latest
+    # A window is bounded at MAX_WINDOW_SECONDS (20 minutes) by the transport;
+    # the rest is install and cache restore.  Past this the runner kills the job
+    # and the chain stops on its own -- nothing re-dispatches a dead window.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install 100Ways with the AI and test extras
+        run: |
+          set -euo pipefail
+          pip install -e ".[dev,ai]"
+
+      - name: Restore the state the scheduled monitor left
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: telegram-state
+          key: telegram-state-${{ github.repository }}-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            telegram-state-${{ github.repository }}-${{ github.ref_name }}-
+
+      - name: Initialize Telegram memory directory
+        run: mkdir -p telegram-state
+
+      - name: Check that a window can be opened at all
+        id: ready
+        env:
+          HOP: ${{ inputs.hop }}
+          SECONDS: ${{ inputs.seconds }}
+          REASON: ${{ inputs.reason }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+          {
+            printf -- '- Window: hop %s, %s seconds\n' "${HOP:-0}" "${SECONDS:-0}"
+            if test -n "${REASON}"; then
+              printf -- '- Queued because: %s\n' "${REASON}"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Inputs become command-line arguments later, so anything that is not a
+          # plain number stops here instead of reaching argparse mid-chain.
+          case "${HOP}" in
+            ''|*[!0-9]*) echo "::warning::hop '${HOP}' is not a number; no window was opened."; exit 0 ;;
+          esac
+          case "${SECONDS}" in
+            ''|*[!0-9]*) echo "::warning::seconds '${SECONDS}' is not a number; no window was opened."; exit 0 ;;
+          esac
+          if test ! -f telegram-state/decision.json; then
+            echo "::warning::No commit-stream state in the cache; this window has nothing to answer with. Run stage-commit-stream with notify=true."
+            echo "open=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if test -z "${TELEGRAM_BOT_TOKEN}" || test -z "${TELEGRAM_CHAT_ID}"; then
+            echo "::warning::Telegram credentials are not configured; no window was opened."
+            echo "open=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "open=true" >> "$GITHUB_OUTPUT"
+
+      - name: Answer the chat for this window
+        if: ${{ steps.ready.outputs.open == 'true' }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+          TELEGRAM_ALLOW_CHATS: ${{ secrets.TELEGRAM_ALLOW_CHATS }}
+          TELEGRAM_OPERATORS: ${{ secrets.TELEGRAM_OPERATORS }}
+          TELEGRAM_ADMINS: ${{ secrets.TELEGRAM_ADMINS }}
+          GH_TOKEN: ${{ github.token }}
+          HOP: ${{ inputs.hop }}
+          SECONDS: ${{ inputs.seconds }}
+        run: |
+          set -euo pipefail
+          # git push and `gh pr create` authenticate with GH_TOKEN, which Actions
+          # already exports for the job and the agent reads under the same name.
+          python3 -m hundredways.telegram_agent \
+            --decision telegram-state/decision.json \
+            --context telegram-state/telegram-context.json \
+            --state telegram-state/interaction.json \
+            --seconds "$SECONDS" \
+            --hop "$HOP" \
+            --workflow stage-telegram-window.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$GITHUB_REF_NAME" \
+            --github-token "${GITHUB_TOKEN:-$GH_TOKEN}" \
+            --test-command "python3 -m pytest -q tests"
+
+      - name: Save Telegram interaction memory
+        if: ${{ always() }}
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: telegram-state
+          key: telegram-state-${{ github.repository }}-${{ github.ref_name }}-${{ github.run_id }}

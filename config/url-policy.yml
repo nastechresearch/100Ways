@@ -1,0 +1,60 @@
+# URL policy for the evidence surface (`100ways urls`, `100ways verify-report`).
+#
+# Read by hundredways/policy.py -- block style, two-space steps, no flow
+# collections, anchors, tags or block scalars (tests/test_policy.py proves this
+# file parses to the same answer yaml.safe_load gives).
+#
+# What each list means, because `100ways urls` only ever claims what these say:
+#
+#   allowed_hosts      the domains our own published links are expected to land
+#                      on.  A host outside this list is not a violation -- it is
+#                      simply one the engine cannot vouch for without a probe.
+#   upstream_hosts     hosts belonging to the upstream project.  A link that
+#                      still points here is the brand transform missing a case,
+#                      so it is a violation, with the branded URL as its
+#                      suggestion.  Repository *paths* are not listed here: the
+#                      brand map in rules.py is the only source of that truth.
+#   placeholder_hosts  documentation scaffolding that must never ship.
+#   ignore_paths       path fragments skipped entirely (vendored trees, the
+#                      generated catalog, this policy file's own examples).
+#   probe.*            the live-check budget, opt-in per run only: a link the
+#                      per-URL timeout could not answer is UNREACHABLE, a link the
+#                      max_urls or wall_budget_seconds cut off is not probed at all,
+#                      and neither is ever reported as a pass.
+version: 1
+
+allowed_hosts:
+  - nastechresearch.com
+  - nastech.github.io
+  - github.com
+  - pypi.org
+  - test.pypi.org
+  - www.npmjs.com
+  - nodesource.com
+
+upstream_hosts:
+  - nousresearch.com
+  - hermes-agent.nousresearch.com
+  - nousresearch.ai
+
+placeholder_hosts:
+  - example.com
+  - example.org
+  - example.net
+  - localhost
+  - 127.0.0.1
+  - api.example.com
+  - your-domain.com
+
+ignore_paths:
+  - /site/status.json
+  - /config/owned-assets/
+  - /tests/fixtures/
+  - /docs/superpowers/
+  - package-lock.json
+  - uv.lock
+
+probe:
+  timeout_seconds: 6
+  max_urls: 200
+  wall_budget_seconds: 90

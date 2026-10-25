@@ -97,25 +97,35 @@ def _normalize_test_workers(text: str) -> str:
     return _TEST_WORKERS_RE.sub(_cap, text)
 
 
-# The OS-matrix Windows lane fans out to 16 workers upstream (32-core Windows
-# runners).  The free 4-core ``windows-latest`` starves every nested PowerShell
-# child into its idle deadline, so cap the Windows expression at the runner's
-# core count.  macOS/Linux rows keep their upstream expression untouched.
-_OS_WINDOWS_WORKERS_RE = re.compile(
+# The OS-matrix Windows lane fans out to 16 workers upstream (a 32-core paid
+# Windows image) and its ``||`` arm is ``''``, which the runner reads as unset and
+# defaults to ``os.cpu_count()`` -- 12 cores on upstream's macOS image.  This
+# fork's OS lanes are the free hosted images (4-core Windows, 3-core macOS), and a
+# lane that spawns its own timed children (nested PowerShell trees, the
+# flock/gateway-boot probes in ``tests/nastech_cli/test_browse_schema_drift.py``)
+# starves those children into their deadlines.  Rewrite the whole expression
+# rather than leaving the rows upstream's: the cap has to hold after every sync,
+# and a hand-edit on the fork is regenerated away.  The ``||`` arm is macOS-only --
+# the matrix ``include`` rows carry the ``macos``/``windows`` markers -- and the
+# output matches this same pattern, so the rule is its own fixed point.
+_OS_MARKED_WORKERS_RE = re.compile(
     r"(?m)^(?P<prefix>[ \t]*NASTECH_TEST_WORKERS:[ \t]*)"
-    r"\$\{\{[ \t]*matrix\.marker == 'windows'[ \t]*&&.*?\|\|[ \t]*''[ \t]*\}\}[ \t]*$"
+    r"\$\{\{[ \t]*matrix\.marker == 'windows'[ \t]*&&.*?\|\|[ \t]*'(?P<other>\d*)'"
+    r"[ \t]*\}\}[ \t]*$"
 )
 _OS_WINDOWS_WORKERS = 4
+_OS_MACOS_WORKERS = 2
 
 
 def _normalize_os_test_workers(text: str) -> str:
     def _cap(match_obj: re.Match) -> str:
         return (
             f"{match_obj.group('prefix')}"
-            f"${{{{ matrix.marker == 'windows' && '{_OS_WINDOWS_WORKERS}' || '' }}}}"
+            f"${{{{ matrix.marker == 'windows' && '{_OS_WINDOWS_WORKERS}'"
+            f" || '{_OS_MACOS_WORKERS}' }}}}"
         )
 
-    return _OS_WINDOWS_WORKERS_RE.sub(_cap, text)
+    return _OS_MARKED_WORKERS_RE.sub(_cap, text)
 
 
 # Standard runners need a little more wall-clock allowance for the complete
@@ -157,8 +167,26 @@ def _normalize_test_timeout(text: str) -> str:
 def _normalize_runner(match_obj: re.Match) -> str:
     base, _, arm = match_obj.group(1), match_obj.group(2), match_obj.group(3)
     if arm:
-        # Standard hosted arm64 label; windows/macos have no arm hosted tier.
-        return "ubuntu-24.04-arm" if base.startswith("ubuntu") else base
+        # An arm64 label is an architecture requirement, not a size hint: an
+        # win32-arm64 job on an x64 host builds a win32-x64 payload and the
+        # bundle's own audit rejects the package (``audit-bundle-arch.mjs:
+        # 659 binaries do not match --arch=arm64``, run 39508427430).  Windows
+        # has the standard ``windows-11-arm`` tier for that; macOS does not, so
+        # a macOS arm row keeps its base label and still runs natively.
+        #
+        # Native hardware is necessary but not yet sufficient here: upstream
+        # ships ``dependency_injector`` abi3 wheels for win32 and win_amd64
+        # only, so an arm64 bundle compiles it and the free image's MSVC ARM64
+        # toolset fails (``LNK1104: cannot open file
+        # ...containers.cp314-win_arm64.exp``, run 39539131670) where upstream's
+        # paid ``windows-latest-32-arm-core`` gets through (run 39383704420).
+        # The label is still the honest one -- on x64 the lane cannot produce a
+        # package at all, while on arm64 it fails somewhere a toolchain or a
+        # wheel can fix -- and no fork release is blocked by it, because the
+        # lane table leaves the unsigned ``windows`` lane out of ``DEFAULT``.
+        if base.startswith("ubuntu"):
+            return "ubuntu-24.04-arm"
+        return "windows-11-arm" if base.startswith("windows") else base
     return base
 
 
@@ -193,6 +221,11 @@ def _normalize_blacksmith(match_obj: re.Match) -> str:
     os_name, arm = match_obj.group(2), match_obj.group(4)
     if os_name == "ubuntu":
         return "ubuntu-24.04-arm" if arm else "ubuntu-latest"
+    if os_name == "windows":
+        # Same architecture rule as ``_normalize_runner``: upstream has moved
+        # its ARM rows onto blacksmith labels before, and an arm64 Windows lane
+        # landing on the x64 image fails its own bundle-architecture audit.
+        return "windows-11-arm" if arm else "windows-latest"
     return f"{os_name}-latest"
 
 
@@ -312,6 +345,69 @@ def preserved_repo_url_spans(
     return tuple(spans)
 
 
+# ---------------------------------------------------------------------------
+# External service identifiers.  A name that lives inside a service somebody
+# else runs is as little ours to rename as somebody else's repository: the
+# branded spelling is an object the service has never heard of, so the feature
+# resolves a 404 at runtime instead of failing to build.
+# ---------------------------------------------------------------------------
+
+# DocSearch's index is selected by the ``indexName`` of the app its committed
+# ``appId``/``apiKey`` pair can read, so branding that one word while the pair
+# stays inherited splits the triple.  Both the JS object form the fork actually
+# ships (``indexName: 'hermes docs'``) and the JSON form a crawler config would
+# use (``"indexName": "hermes docs"``) are matched; an unquoted YAML value is
+# not, because there the boundary of the name is ambiguous.
+ALGOLIA_INDEX_NAME_RE = re.compile(
+    r"""(?<![A-Za-z0-9_-])["']?indexName["']?[ \t]*:[ \t]*"""
+    r"""(?P<quote>["'])(?P<value>[^"'\n]+)(?P=quote)"""
+)
+
+# Indices that exist in the app the site's DocSearch credentials point at.
+# Measured 2026-10-21 against ``GET /1/indexes`` for appId ``2JLBVEYZN5``, which
+# answers exactly ``hermes docs`` and ``hermes docs.tmp``; the fork owns nothing
+# there, and the docs-search monitor has been red on every run since the index
+# name was branded.
+PROVISIONED_ALGOLIA_INDICES: frozenset[str] = frozenset({"hermes docs"})
+
+
+def provisioned_algolia_indices() -> frozenset[str]:
+    """Index names the fork may brand *to*, i.e. names that really exist.
+
+    ``HUNDREDWAYS_ALGOLIA_INDICES`` is a comma list an owner fills in once they
+    have created their own Algolia app, indexed the fork's docs domain, and put
+    that app's id and search-only key in the site config.  Until then the only
+    reachable object is the inherited index, so that name has to survive.
+    """
+    raw = os.environ.get("HUNDREDWAYS_ALGOLIA_INDICES", "")
+    extra = {item.strip().lower() for item in raw.split(",") if item.strip()}
+    return {name.lower() for name in PROVISIONED_ALGOLIA_INDICES} | extra
+
+
+def preserved_algolia_index_spans(
+    line: str, rules: "BrandingRules | None" = None
+) -> tuple[re.Match, ...]:
+    """``indexName`` values in ``line`` that branding must leave verbatim.
+
+    A value is preserved when it names an index the configured app really has
+    and branding would move it to a name that app has never heard of -- the
+    same test the repository rule makes of an owner, made here of a service's
+    object list.  An index nobody has provisioned is not protected: branding an
+    unknown string is the ordinary policy.
+    """
+    rules = rules if rules is not None else BrandingRules()
+    provisioned = provisioned_algolia_indices()
+    spans: list[re.Match] = []
+    for match in ALGOLIA_INDEX_NAME_RE.finditer(line):
+        value = match.group("value")
+        if value.lower() not in provisioned:
+            continue
+        if rules.brand_service_name(value).lower() in provisioned:
+            continue
+        spans.append(match)
+    return tuple(spans)
+
+
 # Placeholder sentinels used to carry a preserved URL through the token pass.
 # They live in a private-use block and hold no digits, so no normalizer can
 # rewrite them and no brand token can match inside them.
@@ -384,6 +480,10 @@ class BrandingRules:
         """The branded form of a single repository identifier."""
         return self._apply_tokens(path)
 
+    def brand_service_name(self, value: str) -> str:
+        """The branded form of a single external service object name."""
+        return self._apply_tokens(value)
+
     def preserves_repo_path(self, path: str) -> bool:
         """True when branding must leave this repository identifier verbatim.
 
@@ -400,29 +500,80 @@ class BrandingRules:
 
         A ``github.com/<owner>/<repo>`` path that :meth:`preserves_repo_path`
         keeps its inherited spelling -- renaming it yields a URL that 404s --
-        while everything around it is branded normally.
+        while everything around it is branded normally.  One exception: an
+        identifier that the same file also spells bare (outside any repository
+        identifier, so the token pass rewrites it there) is branded in its URL
+        form too.  A file that carried two spellings of one identifier could
+        not be read as a whole, and the fork's release tests build a URL from a
+        repository string they then assert against a URL literal, so a split
+        spelling fails them on a tree whose only divergence is the brand.
         """
         return self._transform_text(text, preserve_foreign_repos=True)
+
+    def _bare_also_branded(
+        self, text: str, identifier: str, covered: list[tuple[int, int]]
+    ) -> bool:
+        """True when this repository identifier is also spelled bare in *text*.
+
+        ``covered`` holds the spans of the repository identifiers that were
+        masked out, so an occurrence inside one of them does not count: only a
+        bare ``<owner>/<repo>`` outside every identifier the pass protects is a
+        token the pass rewrites in place.
+        """
+        core = identifier[: -len(".git")] if identifier.endswith(".git") else identifier
+        if self.brand_repo_path(core) == core:
+            return False
+        start = text.find(core)
+        while start != -1:
+            end = start + len(core)
+            if not any(lo <= start and end <= hi for lo, hi in covered):
+                return True
+            start = text.find(core, start + 1)
+        return False
 
     def _transform_text(self, text: str, *, preserve_foreign_repos: bool) -> str:
         if not preserve_foreign_repos:
             return self._apply_tokens(text)
         spans: list[str] = []
+        # ``None`` marks a stashed span with no owner to brand into -- an
+        # external service's object name, restored exactly as it was found.
+        identifiers: list[str | None] = []
 
         def _stash(match: re.Match) -> str:
             spans.append(match.group(0))
+            identifiers.append(f"{match.group('owner')}/{match.group('repo')}")
             return _mask(len(spans) - 1)
 
         working = GITHUB_REPO_RE.sub(_stash, text)
+        provisioned = provisioned_algolia_indices()
+
+        def _stash_index(match: re.Match) -> str:
+            value = match.group("value")
+            if value.lower() not in provisioned:
+                # No evidence this index exists, so there is nothing to protect:
+                # branding it is the ordinary policy for an unknown string.
+                return match.group(0)
+            if self.brand_service_name(value).lower() in provisioned:
+                return match.group(0)
+            spans.append(match.group(0))
+            identifiers.append(None)
+            return _mask(len(spans) - 1)
+
+        working = ALGOLIA_INDEX_NAME_RE.sub(_stash_index, working)
         if not spans:
             return self._apply_tokens(working)
         branded = self._apply_tokens(working)
+        covered = [(m.start(), m.end()) for m in GITHUB_REPO_RE.finditer(text)]
         for index, original in enumerate(spans):
-            keep = (
-                original
-                if self.preserves_repo_path(original)
-                else self.brand_repo_path(original)
-            )
+            identifier = identifiers[index]
+            if identifier is None:
+                keep = original
+            elif self.preserves_repo_path(original) and not self._bare_also_branded(
+                text, identifier, covered
+            ):
+                keep = original
+            else:
+                keep = self.brand_repo_path(original)
             branded = branded.replace(_mask(index), keep)
         return branded
 

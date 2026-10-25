@@ -143,7 +143,23 @@ jobs:
               "website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/user-guide/features/skins.md",
               "website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/user-guide/profile-distributions.md",
           }
+          # Reviewed rule change: the external-service-identifier fix (see
+          # rules.ALGOLIA_INDEX_NAME_RE) stops renaming an Algolia index that
+          # the app the committed credentials reach does not have.  The birth
+          # snapshot branded the DocSearch index name but had no token for the
+          # opaque appId/apiKey beside it, which is the split that made every
+          # published docs search answer HTTP 404 "Index nastech docs does not
+          # exist".  Re-rendering the parent now yields the live index, so the
+          # file drifts by exactly one line -- measured with
+          # PROVISIONED_ALGOLIA_INDICES emptied, the diff for this file is the
+          # single ``indexName`` pair and nothing else.  Kept apart from
+          # url_preservation_drift because the proof above is about repository
+          # identifiers and does not describe this file.
+          service_preservation_drift = {
+              "website/docusaurus.config.ts",
+          }
           allowlist |= url_preservation_drift
+          allowlist |= service_preservation_drift
           drifted = {f.mapped_path for f in report.failed}
           new_drift = drifted - allowlist
           if report.pass_ratio < 0.99:
