@@ -2261,9 +2261,7 @@ def test_set_theme_line_is_shortened_before_the_surface_counts(tmp_path):
     prompts = snap / "prompts"
     prompts.mkdir(parents=True)
     stable = "System prompt header.\nBe helpful.\n"
-    (prompts / "desktop.claude.txt").write_text(
-        "===== stable =====\n" + stable, encoding="utf-8"
-    )
+    (prompts / "desktop.claude.txt").write_text("===== stable =====\n" + stable, encoding="utf-8")
     tools_dir = snap / "tools"
     long_schema = json.loads(
         (tools_dir / "tool_search.desktop.claude.json").read_text(encoding="utf-8")
