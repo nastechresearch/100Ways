@@ -1624,6 +1624,111 @@ def _reconcile_drop_vercel_deploy_job(dst: str) -> int:
     return 1
 
 
+class DocsSearchHydrationGateError(ValueError):
+    """The live-search probe no longer carries the click site the gate attaches to.
+
+    A ``ValueError`` on purpose: ``hundredways.conformance`` reports it as a
+    conformance issue while the ``reconcile`` stage still marks the update
+    failed, so the sync stops instead of shipping a probe that races hydration.
+
+    The measurements that make the gate necessary, kept with the failure so a
+    moved anchor is argued against evidence and not guessed at:
+
+    * run 40211574851 (job 12121574...) died on its last step with
+      ``browser check crashed: locator.fill: Timeout 10000ms exceeded`` -- the
+      click returned and the fill then found nothing to fill;
+    * under CI's exact build (Playwright 1.62.1 on ``chromium-headless-shell``,
+      the file's lines 158-160 unchanged) 2 of 4 runs measured
+      ``.DocSearch-Input`` **count 0** at fill time, so the element did not
+      exist yet -- not a strict-mode ambiguity, not a hidden node, and the
+      headless shell hydrates the page fine;
+    * failing runs had ``reactLiveAtClick=false, kbdCountAtClick=0`` with
+      hydration completing at ~11.5 s page time while the click happened at
+      ~1.5 s; passing runs had ``reactLiveAtClick=true, kbdCountAtClick=2``;
+    * ``window.docusaurus`` is true even in the failing runs, so it is not a
+      sufficient readiness gate; the ``<kbd>`` hints inside
+      ``.DocSearch-Button-Keys`` are empty in the server render (verified
+      against the live Pages HTML) and exist only in the mounted render, so
+      they mark the same readiness a human visitor has;
+    * upstream stays green (12/12) because its Vercel target hydrates warm,
+      while the fork's GitHub Pages cold CDN hydrates at ~11.5 s.  The fork's
+      copy of this file differs from upstream only in branding (the ``DOCS_URL``
+      comment and const, the UA string) and lines 145-172 are byte-identical to
+      upstream, so a hand edit in the fork is deleted by the next actions-bot
+      sync and the gate has to be re-derived here.
+    """
+
+
+def _reconcile_docs_search_hydration_gate(dst: str) -> bool:
+    """Mount-gate the Docs Search Monitor's browser step before it clicks.
+
+    ``website/scripts/check-live-search.mjs`` (upstream-owned since 3b043e19,
+    5e908370, e8b84b98; the fork's copy arrived with the sync at f159ba0a)
+    clicks the docs search button straight after ``domcontentloaded``.  On
+    GitHub Pages that button ships in the server render, so it exists at ~1.5 s
+    while DocSearch only attaches its React handler at ~11.5 s on a cold CDN:
+    the click is dropped, ``.DocSearch-Input`` is never created, and the probe
+    dies at the ``fill`` -- the fork's monitor red, upstream's green.  Branding
+    cannot decide this (its domain rule already did its job on the ``DOCS_URL``
+    two lines up), so it is one targeted exact-literal rewrite, the way
+    ``_reconcile_plugin_guard_trusted_installer_hosts`` restores the one
+    site-specific reference a global brand rule cannot fix.
+
+    The gate waits for ``.DocSearch-Button-Keys kbd``, absent from the server
+    render and present only once the widget has mounted.  Its bound is
+    ``REQUEST_TIMEOUT_MS``: the deadline this script already gives every round
+    trip -- 20 s, about twice the measured cold-CDN hydration and the same
+    budget the click line itself carries -- so no new number enters the file.
+    Nothing is weakened: the click keeps ``timeout: 20_000``, the fill keeps
+    ``timeout: 10_000``, no retry is added, and the wait is a plain ``await``
+    inside ``checkBrowser``, so a site that never hydrates still throws here and
+    the probe still exits 1 with a red reason.  No-op once the gate is in place;
+    a moved anchor raises :class:`DocsSearchHydrationGateError` and stops the
+    sync rather than silently skipping.
+    """
+    rel = "website/scripts/check-live-search.mjs"
+    text = _reconcile_budget_read(dst, rel)
+    if text is None:
+        return False
+    gate = (
+        "    await page.locator('.DocSearch-Button-Keys kbd').first()"
+        ".waitFor({ timeout: REQUEST_TIMEOUT_MS });\n"
+    )
+    if gate in text:
+        # Already gated: the second pass is a no-op.
+        return False
+    goto_line = (
+        "    await page.goto(`${DOCS_URL}/`, { waitUntil: 'domcontentloaded', timeout: 30_000 });\n"
+    )
+    click_line = "    await page.locator('.DocSearch-Button').first().click({ timeout: 20_000 });\n"
+    needle = goto_line + click_line
+    if needle not in text:
+        raise DocsSearchHydrationGateError(
+            f"{rel} carries neither the pre-fix click site nor the hydration "
+            "gate, so the probe no longer clicks straight after "
+            "`domcontentloaded`. Read upstream's `checkBrowser` and retarget "
+            "the anchor in `_reconcile_docs_search_hydration_gate`: an ungated "
+            "probe puts the fork back at run 40211574851's "
+            "`browser check crashed: locator.fill: Timeout 10000ms exceeded` "
+            "(the Docs Search Monitor's last step), because GitHub Pages' cold "
+            "CDN only mounts DocSearch at ~11.5 s while the click lands at "
+            "~1.5 s."
+        )
+    comment = (
+        "    // The server render carries this button, but on a cold Pages CDN\n"
+        "    // DocSearch mounts its handler seconds later, and a click before\n"
+        "    // that is dropped: .DocSearch-Input is then never created and the\n"
+        "    // fill below times out.  The <kbd> hints inside\n"
+        "    // .DocSearch-Button-Keys exist only in the mounted render, so\n"
+        "    // waiting for one is the readiness a visitor already has.  A site\n"
+        "    // that never hydrates still fails here, red.\n"
+    )
+    _reconcile_budget_write(
+        dst, rel, text.replace(needle, goto_line + comment + gate + click_line, 1)
+    )
+    return True
+
+
 def _reconcile_project_identity_width(dst: str) -> int:
     """Keep the complete branded project identity in a tight terminal label.
 
@@ -5739,6 +5844,13 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     ):
         result.total += 1
         result.fixed.append(".github/workflows/deploy-site.yml")
+    # AFTER _reconcile_domains: that stage is what gives this probe its fork
+    # ``DOCS_URL`` (Pages origin + project path), and the hydration gate is the
+    # one site-specific reference the global brand rule cannot decide -- the
+    # probe clicks the docs search button before the cold Pages CDN mounts it.
+    if _reconcile_docs_search_hydration_gate(dst):
+        result.total += 1
+        result.fixed.append("website/scripts/check-live-search.mjs")
     for rel in _reconcile_dunder_all_order(dst):
         result.total += 1
         result.fixed.append(rel)
