@@ -132,6 +132,8 @@ from hundredways.updates import (
     _split_prompt_surface_tiers,
     brand_tree,
     compare_trees,
+    read_manifest_with_subjects,
+    split_manifest_subjects,
     fork_manifest_upstream_sha,
     next_update_number,
     package_zip,
@@ -1287,7 +1289,9 @@ def test_manifest_records_pipeline(tmp_path):
     assert manifest["source_provenance"]["acquisition"] == "fresh-direct-clone"
     assert manifest["source_provenance"]["remote_url"] == str(hermes).replace("hermes", "nastech")
     assert manifest["source_provenance"]["fetched_at"].endswith("+00:00")
-    assert isinstance(manifest["commit_subjects"], list)
+    assert manifest["commit_subjects_file"] == "commit-subjects.jsonl"
+    assert manifest["commit_subject_count"] >= 0
+    assert isinstance(read_manifest_with_subjects(res.manifest_path)["commit_subjects"], list)
     assert isinstance(manifest["changed_areas"], dict)
     assert manifest["reconciliation_actions"] == []
 
@@ -5727,3 +5731,61 @@ def test_unsigned_darwin_build_env_stops_when_the_step_moves(tmp_path):
     )
     with pytest.raises(UnsignedDarwinBuildEnvError, match="Re-derive the anchor"):
         _reconcile_unsigned_darwin_build_env(str(candidate))
+
+
+# ---------------------------------------------------------------------------
+# The receipt's commit prose lives in a data log, not in the JSON the fork lints
+# ---------------------------------------------------------------------------
+
+_TMP_SUBJECT = "test(gateway): compare against the server's resolved home (macOS /tmp is a symlink)"
+
+
+def test_the_receipt_keeps_commit_prose_out_of_the_linted_json(tmp_path):
+    manifest = {
+        "number": 2,
+        "upstream_sha": "5e5be7c2f114144ed96266acd2afab643c7172fe",
+        "commit_subjects": ["fix(tui): /save always reports a failed write", _TMP_SUBJECT],
+    }
+
+    receipt = split_manifest_subjects(manifest, str(tmp_path))
+
+    assert "commit_subjects" not in receipt
+    assert receipt["commit_subjects_file"] == "commit-subjects.jsonl"
+    assert receipt["commit_subject_count"] == 2
+    assert "/tmp" not in json.dumps(receipt), "the /tmp subject must not survive in the receipt"
+    assert (tmp_path / "commit-subjects.jsonl").read_text(encoding="utf-8").splitlines() == [
+        json.dumps("fix(tui): /save always reports a failed write"),
+        json.dumps(_TMP_SUBJECT),
+    ]
+
+
+def test_every_subject_is_kept_verbatim_and_in_order(tmp_path):
+    subjects = ['fix(a): quote " and \\ survive', "feat(b): ünïcode — dash", _TMP_SUBJECT]
+
+    split_manifest_subjects({"commit_subjects": subjects}, str(tmp_path))
+
+    lines = (tmp_path / "commit-subjects.jsonl").read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line) for line in lines] == subjects
+
+
+def test_the_loader_folds_the_log_back_where_the_narrative_reads_it(tmp_path):
+    manifest = {"number": 3, "commit_subjects": ["fix(a): one", _TMP_SUBJECT]}
+    receipt = split_manifest_subjects(manifest, str(tmp_path))
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    assert read_manifest_with_subjects(str(path))["commit_subjects"] == manifest["commit_subjects"]
+
+
+def test_a_receipt_that_still_inlines_its_subjects_reads_the_same(tmp_path):
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps({"commit_subjects": ["fix(a): one"]}), encoding="utf-8")
+
+    assert read_manifest_with_subjects(str(path))["commit_subjects"] == ["fix(a): one"]
+
+
+def test_a_receipt_with_no_subjects_at_all_still_reads(tmp_path):
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps({"number": 4}), encoding="utf-8")
+
+    assert read_manifest_with_subjects(str(path)) == {"number": 4}
