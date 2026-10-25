@@ -3924,6 +3924,98 @@ def _reconcile_windows_boot_lifecycle_race(dst: str) -> bool:
     return True
 
 
+_WINDOWS_SUSPEND_TEST_REL = "tests/nastech_cli/test_local_runtime_processes.py"
+_WINDOWS_SUSPEND_TEST_DEF = "def test_failed_setup_never_runs_child_and_releases_handles("
+_WINDOWS_SUSPEND_ONE_SHOT = (
+    "        assert psutil.Process(proc.pid).status() == psutil.STATUS_STOPPED\n"
+)
+_WINDOWS_SUSPEND_MARKER = "never observed suspended"
+_WINDOWS_SUSPEND_BUDGET_S = 2.0
+_WINDOWS_SUSPEND_WAIT = (
+    "        # CreateProcessW answers before every thread of a CREATE_SUSPENDED\n"
+    "        # launch reaches the system thread table, and psutil's Windows\n"
+    "        # status() reads exactly that table (cext.proc_is_suspended). The\n"
+    "        # child still cannot run here -- spawn_server resumes it only after\n"
+    "        # this assign() returns -- so poll for the observation instead of\n"
+    "        # demanding it land on the first read. A child that really is running\n"
+    "        # never settles, and the marker check below catches that too.\n"
+    "        assert _wait(\n"
+    "            lambda: psutil.Process(proc.pid).status() == psutil.STATUS_STOPPED,\n"
+    f"            timeout={_WINDOWS_SUSPEND_BUDGET_S},\n"
+    '        ), "child never observed suspended"\n'
+)
+
+
+class WindowsSuspendObservationError(ValueError):
+    """The suspended-child assert moved, so the racy one-shot read may still be there.
+
+    A ``ValueError`` on purpose: :mod:`hundredways.conformance` reports it as a
+    candidate issue and the ``reconcile`` stage fails the update rather than
+    publishing a tree that silently keeps upstream's single ``psutil`` read.  That
+    read is what red-flakes ``Windows-only tests (arm64)`` with
+    ``assert 'running' == 'stopped'``, and the red names neither the race nor the
+    file that can fix it.
+    """
+
+
+def _reconcile_windows_suspend_observation(dst: str) -> bool:
+    """Poll for the ``CREATE_SUSPENDED`` observation instead of reading it once.
+
+    ``spawn_server`` (``nastech_cli/local_runtime/processes.py``) launches the router
+    with ``CREATE_SUSPENDED``, calls ``job.assign(proc)``, and only then ``resume()``s
+    it, so containment genuinely happens while the child cannot execute.  The test
+    asserts that precondition inside its patched ``assign``, and on Windows psutil's
+    ``Process.status()`` is ``cext.proc_is_suspended(pid)`` (``_pswindows.py:1041``) --
+    a read of the primary thread's wait reason in the system thread table, which is not
+    always published in the instant ``CreateProcessW`` returns.  A single read can then
+    answer ``'running'`` about a thread the kernel will not schedule.
+
+    The lane is red only some of the time, and only on that line.  Of the 12
+    ``Windows-only tests (arm64)`` jobs on the ``windows-11-arm`` image across the last
+    six ``main`` runs, 10 passed this file and 2 failed at line 177 (jobs 119653984058,
+    117618374648), and the same assertion is what fails the open candidate (job
+    120819400596).  Every failure is ``assert 'running' == 'stopped'`` on
+    ``test_failed_setup_never_runs_child_and_releases_handles[assign]`` or ``[resume]``,
+    both of which reach that line.
+
+    This is not a budget change: the assertion still requires ``STATUS_STOPPED``, it
+    simply lets the kernel finish saying so.  ``_wait`` is the file's own helper at a
+    30 ms cadence, so 2.0 s is ~66 reads and is spent only on a failure path.  The
+    ``assert not marker.exists()`` underneath -- the actual product claim that a failed
+    setup never runs the child -- is left exactly as upstream wrote it, and a child that
+    really did resume still fails.
+    """
+    text = _reconcile_budget_read(dst, _WINDOWS_SUSPEND_TEST_REL)
+    if text is None or _WINDOWS_SUSPEND_MARKER in text:
+        return False
+    if text.count(_WINDOWS_SUSPEND_ONE_SHOT) == 1:
+        if "def _wait(" not in text:
+            raise WindowsSuspendObservationError(
+                f"{_WINDOWS_SUSPEND_TEST_REL} no longer defines the ``_wait`` helper the "
+                "bounded poll is built from, so installing the poll there would be a "
+                "NameError on Windows. Re-derive _WINDOWS_SUSPEND_WAIT against whatever "
+                "poll helper upstream uses now."
+            )
+        _reconcile_budget_write(
+            dst,
+            _WINDOWS_SUSPEND_TEST_REL,
+            text.replace(_WINDOWS_SUSPEND_ONE_SHOT, _WINDOWS_SUSPEND_WAIT, 1),
+        )
+        return True
+    if _WINDOWS_SUSPEND_TEST_DEF not in text:
+        return False  # upstream dropped the test; there is nothing left to reconcile
+    raise WindowsSuspendObservationError(
+        f"{_WINDOWS_SUSPEND_TEST_REL} no longer holds exactly one line spelling the "
+        "suspended-child check as "
+        f"{_WINDOWS_SUSPEND_ONE_SHOT.strip()!r}, so the sync cannot install the bounded "
+        "_wait poll and upstream's one-shot psutil read stays. That read is the "
+        "Windows-only tests (arm64) flake: "
+        "test_failed_setup_never_runs_child_and_releases_handles goes red with "
+        "assert 'running' == 'stopped'. Re-derive _WINDOWS_SUSPEND_ONE_SHOT against "
+        "upstream's current file."
+    )
+
+
 class WindowsRealGitLocateError(ValueError):
     """``_locate_real_git`` no longer matches the shape the robustness patch needs.
 
@@ -5632,6 +5724,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_windows_boot_lifecycle_race(dst):
         result.total += 1
         result.fixed.append("tests/e2e/core/windows/test_boot_lifecycle.py")
+    if _reconcile_windows_suspend_observation(dst):
+        result.total += 1
+        result.fixed.append(_WINDOWS_SUSPEND_TEST_REL)
     if _reconcile_install_ps1_store_guard_test(dst):
         result.total += 1
         result.fixed.append("scripts/tests/test-install-ps1-store-guard.ps1")

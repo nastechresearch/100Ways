@@ -122,6 +122,12 @@ from hundredways.updates import (
     _reconcile_unsigned_darwin_build_env,
     _reconcile_vercel_prepare,
     _reconcile_windows_boot_lifecycle_race,
+    _reconcile_windows_suspend_observation,
+    _WINDOWS_SUSPEND_BUDGET_S,
+    _WINDOWS_SUSPEND_ONE_SHOT,
+    _WINDOWS_SUSPEND_TEST_REL,
+    _WINDOWS_SUSPEND_WAIT,
+    WindowsSuspendObservationError,
     _NASTECH_UI_INTEGRITY,
     _UI_SCOPE_ASSET_EVIDENCE,
     UiScopePinError,
@@ -874,6 +880,134 @@ def test_windows_boot_lifecycle_accepts_already_gone_taskkill(tmp_path):
     assert "def _kill_raced_its_target(" in text
     assert "killed.returncode == 0 or _kill_raced_its_target(killed)" in text
     assert _reconcile_windows_boot_lifecycle_race(str(candidate)) is False
+
+
+_WINDOWS_SUSPEND_TEST_TEXT = (
+    "import time\n"
+    "\n\n"
+    "def _wait(predicate, timeout=10):\n"
+    "    deadline = time.monotonic() + timeout\n"
+    "    while time.monotonic() < deadline:\n"
+    "        if predicate():\n"
+    "            return True\n"
+    "        time.sleep(.03)\n"
+    "    return bool(predicate())\n"
+    "\n\n"
+    "def test_failed_setup_never_runs_child_and_releases_handles(tmp_path, monkeypatch):\n"
+    "    marker = tmp_path / 'child executed'\n"
+    "\n"
+    "    def assign(job, proc):\n"
+    "        children.append(proc)\n"
+    "        assert psutil.Process(proc.pid).status() == psutil.STATUS_STOPPED\n"
+    "        assert not marker.exists()\n"
+    "        real_assign(job, proc)\n"
+)
+
+
+def _windows_suspend_candidate(tmp_path, *, text=None):
+    """A candidate carrying the upstream-owned Windows test the rule patches."""
+    candidate = tmp_path / "candidate"
+    path = candidate / _WINDOWS_SUSPEND_TEST_REL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_WINDOWS_SUSPEND_TEST_TEXT if text is None else text, encoding="utf-8")
+    return candidate, path
+
+
+def test_windows_suspend_observation_polls_for_the_suspended_child(tmp_path):
+    candidate, path = _windows_suspend_candidate(tmp_path)
+
+    assert _reconcile_windows_suspend_observation(str(candidate)) is True
+
+    text = path.read_text(encoding="utf-8")
+    assert _WINDOWS_SUSPEND_ONE_SHOT not in text
+    assert "assert _wait(\n" in text
+    assert "child never observed suspended" in text
+    # The same claim, just given the kernel time to make it observable.
+    assert text.count("psutil.STATUS_STOPPED") == 1
+    assert "lambda: psutil.Process(proc.pid).status() == psutil.STATUS_STOPPED," in text
+    # The product guard under it stays upstream's, untouched.
+    assert "        assert not marker.exists()\n" in text
+    compile(text, path.name, "exec")
+
+
+def test_windows_suspend_observation_bounds_the_poll_it_adds(tmp_path):
+    """A timeout is what separates a poll from a hang, so pin that it is passed."""
+    candidate, path = _windows_suspend_candidate(tmp_path)
+    assert _reconcile_windows_suspend_observation(str(candidate)) is True
+    text = path.read_text(encoding="utf-8")
+    assert f"timeout={_WINDOWS_SUSPEND_BUDGET_S},\n" in text
+    assert "while True" not in text
+
+
+def test_windows_suspend_observation_adds_no_wall_clock_sleep():
+    """The fork's HX013 ratchet: a test waits on a condition, never on the clock.
+
+    ``_WINDOWS_SUSPEND_WAIT`` is text the fork receives as its own source, so the fork
+    measures it in its next PR: a new literal sleep is a blocking finding there, and a
+    slower race here.  88 is the fork's own ruff line length.
+    """
+    assert "time.sleep" not in _WINDOWS_SUSPEND_WAIT
+    assert f"timeout={_WINDOWS_SUSPEND_BUDGET_S}," in _WINDOWS_SUSPEND_WAIT
+    assert all(len(line) <= 88 for line in _WINDOWS_SUSPEND_WAIT.splitlines())
+
+
+def test_windows_suspend_observation_is_a_fixed_point(tmp_path):
+    candidate, path = _windows_suspend_candidate(tmp_path)
+    assert _reconcile_windows_suspend_observation(str(candidate)) is True
+    once = path.read_text(encoding="utf-8")
+    assert _reconcile_windows_suspend_observation(str(candidate)) is False
+    assert path.read_text(encoding="utf-8") == once
+
+
+def test_windows_suspend_observation_raises_when_the_assert_is_reworded(tmp_path):
+    """A moved anchor stops the sync; it does not ship the racy one-shot read."""
+    text = _WINDOWS_SUSPEND_TEST_TEXT.replace(
+        _WINDOWS_SUSPEND_ONE_SHOT,
+        '        assert str(psutil.Process(proc.pid).status()) == "stopped"\n',
+    )
+    candidate, path = _windows_suspend_candidate(tmp_path, text=text)
+
+    with pytest.raises(WindowsSuspendObservationError) as excinfo:
+        _reconcile_windows_suspend_observation(str(candidate))
+
+    message = str(excinfo.value)
+    assert _WINDOWS_SUSPEND_TEST_REL in message
+    assert "_WINDOWS_SUSPEND_ONE_SHOT" in message
+    assert "Windows-only tests (arm64)" in message
+    assert _WINDOWS_SUSPEND_ONE_SHOT not in path.read_text(encoding="utf-8")
+
+
+def test_windows_suspend_observation_requires_the_wait_helper_it_calls(tmp_path):
+    """Injecting a ``_wait`` call into a file without that helper is a NameError."""
+    text = _WINDOWS_SUSPEND_TEST_TEXT.replace(
+        "def _wait(predicate, timeout=10):\n", "def _settled(predicate, timeout=10):\n"
+    )
+    candidate, _ = _windows_suspend_candidate(tmp_path, text=text)
+
+    with pytest.raises(WindowsSuspendObservationError) as excinfo:
+        _reconcile_windows_suspend_observation(str(candidate))
+    assert "_wait" in str(excinfo.value)
+
+
+def test_windows_suspend_observation_stands_down_when_upstream_drops_the_test(tmp_path):
+    """Upstream deleting the test says nothing about the race, so it is not a red gate."""
+    candidate, path = _windows_suspend_candidate(tmp_path, text="import psutil\n")
+    assert _reconcile_windows_suspend_observation(str(candidate)) is False
+    assert path.read_text(encoding="utf-8") == "import psutil\n"
+
+
+def test_windows_suspend_observation_absent_file_is_a_no_op(tmp_path):
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    assert _reconcile_windows_suspend_observation(str(candidate)) is False
+
+
+def test_windows_suspend_observation_registered_in_reconcile_tree(tmp_path):
+    """``reconcile_tree`` must dispatch the rule, or the fork never receives it."""
+    candidate, path = _windows_suspend_candidate(tmp_path)
+    result = reconcile_tree(str(candidate))
+    assert _WINDOWS_SUSPEND_TEST_REL in result.fixed
+    assert "child never observed suspended" in path.read_text(encoding="utf-8")
 
 
 def test_windows_real_git_locate_picks_every_git_for_windows_layout(tmp_path):
