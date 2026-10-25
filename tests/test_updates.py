@@ -16,6 +16,7 @@ import zipfile
 
 import pytest
 
+from hundredways import updates
 from hundredways.assets import OwnedAssets
 from hundredways.integrity import audit_candidate_tree
 from hundredways.updates import (
@@ -100,6 +101,7 @@ from hundredways.updates import (
     _reconcile_guest_identity_stub,
     _reconcile_install_ps1_store_guard_test,
     _reconcile_locale_key_order,
+    _reconcile_lock_record,
     _reconcile_managed_gateway_wire_headers,
     _reconcile_nastech_home_env_prefix,
     _reconcile_pinned_source_clones,
@@ -128,11 +130,14 @@ from hundredways.updates import (
     _reconcile_windows_boot_lifecycle_race,
     _NASTECH_UI_INTEGRITY,
     _UI_SCOPE_ASSET_EVIDENCE,
+    UiRegistryLookupError,
     UiScopePinError,
     _sigv4_vector_signature,
     _split_prompt_surface_tiers,
     brand_tree,
     compare_trees,
+    read_manifest_with_subjects,
+    split_manifest_subjects,
     fork_manifest_upstream_sha,
     next_update_number,
     package_zip,
@@ -1288,7 +1293,9 @@ def test_manifest_records_pipeline(tmp_path):
     assert manifest["source_provenance"]["acquisition"] == "fresh-direct-clone"
     assert manifest["source_provenance"]["remote_url"] == str(hermes).replace("hermes", "nastech")
     assert manifest["source_provenance"]["fetched_at"].endswith("+00:00")
-    assert isinstance(manifest["commit_subjects"], list)
+    assert manifest["commit_subjects_file"] == "commit-subjects.jsonl"
+    assert manifest["commit_subject_count"] >= 0
+    assert isinstance(read_manifest_with_subjects(res.manifest_path)["commit_subjects"], list)
     assert isinstance(manifest["changed_areas"], dict)
     assert manifest["reconciliation_actions"] == []
 
@@ -4702,13 +4709,14 @@ def test_reconcile_security_contact_removes_undeliverable_mailbox(tmp_path):
     assert (tmp_path / "SECURITY.md").read_text() == text
 
 
-def test_reconcile_ui_scope_pins_rejects_range_and_unknown_version(tmp_path):
+def test_reconcile_ui_scope_pins_rejects_range_and_unknown_version(tmp_path, monkeypatch):
     """A range silently installs a different package: fail closed instead.
 
     Verified against registry.npmjs.org: @nous-research/ui latest is 1.5.2,
     @nastech-research/ui latest is 0.18.4 -- so "^1.5.2" or "latest" cannot
     mean the same thing after branding.
     """
+    registry = _table_answer(monkeypatch)
     app = tmp_path / "apps" / "desktop"
     app.mkdir(parents=True)
     manifest = app / "package.json"
@@ -4722,6 +4730,8 @@ def test_reconcile_ui_scope_pins_rejects_range_and_unknown_version(tmp_path):
     assert isinstance(excinfo.value, UiScopePinError)
     assert "must be pinned to an exact version" in str(excinfo.value)
     assert "@nastech-research/ui" in str(excinfo.value)
+    # a range never needs the registry: it is refused on shape alone
+    assert registry.urls == []
 
     manifest.write_text(json.dumps(
         {"name": "desktop", "dependencies": {"@nastech-research/ui": "latest"}}))
@@ -4733,7 +4743,8 @@ def test_reconcile_ui_scope_pins_rejects_range_and_unknown_version(tmp_path):
     with pytest.raises(ValueError) as excinfo:
         _reconcile_ui_scope_pins(str(tmp_path))
     assert "not a version the fork has published" in str(excinfo.value)
-    assert "_NASTECH_UI_INTEGRITY" in str(excinfo.value)
+    assert "the registry lists" in str(excinfo.value)
+    assert registry.urls == [updates._NASTECH_UI_REGISTRY_URL]
 
     # the upstream scope must never survive branding
     manifest.write_text(json.dumps(
@@ -4754,6 +4765,379 @@ def test_reconcile_ui_scope_pins_allows_the_upstream_pinned_version(tmp_path):
     assert "0.18.2" in _NASTECH_UI_INTEGRITY
 
 
+def test_lock_record_names_the_published_set_for_an_unpublished_ui_version(monkeypatch):
+    """Say what the gate is waiting on, and do not imply the value can be typed in.
+
+    Upstream moved ``@nous-research/ui`` to 0.19.1 and every sync since has stopped with
+    ``no fork-published integrity for @nastech-research/ui@0.19.1; add it to
+    _NASTECH_UI_INTEGRITY in updates.py``.  That reads like a row to fill in, while the
+    actual prerequisite is a fork ``npm publish``: ``@nastech-research/ui`` stops at 0.18.4,
+    so there is no ``dist.integrity`` to copy, and a hand-written sha512 would pass this
+    gate and then fail ``npm ci`` for every user who installs the fork.
+    """
+    registry = _table_answer(monkeypatch)
+    version = "9.9.9"
+    assert version not in _NASTECH_UI_INTEGRITY
+    rec = {
+        "name": "@nous-research/ui",
+        "version": version,
+        "resolved": f"https://registry.npmjs.org/@nous-research/ui/-/ui-{version}.tgz",
+        "integrity": "sha512-upstream-bytes-are-not-the-forks",
+    }
+
+    with pytest.raises(UiScopePinError) as excinfo:
+        _reconcile_lock_record(rec)
+
+    message = str(excinfo.value)
+    assert f"@nastech-research/ui@{version}" in message
+    assert "has not published" in message
+    for published in sorted(_NASTECH_UI_INTEGRITY):
+        assert published in message
+    assert "dist.integrity" in message
+    # The remedy is the publish, not an engine edit: once npm serves the version
+    # the digest comes from there, so the sync needs nothing from 100Ways.
+    assert "Publish that version" in message
+    assert "no engine change is needed" in message
+    assert registry.urls == [updates._NASTECH_UI_REGISTRY_URL]
+    # Fail closed: nothing is rewritten, so no half-branded record can reach the tree.
+    assert rec["integrity"] == "sha512-upstream-bytes-are-not-the-forks"
+    assert "nous-research" in rec["resolved"]
+
+
+def test_lock_record_still_rewrites_a_fork_published_ui_version():
+    """The clearer failure must not cost the happy path its rewrite."""
+    version = sorted(_NASTECH_UI_INTEGRITY)[0]
+    rec = {
+        "name": "@nous-research/ui",
+        "version": version,
+        "resolved": f"https://registry.npmjs.org/@nous-research/ui/-/ui-{version}.tgz",
+        "integrity": "sha512-upstream",
+    }
+
+    assert _reconcile_lock_record(rec) is True
+    assert rec["resolved"] == (
+        f"https://registry.npmjs.org/@nastech-research/ui/-/ui-{version}.tgz"
+    )
+    assert rec["integrity"] == _NASTECH_UI_INTEGRITY[version]
+
+
+# ---------------------------------------------------------------------------
+# The registry fallback: a version the fork publishes after the table is cut
+# ---------------------------------------------------------------------------
+
+
+class _RegistryResponse:
+    """The two methods ``urlopen``'s return value is used for here."""
+
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+class _UiRegistry:
+    """A canned npm answer for the fork's ``@nastech-research/ui`` scope.
+
+    Every request is recorded, because the two properties that make the
+    fallback safe are about requests: the reviewed table must answer without
+    one, and only the fork's own package may ever be asked -- upstream holds
+    different bytes under the same version numbers, so its digest in a lock is
+    the exact failure this gate exists to prevent.
+    """
+
+    def __init__(self, document=None, *, raw: str | None = None, error: Exception | None = None):
+        self.document = document
+        self.raw = raw
+        self.error = error
+        self.urls: list[str] = []
+
+    def install(self, monkeypatch) -> "_UiRegistry":
+        monkeypatch.setattr(updates.urllib.request, "urlopen", self._urlopen)
+        monkeypatch.setattr(updates, "_ui_registry_document", None)
+        return self
+
+    def _urlopen(self, request, timeout=None):
+        self.urls.append(request.full_url)
+        if self.error is not None:
+            raise self.error
+        body = self.raw if self.raw is not None else json.dumps(self.document)
+        return _RegistryResponse(body.encode())
+
+
+def _fork_published(integrity_by_version: dict) -> dict:
+    """A package document shaped like npm's answer for ``@nastech-research/ui``.
+
+    A ``None`` digest publishes the version with no ``dist.integrity`` at all,
+    which is the registry's way of answering nothing useful.  The tarball host
+    is a ``.invalid`` domain: nothing here can be fetched, only read.
+    """
+    return {
+        "name": "@nastech-research/ui",
+        "dist-tags": {"latest": sorted(integrity_by_version)[-1]},
+        "versions": {
+            version: {
+                "name": "@nastech-research/ui",
+                "version": version,
+                "dist": {
+                    "tarball": f"https://registry.nastech-research.invalid/ui-{version}.tgz",
+                    **({"integrity": integrity} if integrity is not None else {}),
+                },
+            }
+            for version, integrity in integrity_by_version.items()
+        },
+    }
+
+
+# 0.19.1 is the version upstream moved to that no sync could brand: the fork
+# has to publish it, and this is the digest npm would then serve for it.
+_FORK_NEW_DIGEST = "sha512-FORKREPUBLISHED0191BYTES=="
+
+
+def _table_answer(monkeypatch) -> _UiRegistry:
+    """The registry says exactly what the reviewed table says: today's truth."""
+    return _UiRegistry(_fork_published(dict(_NASTECH_UI_INTEGRITY))).install(monkeypatch)
+
+
+def _registry_publishes_the_new_version(monkeypatch) -> _UiRegistry:
+    """The table's versions plus a fork-published 0.19.1."""
+    document = _fork_published({**_NASTECH_UI_INTEGRITY, "0.19.1": _FORK_NEW_DIGEST})
+    return _UiRegistry(document).install(monkeypatch)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_registry(monkeypatch):
+    """No test in this module may reach npm: the transport blocks instead.
+
+    The fallback is lazy and memoised, so a test that asks for an unreviewed
+    ui version without stubbing the registry gets a loud error rather than a
+    request whose answer depends on what the fork published this week.  The
+    memo is reset for every test too, so one test's cached document cannot
+    answer another's question.
+    """
+
+    def _blocked(request, timeout=None):
+        raise AssertionError(f"test reached the npm registry for {request.full_url}")
+
+    monkeypatch.setattr(updates.urllib.request, "urlopen", _blocked)
+    monkeypatch.setattr(updates, "_ui_registry_document", None)
+
+
+def _ui_lock_record(version: str) -> dict:
+    """The upstream lock record branding copies in for a ``@nous-research/ui`` pin."""
+    return {
+        "name": "@nous-research/ui",
+        "version": version,
+        "resolved": f"https://registry.npmjs.org/@nous-research/ui/-/ui-{version}.tgz",
+        "integrity": "sha512-UPSTREAM-TARBALL-BYTES",
+    }
+
+
+def test_lock_record_takes_the_digest_the_registry_publishes(monkeypatch):
+    """A version published after the table was cut needs no engine edit.
+
+    This is the whole point of the fallback: ``@nastech-research/ui@0.19.1``
+    blocked every sync until someone publishes it AND ships a 100Ways PR with
+    the new digest.  The publish is the fork's job; the digest is on npm the
+    moment it happens, and reading it there is safer than typing it here --
+    a hand-copied upstream digest would pass the gate and then fail ``npm ci``.
+    """
+    registry = _registry_publishes_the_new_version(monkeypatch)
+    rec = _ui_lock_record("0.19.1")
+
+    assert _reconcile_lock_record(rec) is True
+    assert rec["integrity"] == _FORK_NEW_DIGEST
+    assert rec["resolved"] == ("https://registry.npmjs.org/@nastech-research/ui/-/ui-0.19.1.tgz")
+    assert "UPSTREAM" not in rec["integrity"]
+    assert registry.urls == ["https://registry.npmjs.org/@nastech-research%2Fui"]
+
+
+def test_table_versions_never_cost_a_request(monkeypatch):
+    """The offline table stays the answer for what it reviews: no network, no flake."""
+    registry = _table_answer(monkeypatch)
+    for version in sorted(_NASTECH_UI_INTEGRITY):
+        rec = _ui_lock_record(version)
+        assert _reconcile_lock_record(rec) is True
+        assert rec["integrity"] == _NASTECH_UI_INTEGRITY[version]
+    assert registry.urls == []
+
+
+def test_the_fork_is_the_only_package_ever_asked(monkeypatch):
+    """Upstream's digest for the same version number must never be fetched."""
+    registry = _table_answer(monkeypatch)
+    with pytest.raises(UiScopePinError):
+        _reconcile_lock_record(_ui_lock_record("9.9.9"))
+    assert registry.urls == [updates._NASTECH_UI_REGISTRY_URL]
+    for url in registry.urls:
+        assert "nastech-research" in url
+        assert "nous-research" not in url
+
+
+def test_two_unknown_versions_cost_one_request(monkeypatch):
+    """One document answers every question the run asks."""
+    registry = _registry_publishes_the_new_version(monkeypatch)
+    assert _reconcile_lock_record(_ui_lock_record("0.19.1")) is True
+    with pytest.raises(UiScopePinError):
+        _reconcile_lock_record(_ui_lock_record("9.9.9"))
+    assert registry.urls == [updates._NASTECH_UI_REGISTRY_URL]
+
+
+def test_transport_failure_stops_the_sync_without_writing_the_lock(monkeypatch):
+    """An answer that could not be read is not a verdict that no release exists.
+
+    The distinction is what keeps a network blip from becoming a wrong lock:
+    an unverified ``dist.integrity`` installs fine until ``npm ci`` compares
+    the tarball, which fails for every user of the fork at once.
+    """
+    registry = _UiRegistry(error=OSError("no route to registry.npmjs.org")).install(monkeypatch)
+    rec = _ui_lock_record("0.19.1")
+
+    with pytest.raises(UiRegistryLookupError) as excinfo:
+        _reconcile_lock_record(rec)
+
+    assert isinstance(excinfo.value, ValueError)  # conformance reports it as an issue
+    assert not isinstance(excinfo.value, UiScopePinError)  # the fork has nothing to publish
+    assert "Nothing was written to the lock" in str(excinfo.value)
+    assert "_NASTECH_UI_INTEGRITY" in str(excinfo.value)  # the offline remedy
+    assert registry.urls == [updates._NASTECH_UI_REGISTRY_URL]
+    # fail closed: the record is byte-for-byte what upstream shipped
+    assert rec["integrity"] == "sha512-UPSTREAM-TARBALL-BYTES"
+    assert "nous-research" in rec["resolved"]
+
+
+def test_http_error_is_not_read_as_an_unpublished_version(monkeypatch):
+    """A 4xx/5xx answer does not establish that no such release exists."""
+    error = updates.urllib.error.HTTPError(
+        updates._NASTECH_UI_REGISTRY_URL, 500, "server error", None, None
+    )
+    _UiRegistry(error=error).install(monkeypatch)
+
+    with pytest.raises(UiRegistryLookupError) as excinfo:
+        _reconcile_lock_record(_ui_lock_record("0.19.1"))
+    assert "HTTP 500" in str(excinfo.value)
+    assert not isinstance(excinfo.value, UiScopePinError)
+
+
+def test_a_body_that_is_not_json_is_not_an_answer(monkeypatch):
+    """The npm error page is HTML; parsing it must not look like a verdict."""
+    _UiRegistry(raw="<html><body>Bad Gateway</body></html>").install(monkeypatch)
+    with pytest.raises(UiRegistryLookupError) as excinfo:
+        _reconcile_lock_record(_ui_lock_record("0.19.1"))
+    assert "registry lookup" in str(excinfo.value)
+
+
+def test_a_document_without_a_versions_map_is_not_an_answer(monkeypatch):
+    """A renamed or unpublished scope answers with a body that has no versions."""
+    _UiRegistry(raw="{}").install(monkeypatch)
+    with pytest.raises(UiRegistryLookupError) as excinfo:
+        _reconcile_lock_record(_ui_lock_record("0.19.1"))
+    assert "no versions map" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("integrity", [None, "sha1-not-a-npm-digest", 512])
+def test_a_published_entry_with_an_unusable_digest_is_not_an_answer(monkeypatch, integrity):
+    """npm ci verifies a sha512 or not at all, so anything else halts the stage."""
+    # ``None`` is the digest-less case: _fork_published omits dist.integrity.
+    doc = _fork_published({**_NASTECH_UI_INTEGRITY, "0.19.1": integrity})
+    _UiRegistry(doc).install(monkeypatch)
+
+    with pytest.raises(UiRegistryLookupError) as excinfo:
+        _reconcile_lock_record(_ui_lock_record("0.19.1"))
+    assert "ui@0.19.1" in str(excinfo.value)
+
+
+def test_manifest_pin_the_registry_publishes_needs_no_engine_edit(tmp_path, monkeypatch):
+    """The package.json gate reads the same answer as the lock gate."""
+    _registry_publishes_the_new_version(monkeypatch)
+    app = tmp_path / "apps" / "desktop"
+    app.mkdir(parents=True)
+    (app / "package.json").write_text(
+        json.dumps({"name": "desktop", "dependencies": {"@nastech-research/ui": "0.19.1"}})
+    )
+
+    assert _reconcile_ui_scope_pins(str(tmp_path)) == []
+
+
+def test_manifest_pin_the_registry_lacks_names_the_publish(tmp_path, monkeypatch):
+    """The failure tells the fork what to publish, not what to type into the engine."""
+    registry = _table_answer(monkeypatch)
+    app = tmp_path / "apps" / "desktop"
+    app.mkdir(parents=True)
+    (app / "package.json").write_text(
+        json.dumps({"name": "desktop", "dependencies": {"@nastech-research/ui": "9.9.9"}})
+    )
+
+    with pytest.raises(UiScopePinError) as excinfo:
+        _reconcile_ui_scope_pins(str(tmp_path))
+    assert "not a version the fork has published" in str(excinfo.value)
+    assert "the registry lists" in str(excinfo.value)
+    for version in sorted(_NASTECH_UI_INTEGRITY):
+        assert version in str(excinfo.value)
+    assert registry.urls == [updates._NASTECH_UI_REGISTRY_URL]
+
+
+def test_live_cdn_reference_the_registry_publishes_is_left_alone(tmp_path, monkeypatch):
+    """The registry answers "is this live?"; the reviewed evidence says what to change to.
+
+    An esm.sh font URL at a version the fork publishes resolves to real bytes,
+    so rewriting it would be a blind edit of a working reference.  Repinning
+    still only ever lands on a version whose font bytes were hashed and
+    compared (``_UI_SCOPE_ASSET_EVIDENCE``), never on the newest thing npm
+    happens to serve.
+    """
+    registry = _registry_publishes_the_new_version(monkeypatch)
+    tpl = tmp_path / "optional-skills" / "creative" / "pretext" / "templates"
+    tpl.mkdir(parents=True)
+    template = tpl / "donut-orbit.html"
+    live = (
+        '  src: url("https://esm.sh/@nastech-research/ui@0.19.1/dist/fonts/'
+        'Mondwest-Regular.woff2") format("woff2");\n'
+    )
+    template.write_text(live)
+
+    assert _reconcile_ui_scope_pins(str(tmp_path)) == []
+    assert template.read_text() == live
+
+    # and a dead version is repinned inside the reviewed set only, even though
+    # the registry offers a newer one
+    template.write_text(_REAL_DONUT_FONT_REFS)
+    assert _reconcile_ui_scope_pins(str(tmp_path)) == [
+        "optional-skills/creative/pretext/templates/donut-orbit.html"
+    ]
+    assert template.read_text().count("@nastech-research/ui@0.18.4") == 2
+    assert "ui@0.19.1" not in template.read_text()
+    assert registry.urls == [updates._NASTECH_UI_REGISTRY_URL]
+
+
+def test_a_failed_lookup_is_not_cached(monkeypatch):
+    """The next check asks again rather than trusting a stale failure."""
+    _UiRegistry(error=OSError("no net")).install(monkeypatch)
+    with pytest.raises(UiRegistryLookupError):
+        _reconcile_lock_record(_ui_lock_record("0.19.1"))
+
+    registry = _registry_publishes_the_new_version(monkeypatch)
+    rec = _ui_lock_record("0.19.1")
+    assert _reconcile_lock_record(rec) is True
+    assert registry.urls == [updates._NASTECH_UI_REGISTRY_URL]
+
+
+def test_a_404_on_the_package_is_not_read_as_an_unpublished_version(monkeypatch):
+    """A scope that cannot be found is not evidence about a version of it."""
+    error = updates.urllib.error.HTTPError(
+        updates._NASTECH_UI_REGISTRY_URL, 404, "not found", None, None
+    )
+    _UiRegistry(error=error).install(monkeypatch)
+    with pytest.raises(UiRegistryLookupError) as excinfo:
+        _reconcile_lock_record(_ui_lock_record("0.19.1"))
+    assert "HTTP 404" in str(excinfo.value)
+
+
 def test_reconcile_domains_keeps_the_real_assets_worker_host(tmp_path):
     """Contrast case: the one real Nastech origin is never sent to github.io."""
     (tmp_path / "notes.md").write_text(
@@ -4768,8 +5152,9 @@ def test_reconcile_domains_keeps_the_real_assets_worker_host(tmp_path):
     assert "https://nastechresearch.github.io/nastech-agent/docs" in text
 
 
-def test_pipeline_registers_the_dead_config_reconciles(tmp_path):
+def test_pipeline_registers_the_dead_config_reconciles(tmp_path, monkeypatch):
     """reconcile_tree must actually run the three new stages on a real run."""
+    _table_answer(monkeypatch)
     hermes = _hermes_repo(tmp_path)
     hermes_path = os.path.join(hermes, "hermes_cli")
     with open(os.path.join(hermes_path, "auth_constants.py"), "w", encoding="utf-8") as fh:
@@ -4817,7 +5202,7 @@ def test_pipeline_registers_the_dead_config_reconciles(tmp_path):
     assert "nous-research" not in template
 
 
-def test_reconcile_ui_scope_pins_rejects_unpublished_cdn_version(tmp_path):
+def test_reconcile_ui_scope_pins_rejects_unpublished_cdn_version(tmp_path, monkeypatch):
     """A scoped CDN reference must not point at a version nobody published.
 
     Verified live: upstream's @nous-research/ui@0.4.0 exists (npm 200) but the
@@ -4825,6 +5210,7 @@ def test_reconcile_ui_scope_pins_rejects_unpublished_cdn_version(tmp_path):
     rebrand turns this template's font URL into a dead link that resolves to
     a package the fork never shipped.
     """
+    _table_answer(monkeypatch)
     tpl = tmp_path / "optional-skills" / "creative" / "pretext" / "templates"
     tpl.mkdir(parents=True)
     (tpl / "donut-orbit.html").write_text(
@@ -4897,7 +5283,7 @@ def test_ui_scope_asset_evidence_records_verified_byte_identity():
         assert set(versions) & set(_NASTECH_UI_INTEGRITY)
 
 
-def test_reconcile_ui_scope_repins_verified_identical_font_version(tmp_path):
+def test_reconcile_ui_scope_repins_verified_identical_font_version(tmp_path, monkeypatch):
     """A dead version with a proven-identical published twin is repinned.
 
     Reproduces the real template: the direct font URL and the DS_CDN base
@@ -4905,6 +5291,7 @@ def test_reconcile_ui_scope_repins_verified_identical_font_version(tmp_path):
     byte-identical in the published 0.18.4, so both references are repinned
     (instead of the stage failing and stopping the sync).
     """
+    _table_answer(monkeypatch)
     tpl = tmp_path / "optional-skills" / "creative" / "pretext" / "templates"
     tpl.mkdir(parents=True)
     template = tpl / "donut-orbit.html"
@@ -4925,13 +5312,14 @@ def test_reconcile_ui_scope_repins_verified_identical_font_version(tmp_path):
     assert template.read_text() == text
 
 
-def test_reconcile_ui_scope_pins_still_fails_closed_without_verified_target(tmp_path):
+def test_reconcile_ui_scope_pins_still_fails_closed_without_verified_target(tmp_path, monkeypatch):
     """No evidence for the asset means no repin: raise, do not guess.
 
     A version the fork never published whose asset has no recorded
     byte-identical twin cannot be repaired safely, so the reference must stay
     loud -- this is the guarantee that keeps the repin from being blind.
     """
+    _table_answer(monkeypatch)
     tpl = tmp_path / "optional-skills" / "creative" / "pretext" / "templates"
     tpl.mkdir(parents=True)
     template = tpl / "donut-orbit.html"
@@ -5640,3 +6028,58 @@ def test_store_rest_credentials_stay_the_four_the_script_reads(tmp_path):
     assert "MS_STORE_SELLER_ID" not in injected
     # The fold is idempotent: a second pass changes the file not at all.
     assert _reconcile_signing_gated_store(str(candidate)) is False
+# The receipt's commit prose lives in a data log, not in the JSON the fork lints
+# ---------------------------------------------------------------------------
+
+_TMP_SUBJECT = "test(gateway): compare against the server's resolved home (macOS /tmp is a symlink)"
+
+
+def test_the_receipt_keeps_commit_prose_out_of_the_linted_json(tmp_path):
+    manifest = {
+        "number": 2,
+        "upstream_sha": "5e5be7c2f114144ed96266acd2afab643c7172fe",
+        "commit_subjects": ["fix(tui): /save always reports a failed write", _TMP_SUBJECT],
+    }
+
+    receipt = split_manifest_subjects(manifest, str(tmp_path))
+
+    assert "commit_subjects" not in receipt
+    assert receipt["commit_subjects_file"] == "commit-subjects.jsonl"
+    assert receipt["commit_subject_count"] == 2
+    assert "/tmp" not in json.dumps(receipt), "the /tmp subject must not survive in the receipt"
+    assert (tmp_path / "commit-subjects.jsonl").read_text(encoding="utf-8").splitlines() == [
+        json.dumps("fix(tui): /save always reports a failed write"),
+        json.dumps(_TMP_SUBJECT),
+    ]
+
+
+def test_every_subject_is_kept_verbatim_and_in_order(tmp_path):
+    subjects = ['fix(a): quote " and \\ survive', "feat(b): ünïcode — dash", _TMP_SUBJECT]
+
+    split_manifest_subjects({"commit_subjects": subjects}, str(tmp_path))
+
+    lines = (tmp_path / "commit-subjects.jsonl").read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line) for line in lines] == subjects
+
+
+def test_the_loader_folds_the_log_back_where_the_narrative_reads_it(tmp_path):
+    manifest = {"number": 3, "commit_subjects": ["fix(a): one", _TMP_SUBJECT]}
+    receipt = split_manifest_subjects(manifest, str(tmp_path))
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    assert read_manifest_with_subjects(str(path))["commit_subjects"] == manifest["commit_subjects"]
+
+
+def test_a_receipt_that_still_inlines_its_subjects_reads_the_same(tmp_path):
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps({"commit_subjects": ["fix(a): one"]}), encoding="utf-8")
+
+    assert read_manifest_with_subjects(str(path))["commit_subjects"] == ["fix(a): one"]
+
+
+def test_a_receipt_with_no_subjects_at_all_still_reads(tmp_path):
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps({"number": 4}), encoding="utf-8")
+
+    assert read_manifest_with_subjects(str(path)) == {"number": 4}
