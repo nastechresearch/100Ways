@@ -31,6 +31,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -6312,6 +6313,111 @@ class UpdateResult:
         )
 
 
+# The fork's own /tmp-literal checker and the burn-down list it documents for files
+# whose hits are deliberate.  Both spellings are upstream's, so a rename there has to
+# surface as a stage failure here rather than as a silent no-op.
+TMP_LITERAL_CHECKER = os.path.join("scripts", "check_no_tmp_literals.py")
+TMP_LITERAL_BASELINE_OPEN = "_BASELINE: dict[str, int] = {"
+
+
+class TmpLiteralBaselineError(ValueError):
+    """The receipt's /tmp hits could not be recorded in the fork's own burn-down list."""
+
+
+def _receipt_tmp_hits(tree: str, name: str) -> int:
+    """Lines of ``tree/name`` the fork's checker calls a /tmp literal.
+
+    Measured by running that checker rather than by re-implementing its token rule:
+    the rule, the suffix scope and the ignore list are upstream's, and a copy here
+    would keep counting after upstream changed any of them.
+    """
+    try:
+        result = subprocess.run(
+            [sys.executable, TMP_LITERAL_CHECKER, name],
+            cwd=tree,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise TmpLiteralBaselineError(
+            f"{TMP_LITERAL_CHECKER} could not measure {name}: {exc}"
+        ) from exc
+    if result.returncode not in (0, 1):
+        raise TmpLiteralBaselineError(
+            f"{TMP_LITERAL_CHECKER} exited {result.returncode} measuring {name}: "
+            f"{(result.stderr or result.stdout).strip()[:300]}"
+        )
+    finding = re.compile(re.escape(name) + r":\d+:")
+    return sum(1 for line in result.stdout.splitlines() if finding.match(line))
+
+
+def _baseline_with_count(text: str, name: str, count: int) -> str:
+    """``text`` with ``_BASELINE``'s entry for ``name`` set to ``count`` (0 removes it).
+
+    Only that one key is touched: every other entry is a burn-down the fork still owes,
+    and rewriting it from here would launder hits this run never measured.
+    """
+    lines = text.splitlines(keepends=True)
+    start = next(
+        (i for i, line in enumerate(lines) if line.startswith(TMP_LITERAL_BASELINE_OPEN)),
+        None,
+    )
+    if start is None:
+        raise TmpLiteralBaselineError(
+            f"{TMP_LITERAL_CHECKER} has no {TMP_LITERAL_BASELINE_OPEN!r} block, so "
+            f"{name}'s hits have nowhere to be recorded"
+        )
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].strip() == "}"), None)
+    if end is None:
+        raise TmpLiteralBaselineError(
+            f"{TMP_LITERAL_CHECKER}'s _BASELINE block is never closed, so {name}'s hits "
+            f"cannot be recorded"
+        )
+    entry = re.compile(r'^\s+"' + re.escape(name) + r'": \d+,\s*$')
+    found = [i for i in range(start + 1, end) if entry.match(lines[i])]
+    if count == 0:
+        for index in reversed(found):
+            del lines[index]
+        return "".join(lines)
+    for extra in reversed(found[1:]):
+        del lines[extra]
+    if found:
+        lines[found[0]] = f'    "{name}": {count},\n'
+    else:
+        lines.insert(end, f'    "{name}": {count},\n')
+    return "".join(lines)
+
+
+def record_receipt_tmp_hits(tree: str, name: str = "manifest.json") -> bool:
+    """Record the receipt's measured /tmp hits in the fork's own burn-down list.
+
+    The receipt quotes upstream commit subjects verbatim, so a subject that names a
+    /tmp path (5e5be7c, 2026-10-24) is a hit for the fork's tmp-literal checker the
+    moment the file exists.  That checker is upstream's and its per-line ``no-tmp: ok``
+    marker needs a comment form JSON does not have, so the only escape hatch it
+    documents for a generated file is ``_BASELINE``.  The count is measured, so a sync
+    that gains or loses such a subject moves the entry with it instead of going red
+    for a receipt nobody can annotate.
+
+    Returns False when the tree carries no such checker -- there is then nothing in
+    the fork to satisfy.
+    """
+    script = os.path.join(tree, TMP_LITERAL_CHECKER)
+    if not os.path.isfile(script):
+        return False
+    hits = _receipt_tmp_hits(tree, name)
+    with open(script, encoding="utf-8") as handle:
+        text = handle.read()
+    updated = _baseline_with_count(text, name, hits)
+    if updated != text:
+        with open(script, "w", encoding="utf-8") as handle:
+            handle.write(updated)
+    return True
+
+
 class UpdateManager:
     """Run one full update: the 18 ordered pipeline stages."""
 
@@ -6736,7 +6842,16 @@ class UpdateManager:
                 # paths. Apply the canonical text normalizer to the serialized
                 # metadata too, so generated output remains a fixed point.
                 fh.write(self.rules.transform_text(json.dumps(manifest, indent=2)))
+            # The receipt quotes upstream subjects, and a subject that names a /tmp
+            # path is a hit for the fork's own checker the moment this file exists.
+            # JSON has no comment form for that checker's per-line marker, so the
+            # receipt is recorded with its measured count in the checker's burn-down
+            # list instead of the next pipeline run rediscovering it.
+            record_receipt_tmp_hits(dest, "manifest.json")
             manifest_stage.status = "ok"
+        except TmpLiteralBaselineError as exc:
+            manifest_stage.status = "fail"
+            manifest_stage.detail = f"receipt baseline not recorded: {exc}"
         except OSError as exc:
             manifest_stage.status = "fail"
             manifest_stage.detail = f"manifest write failed: {exc}"

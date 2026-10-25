@@ -31,6 +31,7 @@ from hundredways.updates import (
     GatewayAllowlistReloadError,
     GatewayPluginGateError,
     NastechSuitePinError,
+    TmpLiteralBaselineError,
     TermuxAptKeyDocError,
     UpdateManager,
     UnsignedDarwinBuildEnvError,
@@ -132,6 +133,7 @@ from hundredways.updates import (
     _split_prompt_surface_tiers,
     brand_tree,
     compare_trees,
+    record_receipt_tmp_hits,
     fork_manifest_upstream_sha,
     next_update_number,
     package_zip,
@@ -5727,3 +5729,110 @@ def test_unsigned_darwin_build_env_stops_when_the_step_moves(tmp_path):
     )
     with pytest.raises(UnsignedDarwinBuildEnvError, match="Re-derive the anchor"):
         _reconcile_unsigned_darwin_build_env(str(candidate))
+
+
+# ---------------------------------------------------------------------------
+# The receipt's own /tmp hits: measured by the fork's checker, recorded in its list
+# ---------------------------------------------------------------------------
+
+
+def _checker(hits: int, exit_code: int | None = None) -> str:
+    """A stand-in for the fork's checker reporting ``hits`` findings on manifest.json."""
+    return (
+        "import sys\n"
+        f"N = {hits}\n"
+        "for n in range(1, N + 1):\n"
+        "    print(f'manifest.json:{n}: \"subject (macOS /tmp is a symlink)\",')\n"
+        f"sys.exit({exit_code if exit_code is not None else (1 if hits else 0)})\n"
+    )
+
+
+def _baseline_of(text: str) -> dict:
+    head = "_BASELINE: dict[str, int] = {"
+    start = text.index(head) + len(head) - 1
+    return ast.literal_eval(text[start : text.index("\n}", start) + 2])
+
+
+_OTHER_ENTRY = (
+    '\n_BASELINE: dict[str, int] = {\n    "website/docs/getting-started/nix-setup.md": 1,\n}\n'
+)
+
+
+def _receipt_tree(tmp_path, hits: int, baseline: str | None = _OTHER_ENTRY, **checker):
+    scripts = tmp_path / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    (scripts / "check_no_tmp_literals.py").write_text(_checker(hits, **checker), encoding="utf-8")
+    if baseline is not None:
+        body = (scripts / "check_no_tmp_literals.py").read_text(encoding="utf-8")
+        (scripts / "check_no_tmp_literals.py").write_text(body + baseline, encoding="utf-8")
+    (tmp_path / "manifest.json").write_text(
+        '{\n  "commit_subjects": [\n'
+        "    \"test(gateway): compare against the server's resolved home "
+        '(macOS /tmp is a symlink)"\n'
+        "  ]\n}\n",
+        encoding="utf-8",
+    )
+    return tmp_path, scripts / "check_no_tmp_literals.py"
+
+
+def test_the_receipt_records_its_measured_hits_and_leaves_the_burn_down_alone(tmp_path):
+    tree, checker = _receipt_tree(tmp_path, 2, baseline=_OTHER_ENTRY)
+
+    assert record_receipt_tmp_hits(str(tree)) is True
+
+    text = checker.read_text(encoding="utf-8")
+    assert _baseline_of(text) == {
+        "website/docs/getting-started/nix-setup.md": 1,
+        "manifest.json": 2,
+    }
+    assert text.count('"manifest.json": 2,') == 1
+
+
+def test_a_second_run_on_the_same_receipt_changes_nothing(tmp_path):
+    tree, checker = _receipt_tree(tmp_path, 1)
+
+    record_receipt_tmp_hits(str(tree))
+    first = checker.read_text(encoding="utf-8")
+    record_receipt_tmp_hits(str(tree))
+
+    assert checker.read_text(encoding="utf-8") == first
+
+
+def test_an_existing_entry_moves_to_the_count_the_checker_measures(tmp_path):
+    baseline = '\n_BASELINE: dict[str, int] = {\n    "manifest.json": 1,\n    "a.py": 2,\n}\n'
+    tree, checker = _receipt_tree(tmp_path, 3, baseline=baseline)
+
+    record_receipt_tmp_hits(str(tree))
+
+    text = checker.read_text(encoding="utf-8")
+    assert _baseline_of(text) == {"manifest.json": 3, "a.py": 2}
+    assert '"manifest.json": 1,' not in text
+
+
+def test_a_receipt_the_checker_finds_clean_loses_its_entry(tmp_path):
+    baseline = '\n_BASELINE: dict[str, int] = {\n    "manifest.json": 4,\n    "a.py": 2,\n}\n'
+    tree, checker = _receipt_tree(tmp_path, 0, baseline=baseline)
+
+    record_receipt_tmp_hits(str(tree))
+
+    text = checker.read_text(encoding="utf-8")
+    assert _baseline_of(text) == {"a.py": 2}
+
+
+def test_a_checker_that_cannot_measure_stops_the_stage_instead_of_guessing(tmp_path):
+    tree, _checker_path = _receipt_tree(tmp_path, 0, exit_code=2)
+
+    with pytest.raises(TmpLiteralBaselineError, match="exited 2 measuring manifest.json"):
+        record_receipt_tmp_hits(str(tree))
+
+
+def test_a_tree_without_the_checker_is_left_alone(tmp_path):
+    assert record_receipt_tmp_hits(str(tmp_path)) is False
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_checker_with_no_baseline_block_is_a_loud_failure(tmp_path):
+    tree, _checker_path = _receipt_tree(tmp_path, 1, baseline="\n# no list here\n")
+
+    with pytest.raises(TmpLiteralBaselineError, match="nowhere to be recorded"):
+        record_receipt_tmp_hits(str(tree))
