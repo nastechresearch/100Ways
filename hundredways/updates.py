@@ -4417,7 +4417,40 @@ def _reconcile_connector_test_guest_offline(dst: str) -> list[str]:
     return fixed
 
 
-def _reconcile_plugin_catalog_sync_exemption(dst: str) -> bool:
+class PluginCatalogAdmissionError(ValueError):
+    """The plugin-catalog admission step no longer matches the shape the guard needs.
+
+    A ``ValueError`` on purpose: ``hundredways.conformance`` reports it as a
+    conformance issue instead of aborting the whole run, while the ``reconcile``
+    stage still marks the update failed.
+
+    Measured anchor (upstream ``NousResearch/hermes-agent``
+    ``.github/workflows/plugin-catalog-ci.yml``, step ``Find changed catalog
+    entries`` at ``86fa9e6ca1`` line 66): ``run: |`` / ``set -euo pipefail`` /
+    ``# HEAD is the PR merge commit:``.  The exemption block re-inserted here
+    is what keeps the engine's own full-sync PR green on that step: it landed
+    on fork ``main`` as ``2c25c1a0`` (PR #146, 2026-10-13T13:39Z) and every
+    completed Plugin Catalog CI run on ``100WAYS`` since has passed (job
+    115306455590 echoed and executed it at 12:52Z, 47 minutes BEFORE the block
+    existed in ``main`` -- the ``pull_request`` event evaluates the workflow
+    file of the PR head/merge side, so the exemption applies to the very PR
+    that first carries it).
+    Without the block a sync PR fails on the data-only rule (job
+    115191916099, 2026-10-13T07:59:45Z: ``::error::catalog entry PRs may only
+    touch plugin-catalog/** and contributors/emails/**, found:``).  A moved
+    anchor therefore stops the sync loudly instead of silently re-publishing
+    that red.
+    """
+
+
+# Marker of the exemption block itself: once present, the file is already
+# reconciled and a second pass must be a byte-for-byte no-op.
+_PLUGIN_CATALOG_ADMISSION_MARKER = (
+    'echo "Fork 100WAYS sync PR: catalog admission gate does not apply."'
+)
+
+
+def _reconcile_plugin_catalog_admission(dst: str) -> bool:
     """Exempt the engine's 100WAYS sync PR from the plugin-catalog admission gate.
 
     ``plugin-catalog-ci.yml`` fires on any PR touching ``plugin-catalog/**`` and
@@ -4426,19 +4459,30 @@ def _reconcile_plugin_catalog_sync_exemption(dst: str) -> bool:
     every path and can never satisfy that rule — the gate goes red judging files
     it was never meant to see.  A sync PR is the engine's own push, not a plugin
     admission, so skip the gate for it: keyed on BOTH the fork head repo and the
-    reserved branch, a same-branch PR from any other fork still runs the gate.
+    reserved branch with ``&&``, so a cross-repo PR (even one whose head branch
+    is named 100WAYS) and a same-repo PR from any other branch still run the
+    full data-only rule; only a same-repo writer on the engine's own reserved
+    branch can trip the exemption.
+
+    Idempotent by the marker guard, and a moved anchor raises
+    ``PluginCatalogAdmissionError`` rather than silently dropping the exemption.
     """
     rel = ".github/workflows/plugin-catalog-ci.yml"
     text = _reconcile_budget_read(dst, rel)
     if text is None:
         return False
-    needle = (
-        "        run: |\n"
-        "          set -euo pipefail\n"
-        "          # HEAD is the PR merge commit:"
-    )
-    if needle not in text:
+    if _PLUGIN_CATALOG_ADMISSION_MARKER in text:
         return False
+    needle = "        run: |\n          set -euo pipefail\n          # HEAD is the PR merge commit:"
+    if needle not in text:
+        raise PluginCatalogAdmissionError(
+            f"{rel}: the 'Find changed catalog entries' anchor "
+            "(run: | / set -euo pipefail / '# HEAD is the PR merge commit:') is "
+            "absent and no exemption marker is present, so the sync-PR admission "
+            "exemption could not be applied; re-read the upstream step "
+            "(hermes-agent 86fa9e6ca1:66) and update this rule — skipping "
+            "silently re-publishes the red measured in job 115191916099"
+        )
     guard = (
         "        run: |\n"
         "          set -euo pipefail\n"
@@ -4446,13 +4490,13 @@ def _reconcile_plugin_catalog_sync_exemption(dst: str) -> bool:
         "          # the reserved 100WAYS branch, so a sync PR touches every path and\n"
         "          # can never satisfy the data-only rule below. It is the engine's\n"
         "          # own push, not a plugin admission: skip the gate for it.\n"
-        "          if [ \"${GITHUB_HEAD_REF:-}\" = \"100WAYS\" ] \\\n"
-        "            && [ \"${{ github.event.pull_request.head.repo.full_name }}\" = \"nastechresearch/nastech-agent\" ]; then\n"
-        "            echo \"Fork 100WAYS sync PR: catalog admission gate does not apply.\"\n"
+        '          if [ "${GITHUB_HEAD_REF:-}" = "100WAYS" ] \\\n'
+        '            && [ "${{ github.event.pull_request.head.repo.full_name }}" = "nastechresearch/nastech-agent" ]; then\n'
+        '            echo "Fork 100WAYS sync PR: catalog admission gate does not apply."\n'
         "            {\n"
         "              echo 'files<<__EOF__'\n"
         "              echo '__EOF__'\n"
-        "            } >> \"$GITHUB_OUTPUT\"\n"
+        '            } >> "$GITHUB_OUTPUT"\n'
         "            exit 0\n"
         "          fi\n"
         "          # HEAD is the PR merge commit:"
@@ -5748,7 +5792,7 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     for rel in _reconcile_connector_test_guest_offline(dst):
         result.total += 1
         result.fixed.append(rel)
-    if _reconcile_plugin_catalog_sync_exemption(dst):
+    if _reconcile_plugin_catalog_admission(dst):
         result.total += 1
         result.fixed.append(".github/workflows/plugin-catalog-ci.yml")
     for rel in _reconcile_pinned_source_clones(dst):

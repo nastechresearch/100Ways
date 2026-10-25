@@ -30,6 +30,7 @@ from hundredways.updates import (
     GatewayAllowlistReloadError,
     GatewayPluginGateError,
     NastechSuitePinError,
+    PluginCatalogAdmissionError,
     TermuxAptKeyDocError,
     UpdateManager,
     UnsignedDarwinBuildEnvError,
@@ -100,7 +101,7 @@ from hundredways.updates import (
     _reconcile_managed_gateway_wire_headers,
     _reconcile_nastech_home_env_prefix,
     _reconcile_pinned_source_clones,
-    _reconcile_plugin_catalog_sync_exemption,
+    _reconcile_plugin_catalog_admission,
     _reconcile_plugin_guard_trusted_installer_hosts,
     _reconcile_portable_shebang,
     _reconcile_portal_override_test_collision,
@@ -3246,41 +3247,250 @@ def test_reconcile_connector_test_guest_offline_skips_unrelated_tree(tmp_path):
     assert path.read_text(encoding="utf-8") == original
 
 
-def test_reconcile_plugin_catalog_sync_exemption(tmp_path):
-    """The engine's 100WAYS sync PR must skip the data-only catalog gate."""
+# The verbatim upstream step the admission rule anchors on: hermes-agent
+# 86fa9e6ca1 ``.github/workflows/plugin-catalog-ci.yml`` lines 62-118, before
+# branding (branding only renames the word ``hermes`` in one comment line the
+# rewrite never touches).
+_UPSTREAM_CHANGED_ENTRIES_STEP = (
+    "      - name: Find changed catalog entries\n"
+    "        id: changed\n"
+    "        run: |\n"
+    "          set -euo pipefail\n"
+    "          # HEAD is the PR merge commit: diffing it against its first parent is\n"
+    "          # exactly what the PR would land. Refuse anything else rather than\n"
+    "          # silently diffing a single commit.\n"
+    "          if ! git rev-parse -q --verify 'HEAD^2' >/dev/null; then\n"
+    '            echo "::error::expected the pull_request merge commit as HEAD"\n'
+    "            exit 1\n"
+    "          fi\n"
+    "          CHANGED=$(git diff --name-only --diff-filter=AMRT 'HEAD^1' HEAD \\\n"
+    "            -- 'plugin-catalog/*.yaml' 'plugin-catalog/*.yml')\n"
+    "          CHANGED=$(printf '%s' \"$CHANGED\" | grep -v '/removed\\.yaml$' || true)\n"
+    '          if [ -n "$CHANGED" ]; then\n'
+    "            ALL=$(git diff --name-only 'HEAD^1' HEAD)\n"
+    "            OUTSIDE=$(printf '%s' \"$ALL\" | "
+    "grep -vE '^(plugin-catalog|contributors/emails)/' || true)\n"
+    '            if [ -n "$OUTSIDE" ]; then\n'
+    '              echo "::error::catalog entry PRs may only touch '
+    'plugin-catalog/** and contributors/emails/**, found:"\n'
+    "              printf '%s' \"$OUTSIDE\" | tr '\\0\\n' ' '\n"
+    "              echo\n"
+    "              exit 1\n"
+    "            fi\n"
+    "          fi\n"
+    '          echo "Changed catalog entries:"\n'
+    '          echo "${CHANGED:-<none>}"\n'
+    "          {\n"
+    "            echo 'files<<__EOF__'\n"
+    '            echo "$CHANGED"\n'
+    "            echo '__EOF__'\n"
+    '          } >> "$GITHUB_OUTPUT"\n'
+)
+
+_UPSTREAM_PLUGIN_CATALOG_CI = (
+    "name: Plugin Catalog CI\n"
+    "on:\n"
+    "  pull_request:\n"
+    "    paths:\n"
+    '      - "plugin-catalog/**"\n'
+    "jobs:\n"
+    "  pinned-source-validate:\n"
+    "    steps:\n"
+    + _UPSTREAM_CHANGED_ENTRIES_STEP
+    + "      - name: Clone each entry at its pinned sha and validate\n"
+    "        run: echo validated\n"
+)
+
+
+def _write_plugin_catalog_ci(tmp_path, text):
     root = tmp_path / "branded"
     wf = root / ".github" / "workflows"
     wf.mkdir(parents=True)
     target = wf / "plugin-catalog-ci.yml"
-    target.write_text(
-        "name: Plugin Catalog CI\n"
-        "jobs:\n"
-        "  pinned-source-validate:\n"
-        "    steps:\n"
-        "      - name: Find changed catalog entries\n"
-        "        id: changed\n"
-        "        run: |\n"
-        "          set -euo pipefail\n"
-        "          # HEAD is the PR merge commit:\n"
-        "          git diff --name-only HEAD^1 HEAD\n",
-        encoding="utf-8",
+    target.write_text(text, encoding="utf-8")
+    return root, target
+
+
+def _changed_entries_step_body(text):
+    """Extract the reconciled ``Find changed catalog entries`` block scalar."""
+    start = text.index("        run: |\n") + len("        run: |\n")
+    end = text.index("\n      - name: Clone each entry", start)
+    return text[start:end]
+
+
+def _catalog_merge_repo(tmp_path, changed_paths, slug):
+    """A repo whose HEAD is a pull_request-shaped merge commit (HEAD^2 exists).
+
+    ``changed_paths`` arrive on the second parent, exactly like a PR branch:
+    ``HEAD^1..HEAD`` diffs to those files and nothing else.
+    """
+    repo = tmp_path / f"repo-{slug}"
+    repo.mkdir()
+
+    def _git(*args):
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t", "-C", str(repo), *args],
+            check=True,
+            capture_output=True,
+        )
+
+    _git("init", "-q", "-b", "main")
+    (repo / "README.md").write_text("base\n", encoding="utf-8")
+    _git("add", "README.md")
+    _git("commit", "-q", "-m", "base")
+    _git("checkout", "-q", "-b", "pr")
+    for rel in changed_paths:
+        path = repo / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("entry: 1\n", encoding="utf-8")
+    _git("add", "-A")
+    _git("commit", "-q", "-m", "pr change")
+    _git("checkout", "-q", "main")
+    _git("merge", "-q", "--no-ff", "-m", "merge", "pr")
+    return repo
+
+
+def _changed_entries_script(text):
+    """De-block the reconciled step body into a runnable bash script."""
+    body = _changed_entries_step_body(text)
+    return "\n".join(line[10:] if line.startswith(" " * 10) else line for line in body.splitlines())
+
+
+def _run_changed_entries_step(tmp_path, script, *, head_ref, head_repo, changed_paths):
+    slug = f"{head_ref}-{head_repo}".replace("/", "-")
+    repo = _catalog_merge_repo(tmp_path, changed_paths, slug)
+    out_file = tmp_path / f"output-{slug}"
+    script = script.replace("${{ github.event.pull_request.head.repo.full_name }}", head_repo)
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": os.environ.get("HOME", "/tmp"),
+        "GITHUB_HEAD_REF": head_ref,
+        "GITHUB_OUTPUT": str(out_file),
+    }
+    proc = subprocess.run(
+        ["bash"],
+        input=script,
+        capture_output=True,
+        text=True,
+        cwd=repo,
+        env=env,
     )
+    output = out_file.read_text(encoding="utf-8") if out_file.exists() else ""
+    return proc, output
 
-    assert _reconcile_plugin_catalog_sync_exemption(str(root)) is True
+
+def test_reconcile_plugin_catalog_admission_exempts_sync_head(tmp_path):
+    """The guard block is inserted in front of the untouched data-only body."""
+    root, target = _write_plugin_catalog_ci(tmp_path, _UPSTREAM_PLUGIN_CATALOG_CI)
+
+    assert _reconcile_plugin_catalog_admission(str(root)) is True
     text = target.read_text(encoding="utf-8")
-    assert 'GITHUB_HEAD_REF' in text
-    assert '"100WAYS"' in text
-    assert 'nastechresearch/nastech-agent' in text
-    assert "files<<__EOF__" in text
-    # The original body is preserved after the guarded early exit.
-    assert "          # HEAD is the PR merge commit:\n" in text
+    # The exemption keys on BOTH clauses: reserved branch AND same-repo head.
+    assert 'if [ "${GITHUB_HEAD_REF:-}" = "100WAYS" ] \\' in text
+    assert (
+        '&& [ "${{ github.event.pull_request.head.repo.full_name }}" = '
+        '"nastechresearch/nastech-agent" ]; then' in text
+    )
+    # Everything the step does for a real admission PR is preserved verbatim.
+    for line in _UPSTREAM_CHANGED_ENTRIES_STEP.splitlines()[3:]:
+        assert line in text
+    # Only the step header was rewritten: the tail after the anchor is intact.
+    anchor = "# HEAD is the PR merge commit:"
+    assert text.count(anchor) == 1
+    assert _UPSTREAM_CHANGED_ENTRIES_STEP.split(anchor)[1] in text
 
-    # Idempotent: the marker now sits behind the guard, so the needle is gone.
-    assert _reconcile_plugin_catalog_sync_exemption(str(root)) is False
+
+def test_reconcile_plugin_catalog_admission_is_a_fixed_point(tmp_path):
+    root, target = _write_plugin_catalog_ci(tmp_path, _UPSTREAM_PLUGIN_CATALOG_CI)
+    assert _reconcile_plugin_catalog_admission(str(root)) is True
+    once = target.read_bytes()
+    assert _reconcile_plugin_catalog_admission(str(root)) is False
+    assert target.read_bytes() == once
 
 
-def test_reconcile_plugin_catalog_sync_exemption_skips_missing_workflow(tmp_path):
-    assert _reconcile_plugin_catalog_sync_exemption(str(tmp_path)) is False
+def test_reconcile_plugin_catalog_admission_guard_behaviour(tmp_path):
+    """The reconciled step EXEMPTS only same-repo 100WAYS heads and still
+    enforces data-only admission for everyone else -- executed, not asserted
+    about the text: the script body is extracted from the reconciled file and
+    run with bash against a real merge-commit repo."""
+    root, target = _write_plugin_catalog_ci(tmp_path, _UPSTREAM_PLUGIN_CATALOG_CI)
+    assert _reconcile_plugin_catalog_admission(str(root)) is True
+    script = _changed_entries_script(target.read_text(encoding="utf-8"))
+
+    def run(head_ref, head_repo, changed_paths):
+        return _run_changed_entries_step(
+            tmp_path,
+            script,
+            head_ref=head_ref,
+            head_repo=head_repo,
+            changed_paths=changed_paths,
+        )
+
+    # A: the engine's own sync PR -- same repo, reserved branch, PR touches
+    # thousands of non-catalog files. Exempt, with an EMPTY file list so the
+    # downstream per-entry validation steps are skipped by their own gate.
+    proc, output = run(
+        "100WAYS",
+        "nastechresearch/nastech-agent",
+        ["plugin-catalog/timestamp-ref.yaml", "agent/foo.py", "tests/x.py"],
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "catalog admission gate does not apply" in proc.stdout
+    assert output == "files<<__EOF__\n__EOF__\n"
+
+    # B: a cross-repo PR even with a branch NAMED 100WAYS -- the same-repo
+    # clause blocks the exemption and the data-only rule fires.
+    proc, _ = run(
+        "100WAYS",
+        "evil-totals/nastech-agent",
+        ["plugin-catalog/timestamp-ref.yaml", "agent/foo.py"],
+    )
+    assert proc.returncode == 1
+    assert "may only touch plugin-catalog/**" in proc.stdout
+
+    # C: a same-repo PR from a non-reserved branch (a human shipping an entry
+    # plus tooling) -- the branch clause blocks the exemption and it fires too.
+    proc, _ = run(
+        "add-my-plugin",
+        "nastechresearch/nastech-agent",
+        ["plugin-catalog/timestamp-ref.yaml", "agent/foo.py"],
+    )
+    assert proc.returncode == 1
+    assert "may only touch plugin-catalog/**" in proc.stdout
+
+    # D: a genuine data-only admission PR from outside still runs the FULL
+    # gate: not exempt, entry listed for the pinned-sha validation steps.
+    proc, output = run("add-my-plugin", "somebody/else", ["plugin-catalog/new.yaml"])
+    assert proc.returncode == 0, proc.stderr
+    assert "plugin-catalog/new.yaml" in output
+
+
+def test_reconcile_plugin_catalog_admission_moved_anchor_raises(tmp_path):
+    """A reworded upstream anchor stops the sync instead of silently dropping
+    the exemption -- that silent drop is how the 2026-10-13 red was born."""
+    moved = _UPSTREAM_PLUGIN_CATALOG_CI.replace(
+        "# HEAD is the PR merge commit:", "# HEAD names the PR merge commit:"
+    )
+    root, target = _write_plugin_catalog_ci(tmp_path, moved)
+    with pytest.raises(PluginCatalogAdmissionError, match="plugin-catalog-ci.yml"):
+        _reconcile_plugin_catalog_admission(str(root))
+    # Still untouched: raising must not half-write the file.
+    assert "Fork 100WAYS sync PR" not in target.read_text(encoding="utf-8")
+    assert issubclass(PluginCatalogAdmissionError, ValueError)
+
+
+def test_reconcile_plugin_catalog_admission_skips_missing_workflow(tmp_path):
+    """Absent file (an engine-local tree without the upstream workflow) is a
+    no-op -- the fail-loud contract covers only trees that carry the file."""
+    assert _reconcile_plugin_catalog_admission(str(tmp_path)) is False
+
+
+def test_reconcile_plugin_catalog_admission_registered_in_reconcile_tree(tmp_path):
+    """reconcile_tree must dispatch it, or every sync re-publishes the red."""
+    root, target = _write_plugin_catalog_ci(tmp_path, _UPSTREAM_PLUGIN_CATALOG_CI)
+    result = reconcile_tree(str(root))
+    assert ".github/workflows/plugin-catalog-ci.yml" in result.fixed
+    assert "Fork 100WAYS sync PR" in target.read_text(encoding="utf-8")
 
 
 def test_reconcile_pinned_source_clones_names_every_external_ref(tmp_path):
