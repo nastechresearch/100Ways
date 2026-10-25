@@ -266,6 +266,28 @@ WAYS: list[Way] = [
     Way("verify.art-unclaimed", "Unclaimed identity art", "verify", "art inside a required class that no manifest target names is found by walking the tree, not assumed from the registry", uses="assetforge.audit_asset_policy"),
     Way("brand.proved-leak", "Attributed art leak", "brand", "unclaimed art only blocks a release when an upstream checkout proves a path brands into it; otherwise it stays a review", uses="assetforge.branded_paths"),
     Way("gate.withheld-verdict", "Withheld verdict", "gate", "a class nobody walked is reported as unmeasured rather than passing as clean", uses="assetforge.render"),
+    # ---- the published ui pair: spellings read off bytes, not remembered ---------
+    Way(
+        "brand.derived-pair",
+        "Derived rebrand pair",
+        "brand",
+        "read the rename set and every token rewrite off the one version published on both sides",
+        uses="uipack.Transform.derive",
+    ),
+    Way(
+        "gate.proven-before-publish",
+        "Proof-before-publish gate",
+        "gate",
+        "the transform must reproduce the fork's published bytes before <to> is touched",
+        uses="uipack.Transform._assert_proves",
+    ),
+    Way(
+        "verify.survivor-budget",
+        "Survivor budget",
+        "verify",
+        "an upstream brand stem survives only as often as the human's own publish still says it",
+        uses="uipack.audit_stems",
+    ),
 ]
 
 
