@@ -130,7 +130,13 @@ from .telegram_agent import send_message as send_telegram
 from .telegram_commands import LEVELS, grants, lookup, menu, parse, usage_for
 from .telegram_tables import BLOCK, GRID, MAX_PAGES, TableError, answer, build
 from .telegram_transport import TelegramDeliveryError
-from .updates import DEFAULT_HERMES_URL, UpdateManager, default_updates_dir, hermes_path
+from .updates import (
+    DEFAULT_HERMES_URL,
+    UpdateManager,
+    default_updates_dir,
+    hermes_path,
+    read_manifest_with_subjects,
+)
 from .urlcheck import (
     DECIDED,
     URL_POLICY_PATH,
@@ -773,7 +779,7 @@ class Cli:
 
     def cmd_narrative(self) -> None:
         """Build the title and body a reviewer reads, from a manifest alone."""
-        manifest = _read_json(self.args.manifest)
+        manifest = read_manifest_with_subjects(self.args.manifest)
         summary = _read_text(self.args.summary)
         paragraph = garnish(manifest, engine=AIEngine()) if self.args.ai else ""
         if self.args.ai and not paragraph:
