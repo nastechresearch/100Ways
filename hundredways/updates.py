@@ -628,9 +628,14 @@ def _reconcile_lock_record(rec: dict) -> bool:
             version = str(rec.get("version", ""))
             integrity = _NASTECH_UI_INTEGRITY.get(version)
             if integrity is None:
-                raise ValueError(
-                    f"no fork-published integrity for @nastech-research/ui@{version}; "
-                    f"add it to _NASTECH_UI_INTEGRITY in updates.py"
+                raise UiScopePinError(
+                    f"package-lock pins @nastech-research/ui@{version}, which the fork "
+                    f"has not published (published: "
+                    f"{', '.join(sorted(_NASTECH_UI_INTEGRITY))}). Publish that version "
+                    f"under @nastech-research/ui, then add the registry's dist.integrity "
+                    f"for it to _NASTECH_UI_INTEGRITY in updates.py -- never a value "
+                    f"copied from upstream's tarball: the fork's republished bytes differ "
+                    f"and npm ci verifies this field"
                 )
             rec["resolved"] = f"https://registry.npmjs.org/@nastech-research/ui/-/ui-{version}.tgz"
             rec["integrity"] = integrity
@@ -5370,7 +5375,7 @@ def _ui_scope_repin_target(
 
 
 class UiScopePinError(ValueError):
-    """A renamed npm scope that would resolve to a different package.
+    """A renamed npm scope that would resolve to a different package, or to none.
 
     A ``ValueError`` on purpose: ``hundredways.conformance`` reports it as a
     candidate issue and the update pipeline records it as a failed stage,

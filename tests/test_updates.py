@@ -97,6 +97,7 @@ from hundredways.updates import (
     _reconcile_guest_identity_stub,
     _reconcile_install_ps1_store_guard_test,
     _reconcile_locale_key_order,
+    _reconcile_lock_record,
     _reconcile_managed_gateway_wire_headers,
     _reconcile_nastech_home_env_prefix,
     _reconcile_pinned_source_clones,
@@ -4748,6 +4749,56 @@ def test_reconcile_ui_scope_pins_allows_the_upstream_pinned_version(tmp_path):
         {"name": "desktop", "dependencies": {"@nastech-research/ui": version}}))
     assert _reconcile_ui_scope_pins(str(tmp_path)) == []
     assert "0.18.2" in _NASTECH_UI_INTEGRITY
+
+
+def test_lock_record_names_the_published_set_for_an_unpublished_ui_version():
+    """Say what the gate is waiting on, and do not imply the value can be typed in.
+
+    Upstream moved ``@nous-research/ui`` to 0.19.1 and every sync since has stopped with
+    ``no fork-published integrity for @nastech-research/ui@0.19.1; add it to
+    _NASTECH_UI_INTEGRITY in updates.py``.  That reads like a row to fill in, while the
+    actual prerequisite is a fork ``npm publish``: ``@nastech-research/ui`` stops at 0.18.4,
+    so there is no ``dist.integrity`` to copy, and a hand-written sha512 would pass this
+    gate and then fail ``npm ci`` for every user who installs the fork.
+    """
+    version = "9.9.9"
+    assert version not in _NASTECH_UI_INTEGRITY
+    rec = {
+        "name": "@nous-research/ui",
+        "version": version,
+        "resolved": f"https://registry.npmjs.org/@nous-research/ui/-/ui-{version}.tgz",
+        "integrity": "sha512-upstream-bytes-are-not-the-forks",
+    }
+
+    with pytest.raises(UiScopePinError) as excinfo:
+        _reconcile_lock_record(rec)
+
+    message = str(excinfo.value)
+    assert f"@nastech-research/ui@{version}" in message
+    assert "has not published" in message
+    for published in sorted(_NASTECH_UI_INTEGRITY):
+        assert published in message
+    assert "dist.integrity" in message
+    # Fail closed: nothing is rewritten, so no half-branded record can reach the tree.
+    assert rec["integrity"] == "sha512-upstream-bytes-are-not-the-forks"
+    assert "nous-research" in rec["resolved"]
+
+
+def test_lock_record_still_rewrites_a_fork_published_ui_version():
+    """The clearer failure must not cost the happy path its rewrite."""
+    version = sorted(_NASTECH_UI_INTEGRITY)[0]
+    rec = {
+        "name": "@nous-research/ui",
+        "version": version,
+        "resolved": f"https://registry.npmjs.org/@nous-research/ui/-/ui-{version}.tgz",
+        "integrity": "sha512-upstream",
+    }
+
+    assert _reconcile_lock_record(rec) is True
+    assert rec["resolved"] == (
+        f"https://registry.npmjs.org/@nastech-research/ui/-/ui-{version}.tgz"
+    )
+    assert rec["integrity"] == _NASTECH_UI_INTEGRITY[version]
 
 
 def test_reconcile_domains_keeps_the_real_assets_worker_host(tmp_path):
