@@ -3886,10 +3886,11 @@ started = time.monotonic()
     # simulated slow disk stays charged while the host's scheduler is not, and lateness an
     # earlier phase paid cannot excuse a window it is not part of. Credited only while the
     # child's account is coherent (the phase ran callbacks and its within-window lateness fits
-    # inside the window it claims); otherwise the raw window is charged, exactly as upstream
-    # bounds it, because an unproven subtraction is not evidence.
+    # inside the window it claims); otherwise the child's whole wall time is charged, exactly
+    # as upstream bounds it: an unproven subtraction is not evidence, and a report that
+    # measured no window at all must still pay its full elapsed rather than nothing.
     late_in = late - late_at
-    charge = window - late_in if callbacks > 0 and 0.0 <= late_in <= window else window
+    charge = window - late_in if callbacks > 0 and 0.0 <= late_in <= window else elapsed
     assert charge < budget_s + 2, out
     assert boot_ok, f"boot refused a browse that gave up inside its budget: {boot_error} / {out}"
 ''',
@@ -3932,11 +3933,12 @@ def _reconcile_browse_budget_flock_tests(dst: str) -> bool:
     at the stamp too and reports it as ``late_at``, so the parent credits only the lateness that
     demonstrably accrued inside the window it charges -- never oversleep an earlier phase paid
     for, which could otherwise zero the charge of a genuinely slow phase and turn the bound into
-    a green test that asserts nothing.  The parent bounds the phase with that account --
-    every injected millisecond of the simulated disk stays charged, only provable within-window
-    scheduler lateness is credited, and an incoherent account charges the raw window -- so a slow
-    host with a correct product passes on evidence while a browse that genuinely runs past its
-    budget accrues injected delay as it goes and still fails.
+    a green test that asserts nothing.  The parent bounds the phase with that account -- every
+    injected millisecond of the simulated disk stays charged, only provable within-window
+    scheduler lateness is credited, and an incoherent or unmeasured account charges the child's
+    whole wall time, exactly as upstream did -- so a slow host with a correct product passes on
+    evidence while a browse that genuinely runs past its budget accrues injected delay as it
+    goes and still fails.
 
     ``pytest.skip`` is already this suite's idiom for host-capability gaps (``test_backup.py``
     skips on ``chmod`` semantics, ``test_agent_import.py`` on POSIX-only modes), so the lane still

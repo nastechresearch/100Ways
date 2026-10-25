@@ -789,7 +789,7 @@ def test_browse_budget_bound_still_fails_a_real_overshoot(tmp_path):
 @pytest.mark.parametrize(
     ("window", "callbacks", "late", "late_at"),
     [
-        # No callback ran, so there is no account to credit: charge the raw window.
+        # No callback ran, so there is no account to credit: charge the whole wall time.
         (5.77, 0, 2.9, 0.0),
         # The within-window excess cannot exceed the window it lives in: an incoherent report
         # earns nothing.
@@ -800,14 +800,24 @@ def test_browse_budget_bound_still_fails_a_real_overshoot(tmp_path):
         # window's stamp (late_at == late), so the credit is zero and the raw window is charged.
         # The branch as pushed credited 5.77 - 5.77 = 0 here and passed a phase that overslept.
         (5.77, 302, 5.77, 5.77),
-        # A snapshot ahead of the counter it snapshots is not an account: charge the raw window.
+        # A snapshot ahead of the counter it snapshots is not an account: charge the whole wall
+        # time.
         (5.77, 302, 2.9, 9.9),
+        # The child stamped no phase at all, so its window is the -1.0 sentinel: an unmeasured
+        # window must read as "unproven", never as "cost nothing". The real child cannot reach
+        # the bound like this (it asserts the "slowed" line first), but the bound may not depend
+        # on that -- this is the frame that would have gone green on -1.0 < 5.
+        (-1.0, 0, 0.0, -1.0),
     ],
 )
 def test_browse_budget_bound_only_credit_a_coherent_account(
     tmp_path, window, callbacks, late, late_at
 ):
-    """The credit is withheld unless the report proves the lateness is inside the window charged."""
+    """The credit is withheld unless the report proves the lateness is inside the window charged.
+
+    A window the child never stamped is the same class of unproven claim, so the fallback charges
+    the whole wall time rather than the sentinel.
+    """
     text = _browse_budget_rewritten(tmp_path)
     frame = f"RESULT 503 6.121 {window} {callbacks} {late} {late_at} nothing was changed"
 
