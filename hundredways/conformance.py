@@ -36,7 +36,15 @@ from .updates import (
     verify_branded,
 )
 
-_REPORT_PATHS = {"GATE-REPORT.md", "UPDATE-REPORT.md", "manifest.json"}
+# Files the pipeline writes beside the branded tree; they are accounted for, not
+# expected to match a branded source path.  commit-subjects.jsonl holds the receipt's
+# prose (see updates.COMMIT_SUBJECTS_FILE).
+_REPORT_PATHS = {
+    "GATE-REPORT.md",
+    "UPDATE-REPORT.md",
+    "manifest.json",
+    "commit-subjects.jsonl",
+}
 
 
 @dataclass(frozen=True)
