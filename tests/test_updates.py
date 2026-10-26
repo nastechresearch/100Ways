@@ -21,16 +21,22 @@ from hundredways.assets import OwnedAssets
 from hundredways.integrity import audit_candidate_tree
 from hundredways.updates import (
     STAGES,
+    STORE_CREDENTIALS,
+    STORE_REST_CREDENTIALS,
     AgentsChainCapError,
     AssetsWorkerIndexError,
     BrowseBudgetDdlError,
     BrowseBudgetFlockTestError,
     ChannelReaderUserAgentError,
+    DocsSearchHydrationGateError,
     ForkLaneReleaseEditError,
     FreeRunnerParallelismError,
     GatewayAllowlistReloadError,
     GatewayPluginGateError,
     NastechSuitePinError,
+    PluginCatalogAdmissionError,
+    SetThemeCatalogLineError,
+    StoreLaneGateError,
     TermuxAptKeyDocError,
     UpdateManager,
     UnsignedDarwinBuildEnvError,
@@ -88,6 +94,7 @@ from hundredways.updates import (
     _reconcile_windows_boot_lifecycle_race,
     _reconcile_windows_real_git_locate,
     _reconcile_docs_posix_separators,
+    _reconcile_docs_search_hydration_gate,
     _reconcile_drop_vercel_deploy_job,
     _reconcile_fork_skill_catalogs,
     _reconcile_fork_skill_sidebars,
@@ -102,7 +109,7 @@ from hundredways.updates import (
     _reconcile_managed_gateway_wire_headers,
     _reconcile_nastech_home_env_prefix,
     _reconcile_pinned_source_clones,
-    _reconcile_plugin_catalog_sync_exemption,
+    _reconcile_plugin_catalog_admission,
     _reconcile_plugin_guard_trusted_installer_hosts,
     _reconcile_portable_shebang,
     _reconcile_portal_override_test_collision,
@@ -110,9 +117,11 @@ from hundredways.updates import (
     _reconcile_prompt_surface_snapshot,
     _reconcile_python_test_timeout,
     _reconcile_reasoning_effort_selection,
+    _reconcile_set_theme_catalog_line,
     _reconcile_sigv4_vectors,
     _reconcile_skill_description_hardline,
     _reconcile_skill_docs_order,
+    _reconcile_store_gate_covers_the_lane,
     _reconcile_telegram_mention_context_lengths,
     _reconcile_dead_api_defaults,
     _reconcile_domains,
@@ -124,7 +133,17 @@ from hundredways.updates import (
     _reconcile_unsigned_darwin_build_env,
     _reconcile_vercel_prepare,
     _reconcile_windows_boot_lifecycle_race,
+    _reconcile_windows_suspend_observation,
+    _WINDOWS_SUSPEND_BUDGET_S,
+    _WINDOWS_SUSPEND_ONE_SHOT,
+    _WINDOWS_SUSPEND_TEST_REL,
+    _WINDOWS_SUSPEND_WAIT,
+    WindowsSuspendObservationError,
     _NASTECH_UI_INTEGRITY,
+    _SET_THEME_CATALOG_BUDGET,
+    _SET_THEME_LONG,
+    _SET_THEME_SHORT,
+    _SET_THEME_SOURCE_REL,
     _UI_SCOPE_ASSET_EVIDENCE,
     UiRegistryLookupError,
     UiScopePinError,
@@ -576,6 +595,114 @@ def _browse_budget_tree(tmp_path, text):
     return candidate, path
 
 
+#: Upstream's own pin of the browse budget, which no rewrite pair touches.  It rides along in the
+#: fixture so a test can prove the rule leaves the budget value alone instead of trusting that it
+#: did: ``3.0`` is the number the red lane was measured against.
+_BROWSE_BUDGET_PIN = (
+    "    assert reconcile.BROWSE_INTEGRITY_BUDGET_S == reconcile.BROWSE_RECONCILE_BUDGET_S == 3.0\n"
+)
+
+
+def _browse_budget_pre():
+    """The pre-rewrite file: every pair's pre-image, in order, plus the untouched budget pin."""
+    return "".join(before for before, _ in _BROWSE_BUDGET_EDITS) + _BROWSE_BUDGET_PIN
+
+
+def _browse_budget_rewritten(tmp_path):
+    """Run the rule on the real pre-image and hand back the produced file text."""
+    candidate, path = _browse_budget_tree(tmp_path, _browse_budget_pre())
+    assert _reconcile_browse_budget_flock_tests(str(candidate)) is True
+    return path.read_text(encoding="utf-8")
+
+
+class _BudgetSkip(Exception):
+    """Raised by the stubbed ``pytest.skip`` so the executed block can report a skip."""
+
+
+def _budget_block(text):
+    """The produced file's parse-and-bound block, dedented, ready to exec.
+
+    The tests below execute the injected source against frames the child itself would print,
+    instead of restating its arithmetic here -- a re-implementation would pass when the rewrite
+    does not.
+    """
+    lines = text.splitlines()
+    start = next(i for i, line in enumerate(lines) if 'result.split(" ", 7)' in line)
+    end = next(i for i, line in enumerate(lines) if line == "    assert charge < budget_s + 2, out")
+    picked = [line[4:] if line.startswith("    ") else line for line in lines[start : end + 1]]
+    return "\n".join(picked)
+
+
+def _budget_child_report(text):
+    """The produced child's own frame-print, as source, from its end stamp onwards."""
+    lines = text.splitlines()
+    start = next(i for i, line in enumerate(lines) if line == "    ended = time.monotonic()")
+    tail = "exc.detail, flush=True)"
+    end = next(i for i, line in enumerate(lines[start:], start) if line.rstrip().endswith(tail))
+    picked = [line[4:] if line.startswith("    ") else line for line in lines[start : end + 1]]
+    return "\n".join(picked) + "\n"
+
+
+def _budget_child_slow(text):
+    """The produced child's ``slow()`` body, dedented to module level."""
+    lines = text.splitlines()
+    start = next(i for i, line in enumerate(lines) if line == "        def slow():")
+    body = []
+    for line in lines[start + 1 :]:
+        if not line.startswith("            "):
+            break
+        body.append(line[8:])
+    return "def slow():\n" + "\n".join(body) + "\n"
+
+
+def _budget_child_stamp(text):
+    """The produced child's stamp block, dedented: where the window begins and late is snapshot."""
+    lines = text.splitlines()
+    start = next(
+        i
+        for i, line in enumerate(lines)
+        if line == '    if holding_lock() and (phase == "integrity") == read_only:'
+    )
+    end = next(i for i, line in enumerate(lines[start:], start) if 'print("slowed"' in line)
+    picked = [line[4:] if line.startswith("    ") else line for line in lines[start : end + 1]]
+    return "\n".join(picked) + "\n"
+
+
+class _DrivenClock:
+    """A monotonic clock we advance ourselves: its ``sleep`` arrives ``late_by`` seconds late.
+
+    No real sleeping, and no literal delay added to the suite -- the host's lateness is the datum,
+    so the test supplies it directly.
+    """
+
+    def __init__(self, late_by=0.0):
+        self.now = 0.0
+        self.late_by = late_by
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds + self.late_by
+
+
+def _run_budget_block(text, frame, budget_s=3.0, wait_s=5.0):
+    """Exec the produced bound block against one child frame; returns its namespace or raises."""
+
+    def _skip(message):
+        raise _BudgetSkip(message)
+
+    namespace = {
+        "result": frame,
+        "out": frame,
+        "budget_s": budget_s,
+        "wait_s": wait_s,
+        "pytest": types.SimpleNamespace(skip=_skip),
+    }
+    exec(compile(_budget_block(text), "<budget bound>", "exec"), namespace)
+    return namespace
+
+
 def test_browse_budget_flock_tests_rebuild_the_host_aware_bounds(tmp_path):
     """Every rewrite pair applies, in order, and the result is a fixed point.
 
@@ -583,8 +710,8 @@ def test_browse_budget_flock_tests_rebuild_the_host_aware_bounds(tmp_path):
     upstream -- or one that overlaps its neighbour's context -- fails here instead of on the
     fork's macOS lane.
     """
-    pre = "".join(before for before, _ in _BROWSE_BUDGET_EDITS)
-    expected = "".join(after for _, after in _BROWSE_BUDGET_EDITS)
+    pre = _browse_budget_pre()
+    expected = "".join(after for _, after in _BROWSE_BUDGET_EDITS) + _BROWSE_BUDGET_PIN
     candidate, path = _browse_budget_tree(tmp_path, pre)
 
     assert _reconcile_browse_budget_flock_tests(str(candidate)) is True
@@ -593,12 +720,12 @@ def test_browse_budget_flock_tests_rebuild_the_host_aware_bounds(tmp_path):
     assert _reconcile_browse_budget_flock_tests(str(candidate)) is False
     assert path.read_text(encoding="utf-8") == expected
     # The rewritten file must charge the budgeted window, not the child's whole wall time.
-    assert "assert window < budget_s + 2, out" in text
-    assert 'result.split(" ", 4)' in text
+    assert "assert charge < budget_s + 2, out" in text
+    assert 'result.split(" ", 7)' in text
     assert "assert float(elapsed) < budget_s + 2" not in text
 
 
-@pytest.mark.parametrize("drop", [0, 3, 7, 11])
+@pytest.mark.parametrize("drop", [0, 3, 4, 5, 7, 11, 13])
 def test_browse_budget_flock_tests_fail_loudly_when_upstream_moved(tmp_path, drop):
     """A rewrite that stopped matching raises; it never no-ops into a silent red lane."""
     pairs = list(_BROWSE_BUDGET_EDITS)
@@ -613,6 +740,253 @@ def test_browse_budget_flock_tests_fail_loudly_when_upstream_moved(tmp_path, dro
     assert f"rewrite #{drop + 1}" in message
     assert "_reconcile_browse_budget_flock_tests" in message
     assert "macOS" in message
+    # The raise carries the red it is guarding, measured on the lane, so the sync failure is
+    # self-explaining: the assertion that crossed and the budget it crossed.
+    assert "assert 5.773591583999973 < (3.0 + 2)" in message
+
+
+def test_browse_budget_child_and_parent_share_one_report(tmp_path):
+    """The bound is fed by the child's own account: exec the child's print, exec the parent's read.
+
+    Nothing here restates the arithmetic -- the two snippets come out of the rewritten file and run
+    against a clock the test drives, so the frame the child writes is literally the frame the parent
+    parses.
+    """
+    text = _browse_budget_rewritten(tmp_path)
+    clock = _DrivenClock()
+    clock.now = 6.77  # the instant the child's budgeted phase ends, on the host's own clock
+    written = []
+    namespace = {
+        "time": clock,
+        "started": 0.4,
+        "slowed_at": 1.0,
+        "late_at": 1.2,  # the lateness already accrued when this window was stamped
+        "callbacks": 302,
+        "late": 2.9,
+        "exc": types.SimpleNamespace(status_code=503, detail="nothing was changed here"),
+        "print": lambda *a, **kw: written.append(" ".join(str(part) for part in a)),
+    }
+    exec(compile(_budget_child_report(text), "<child frame>", "exec"), namespace)
+    frame = written[0]
+
+    # The same frame, read back by the parent block the rule produced: the window the child stamped,
+    # the lateness it counted and the snapshot taken at the stamp are what the bound is compared to.
+    env = _run_budget_block(text, frame)
+    assert env["window"] == pytest.approx(5.77)
+    assert env["callbacks"] == 302 and env["late"] == pytest.approx(2.9)
+    assert env["late_at"] == pytest.approx(1.2)
+    assert env["status"] == "503"
+    assert env["charge"] == pytest.approx(5.77 - (2.9 - 1.2))
+
+
+def test_browse_budget_bound_charges_the_reported_evidence(tmp_path):
+    """A phase that ran its callbacks and arrived late inside its own window passes on that proof.
+
+    These are job 120651211235's numbers: ``window`` 5.77 s against ``3.0 + 2``, with
+    ``assert status == "503"`` already passed in front of it. The ``late_at`` field says almost
+    all of that lateness accrued after the window's stamp, so the credit is real.
+    """
+    text = _browse_budget_rewritten(tmp_path)
+    frame = "RESULT 503 6.121000250000009 5.773591584 302 2.91 0.01 nothing was changed"
+
+    env = _run_budget_block(text, frame)
+    assert env["charge"] == pytest.approx(5.773591584 - (2.91 - 0.01))
+    assert env["charge"] < 3.0 + 2  # the untouched bound, fed by the child's own account
+    # The raw window on its own was over the bound -- that is the red this closes.
+    assert env["window"] > 3.0 + 2
+
+
+def test_browse_budget_bound_still_fails_a_real_overshoot(tmp_path):
+    """A browse that genuinely runs past its budget is still red, lateness or no lateness.
+
+    Measured on a doctored product that ignores its own abort until 8 s: ``window`` 8.14 s, 796
+    callbacks, within-window lateness only 0.14 s -- the injected disk time it accrued stays
+    charged.
+    """
+    text = _browse_budget_rewritten(tmp_path)
+    frame = "RESULT 503 9.001 8.142554323 796 0.139849165 0.0 nothing was changed"
+
+    with pytest.raises(AssertionError):
+        _run_budget_block(text, frame)
+
+
+@pytest.mark.parametrize(
+    ("window", "callbacks", "late", "late_at"),
+    [
+        # No callback ran, so there is no account to credit: charge the whole wall time.
+        (5.77, 0, 2.9, 0.0),
+        # The within-window excess cannot exceed the window it lives in: an incoherent report
+        # earns nothing.
+        (5.77, 302, 9.9, 0.0),
+        # A negative lateness is not a subtraction the bound may make.
+        (5.77, 302, -1.0, 0.0),
+        # The hole this closes: late == the whole window, but ALL of it accrued before this
+        # window's stamp (late_at == late), so the credit is zero and the raw window is charged.
+        # The branch as pushed credited 5.77 - 5.77 = 0 here and passed a phase that overslept.
+        (5.77, 302, 5.77, 5.77),
+        # A snapshot ahead of the counter it snapshots is not an account: charge the whole wall
+        # time.
+        (5.77, 302, 2.9, 9.9),
+        # The child stamped no phase at all, so its window is the -1.0 sentinel: an unmeasured
+        # window must read as "unproven", never as "cost nothing". The real child cannot reach
+        # the bound like this (it asserts the "slowed" line first), but the bound may not depend
+        # on that -- this is the frame that would have gone green on -1.0 < 5.
+        (-1.0, 0, 0.0, -1.0),
+    ],
+)
+def test_browse_budget_bound_only_credit_a_coherent_account(
+    tmp_path, window, callbacks, late, late_at
+):
+    """The credit is withheld unless the report proves the lateness is inside the window charged.
+
+    A window the child never stamped is the same class of unproven claim, so the fallback charges
+    the whole wall time rather than the sentinel.
+    """
+    text = _browse_budget_rewritten(tmp_path)
+    frame = f"RESULT 503 6.121 {window} {callbacks} {late} {late_at} nothing was changed"
+
+    with pytest.raises(AssertionError):
+        _run_budget_block(text, frame)
+
+
+def test_browse_budget_child_counts_lateness_not_its_own_injected_delay(tmp_path):
+    """The child's counter charges the simulated disk fully and credits only the scheduler.
+
+    ``late_by=0`` is a host that wakes exactly when told: the delay it slept is the fixture's work,
+    so nothing is credited. ``late_by=0.05`` is a host that oversleeps: that, and only that, is.
+    """
+    text = _browse_budget_rewritten(tmp_path)
+    source = compile(_budget_child_slow(text), "<child slow>", "exec")
+
+    def run(late_by, times):
+        clock = _DrivenClock(late_by=late_by)
+        namespace = {
+            "time": clock,
+            "handler": lambda: 0,
+            "_STEP_S": 0.01,
+            "callbacks": 0,
+            "late": 0.0,
+        }
+        exec(source, namespace)
+        for _ in range(times):
+            namespace["slow"]()
+        return namespace
+
+    on_time = run(0.0, 4)
+    assert on_time["callbacks"] == 4
+    assert on_time["late"] == pytest.approx(0.0)
+
+    oversleeping = run(0.05, 4)
+    assert oversleeping["callbacks"] == 4
+    assert oversleeping["late"] == pytest.approx(0.2)
+
+
+def test_browse_budget_second_stamp_credits_only_its_own_window(tmp_path):
+    """A re-stamped window cannot be excused by lateness an earlier phase accrued.
+
+    This drives the produced child itself -- its stamp block, its ``slow()`` and its frame print,
+    all extracted from the rewritten file and exec'd against a driven clock -- across TWO slowed
+    phases: the first oversleeps its injected delay by 2.0 s in total, the second does the
+    budgeted phase's own work slowly but sleeps exactly when told. The child's own print therefore
+    reports ``late == late_at == 2.0`` with ``window == 6.0``, and the parent bound, exec'd on
+    those bytes, must charge the full 6.0 s and go red. The branch as pushed credited the whole
+    2.0 s (``0.0 <= late <= window``), charged 4.0 s against ``3.0 + 2`` and passed -- the green
+    test that asserted nothing this closes.
+    """
+    text = _browse_budget_rewritten(tmp_path)
+    slow_src = compile(_budget_child_slow(text), "<child slow>", "exec")
+    stamp_src = compile(_budget_child_stamp(text), "<child stamp>", "exec")
+    report_src = compile(_budget_child_report(text), "<child frame>", "exec")
+    clock = _DrivenClock(late_by=0.0)
+    written = []
+    namespace = {
+        "time": clock,
+        "handler": lambda: 0,
+        "_STEP_S": 0.01,
+        "callbacks": 0,
+        "late": 0.0,
+        "holding_lock": lambda: True,
+        "phase": "browse",
+        "read_only": False,
+        "slowed_at": None,
+        "late_at": None,
+        "started": 1.0,
+        "exc": types.SimpleNamespace(status_code=503, detail="nothing was changed here"),
+        "print": lambda *a, **kw: written.append(" ".join(str(part) for part in a)),
+    }
+    exec(slow_src, namespace)
+
+    # Phase one: the lock is ours, the window is stamped, and the host oversleeps every injected
+    # delay by half a second.
+    clock.now = 1.0
+    exec(stamp_src, namespace)
+    clock.late_by = 0.5
+    for _ in range(4):
+        namespace["slow"]()
+    assert namespace["late"] == pytest.approx(2.0)
+    assert written[0] == "slowed"
+
+    # The child re-stamps: a second budgeted connect qualifies, so `window` will now measure only
+    # what follows this stamp -- and everything the first phase overslept is outside it.
+    clock.late_by = 0.0
+    exec(stamp_src, namespace)
+    assert namespace["late_at"] == pytest.approx(2.0)
+
+    # Phase two: six seconds of budgeted work, run on time (the advance beyond the four callbacks
+    # stands for the slow product, not a slow scheduler).
+    stamp_now = clock.now
+    clock.now += 6.0 - 4 * 0.01
+    for _ in range(4):
+        namespace["slow"]()
+    exec(report_src, namespace)
+    frame = written[-1]
+
+    # The bytes are the child's own proof: window six, lateness two, snapshot two -- all of the
+    # credited quantity accrued before the window being charged.
+    parts = frame.split(" ")
+    assert parts[0] == "RESULT" and parts[1] == "503"
+    assert float(parts[3]) == pytest.approx(6.0)  # window
+    assert float(parts[5]) == pytest.approx(2.0)  # late (process-wide)
+    assert float(parts[6]) == pytest.approx(2.0)  # late_at (snapshot at the stamp)
+    assert " ".join(parts[7:]) == "nothing was changed here"
+    assert namespace["slowed_at"] == pytest.approx(stamp_now)
+
+    # wait_s 6.0 keeps the startup skip's margin (3.0 s) wider than the 2.0 s the first phase
+    # spent before the final stamp, so the skip predicate -- which this bound must not borrow --
+    # stays silent and the full window reaches the assertion.
+    with pytest.raises(AssertionError):
+        _run_budget_block(text, frame, wait_s=6.0)
+
+
+def test_browse_budget_bound_and_constants_survive_the_rewrite(tmp_path):
+    """Neither the margin nor the budget is edited: the produced file still says what upstream did.
+
+    The pin upstream writes for the budget value itself rides through the fixture untouched, so a
+    rule that quietly moved ``3.0`` or padded ``+ 2`` would fail here rather than in the lane.
+    """
+    text = _browse_budget_rewritten(tmp_path)
+    assert text.count("budget_s + 2") == 1
+    assert "assert charge < budget_s + 2, out" in text
+    assert 'getattr(reconcile, "BROWSE_RECONCILE_BUDGET_S", 2.0)' in text
+    assert _BROWSE_BUDGET_PIN in text  # the == 3.0 pin, verbatim
+    for widened in ("budget_s + 3", "budget_s + 2.5", "budget_s * 2", "BUDGET_S = 4"):
+        assert widened not in text
+
+
+def test_browse_budget_host_skip_did_not_get_broader(tmp_path):
+    """The only skip paths are the two the rule shipped with, on the predicates it shipped with.
+
+    A lane that skips by asserting nothing is worse than a red one, so this pins the skip count and
+    the predicate: the host escape is still keyed on measured process hand-off and startup, never
+    on the lateness the child is allowed to report.
+    """
+    text = _browse_budget_rewritten(tmp_path)
+    assert text.count("pytest.skip(") == 2
+    assert "pytest.skip_if" not in text and "skipif" not in text and "xfail" not in text
+    guard = next(line for line in text.splitlines() if "startup > margin" in line)
+    assert guard == "    if window >= 0 and startup > margin:"
+    assert "late" not in guard and "callbacks" not in guard
+    assert "    margin = wait_s - budget_s" in text
 
 
 def test_browse_budget_flock_reconcile_is_registered_in_reconcile_tree(tmp_path):
@@ -620,11 +994,19 @@ def test_browse_budget_flock_reconcile_is_registered_in_reconcile_tree(tmp_path)
     root = tmp_path / "candidate"
     path = root / _BROWSE_BUDGET_TEST_REL
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("".join(before for before, _ in _BROWSE_BUDGET_EDITS), encoding="utf-8")
+    path.write_text(_browse_budget_pre(), encoding="utf-8")
 
     result = reconcile_tree(str(root))
     assert _BROWSE_BUDGET_TEST_REL in result.fixed
     assert "def _hold_release_latency(" in path.read_text(encoding="utf-8")
+    # What the pipeline delivers is byte-for-byte what the rule alone produces -- and the two
+    # blocks it injected compile as real source (the stitched fixture is fragments, so the whole
+    # file is compiled on the branded tree instead, where it is one).
+    delivered = path.read_text(encoding="utf-8")
+    assert delivered == _browse_budget_rewritten(tmp_path / "direct")
+    compile(_budget_child_report(delivered), "<child frame>", "exec")
+    compile(_budget_block(delivered), "<budget bound>", "exec")
+    compile(_budget_child_slow(delivered), "<child slow>", "exec")
 
 
 def test_new_timeout_reconciles_are_registered_in_reconcile_tree(tmp_path):
@@ -879,6 +1261,135 @@ def test_windows_boot_lifecycle_accepts_already_gone_taskkill(tmp_path):
     assert "def _kill_raced_its_target(" in text
     assert "killed.returncode == 0 or _kill_raced_its_target(killed)" in text
     assert _reconcile_windows_boot_lifecycle_race(str(candidate)) is False
+
+
+_WINDOWS_SUSPEND_TEST_TEXT = (
+    "import time\n"
+    "\n\n"
+    "def _wait(predicate, timeout=10):\n"
+    "    deadline = time.monotonic() + timeout\n"
+    "    while time.monotonic() < deadline:\n"
+    "        if predicate():\n"
+    "            return True\n"
+    "        time.sleep(.03)\n"
+    "    return bool(predicate())\n"
+    "\n\n"
+    "def test_failed_setup_never_runs_child_and_releases_handles(tmp_path, monkeypatch):\n"
+    "    marker = tmp_path / 'child executed'\n"
+    "\n"
+    "    def assign(job, proc):\n"
+    "        children.append(proc)\n"
+    "        assert psutil.Process(proc.pid).status() == psutil.STATUS_STOPPED\n"
+    "        assert not marker.exists()\n"
+    "        real_assign(job, proc)\n"
+)
+
+
+def _windows_suspend_candidate(tmp_path, *, text=None):
+    """A candidate carrying the upstream-owned Windows test the rule patches."""
+    candidate = tmp_path / "candidate"
+    path = candidate / _WINDOWS_SUSPEND_TEST_REL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_WINDOWS_SUSPEND_TEST_TEXT if text is None else text, encoding="utf-8")
+    return candidate, path
+
+
+def test_windows_suspend_observation_polls_for_the_suspended_child(tmp_path):
+    candidate, path = _windows_suspend_candidate(tmp_path)
+
+    assert _reconcile_windows_suspend_observation(str(candidate)) is True
+
+    text = path.read_text(encoding="utf-8")
+    assert _WINDOWS_SUSPEND_ONE_SHOT not in text
+    assert "assert _wait(\n" in text
+    assert "child never observed suspended" in text
+    # The same claim, just given the kernel time to make it observable.
+    assert text.count("psutil.STATUS_STOPPED") == 1
+    assert "lambda: psutil.Process(proc.pid).status() == psutil.STATUS_STOPPED," in text
+    # The product guard under it stays upstream's, untouched.
+    assert "        assert not marker.exists()\n" in text
+    compile(text, path.name, "exec")
+
+
+def test_windows_suspend_observation_bounds_the_poll_it_adds(tmp_path):
+    """A timeout is what separates a poll from a hang, so pin that it is passed."""
+    candidate, path = _windows_suspend_candidate(tmp_path)
+    assert _reconcile_windows_suspend_observation(str(candidate)) is True
+    text = path.read_text(encoding="utf-8")
+    assert f"timeout={_WINDOWS_SUSPEND_BUDGET_S},\n" in text
+    assert "while True" not in text
+
+
+def test_windows_suspend_observation_adds_no_wall_clock_sleep():
+    """The fork's HX013 ratchet: a test waits on a condition, never on the clock.
+
+    ``_WINDOWS_SUSPEND_WAIT`` is text the fork receives as its own source, so the fork
+    measures it in its next PR: a new literal sleep is a blocking finding there, and a
+    slower race here.  The 88-char bound is ruff's default; the fork does not select
+    E501, but injected source should still read like its neighbours.
+    """
+    assert "time.sleep" not in _WINDOWS_SUSPEND_WAIT
+    assert f"timeout={_WINDOWS_SUSPEND_BUDGET_S}," in _WINDOWS_SUSPEND_WAIT
+    assert all(len(line) <= 88 for line in _WINDOWS_SUSPEND_WAIT.splitlines())
+
+
+def test_windows_suspend_observation_is_a_fixed_point(tmp_path):
+    candidate, path = _windows_suspend_candidate(tmp_path)
+    assert _reconcile_windows_suspend_observation(str(candidate)) is True
+    once = path.read_text(encoding="utf-8")
+    assert _reconcile_windows_suspend_observation(str(candidate)) is False
+    assert path.read_text(encoding="utf-8") == once
+
+
+def test_windows_suspend_observation_raises_when_the_assert_is_reworded(tmp_path):
+    """A moved anchor stops the sync; it does not ship the racy one-shot read."""
+    text = _WINDOWS_SUSPEND_TEST_TEXT.replace(
+        _WINDOWS_SUSPEND_ONE_SHOT,
+        '        assert str(psutil.Process(proc.pid).status()) == "stopped"\n',
+    )
+    candidate, path = _windows_suspend_candidate(tmp_path, text=text)
+
+    with pytest.raises(WindowsSuspendObservationError) as excinfo:
+        _reconcile_windows_suspend_observation(str(candidate))
+
+    message = str(excinfo.value)
+    assert _WINDOWS_SUSPEND_TEST_REL in message
+    assert "_WINDOWS_SUSPEND_ONE_SHOT" in message
+    assert "Windows-only tests (arm64)" in message
+    assert _WINDOWS_SUSPEND_ONE_SHOT not in path.read_text(encoding="utf-8")
+
+
+def test_windows_suspend_observation_requires_the_wait_helper_it_calls(tmp_path):
+    """Injecting a ``_wait`` call into a file without that helper is a NameError."""
+    text = _WINDOWS_SUSPEND_TEST_TEXT.replace(
+        "def _wait(predicate, timeout=10):\n", "def _settled(predicate, timeout=10):\n"
+    )
+    candidate, _ = _windows_suspend_candidate(tmp_path, text=text)
+
+    with pytest.raises(WindowsSuspendObservationError) as excinfo:
+        _reconcile_windows_suspend_observation(str(candidate))
+    assert "_wait" in str(excinfo.value)
+
+
+def test_windows_suspend_observation_stands_down_when_upstream_drops_the_test(tmp_path):
+    """Upstream deleting the test says nothing about the race, so it is not a red gate."""
+    candidate, path = _windows_suspend_candidate(tmp_path, text="import psutil\n")
+    assert _reconcile_windows_suspend_observation(str(candidate)) is False
+    assert path.read_text(encoding="utf-8") == "import psutil\n"
+
+
+def test_windows_suspend_observation_absent_file_is_a_no_op(tmp_path):
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    assert _reconcile_windows_suspend_observation(str(candidate)) is False
+
+
+def test_windows_suspend_observation_registered_in_reconcile_tree(tmp_path):
+    """``reconcile_tree`` must dispatch the rule, or the fork never receives it."""
+    candidate, path = _windows_suspend_candidate(tmp_path)
+    result = reconcile_tree(str(candidate))
+    assert _WINDOWS_SUSPEND_TEST_REL in result.fixed
+    assert "child never observed suspended" in path.read_text(encoding="utf-8")
 
 
 def test_windows_real_git_locate_picks_every_git_for_windows_layout(tmp_path):
@@ -2009,6 +2520,239 @@ def test_reconcile_docusaurus_site_config_subpath_url_collapses(tmp_path):
     assert _reconcile_docusaurus_site_config(str(root)) == 0
 
 
+# The Docs Search Monitor's live probe, as the branded tree carries it today.
+# The fixture is byte-identical to the fork's website/scripts/
+# check-live-search.mjs (its lines 145-172 are byte-identical to upstream), so
+# the anchors pinned below are the ones the reconcile reads on a real sync.
+_DOCS_SEARCH_FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "docs_search")
+_DOCS_SEARCH_REL = "website/scripts/check-live-search.mjs"
+_DOCS_SEARCH_URL = "https://nastechresearch.github.io/nastech-agent/docs"
+
+# Pre-image: the probe clicks the server-rendered button the moment
+# ``domcontentloaded`` fired, with no mount gate between the two lines.
+_DOCS_SEARCH_PRE_ANCHOR = (
+    "    await page.goto(`${DOCS_URL}/`, "
+    "{ waitUntil: 'domcontentloaded', timeout: 30_000 });\n"
+    "    await page.locator('.DocSearch-Button').first()"
+    ".click({ timeout: 20_000 });\n"
+)
+
+# Post-image: the same click, now behind a wait for the mounted render's
+# ``<kbd>`` hint, bounded by the file's own REQUEST_TIMEOUT_MS.  Every timeout
+# in it is the one upstream wrote -- the gate only adds a line.
+_DOCS_SEARCH_POST_ANCHOR = (
+    "    await page.goto(`${DOCS_URL}/`, "
+    "{ waitUntil: 'domcontentloaded', timeout: 30_000 });\n"
+    "    // The server render carries this button, but on a cold Pages CDN\n"
+    "    // DocSearch mounts its handler seconds later, and a click before\n"
+    "    // that is dropped: .DocSearch-Input is then never created and the\n"
+    "    // fill below times out.  The <kbd> hints inside\n"
+    "    // .DocSearch-Button-Keys exist only in the mounted render, so\n"
+    "    // waiting for one is the readiness a visitor already has.  A site\n"
+    "    // that never hydrates still fails here, red.\n"
+    "    await page.locator('.DocSearch-Button-Keys kbd').first()"
+    ".waitFor({ timeout: REQUEST_TIMEOUT_MS });\n"
+    "    await page.locator('.DocSearch-Button').first()"
+    ".click({ timeout: 20_000 });\n"
+)
+
+
+def _live_search_probe_source():
+    with open(
+        os.path.join(_DOCS_SEARCH_FIXTURE, "check-live-search.pre.mjs"), encoding="utf-8"
+    ) as fh:
+        return fh.read()
+
+
+def _write_live_search_probe(root, text):
+    scripts = root / "website" / "scripts"
+    scripts.mkdir(parents=True)
+    probe = scripts / "check-live-search.mjs"
+    probe.write_text(text, encoding="utf-8")
+    return probe
+
+
+def test_reconcile_docs_search_hydration_gate(tmp_path):
+    """The probe must not click the docs search button before it is mounted."""
+    pre = _live_search_probe_source()
+    assert pre.count(_DOCS_SEARCH_PRE_ANCHOR) == 1, "the anchor is one exact place"
+
+    root = tmp_path / "branded"
+    probe = _write_live_search_probe(root, pre)
+    assert _reconcile_docs_search_hydration_gate(str(root)) is True
+
+    text = probe.read_text(encoding="utf-8")
+    expected = pre.replace(_DOCS_SEARCH_PRE_ANCHOR, _DOCS_SEARCH_POST_ANCHOR, 1)
+    # Byte-for-byte: the gate is the only change the rule makes to the probe.
+    assert text == expected
+    assert text.count(_DOCS_SEARCH_POST_ANCHOR) == 1, "the replacement is one place"
+    assert _DOCS_SEARCH_PRE_ANCHOR not in text
+    # No guard moved: the click, the fill, the hit wait and the goto budgets.
+    assert ".click({ timeout: 20_000 });" in text
+    assert ".fill(QUERIES[0], { timeout: 10_000 });" in text
+    assert ".waitFor({ timeout: 15_000 });" in text
+    assert "timeout: 30_000 });" in text
+    assert "PROBE_DEADLINE_MS = 240_000;" in text
+
+    # Fixed point: the gate line marks the patched file, so a second pass is a
+    # no-op rather than a second wait.
+    assert _reconcile_docs_search_hydration_gate(str(root)) is False
+    assert probe.read_text(encoding="utf-8") == text
+
+
+def test_reconcile_docs_search_hydration_gate_skips_missing_file(tmp_path):
+    assert _reconcile_docs_search_hydration_gate(str(tmp_path)) is False
+
+
+def test_reconcile_docs_search_hydration_gate_flags_a_moved_anchor(tmp_path):
+    """A probe that no longer clicks straight after the goto must stop the sync.
+
+    Returning ``False`` here would be the same return as "already gated", so the
+    fork would ship an ungated monitor and the only sign would be the next red
+    Docs Search run -- the failure mode this rule exists to prevent.
+    """
+    pre = _live_search_probe_source()
+    mutated = pre.replace(
+        "{ waitUntil: 'domcontentloaded', timeout: 30_000 }",
+        "{ waitUntil: 'networkidle', timeout: 60_000 }",
+    )
+    root = tmp_path / "branded"
+    probe = _write_live_search_probe(root, mutated)
+
+    with pytest.raises(DocsSearchHydrationGateError) as excinfo:
+        _reconcile_docs_search_hydration_gate(str(root))
+    # The raise carries the evidence, so the stop is arguable at sync time.
+    assert "run 40211574851" in str(excinfo.value)
+    assert "locator.fill: Timeout 10000ms exceeded" in str(excinfo.value)
+    assert probe.read_text(encoding="utf-8") == mutated
+
+    with pytest.raises(DocsSearchHydrationGateError):
+        reconcile_tree(str(root))
+
+
+def test_reconcile_tree_gates_the_probe_after_the_domain_rewrite(tmp_path):
+    """The gate runs after branding, and is recorded as a reconciled path."""
+    root = tmp_path / "branded"
+    probe = _write_live_search_probe(root, _live_search_probe_source())
+
+    result = reconcile_tree(str(root))
+    assert _DOCS_SEARCH_REL in result.fixed
+    text = probe.read_text(encoding="utf-8")
+    assert _DOCS_SEARCH_POST_ANCHOR in text
+
+    source = open(
+        sys.modules[_reconcile_docs_search_hydration_gate.__module__].__file__,
+        encoding="utf-8",
+    ).read()
+    dispatch = source.split("def reconcile_tree", 1)[1].split("\ndef ", 1)[0]
+    # ``_reconcile_domains`` is what gives this file its Pages ``DOCS_URL``; the
+    # gate is a site-specific reference a global brand rule cannot decide, so it
+    # has to be derived from the text that rewrite produced.
+    assert dispatch.index("_reconcile_domains(") < dispatch.index(
+        "_reconcile_docs_search_hydration_gate("
+    )
+
+
+def _run_live_search_probe(tmp_path, *, gated, hydrated):
+    """Run the generated probe under node, with the world modelled outside it.
+
+    Only two things are stubbed, both outside the script: ``fetch`` (preloaded
+    with ``node --require``, so nothing reaches GitHub Pages or Algolia) and the
+    browser driver (resolved through the probe's own
+    ``createRequire(PLAYWRIGHT_DIR)`` seam, and switched between the measured
+    mounted render and the measured server render).  The script itself is the
+    engine's output, byte for byte, and its exit code, its failure reason and
+    the timeouts it passes to every locator are what these tests read.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not available")
+
+    root = tmp_path / "branded"
+    probe = _write_live_search_probe(root, _live_search_probe_source())
+    if gated:
+        assert _reconcile_docs_search_hydration_gate(str(root)) is True
+
+    calls = tmp_path / "calls.jsonl"
+    calls.write_text("", encoding="utf-8")
+    env = {
+        **os.environ,
+        "DOCS_URL": _DOCS_SEARCH_URL,
+        "PLAYWRIGHT_DIR": os.path.join(_DOCS_SEARCH_FIXTURE, "pw"),
+        "STUB_HYDRATED": "1" if hydrated else "0",
+        "STUB_CALL_LOG": str(calls),
+    }
+    env.pop("GITHUB_ACTIONS", None)
+    env.pop("GITHUB_STEP_SUMMARY", None)
+    proc = subprocess.run(
+        [
+            node,
+            "--require",
+            os.path.join(_DOCS_SEARCH_FIXTURE, "net-stub.cjs"),
+            str(probe),
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return {
+        "code": proc.returncode,
+        "out": proc.stdout,
+        "err": proc.stderr,
+        "calls": [json.loads(line) for line in calls.read_text(encoding="utf-8").splitlines()],
+    }
+
+
+def test_ungated_probe_crashes_on_the_never_hydrating_site(tmp_path):
+    """The harness reproduces run 40211574851 before it proves the fix.
+
+    The click resolves, the fill dies, and the last step of the monitor is red:
+    that is the measured failing state, so a green result on the gated probe
+    below cannot be an artefact of the double.
+    """
+    result = _run_live_search_probe(tmp_path, gated=False, hydrated=False)
+
+    assert result["code"] == 1
+    assert "browser check crashed: locator.fill: Timeout 10000ms exceeded." in result["err"]
+    assert [c["op"] for c in result["calls"]] == ["goto", "click", "fill", "close"]
+
+
+def test_never_hydrating_site_still_crashes_the_probe_red(tmp_path):
+    """The gate is a hard await: a site that never mounts DocSearch still fails.
+
+    Nothing was weakened to make the fork green -- the wait is a plain ``await``
+    inside ``checkBrowser``, so its rejection escapes exactly as the fill's did,
+    the browser is still closed in the ``finally``, and the probe still exits 1
+    with a reason naming the real cause and its own budget.
+    """
+    result = _run_live_search_probe(tmp_path, gated=True, hydrated=False)
+
+    assert result["code"] == 1
+    assert "browser check crashed: locator.waitFor: Timeout 20000ms exceeded." in result["err"]
+    # The gate fires before the click, so the dropped click never happens.
+    assert [c.get("timeout") for c in result["calls"]] == [30_000, 20_000, None]
+    assert [c["op"] for c in result["calls"]] == ["goto", "waitFor", "close"]
+    assert not any(c["sel"] == ".DocSearch-Button" for c in result["calls"])
+
+
+def test_hydrating_site_passes_with_every_budget_untouched(tmp_path):
+    """The mounted render goes green, and each step keeps upstream's timeout."""
+    result = _run_live_search_probe(tmp_path, gated=True, hydrated=True)
+
+    assert result["code"] == 0, result["err"]
+    assert 'ok   browser: search modal lists 5 results for "telegram"' in result["out"]
+    assert [(c["sel"], c["op"], c.get("timeout")) for c in result["calls"]] == [
+        ("page", "goto", 30_000),
+        (".DocSearch-Button-Keys kbd", "waitFor", 20_000),
+        (".DocSearch-Button", "click", 20_000),
+        (".DocSearch-Input", "fill", 10_000),
+        (".DocSearch-Hit", "waitFor", 15_000),
+        ("browser", "close", None),
+    ]
+
+
 def test_reconcile_prompt_surface_snapshot(tmp_path):
     root = tmp_path / "branded"
     snap = root / "tests" / "fixtures" / "prompt_surface"
@@ -2104,6 +2848,196 @@ def test_reconcile_prompt_surface_snapshot(tmp_path):
 
     # Idempotent once the snapshot carries the branded render.
     assert _reconcile_prompt_surface_snapshot(str(root)) == []
+
+
+# ---------------------------------------------------------------------------
+# Brand-length guard on set_theme's catalog line (candidate 7f790c348, upstream
+# 5894e750c3; jobs 120743383196 and 120743383269).
+# ---------------------------------------------------------------------------
+
+# tools/set_theme_tool.py's first sentence as upstream ships it, and the same string after
+# the brand map.  The measured delta is what the rule exists for, so it is pinned here rather
+# than derived from the rule's own needles.
+_UPSTREAM_SET_THEME_SENTENCE = (
+    "Change how the Hermes desktop app looks: accent colour, light/dark mode, layout."
+)
+_BRANDED_SET_THEME_SENTENCE = _UPSTREAM_SET_THEME_SENTENCE.replace("Hermes", "Nastech")
+
+
+def _clip_like_short_desc(text: str, max_chars: int = _SET_THEME_CATALOG_BUDGET) -> str:
+    """``tools/tool_search_catalog._short_desc``'s clip, mirrored on one already-extracted sentence.
+
+    Same arithmetic as upstream: over budget, cut at ``max_chars``, drop the trailing partial
+    word, strip ``,;: `` and append the ellipsis the fork's guard forbids.
+    """
+    if len(text) <= max_chars:
+        return text
+    clipped = text[:max_chars]
+    clipped = clipped.rsplit(" ", 1)[0] if " " in clipped else clipped
+    return clipped.rstrip(",;: ") + "…"
+
+
+def _set_theme_source(*, sentence: str = _BRANDED_SET_THEME_SENTENCE) -> str:
+    return (
+        "SET_THEME_SCHEMA = {\n"
+        '    "name": "set_theme",\n'
+        '    "description": (\n'
+        f'        "{sentence} Pass the values "\n'
+        '        "to apply them now; the result says what was applied."\n'
+        "    ),\n"
+        '    "parameters": {"type": "object", "properties": {}},\n'
+        "}\n"
+    )
+
+
+def _set_theme_tree(tmp_path, *, sentence: str = _BRANDED_SET_THEME_SENTENCE):
+    """A branded tree: the real source file plus a snapshot that quotes the same sentence."""
+    root = tmp_path / "branded"
+    (root / "tools").mkdir(parents=True)
+    source = _set_theme_source(sentence=sentence)
+    (root / "tools" / "set_theme_tool.py").write_text(source, encoding="utf-8")
+    snap_tools = root / "tests" / "fixtures" / "prompt_surface" / "tools"
+    snap_tools.mkdir(parents=True)
+    listing = (
+        "Search the tool catalog.\n"
+        f"- set_theme: {sentence}\n"
+        "- show_tip: Point at one desktop UI element with a small arrow bubble "
+        "(no dimming or tour)."
+    )
+    (snap_tools / "tool_search.desktop.claude.json").write_text(
+        json.dumps(
+            {"name": "tool_search", "description": listing, "parameters": {}},
+            indent=2,
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_branding_pushes_the_sentence_over_the_catalog_budget():
+    """The whole bug in two numbers: upstream fits, the brand does not."""
+    assert len(_UPSTREAM_SET_THEME_SENTENCE) == _SET_THEME_CATALOG_BUDGET
+    assert len(_BRANDED_SET_THEME_SENTENCE) == _SET_THEME_CATALOG_BUDGET + 1
+    assert not _clip_like_short_desc(_UPSTREAM_SET_THEME_SENTENCE).endswith("…")
+    assert _clip_like_short_desc(_BRANDED_SET_THEME_SENTENCE).endswith("…")
+
+
+def test_reconcile_set_theme_catalog_line(tmp_path):
+    """Shorten the branded sentence so the catalog line stays whole, in both files."""
+    root = _set_theme_tree(tmp_path)
+
+    changed = _reconcile_set_theme_catalog_line(str(root))
+    assert changed == [
+        _SET_THEME_SOURCE_REL,
+        "tests/fixtures/prompt_surface/tools/tool_search.desktop.claude.json",
+    ]
+
+    text = (root / "tools" / "set_theme_tool.py").read_text(encoding="utf-8")
+    assert _SET_THEME_SHORT in text
+    assert _SET_THEME_LONG not in text
+    compile(text, str(root / "tools" / "set_theme_tool.py"), "exec")
+
+    snapshot = (
+        root / "tests" / "fixtures" / "prompt_surface" / "tools" / "tool_search.desktop.claude.json"
+    )
+    listing = json.loads(snapshot.read_text(encoding="utf-8"))["description"]
+    assert _SET_THEME_LONG not in listing
+    line = next(row for row in listing.splitlines() if row.startswith("- set_theme: "))
+    sentence = line[len("- set_theme: ") :]
+    assert sentence == _SET_THEME_SHORT + " accent colour, light/dark mode, layout."
+    assert len(sentence) <= _SET_THEME_CATALOG_BUDGET
+    # The guard that was red: no catalog line may be clipped.
+    assert not _clip_like_short_desc(sentence).endswith("…")
+
+    # Idempotent: the shortened form is what the render now produces.
+    assert _reconcile_set_theme_catalog_line(str(root)) == []
+
+
+def test_reconcile_set_theme_catalog_line_skips_absent_files(tmp_path):
+    assert _reconcile_set_theme_catalog_line(str(tmp_path)) == []
+
+
+def test_reconcile_set_theme_catalog_line_leaves_a_short_line_alone(tmp_path):
+    """Upstream rewording that already fits is a no-op, not a raise."""
+    short = "Change how the Nastech desktop looks: accent colour, light/dark mode, layout."
+    root = _set_theme_tree(tmp_path, sentence=short)
+
+    assert _reconcile_set_theme_catalog_line(str(root)) == []
+
+
+def test_reconcile_set_theme_catalog_line_flags_a_reworded_description(tmp_path):
+    """A sentence this rule cannot see is a sync-time error, not a red fork lane days later."""
+    root = tmp_path / "branded"
+    (root / "tools").mkdir(parents=True)
+    reworded = "Restyle the desktop in Nastech: pick an accent, mode and layout."
+    (root / "tools" / "set_theme_tool.py").write_text(
+        _set_theme_source(sentence=reworded),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SetThemeCatalogLineError):
+        _reconcile_set_theme_catalog_line(str(root))
+    with pytest.raises(SetThemeCatalogLineError):
+        reconcile_tree(str(root))
+
+
+def test_reconcile_tree_registers_set_theme_catalog_line(tmp_path):
+    """The rule actually runs inside ``reconcile_tree``."""
+    root = _set_theme_tree(tmp_path)
+
+    result = reconcile_tree(str(root))
+    assert _SET_THEME_SOURCE_REL in result.fixed
+    assert "tests/fixtures/prompt_surface/tools/tool_search.desktop.claude.json" in result.fixed
+    assert _SET_THEME_LONG not in (root / "tools" / "set_theme_tool.py").read_text(encoding="utf-8")
+
+
+def test_set_theme_line_is_shortened_before_the_surface_counts(tmp_path):
+    """Ordering: ``surfaces.json`` counts the tool schemas on disk, so the rewrite must precede it.
+
+    The fork's ``test_committed_prompt_surface_is_current`` byte-compares a fresh render against
+    the manifest.  If the manifest is computed before the sentence is shortened it describes the
+    pre-fix text and reports ``stale: surfaces.json`` -- which is the second red this rule clears.
+    """
+    root = _set_theme_tree(tmp_path)
+    snap = root / "tests" / "fixtures" / "prompt_surface"
+    prompts = snap / "prompts"
+    prompts.mkdir(parents=True)
+    stable = "System prompt header.\nBe helpful.\n"
+    (prompts / "desktop.claude.txt").write_text("===== stable =====\n" + stable, encoding="utf-8")
+    tools_dir = snap / "tools"
+    long_schema = json.loads(
+        (tools_dir / "tool_search.desktop.claude.json").read_text(encoding="utf-8")
+    )
+    stale_count = len(json.dumps({"tool_search": long_schema}, sort_keys=True)) // 4
+    (snap / "surfaces.json").write_text(
+        json.dumps(
+            {
+                "desktop.claude": {
+                    "prompt_tokens": {"stable": len(stable) // 4},
+                    "tool_tokens": stale_count,
+                    "tools": ["tool_search"],
+                }
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = reconcile_tree(str(root))
+    assert "tests/fixtures/prompt_surface/surfaces.json" in result.fixed
+    manifest = json.loads((snap / "surfaces.json").read_text(encoding="utf-8"))
+    fixed_schema = json.loads(
+        (tools_dir / "tool_search.desktop.claude.json").read_text(encoding="utf-8")
+    )
+    expected = len(json.dumps({"tool_search": fixed_schema}, sort_keys=True)) // 4
+    assert manifest["desktop.claude"]["tool_tokens"] == expected
+    # Reordering the two rules would leave the manifest describing the clipped-brand text.
+    assert expected != stale_count
 
 
 def test_reconcile_drop_vercel_deploy_job(tmp_path):
@@ -3253,41 +4187,250 @@ def test_reconcile_connector_test_guest_offline_skips_unrelated_tree(tmp_path):
     assert path.read_text(encoding="utf-8") == original
 
 
-def test_reconcile_plugin_catalog_sync_exemption(tmp_path):
-    """The engine's 100WAYS sync PR must skip the data-only catalog gate."""
+# The verbatim upstream step the admission rule anchors on: hermes-agent
+# 86fa9e6ca1 ``.github/workflows/plugin-catalog-ci.yml`` lines 62-118, before
+# branding (branding only renames the word ``hermes`` in one comment line the
+# rewrite never touches).
+_UPSTREAM_CHANGED_ENTRIES_STEP = (
+    "      - name: Find changed catalog entries\n"
+    "        id: changed\n"
+    "        run: |\n"
+    "          set -euo pipefail\n"
+    "          # HEAD is the PR merge commit: diffing it against its first parent is\n"
+    "          # exactly what the PR would land. Refuse anything else rather than\n"
+    "          # silently diffing a single commit.\n"
+    "          if ! git rev-parse -q --verify 'HEAD^2' >/dev/null; then\n"
+    '            echo "::error::expected the pull_request merge commit as HEAD"\n'
+    "            exit 1\n"
+    "          fi\n"
+    "          CHANGED=$(git diff --name-only --diff-filter=AMRT 'HEAD^1' HEAD \\\n"
+    "            -- 'plugin-catalog/*.yaml' 'plugin-catalog/*.yml')\n"
+    "          CHANGED=$(printf '%s' \"$CHANGED\" | grep -v '/removed\\.yaml$' || true)\n"
+    '          if [ -n "$CHANGED" ]; then\n'
+    "            ALL=$(git diff --name-only 'HEAD^1' HEAD)\n"
+    "            OUTSIDE=$(printf '%s' \"$ALL\" | "
+    "grep -vE '^(plugin-catalog|contributors/emails)/' || true)\n"
+    '            if [ -n "$OUTSIDE" ]; then\n'
+    '              echo "::error::catalog entry PRs may only touch '
+    'plugin-catalog/** and contributors/emails/**, found:"\n'
+    "              printf '%s' \"$OUTSIDE\" | tr '\\0\\n' ' '\n"
+    "              echo\n"
+    "              exit 1\n"
+    "            fi\n"
+    "          fi\n"
+    '          echo "Changed catalog entries:"\n'
+    '          echo "${CHANGED:-<none>}"\n'
+    "          {\n"
+    "            echo 'files<<__EOF__'\n"
+    '            echo "$CHANGED"\n'
+    "            echo '__EOF__'\n"
+    '          } >> "$GITHUB_OUTPUT"\n'
+)
+
+_UPSTREAM_PLUGIN_CATALOG_CI = (
+    "name: Plugin Catalog CI\n"
+    "on:\n"
+    "  pull_request:\n"
+    "    paths:\n"
+    '      - "plugin-catalog/**"\n'
+    "jobs:\n"
+    "  pinned-source-validate:\n"
+    "    steps:\n"
+    + _UPSTREAM_CHANGED_ENTRIES_STEP
+    + "      - name: Clone each entry at its pinned sha and validate\n"
+    "        run: echo validated\n"
+)
+
+
+def _write_plugin_catalog_ci(tmp_path, text):
     root = tmp_path / "branded"
     wf = root / ".github" / "workflows"
     wf.mkdir(parents=True)
     target = wf / "plugin-catalog-ci.yml"
-    target.write_text(
-        "name: Plugin Catalog CI\n"
-        "jobs:\n"
-        "  pinned-source-validate:\n"
-        "    steps:\n"
-        "      - name: Find changed catalog entries\n"
-        "        id: changed\n"
-        "        run: |\n"
-        "          set -euo pipefail\n"
-        "          # HEAD is the PR merge commit:\n"
-        "          git diff --name-only HEAD^1 HEAD\n",
-        encoding="utf-8",
+    target.write_text(text, encoding="utf-8")
+    return root, target
+
+
+def _changed_entries_step_body(text):
+    """Extract the reconciled ``Find changed catalog entries`` block scalar."""
+    start = text.index("        run: |\n") + len("        run: |\n")
+    end = text.index("\n      - name: Clone each entry", start)
+    return text[start:end]
+
+
+def _catalog_merge_repo(tmp_path, changed_paths, slug):
+    """A repo whose HEAD is a pull_request-shaped merge commit (HEAD^2 exists).
+
+    ``changed_paths`` arrive on the second parent, exactly like a PR branch:
+    ``HEAD^1..HEAD`` diffs to those files and nothing else.
+    """
+    repo = tmp_path / f"repo-{slug}"
+    repo.mkdir()
+
+    def _git(*args):
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t", "-C", str(repo), *args],
+            check=True,
+            capture_output=True,
+        )
+
+    _git("init", "-q", "-b", "main")
+    (repo / "README.md").write_text("base\n", encoding="utf-8")
+    _git("add", "README.md")
+    _git("commit", "-q", "-m", "base")
+    _git("checkout", "-q", "-b", "pr")
+    for rel in changed_paths:
+        path = repo / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("entry: 1\n", encoding="utf-8")
+    _git("add", "-A")
+    _git("commit", "-q", "-m", "pr change")
+    _git("checkout", "-q", "main")
+    _git("merge", "-q", "--no-ff", "-m", "merge", "pr")
+    return repo
+
+
+def _changed_entries_script(text):
+    """De-block the reconciled step body into a runnable bash script."""
+    body = _changed_entries_step_body(text)
+    return "\n".join(line[10:] if line.startswith(" " * 10) else line for line in body.splitlines())
+
+
+def _run_changed_entries_step(tmp_path, script, *, head_ref, head_repo, changed_paths):
+    slug = f"{head_ref}-{head_repo}".replace("/", "-")
+    repo = _catalog_merge_repo(tmp_path, changed_paths, slug)
+    out_file = tmp_path / f"output-{slug}"
+    script = script.replace("${{ github.event.pull_request.head.repo.full_name }}", head_repo)
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": os.environ.get("HOME", "/tmp"),
+        "GITHUB_HEAD_REF": head_ref,
+        "GITHUB_OUTPUT": str(out_file),
+    }
+    proc = subprocess.run(
+        ["bash"],
+        input=script,
+        capture_output=True,
+        text=True,
+        cwd=repo,
+        env=env,
     )
+    output = out_file.read_text(encoding="utf-8") if out_file.exists() else ""
+    return proc, output
 
-    assert _reconcile_plugin_catalog_sync_exemption(str(root)) is True
+
+def test_reconcile_plugin_catalog_admission_exempts_sync_head(tmp_path):
+    """The guard block is inserted in front of the untouched data-only body."""
+    root, target = _write_plugin_catalog_ci(tmp_path, _UPSTREAM_PLUGIN_CATALOG_CI)
+
+    assert _reconcile_plugin_catalog_admission(str(root)) is True
     text = target.read_text(encoding="utf-8")
-    assert 'GITHUB_HEAD_REF' in text
-    assert '"100WAYS"' in text
-    assert 'nastechresearch/nastech-agent' in text
-    assert "files<<__EOF__" in text
-    # The original body is preserved after the guarded early exit.
-    assert "          # HEAD is the PR merge commit:\n" in text
+    # The exemption keys on BOTH clauses: reserved branch AND same-repo head.
+    assert 'if [ "${GITHUB_HEAD_REF:-}" = "100WAYS" ] \\' in text
+    assert (
+        '&& [ "${{ github.event.pull_request.head.repo.full_name }}" = '
+        '"nastechresearch/nastech-agent" ]; then' in text
+    )
+    # Everything the step does for a real admission PR is preserved verbatim.
+    for line in _UPSTREAM_CHANGED_ENTRIES_STEP.splitlines()[3:]:
+        assert line in text
+    # Only the step header was rewritten: the tail after the anchor is intact.
+    anchor = "# HEAD is the PR merge commit:"
+    assert text.count(anchor) == 1
+    assert _UPSTREAM_CHANGED_ENTRIES_STEP.split(anchor)[1] in text
 
-    # Idempotent: the marker now sits behind the guard, so the needle is gone.
-    assert _reconcile_plugin_catalog_sync_exemption(str(root)) is False
+
+def test_reconcile_plugin_catalog_admission_is_a_fixed_point(tmp_path):
+    root, target = _write_plugin_catalog_ci(tmp_path, _UPSTREAM_PLUGIN_CATALOG_CI)
+    assert _reconcile_plugin_catalog_admission(str(root)) is True
+    once = target.read_bytes()
+    assert _reconcile_plugin_catalog_admission(str(root)) is False
+    assert target.read_bytes() == once
 
 
-def test_reconcile_plugin_catalog_sync_exemption_skips_missing_workflow(tmp_path):
-    assert _reconcile_plugin_catalog_sync_exemption(str(tmp_path)) is False
+def test_reconcile_plugin_catalog_admission_guard_behaviour(tmp_path):
+    """The reconciled step EXEMPTS only same-repo 100WAYS heads and still
+    enforces data-only admission for everyone else -- executed, not asserted
+    about the text: the script body is extracted from the reconciled file and
+    run with bash against a real merge-commit repo."""
+    root, target = _write_plugin_catalog_ci(tmp_path, _UPSTREAM_PLUGIN_CATALOG_CI)
+    assert _reconcile_plugin_catalog_admission(str(root)) is True
+    script = _changed_entries_script(target.read_text(encoding="utf-8"))
+
+    def run(head_ref, head_repo, changed_paths):
+        return _run_changed_entries_step(
+            tmp_path,
+            script,
+            head_ref=head_ref,
+            head_repo=head_repo,
+            changed_paths=changed_paths,
+        )
+
+    # A: the engine's own sync PR -- same repo, reserved branch, PR touches
+    # thousands of non-catalog files. Exempt, with an EMPTY file list so the
+    # downstream per-entry validation steps are skipped by their own gate.
+    proc, output = run(
+        "100WAYS",
+        "nastechresearch/nastech-agent",
+        ["plugin-catalog/timestamp-ref.yaml", "agent/foo.py", "tests/x.py"],
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "catalog admission gate does not apply" in proc.stdout
+    assert output == "files<<__EOF__\n__EOF__\n"
+
+    # B: a cross-repo PR even with a branch NAMED 100WAYS -- the same-repo
+    # clause blocks the exemption and the data-only rule fires.
+    proc, _ = run(
+        "100WAYS",
+        "evil-totals/nastech-agent",
+        ["plugin-catalog/timestamp-ref.yaml", "agent/foo.py"],
+    )
+    assert proc.returncode == 1
+    assert "may only touch plugin-catalog/**" in proc.stdout
+
+    # C: a same-repo PR from a non-reserved branch (a human shipping an entry
+    # plus tooling) -- the branch clause blocks the exemption and it fires too.
+    proc, _ = run(
+        "add-my-plugin",
+        "nastechresearch/nastech-agent",
+        ["plugin-catalog/timestamp-ref.yaml", "agent/foo.py"],
+    )
+    assert proc.returncode == 1
+    assert "may only touch plugin-catalog/**" in proc.stdout
+
+    # D: a genuine data-only admission PR from outside still runs the FULL
+    # gate: not exempt, entry listed for the pinned-sha validation steps.
+    proc, output = run("add-my-plugin", "somebody/else", ["plugin-catalog/new.yaml"])
+    assert proc.returncode == 0, proc.stderr
+    assert "plugin-catalog/new.yaml" in output
+
+
+def test_reconcile_plugin_catalog_admission_moved_anchor_raises(tmp_path):
+    """A reworded upstream anchor stops the sync instead of silently dropping
+    the exemption -- that silent drop is how the 2026-10-13 red was born."""
+    moved = _UPSTREAM_PLUGIN_CATALOG_CI.replace(
+        "# HEAD is the PR merge commit:", "# HEAD names the PR merge commit:"
+    )
+    root, target = _write_plugin_catalog_ci(tmp_path, moved)
+    with pytest.raises(PluginCatalogAdmissionError, match="plugin-catalog-ci.yml"):
+        _reconcile_plugin_catalog_admission(str(root))
+    # Still untouched: raising must not half-write the file.
+    assert "Fork 100WAYS sync PR" not in target.read_text(encoding="utf-8")
+    assert issubclass(PluginCatalogAdmissionError, ValueError)
+
+
+def test_reconcile_plugin_catalog_admission_skips_missing_workflow(tmp_path):
+    """Absent file (an engine-local tree without the upstream workflow) is a
+    no-op -- the fail-loud contract covers only trees that carry the file."""
+    assert _reconcile_plugin_catalog_admission(str(tmp_path)) is False
+
+
+def test_reconcile_plugin_catalog_admission_registered_in_reconcile_tree(tmp_path):
+    """reconcile_tree must dispatch it, or every sync re-publishes the red."""
+    root, target = _write_plugin_catalog_ci(tmp_path, _UPSTREAM_PLUGIN_CATALOG_CI)
+    result = reconcile_tree(str(root))
+    assert ".github/workflows/plugin-catalog-ci.yml" in result.fixed
+    assert "Fork 100WAYS sync PR" in target.read_text(encoding="utf-8")
 
 
 def test_reconcile_pinned_source_clones_names_every_external_ref(tmp_path):
@@ -5734,6 +6877,296 @@ def test_unsigned_darwin_build_env_stops_when_the_step_moves(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# The Store credential gate must list every name the lane consumes
+# ---------------------------------------------------------------------------
+
+
+def _store_workflow(names, *, extra=()):
+    """A minimal workflow whose ``stable-store`` job consumes ``names``.
+
+    ``workflow_references`` only reads names inside a job block under a top-level
+    ``jobs:`` map, so the names go in the job's ``env``.  ``extra`` adds a
+    neighbouring job's credentials to prove the gate ignores names outside the
+    Store family (``DOCKERHUB_*`` is a different lane's business).
+    """
+    env = "".join(f"          {n}: ${{{{ secrets.{n} }}}}\n" for n in names)
+    other = "".join(f"          {n}: ${{{{ secrets.{n} }}}}\n" for n in extra)
+    body = (
+        "name: desktop release\n"
+        "on:\n  workflow_dispatch:\n"
+        "jobs:\n"
+        "  stable-store:\n"
+        "    runs-on: windows-latest\n"
+        "    steps:\n"
+        "      - run: msstore reconfigure\n"
+        "        env:\n"
+        f"{env}"
+    )
+    if other:
+        body += (
+            "  docker-publish:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: docker push\n"
+            "        env:\n"
+            f"{other}"
+        )
+    return body
+
+
+def _store_tree(tmp_path, text, filename="desktop-bundled-release.yml"):
+    candidate = tmp_path / "candidate"
+    wf = candidate / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / filename).write_text(text, encoding="utf-8")
+    return candidate
+
+
+def _store_gate_reads(candidate):
+    """The Store-family names ``pubconfig``'s parser reads out of a tree.
+
+    Derived with the same reader and parser the pre-flight classifies with, so the
+    consumed set is never a list typed next to the gate it is compared against.
+    """
+    from hundredways import pubconfig
+
+    references = []
+    for name, text in pubconfig.load_workflows(str(candidate)):
+        references.extend(pubconfig.workflow_references(text, workflow=name))
+    return {r.name for r in references if r.name.startswith("MS_STORE_")}
+
+
+def test_the_shipped_gate_covers_the_forks_own_store_lane():
+    """``STORE_CREDENTIALS`` == the names the fork's real Store job reads.
+
+    The workflow here is a verbatim transcription of the fork's lane
+    (``tests/fixtures/store_lane``, from ``origin/main``
+    ``desktop-bundled-release.yml`` measured 2026-10-25: ``stable-store`` at 2477, the
+    credential ``env`` at 2487-2497, the ``msstore reconfigure`` of ``--sellerId`` at
+    2513), not a fixture built from the gate -- so dropping ``MS_STORE_SELLER_ID`` from
+    the gate fails this test instead of shipping the hole again.
+    """
+    lane = os.path.join(os.path.dirname(__file__), "fixtures", "store_lane")
+
+    assert _store_gate_reads(lane) == frozenset(STORE_CREDENTIALS)
+    assert "MS_STORE_SELLER_ID" in STORE_CREDENTIALS
+    assert _reconcile_store_gate_covers_the_lane(lane) is None
+
+
+def test_store_gate_lists_every_name_a_lane_consumes(tmp_path):
+    """A gate written to match its lane passes; the completeness is derived twice.
+
+    The consumed set comes from the parser, the gated set from the engine's table,
+    and the rule compares them the same way ``pubconfig`` will at pre-flight.
+    """
+    candidate = _store_tree(tmp_path, _store_workflow(STORE_CREDENTIALS))
+
+    assert _store_gate_reads(candidate) == frozenset(STORE_CREDENTIALS)
+    assert _reconcile_store_gate_covers_the_lane(str(candidate)) is None
+
+
+def test_store_gate_refuses_a_sixth_credential_the_lane_consumes(tmp_path):
+    """A credential upstream adds to the lane but the gate omits must fail the sync.
+
+    Without the raise the gate admits a run whose Store job reads the new name
+    as an empty string -- exactly the shape that let the seller-id hole ship.
+    """
+    candidate = _store_tree(
+        tmp_path,
+        _store_workflow((*STORE_CREDENTIALS, "MS_STORE_CERT_HASH")),
+    )
+
+    with pytest.raises(StoreLaneGateError, match="MS_STORE_CERT_HASH"):
+        _reconcile_store_gate_covers_the_lane(str(candidate))
+
+
+def test_store_gate_refuses_a_lane_it_cannot_measure(tmp_path):
+    """A visible ``msstore`` step with no parsable credential is a moved anchor.
+
+    The audit is only worth shipping if it can see the lane: a tree whose Store step
+    reads its credentials somewhere the parser does not look would report an empty
+    consumed set, pass, and let the same hole reopen silently.  The rule raises and
+    names the file:line a human has to re-derive.
+    """
+    moved = _store_workflow(STORE_CREDENTIALS).replace("secrets.MS_STORE_", "env.MS_STORE_")
+    assert "msstore" in moved
+    candidate = _store_tree(tmp_path, moved)
+
+    assert _store_gate_reads(candidate) == set()
+    with pytest.raises(StoreLaneGateError, match="blind"):
+        _reconcile_store_gate_covers_the_lane(str(candidate))
+
+
+def test_store_gate_refuses_a_gate_that_is_not_one_name_family(tmp_path, monkeypatch):
+    """The family prefix is derived from the gate, so a mixed gate cannot be audited.
+
+    Guessing a shorter stem would match names the lane does not own; refusing says
+    so instead of quietly checking nothing.
+    """
+    from hundredways import updates
+
+    candidate = _store_tree(tmp_path, _store_workflow(STORE_CREDENTIALS))
+    monkeypatch.setattr(updates, "STORE_CREDENTIALS", ("MS_STORE_TENANT_ID", "DOCKERHUB_TOKEN"))
+
+    with pytest.raises(StoreLaneGateError, match="name-family prefix"):
+        updates._reconcile_store_gate_covers_the_lane(str(candidate))
+
+
+def test_store_gate_ignores_a_neighbour_lanes_credentials(tmp_path):
+    """A name outside the Store family is another lane's hole, not a short gate.
+
+    Refusing here would widen the guard onto credentials the Store lane never
+    reads (``DOCKERHUB_TOKEN`` belongs to the image publish), which is not this
+    rule's job and would block a sync whose Store lane is complete.
+    """
+    candidate = _store_tree(
+        tmp_path,
+        _store_workflow(STORE_CREDENTIALS, extra=("DOCKERHUB_TOKEN",)),
+    )
+
+    assert _reconcile_store_gate_covers_the_lane(str(candidate)) is None
+
+
+def test_store_gate_is_read_only_and_absent_ci_is_a_no_op(tmp_path):
+    """The rule audits, it never edits: a pass leaves the tree byte-for-byte alone."""
+    candidate = _store_tree(tmp_path, _store_workflow(STORE_CREDENTIALS))
+    workflow = candidate / ".github/workflows/desktop-bundled-release.yml"
+    before = workflow.read_bytes()
+    empty_ci = tmp_path / "empty-ci"
+    (empty_ci / ".github" / "workflows").mkdir(parents=True)
+
+    assert _reconcile_store_gate_covers_the_lane(str(candidate)) is None
+    assert _reconcile_store_gate_covers_the_lane(str(candidate)) is None
+    assert workflow.read_bytes() == before
+    # no CI directory at all, and a CI directory holding no workflow, are both
+    # "nothing to audit" -- not a crash and not a silently green gate.
+    assert _reconcile_store_gate_covers_the_lane(str(tmp_path / "empty")) is None
+    assert _reconcile_store_gate_covers_the_lane(str(empty_ci)) is None
+
+
+def test_store_gate_runs_from_reconcile_tree(tmp_path):
+    """``reconcile_tree`` must dispatch the gate check, or the fork ships the hole.
+
+    The lane goes in its own workflow file here because the audit reads *every*
+    workflow while the unrelated darwin-anchor rule only knows
+    ``desktop-bundled-release.yml``; naming the real file would make this test fail
+    on that rule's anchor instead of on the dispatch it pins.
+    """
+    candidate = _store_tree(
+        tmp_path,
+        _store_workflow((*STORE_CREDENTIALS, "MS_STORE_CERT_HASH")),
+        filename="store-lane.yml",
+    )
+
+    with pytest.raises(StoreLaneGateError, match="MS_STORE_CERT_HASH"):
+        reconcile_tree(str(candidate))
+
+
+def test_store_gate_is_dispatched_after_every_workflow_writer():
+    """Ordering is load-bearing: the audit measures the tree the sync ships.
+
+    Derived from the engine's own AST rather than a remembered list: every
+    ``_reconcile_*`` rule that touches a ``.github/workflows/`` path -- by literal,
+    through a module constant holding one, or through a rule it calls -- must be
+    dispatched before the Store-gate audit, or the audit grades a workflow a later
+    rule then rewrites.
+    """
+    from hundredways import updates as updates_module
+
+    tree = ast.parse(open(updates_module.__file__, encoding="utf-8").read())
+    path_consts = set()
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Constant):
+            continue
+        if isinstance(node.value.value, str) and node.value.value.startswith(".github/workflows/"):
+            path_consts.update(t.id for t in node.targets if isinstance(t, ast.Name))
+    rules = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("_reconcile_")
+    }
+
+    def touches_a_workflow(node):
+        for sub in ast.walk(node):
+            if (
+                isinstance(sub, ast.Constant)
+                and isinstance(sub.value, str)
+                and sub.value.startswith(".github/workflows/")
+            ):
+                return True
+            if isinstance(sub, ast.Name) and sub.id in path_consts:
+                return True
+        return False
+
+    writers = {name for name, node in rules.items() if touches_a_workflow(node)}
+    grown = True
+    while grown:
+        grown = False
+        for name, node in rules.items():
+            if name in writers:
+                continue
+            called = {
+                sub.func.id
+                for sub in ast.walk(node)
+                if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
+            }
+            if called & writers:
+                writers.add(name)
+                grown = True
+
+    body = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "reconcile_tree"
+    )
+    order = {}
+    for sub in ast.walk(body):
+        if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and sub.func.id in rules:
+            order[sub.func.id] = min(sub.lineno, order.get(sub.func.id, sub.lineno))
+
+    assert writers, "the sync writes workflows, so this ordering has to be pinned"
+    assert "_reconcile_store_gate_covers_the_lane" in order
+    audit = order["_reconcile_store_gate_covers_the_lane"]
+    late = sorted(name for name, line in order.items() if name in writers and line > audit)
+    assert not late, f"the Store audit runs before workflow writers: {late}"
+
+
+def test_store_credentials_gate_has_no_ungated_store_name(tmp_path):
+    """The pre-flight agrees: with the fix the Store lane has no ungated-consumed name."""
+    from hundredways import pubconfig
+
+    candidate = _store_tree(tmp_path, _store_workflow(STORE_CREDENTIALS))
+    (candidate / ".github/workflows/docker.yml").write_text(
+        _store_workflow((), extra=("DOCKERHUB_TOKEN",)), encoding="utf-8"
+    )
+    found = pubconfig.analyze_root(str(candidate), pubconfig.ActionsInventory())
+
+    ungated = {f.name for f in found if f.verdict == pubconfig.UNGATED_CONSUMED}
+    assert not {n for n in ungated if n.startswith("MS_STORE_")}
+    assert _reconcile_store_gate_covers_the_lane(str(candidate)) is None
+
+
+def test_store_rest_credentials_stay_the_four_the_script_reads(tmp_path):
+    """The lane set grew, the ``store.py`` fold did not: it still reads only REST names."""
+    from hundredways.updates import _reconcile_signing_gated_store
+
+    fixture = os.path.join(os.path.dirname(__file__), "fixtures", "signing_lanes")
+    candidate = tmp_path / "fork"
+    shutil.copytree(fixture, str(candidate))
+    store_py = candidate / "scripts/releases/store.py"
+
+    assert _reconcile_signing_gated_store(str(candidate)) is True
+    after = store_py.read_text(encoding="utf-8")
+
+    # The injected tuple names exactly the REST set, so the seller id -- which the
+    # workflow's msstore CLI uses but the Partner Center call never reads -- does
+    # not turn a configured submission into a false skip.
+    injected = after.split("_STORE_CREDENTIALS = (", 1)[1].split(")", 1)[0]
+    for name in STORE_REST_CREDENTIALS:
+        assert f'"{name}"' in injected
+    assert "MS_STORE_SELLER_ID" not in injected
+    # The fold is idempotent: a second pass changes the file not at all.
+    assert _reconcile_signing_gated_store(str(candidate)) is False
 # The receipt's commit prose lives in a data log, not in the JSON the fork lints
 # ---------------------------------------------------------------------------
 
