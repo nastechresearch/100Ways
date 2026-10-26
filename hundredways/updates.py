@@ -1453,6 +1453,90 @@ def _split_prompt_surface_tiers(text: str) -> dict[str, str]:
     return tiers
 
 
+class SetThemeCatalogLineError(ValueError):
+    """The branded ``set_theme`` description no longer matches the shape this rule rewrites.
+
+    A ``ValueError`` on purpose (see :class:`ChannelReaderUserAgentError`): the conformance
+    reporter records it and the ``reconcile`` stage fails the update.  Silently returning here
+    would put the one-character brand delta back into the catalog line and move the failure to
+    two of the fork's own guards on the next candidate, days later, with nothing to point at.
+    """
+
+
+# ``tools/tool_search_catalog.py`` renders each builtin tool's catalog line with
+# ``_short_desc(description, CATALOG_SUMMARY_MAX_CHARS)`` and that budget is 80.  Upstream's
+# ``set_theme`` first sentence is *exactly* 80 characters --
+# "Change how the Hermes desktop app looks: accent colour, light/dark mode, layout." --
+# so it survives the clip whole.  Branding ``Hermes`` -> ``Nastech`` costs one character, the
+# branded sentence is 81, and ``_short_desc`` then clips it on the word boundary and appends
+# the ellipsis.  Two fork guards fire and both are right:
+#   * ``tests/tools/test_tool_search.py`` ->
+#     ``TestCatalogListing::test_builtin_catalog_lines_are_whole_first_sentences`` refuses any
+#     catalog line ending in "…" ("a clipped one hides what the tool does");
+#   * ``tests/ci/test_prompt_surface.py`` re-renders and byte-compares the committed snapshot,
+#     which still carries the unclipped line, and reports
+#     ``tools/stale: tool_search.desktop.claude.json`` plus ``stale: surfaces.json``.
+# The budget is the product's, not this fork's: widening ``CATALOG_SUMMARY_MAX_CHARS`` to 81
+# would buy back a character for the brand at the cost of every tool's catalog line.  Dropping
+# the redundant " app" from this one description keeps the branded sentence whole (77
+# characters), so the live render is unclipped again and the snapshot's copy of the same line
+# is rewritten to match it.  ``_reconcile_prompt_surface_snapshot`` runs after this and
+# recomputes ``surfaces.json`` from the files it just edited.
+# (measured 2026-10-24 on candidate ``7f790c348`` / upstream ``5894e750c3``, jobs
+# 120743383196 and 120743383269; both reproduce on Linux, so neither is a capacity red).
+_SET_THEME_SOURCE_REL = "tools/set_theme_tool.py"
+_SET_THEME_LONG = "Change how the Nastech desktop app looks:"
+_SET_THEME_SHORT = "Change how the Nastech desktop looks:"
+#: The snapshot embeds the same sentence inside the tool_search catalog listing.
+_SET_THEME_SNAPSHOT_DIR = "tests/fixtures/prompt_surface/tools"
+#: tools/tool_search_catalog.CATALOG_SUMMARY_MAX_CHARS -- the fork's own budget, mirrored here
+#: only so the tests can prove the rewrite lands under it.  It is never widened.
+_SET_THEME_CATALOG_BUDGET = 80
+
+
+def _reconcile_set_theme_catalog_line(dst: str) -> list[str]:
+    """Keep ``set_theme``'s catalog line a whole first sentence after the brand delta.
+
+    Rewrites the branded description in :data:`_SET_THEME_SOURCE_REL` and every committed
+    prompt-surface tool schema that quotes it.  Returns the repo-relative paths changed; a
+    second pass is a no-op because the short form is what the render then produces.
+    """
+    fixed: list[str] = []
+    text = _reconcile_budget_read(dst, _SET_THEME_SOURCE_REL)
+    if text is None:
+        return fixed
+    if _SET_THEME_LONG in text:
+        _reconcile_budget_write(
+            dst, _SET_THEME_SOURCE_REL, text.replace(_SET_THEME_LONG, _SET_THEME_SHORT, 1)
+        )
+        fixed.append(_SET_THEME_SOURCE_REL)
+    elif _SET_THEME_SHORT not in text:
+        raise SetThemeCatalogLineError(
+            f"{_SET_THEME_SOURCE_REL} carries neither {_SET_THEME_LONG!r} nor its replacement, "
+            "so the brand-length guard no longer applies. Branding adds a character to "
+            "set_theme's first sentence, and if that sentence reaches "
+            f"{_SET_THEME_CATALOG_BUDGET + 1} characters the catalog clips it: "
+            "test_builtin_catalog_lines_are_whole_first_sentences goes red and "
+            "test_committed_prompt_surface_is_current reports the snapshot stale. Update the "
+            "needles in _reconcile_set_theme_catalog_line to upstream's new shape, then re-run."
+        )
+    try:
+        names = sorted(os.listdir(os.path.join(dst, *_SET_THEME_SNAPSHOT_DIR.split("/"))))
+    except OSError:
+        return fixed
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        rel = f"{_SET_THEME_SNAPSHOT_DIR}/{name}"
+        body = _reconcile_budget_read(dst, rel)
+        if body is None or _SET_THEME_LONG not in body:
+            continue
+        _reconcile_budget_write(dst, rel, body.replace(_SET_THEME_LONG, _SET_THEME_SHORT))
+        if rel not in fixed:
+            fixed.append(rel)
+    return fixed
+
+
 def _reconcile_prompt_surface_snapshot(dst: str) -> list[str]:
     """Re-align the committed prompt-surface snapshot after branding.
 
@@ -4044,6 +4128,98 @@ def _reconcile_windows_boot_lifecycle_race(dst: str) -> bool:
     return True
 
 
+_WINDOWS_SUSPEND_TEST_REL = "tests/nastech_cli/test_local_runtime_processes.py"
+_WINDOWS_SUSPEND_TEST_DEF = "def test_failed_setup_never_runs_child_and_releases_handles("
+_WINDOWS_SUSPEND_ONE_SHOT = (
+    "        assert psutil.Process(proc.pid).status() == psutil.STATUS_STOPPED\n"
+)
+_WINDOWS_SUSPEND_MARKER = "never observed suspended"
+_WINDOWS_SUSPEND_BUDGET_S = 2.0
+_WINDOWS_SUSPEND_WAIT = (
+    "        # CreateProcessW answers before every thread of a CREATE_SUSPENDED\n"
+    "        # launch reaches the system thread table, and psutil's Windows\n"
+    "        # status() reads exactly that table (cext.proc_is_suspended). The\n"
+    "        # child still cannot run here -- spawn_server resumes it only after\n"
+    "        # this assign() returns -- so poll for the observation instead of\n"
+    "        # demanding it land on the first read. A child that really is running\n"
+    "        # never settles, and the marker check below catches that too.\n"
+    "        assert _wait(\n"
+    "            lambda: psutil.Process(proc.pid).status() == psutil.STATUS_STOPPED,\n"
+    f"            timeout={_WINDOWS_SUSPEND_BUDGET_S},\n"
+    '        ), "child never observed suspended"\n'
+)
+
+
+class WindowsSuspendObservationError(ValueError):
+    """The suspended-child assert moved, so the racy one-shot read may still be there.
+
+    A ``ValueError`` on purpose: :mod:`hundredways.conformance` reports it as a
+    candidate issue and the ``reconcile`` stage fails the update rather than
+    publishing a tree that silently keeps upstream's single ``psutil`` read.  That
+    read is what red-flakes ``Windows-only tests (arm64)`` with
+    ``assert 'running' == 'stopped'``, and the red names neither the race nor the
+    file that can fix it.
+    """
+
+
+def _reconcile_windows_suspend_observation(dst: str) -> bool:
+    """Poll for the ``CREATE_SUSPENDED`` observation instead of reading it once.
+
+    ``spawn_server`` (``nastech_cli/local_runtime/processes.py``) launches the router
+    with ``CREATE_SUSPENDED``, calls ``job.assign(proc)``, and only then ``resume()``s
+    it, so containment genuinely happens while the child cannot execute.  The test
+    asserts that precondition inside its patched ``assign``, and on Windows psutil's
+    ``Process.status()`` is ``cext.proc_is_suspended(pid)`` (``_pswindows.py:1041``) --
+    a read of the primary thread's wait reason in the system thread table, which is not
+    always published in the instant ``CreateProcessW`` returns.  A single read can then
+    answer ``'running'`` about a thread the kernel will not schedule.
+
+    The lane is red only some of the time, and only on that line.  Of the 12
+    ``Windows-only tests (arm64)`` jobs on the ``windows-11-arm`` image across the last
+    six ``main`` runs, 10 passed this file and 2 failed at line 177 (jobs 119653984058,
+    117618374648), and the same assertion is what fails the open candidate (job
+    120819400596).  Every failure is ``assert 'running' == 'stopped'`` on
+    ``test_failed_setup_never_runs_child_and_releases_handles[assign]`` or ``[resume]``,
+    both of which reach that line.
+
+    This is not a budget change: the assertion still requires ``STATUS_STOPPED``, it
+    simply lets the kernel finish saying so.  ``_wait`` is the file's own helper at a
+    30 ms cadence, so 2.0 s is ~66 reads and is spent only on a failure path.  The
+    ``assert not marker.exists()`` underneath -- the actual product claim that a failed
+    setup never runs the child -- is left exactly as upstream wrote it, and a child that
+    really did resume still fails.
+    """
+    text = _reconcile_budget_read(dst, _WINDOWS_SUSPEND_TEST_REL)
+    if text is None or _WINDOWS_SUSPEND_MARKER in text:
+        return False
+    if text.count(_WINDOWS_SUSPEND_ONE_SHOT) == 1:
+        if "def _wait(" not in text:
+            raise WindowsSuspendObservationError(
+                f"{_WINDOWS_SUSPEND_TEST_REL} no longer defines the ``_wait`` helper the "
+                "bounded poll is built from, so installing the poll there would be a "
+                "NameError on Windows. Re-derive _WINDOWS_SUSPEND_WAIT against whatever "
+                "poll helper upstream uses now."
+            )
+        _reconcile_budget_write(
+            dst,
+            _WINDOWS_SUSPEND_TEST_REL,
+            text.replace(_WINDOWS_SUSPEND_ONE_SHOT, _WINDOWS_SUSPEND_WAIT, 1),
+        )
+        return True
+    if _WINDOWS_SUSPEND_TEST_DEF not in text:
+        return False  # upstream dropped the test; there is nothing left to reconcile
+    raise WindowsSuspendObservationError(
+        f"{_WINDOWS_SUSPEND_TEST_REL} no longer holds exactly one line spelling the "
+        "suspended-child check as "
+        f"{_WINDOWS_SUSPEND_ONE_SHOT.strip()!r}, so the sync cannot install the bounded "
+        "_wait poll and upstream's one-shot psutil read stays. That read is the "
+        "Windows-only tests (arm64) flake: "
+        "test_failed_setup_never_runs_child_and_releases_handles goes red with "
+        "assert 'running' == 'stopped'. Re-derive _WINDOWS_SUSPEND_ONE_SHOT against "
+        "upstream's current file."
+    )
+
+
 class WindowsRealGitLocateError(ValueError):
     """``_locate_real_git`` no longer matches the shape the robustness patch needs.
 
@@ -5809,6 +5985,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_windows_boot_lifecycle_race(dst):
         result.total += 1
         result.fixed.append("tests/e2e/core/windows/test_boot_lifecycle.py")
+    if _reconcile_windows_suspend_observation(dst):
+        result.total += 1
+        result.fixed.append(_WINDOWS_SUSPEND_TEST_REL)
     if _reconcile_install_ps1_store_guard_test(dst):
         result.total += 1
         result.fixed.append("scripts/tests/test-install-ps1-store-guard.ps1")
@@ -5944,6 +6123,13 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_gateway_plugin_gate_native_ticket(dst):
         result.total += 1
         result.fixed.append("nastech_cli/web_server.py")
+    # Brand-length guard on set_theme's catalog line.  Must run before the prompt-surface
+    # reconcile below: that step recomputes surfaces.json from the tool schemas on disk, so
+    # the description and its snapshot copy have to be shortened first or the manifest counts
+    # describe the pre-fix text.
+    for rel in _reconcile_set_theme_catalog_line(dst):
+        result.total += 1
+        result.fixed.append(rel)
     # Prompt-surface LAST: it counts characters in the rendered prompts, and
     # _reconcile_domains above rewrites the domain hosts inside those prompt
     # files.  Computing it any earlier leaves surfaces.json describing the
