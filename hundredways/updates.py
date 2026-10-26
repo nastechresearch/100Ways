@@ -1453,6 +1453,90 @@ def _split_prompt_surface_tiers(text: str) -> dict[str, str]:
     return tiers
 
 
+class SetThemeCatalogLineError(ValueError):
+    """The branded ``set_theme`` description no longer matches the shape this rule rewrites.
+
+    A ``ValueError`` on purpose (see :class:`ChannelReaderUserAgentError`): the conformance
+    reporter records it and the ``reconcile`` stage fails the update.  Silently returning here
+    would put the one-character brand delta back into the catalog line and move the failure to
+    two of the fork's own guards on the next candidate, days later, with nothing to point at.
+    """
+
+
+# ``tools/tool_search_catalog.py`` renders each builtin tool's catalog line with
+# ``_short_desc(description, CATALOG_SUMMARY_MAX_CHARS)`` and that budget is 80.  Upstream's
+# ``set_theme`` first sentence is *exactly* 80 characters --
+# "Change how the Hermes desktop app looks: accent colour, light/dark mode, layout." --
+# so it survives the clip whole.  Branding ``Hermes`` -> ``Nastech`` costs one character, the
+# branded sentence is 81, and ``_short_desc`` then clips it on the word boundary and appends
+# the ellipsis.  Two fork guards fire and both are right:
+#   * ``tests/tools/test_tool_search.py`` ->
+#     ``TestCatalogListing::test_builtin_catalog_lines_are_whole_first_sentences`` refuses any
+#     catalog line ending in "…" ("a clipped one hides what the tool does");
+#   * ``tests/ci/test_prompt_surface.py`` re-renders and byte-compares the committed snapshot,
+#     which still carries the unclipped line, and reports
+#     ``tools/stale: tool_search.desktop.claude.json`` plus ``stale: surfaces.json``.
+# The budget is the product's, not this fork's: widening ``CATALOG_SUMMARY_MAX_CHARS`` to 81
+# would buy back a character for the brand at the cost of every tool's catalog line.  Dropping
+# the redundant " app" from this one description keeps the branded sentence whole (77
+# characters), so the live render is unclipped again and the snapshot's copy of the same line
+# is rewritten to match it.  ``_reconcile_prompt_surface_snapshot`` runs after this and
+# recomputes ``surfaces.json`` from the files it just edited.
+# (measured 2026-10-24 on candidate ``7f790c348`` / upstream ``5894e750c3``, jobs
+# 120743383196 and 120743383269; both reproduce on Linux, so neither is a capacity red).
+_SET_THEME_SOURCE_REL = "tools/set_theme_tool.py"
+_SET_THEME_LONG = "Change how the Nastech desktop app looks:"
+_SET_THEME_SHORT = "Change how the Nastech desktop looks:"
+#: The snapshot embeds the same sentence inside the tool_search catalog listing.
+_SET_THEME_SNAPSHOT_DIR = "tests/fixtures/prompt_surface/tools"
+#: tools/tool_search_catalog.CATALOG_SUMMARY_MAX_CHARS -- the fork's own budget, mirrored here
+#: only so the tests can prove the rewrite lands under it.  It is never widened.
+_SET_THEME_CATALOG_BUDGET = 80
+
+
+def _reconcile_set_theme_catalog_line(dst: str) -> list[str]:
+    """Keep ``set_theme``'s catalog line a whole first sentence after the brand delta.
+
+    Rewrites the branded description in :data:`_SET_THEME_SOURCE_REL` and every committed
+    prompt-surface tool schema that quotes it.  Returns the repo-relative paths changed; a
+    second pass is a no-op because the short form is what the render then produces.
+    """
+    fixed: list[str] = []
+    text = _reconcile_budget_read(dst, _SET_THEME_SOURCE_REL)
+    if text is None:
+        return fixed
+    if _SET_THEME_LONG in text:
+        _reconcile_budget_write(
+            dst, _SET_THEME_SOURCE_REL, text.replace(_SET_THEME_LONG, _SET_THEME_SHORT, 1)
+        )
+        fixed.append(_SET_THEME_SOURCE_REL)
+    elif _SET_THEME_SHORT not in text:
+        raise SetThemeCatalogLineError(
+            f"{_SET_THEME_SOURCE_REL} carries neither {_SET_THEME_LONG!r} nor its replacement, "
+            "so the brand-length guard no longer applies. Branding adds a character to "
+            "set_theme's first sentence, and if that sentence reaches "
+            f"{_SET_THEME_CATALOG_BUDGET + 1} characters the catalog clips it: "
+            "test_builtin_catalog_lines_are_whole_first_sentences goes red and "
+            "test_committed_prompt_surface_is_current reports the snapshot stale. Update the "
+            "needles in _reconcile_set_theme_catalog_line to upstream's new shape, then re-run."
+        )
+    try:
+        names = sorted(os.listdir(os.path.join(dst, *_SET_THEME_SNAPSHOT_DIR.split("/"))))
+    except OSError:
+        return fixed
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        rel = f"{_SET_THEME_SNAPSHOT_DIR}/{name}"
+        body = _reconcile_budget_read(dst, rel)
+        if body is None or _SET_THEME_LONG not in body:
+            continue
+        _reconcile_budget_write(dst, rel, body.replace(_SET_THEME_LONG, _SET_THEME_SHORT))
+        if rel not in fixed:
+            fixed.append(rel)
+    return fixed
+
+
 def _reconcile_prompt_surface_snapshot(dst: str) -> list[str]:
     """Re-align the committed prompt-surface snapshot after branding.
 
@@ -1742,6 +1826,113 @@ def _reconcile_drop_vercel_deploy_job(dst: str) -> int:
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(text.replace(block, "", 1))
     return 1
+
+
+class DocsSearchHydrationGateError(ValueError):
+    """The live-search probe no longer carries the click site the gate attaches to.
+
+    A ``ValueError`` on purpose: ``hundredways.conformance`` reports it as a
+    conformance issue while the ``reconcile`` stage still marks the update
+    failed, so the sync stops instead of shipping a probe that races hydration.
+
+    The measurements that make the gate necessary, kept with the failure so a
+    moved anchor is argued against evidence and not guessed at:
+
+    * run 40211574851 (job 121223725796, `Docs Search Monitor / probe`,
+      2026-10-25T16:25:10Z) died on its last step with
+      ``browser check crashed: locator.fill: Timeout 10000ms exceeded`` at
+      ``16:25:56`` -- the click returned and the fill then found nothing to
+      fill;
+    * under CI's exact build (Playwright 1.62.1 on ``chromium-headless-shell``,
+      the file's lines 158-160 unchanged) 2 of 4 runs measured
+      ``.DocSearch-Input`` **count 0** at fill time, so the element did not
+      exist yet -- not a strict-mode ambiguity, not a hidden node, and the
+      headless shell hydrates the page fine;
+    * failing runs had ``reactLiveAtClick=false, kbdCountAtClick=0`` with
+      hydration completing at ~11.5 s page time while the click happened at
+      ~1.5 s; passing runs had ``reactLiveAtClick=true, kbdCountAtClick=2``;
+    * ``window.docusaurus`` is true even in the failing runs, so it is not a
+      sufficient readiness gate; the ``<kbd>`` hints inside
+      ``.DocSearch-Button-Keys`` are empty in the server render (verified
+      against the live Pages HTML) and exist only in the mounted render, so
+      they mark the same readiness a human visitor has;
+    * upstream stays green (12/12) because its Vercel target hydrates warm,
+      while the fork's GitHub Pages cold CDN hydrates at ~11.5 s.  The fork's
+      copy of this file differs from upstream only in branding (the ``DOCS_URL``
+      comment and const, the UA string) and lines 145-172 are byte-identical to
+      upstream, so a hand edit in the fork is deleted by the next actions-bot
+      sync and the gate has to be re-derived here.
+    """
+
+
+def _reconcile_docs_search_hydration_gate(dst: str) -> bool:
+    """Mount-gate the Docs Search Monitor's browser step before it clicks.
+
+    ``website/scripts/check-live-search.mjs`` (upstream-owned since 3b043e19,
+    5e908370, e8b84b98; the fork's copy arrived with the sync at f159ba0a)
+    clicks the docs search button straight after ``domcontentloaded``.  On
+    GitHub Pages that button ships in the server render, so it exists at ~1.5 s
+    while DocSearch only attaches its React handler at ~11.5 s on a cold CDN:
+    the click is dropped, ``.DocSearch-Input`` is never created, and the probe
+    dies at the ``fill`` -- the fork's monitor red, upstream's green.  Branding
+    cannot decide this (its domain rule already did its job on the ``DOCS_URL``
+    two lines up), so it is one targeted exact-literal rewrite, the way
+    ``_reconcile_plugin_guard_trusted_installer_hosts`` restores the one
+    site-specific reference a global brand rule cannot fix.
+
+    The gate waits for ``.DocSearch-Button-Keys kbd``, absent from the server
+    render and present only once the widget has mounted.  Its bound is
+    ``REQUEST_TIMEOUT_MS``: the deadline this script already gives every round
+    trip -- 20 s, about twice the measured cold-CDN hydration and the same
+    budget the click line itself carries -- so no new number enters the file.
+    Nothing is weakened: the click keeps ``timeout: 20_000``, the fill keeps
+    ``timeout: 10_000``, no retry is added, and the wait is a plain ``await``
+    inside ``checkBrowser``, so a site that never hydrates still throws here and
+    the probe still exits 1 with a red reason.  No-op once the gate is in place;
+    a moved anchor raises :class:`DocsSearchHydrationGateError` and stops the
+    sync rather than silently skipping.
+    """
+    rel = "website/scripts/check-live-search.mjs"
+    text = _reconcile_budget_read(dst, rel)
+    if text is None:
+        return False
+    gate = (
+        "    await page.locator('.DocSearch-Button-Keys kbd').first()"
+        ".waitFor({ timeout: REQUEST_TIMEOUT_MS });\n"
+    )
+    if gate in text:
+        # Already gated: the second pass is a no-op.
+        return False
+    goto_line = (
+        "    await page.goto(`${DOCS_URL}/`, { waitUntil: 'domcontentloaded', timeout: 30_000 });\n"
+    )
+    click_line = "    await page.locator('.DocSearch-Button').first().click({ timeout: 20_000 });\n"
+    needle = goto_line + click_line
+    if needle not in text:
+        raise DocsSearchHydrationGateError(
+            f"{rel} carries neither the pre-fix click site nor the hydration "
+            "gate, so the probe no longer clicks straight after "
+            "`domcontentloaded`. Read upstream's `checkBrowser` and retarget "
+            "the anchor in `_reconcile_docs_search_hydration_gate`: an ungated "
+            "probe puts the fork back at run 40211574851's "
+            "`browser check crashed: locator.fill: Timeout 10000ms exceeded` "
+            "(the Docs Search Monitor's last step), because GitHub Pages' cold "
+            "CDN only mounts DocSearch at ~11.5 s while the click lands at "
+            "~1.5 s."
+        )
+    comment = (
+        "    // The server render carries this button, but on a cold Pages CDN\n"
+        "    // DocSearch mounts its handler seconds later, and a click before\n"
+        "    // that is dropped: .DocSearch-Input is then never created and the\n"
+        "    // fill below times out.  The <kbd> hints inside\n"
+        "    // .DocSearch-Button-Keys exist only in the mounted render, so\n"
+        "    // waiting for one is the readiness a visitor already has.  A site\n"
+        "    // that never hydrates still fails here, red.\n"
+    )
+    _reconcile_budget_write(
+        dst, rel, text.replace(needle, goto_line + comment + gate + click_line, 1)
+    )
+    return True
 
 
 def _reconcile_project_identity_width(dst: str) -> int:
@@ -4127,6 +4318,98 @@ def _reconcile_windows_boot_lifecycle_race(dst: str) -> bool:
     return True
 
 
+_WINDOWS_SUSPEND_TEST_REL = "tests/nastech_cli/test_local_runtime_processes.py"
+_WINDOWS_SUSPEND_TEST_DEF = "def test_failed_setup_never_runs_child_and_releases_handles("
+_WINDOWS_SUSPEND_ONE_SHOT = (
+    "        assert psutil.Process(proc.pid).status() == psutil.STATUS_STOPPED\n"
+)
+_WINDOWS_SUSPEND_MARKER = "never observed suspended"
+_WINDOWS_SUSPEND_BUDGET_S = 2.0
+_WINDOWS_SUSPEND_WAIT = (
+    "        # CreateProcessW answers before every thread of a CREATE_SUSPENDED\n"
+    "        # launch reaches the system thread table, and psutil's Windows\n"
+    "        # status() reads exactly that table (cext.proc_is_suspended). The\n"
+    "        # child still cannot run here -- spawn_server resumes it only after\n"
+    "        # this assign() returns -- so poll for the observation instead of\n"
+    "        # demanding it land on the first read. A child that really is running\n"
+    "        # never settles, and the marker check below catches that too.\n"
+    "        assert _wait(\n"
+    "            lambda: psutil.Process(proc.pid).status() == psutil.STATUS_STOPPED,\n"
+    f"            timeout={_WINDOWS_SUSPEND_BUDGET_S},\n"
+    '        ), "child never observed suspended"\n'
+)
+
+
+class WindowsSuspendObservationError(ValueError):
+    """The suspended-child assert moved, so the racy one-shot read may still be there.
+
+    A ``ValueError`` on purpose: :mod:`hundredways.conformance` reports it as a
+    candidate issue and the ``reconcile`` stage fails the update rather than
+    publishing a tree that silently keeps upstream's single ``psutil`` read.  That
+    read is what red-flakes ``Windows-only tests (arm64)`` with
+    ``assert 'running' == 'stopped'``, and the red names neither the race nor the
+    file that can fix it.
+    """
+
+
+def _reconcile_windows_suspend_observation(dst: str) -> bool:
+    """Poll for the ``CREATE_SUSPENDED`` observation instead of reading it once.
+
+    ``spawn_server`` (``nastech_cli/local_runtime/processes.py``) launches the router
+    with ``CREATE_SUSPENDED``, calls ``job.assign(proc)``, and only then ``resume()``s
+    it, so containment genuinely happens while the child cannot execute.  The test
+    asserts that precondition inside its patched ``assign``, and on Windows psutil's
+    ``Process.status()`` is ``cext.proc_is_suspended(pid)`` (``_pswindows.py:1041``) --
+    a read of the primary thread's wait reason in the system thread table, which is not
+    always published in the instant ``CreateProcessW`` returns.  A single read can then
+    answer ``'running'`` about a thread the kernel will not schedule.
+
+    The lane is red only some of the time, and only on that line.  Of the 12
+    ``Windows-only tests (arm64)`` jobs on the ``windows-11-arm`` image across the last
+    six ``main`` runs, 10 passed this file and 2 failed at line 177 (jobs 119653984058,
+    117618374648), and the same assertion is what fails the open candidate (job
+    120819400596).  Every failure is ``assert 'running' == 'stopped'`` on
+    ``test_failed_setup_never_runs_child_and_releases_handles[assign]`` or ``[resume]``,
+    both of which reach that line.
+
+    This is not a budget change: the assertion still requires ``STATUS_STOPPED``, it
+    simply lets the kernel finish saying so.  ``_wait`` is the file's own helper at a
+    30 ms cadence, so 2.0 s is ~66 reads and is spent only on a failure path.  The
+    ``assert not marker.exists()`` underneath -- the actual product claim that a failed
+    setup never runs the child -- is left exactly as upstream wrote it, and a child that
+    really did resume still fails.
+    """
+    text = _reconcile_budget_read(dst, _WINDOWS_SUSPEND_TEST_REL)
+    if text is None or _WINDOWS_SUSPEND_MARKER in text:
+        return False
+    if text.count(_WINDOWS_SUSPEND_ONE_SHOT) == 1:
+        if "def _wait(" not in text:
+            raise WindowsSuspendObservationError(
+                f"{_WINDOWS_SUSPEND_TEST_REL} no longer defines the ``_wait`` helper the "
+                "bounded poll is built from, so installing the poll there would be a "
+                "NameError on Windows. Re-derive _WINDOWS_SUSPEND_WAIT against whatever "
+                "poll helper upstream uses now."
+            )
+        _reconcile_budget_write(
+            dst,
+            _WINDOWS_SUSPEND_TEST_REL,
+            text.replace(_WINDOWS_SUSPEND_ONE_SHOT, _WINDOWS_SUSPEND_WAIT, 1),
+        )
+        return True
+    if _WINDOWS_SUSPEND_TEST_DEF not in text:
+        return False  # upstream dropped the test; there is nothing left to reconcile
+    raise WindowsSuspendObservationError(
+        f"{_WINDOWS_SUSPEND_TEST_REL} no longer holds exactly one line spelling the "
+        "suspended-child check as "
+        f"{_WINDOWS_SUSPEND_ONE_SHOT.strip()!r}, so the sync cannot install the bounded "
+        "_wait poll and upstream's one-shot psutil read stays. That read is the "
+        "Windows-only tests (arm64) flake: "
+        "test_failed_setup_never_runs_child_and_releases_handles goes red with "
+        "assert 'running' == 'stopped'. Re-derive _WINDOWS_SUSPEND_ONE_SHOT against "
+        "upstream's current file."
+    )
+
+
 class WindowsRealGitLocateError(ValueError):
     """``_locate_real_git`` no longer matches the shape the robustness patch needs.
 
@@ -4620,7 +4903,40 @@ def _reconcile_connector_test_guest_offline(dst: str) -> list[str]:
     return fixed
 
 
-def _reconcile_plugin_catalog_sync_exemption(dst: str) -> bool:
+class PluginCatalogAdmissionError(ValueError):
+    """The plugin-catalog admission step no longer matches the shape the guard needs.
+
+    A ``ValueError`` on purpose: ``hundredways.conformance`` reports it as a
+    conformance issue instead of aborting the whole run, while the ``reconcile``
+    stage still marks the update failed.
+
+    Measured anchor (upstream ``NousResearch/hermes-agent``
+    ``.github/workflows/plugin-catalog-ci.yml``, step ``Find changed catalog
+    entries`` at ``86fa9e6ca1`` line 66): ``run: |`` / ``set -euo pipefail`` /
+    ``# HEAD is the PR merge commit:``.  The exemption block re-inserted here
+    is what keeps the engine's own full-sync PR green on that step: it landed
+    on fork ``main`` as ``2c25c1a0`` (PR #146, 2026-10-13T13:39Z) and every
+    completed Plugin Catalog CI run on ``100WAYS`` since has passed (job
+    115306455590 echoed and executed it at 12:52Z, 47 minutes BEFORE the block
+    existed in ``main`` -- the ``pull_request`` event evaluates the workflow
+    file of the PR head/merge side, so the exemption applies to the very PR
+    that first carries it).
+    Without the block a sync PR fails on the data-only rule (job
+    115191916099, 2026-10-13T07:59:45Z: ``::error::catalog entry PRs may only
+    touch plugin-catalog/** and contributors/emails/**, found:``).  A moved
+    anchor therefore stops the sync loudly instead of silently re-publishing
+    that red.
+    """
+
+
+# Marker of the exemption block itself: once present, the file is already
+# reconciled and a second pass must be a byte-for-byte no-op.
+_PLUGIN_CATALOG_ADMISSION_MARKER = (
+    'echo "Fork 100WAYS sync PR: catalog admission gate does not apply."'
+)
+
+
+def _reconcile_plugin_catalog_admission(dst: str) -> bool:
     """Exempt the engine's 100WAYS sync PR from the plugin-catalog admission gate.
 
     ``plugin-catalog-ci.yml`` fires on any PR touching ``plugin-catalog/**`` and
@@ -4629,19 +4945,30 @@ def _reconcile_plugin_catalog_sync_exemption(dst: str) -> bool:
     every path and can never satisfy that rule — the gate goes red judging files
     it was never meant to see.  A sync PR is the engine's own push, not a plugin
     admission, so skip the gate for it: keyed on BOTH the fork head repo and the
-    reserved branch, a same-branch PR from any other fork still runs the gate.
+    reserved branch with ``&&``, so a cross-repo PR (even one whose head branch
+    is named 100WAYS) and a same-repo PR from any other branch still run the
+    full data-only rule; only a same-repo writer on the engine's own reserved
+    branch can trip the exemption.
+
+    Idempotent by the marker guard, and a moved anchor raises
+    ``PluginCatalogAdmissionError`` rather than silently dropping the exemption.
     """
     rel = ".github/workflows/plugin-catalog-ci.yml"
     text = _reconcile_budget_read(dst, rel)
     if text is None:
         return False
-    needle = (
-        "        run: |\n"
-        "          set -euo pipefail\n"
-        "          # HEAD is the PR merge commit:"
-    )
-    if needle not in text:
+    if _PLUGIN_CATALOG_ADMISSION_MARKER in text:
         return False
+    needle = "        run: |\n          set -euo pipefail\n          # HEAD is the PR merge commit:"
+    if needle not in text:
+        raise PluginCatalogAdmissionError(
+            f"{rel}: the 'Find changed catalog entries' anchor "
+            "(run: | / set -euo pipefail / '# HEAD is the PR merge commit:') is "
+            "absent and no exemption marker is present, so the sync-PR admission "
+            "exemption could not be applied; re-read the upstream step "
+            "(hermes-agent 86fa9e6ca1:66) and update this rule — skipping "
+            "silently re-publishes the red measured in job 115191916099"
+        )
     guard = (
         "        run: |\n"
         "          set -euo pipefail\n"
@@ -4649,13 +4976,13 @@ def _reconcile_plugin_catalog_sync_exemption(dst: str) -> bool:
         "          # the reserved 100WAYS branch, so a sync PR touches every path and\n"
         "          # can never satisfy the data-only rule below. It is the engine's\n"
         "          # own push, not a plugin admission: skip the gate for it.\n"
-        "          if [ \"${GITHUB_HEAD_REF:-}\" = \"100WAYS\" ] \\\n"
-        "            && [ \"${{ github.event.pull_request.head.repo.full_name }}\" = \"nastechresearch/nastech-agent\" ]; then\n"
-        "            echo \"Fork 100WAYS sync PR: catalog admission gate does not apply.\"\n"
+        '          if [ "${GITHUB_HEAD_REF:-}" = "100WAYS" ] \\\n'
+        '            && [ "${{ github.event.pull_request.head.repo.full_name }}" = "nastechresearch/nastech-agent" ]; then\n'
+        '            echo "Fork 100WAYS sync PR: catalog admission gate does not apply."\n'
         "            {\n"
         "              echo 'files<<__EOF__'\n"
         "              echo '__EOF__'\n"
-        "            } >> \"$GITHUB_OUTPUT\"\n"
+        '            } >> "$GITHUB_OUTPUT"\n'
         "            exit 0\n"
         "          fi\n"
         "          # HEAD is the PR merge commit:"
@@ -5848,6 +6175,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_windows_boot_lifecycle_race(dst):
         result.total += 1
         result.fixed.append("tests/e2e/core/windows/test_boot_lifecycle.py")
+    if _reconcile_windows_suspend_observation(dst):
+        result.total += 1
+        result.fixed.append(_WINDOWS_SUSPEND_TEST_REL)
     if _reconcile_install_ps1_store_guard_test(dst):
         result.total += 1
         result.fixed.append("scripts/tests/test-install-ps1-store-guard.ps1")
@@ -5955,6 +6285,13 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     ):
         result.total += 1
         result.fixed.append(".github/workflows/deploy-site.yml")
+    # AFTER _reconcile_domains: that stage is what gives this probe its fork
+    # ``DOCS_URL`` (Pages origin + project path), and the hydration gate is the
+    # one site-specific reference the global brand rule cannot decide -- the
+    # probe clicks the docs search button before the cold Pages CDN mounts it.
+    if _reconcile_docs_search_hydration_gate(dst):
+        result.total += 1
+        result.fixed.append("website/scripts/check-live-search.mjs")
     for rel in _reconcile_dunder_all_order(dst):
         result.total += 1
         result.fixed.append(rel)
@@ -5964,7 +6301,7 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     for rel in _reconcile_connector_test_guest_offline(dst):
         result.total += 1
         result.fixed.append(rel)
-    if _reconcile_plugin_catalog_sync_exemption(dst):
+    if _reconcile_plugin_catalog_admission(dst):
         result.total += 1
         result.fixed.append(".github/workflows/plugin-catalog-ci.yml")
     for rel in _reconcile_pinned_source_clones(dst):
@@ -5983,6 +6320,13 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_gateway_plugin_gate_native_ticket(dst):
         result.total += 1
         result.fixed.append("nastech_cli/web_server.py")
+    # Brand-length guard on set_theme's catalog line.  Must run before the prompt-surface
+    # reconcile below: that step recomputes surfaces.json from the tool schemas on disk, so
+    # the description and its snapshot copy have to be shortened first or the manifest counts
+    # describe the pre-fix text.
+    for rel in _reconcile_set_theme_catalog_line(dst):
+        result.total += 1
+        result.fixed.append(rel)
     # Prompt-surface LAST: it counts characters in the rendered prompts, and
     # _reconcile_domains above rewrites the domain hosts inside those prompt
     # files.  Computing it any earlier leaves surfaces.json describing the
@@ -5990,6 +6334,13 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     for rel in _reconcile_prompt_surface_snapshot(dst):
         result.total += 1
         result.fixed.append(rel)
+    # Credential-gate completeness LAST, after every rule above has finished writing
+    # the workflows it audits: the Store lane's gate has to list every name the lane
+    # consumes or a pubconfig pre-flight admits a run that then reads an empty
+    # credential far from its cause.  Read-only -- it records no fixed path -- and it
+    # raises :class:`StoreLaneGateError` when a consumed Store credential escapes the
+    # gate, or when the parser cannot see the lane it is supposed to measure.
+    _reconcile_store_gate_covers_the_lane(dst)
     result.fixed.sort()
     return result
 
@@ -6947,8 +7298,34 @@ APPLE_SIGNING_CREDENTIALS = ("CSC_LINK", "CSC_KEY_PASSWORD", "APPLE_API_KEY_P8",
 WINDOWS_SIGNING_CREDENTIALS = ("AZURE_SIGN_ENDPOINT", "AZURE_SIGN_ACCOUNT",
                                "AZURE_SIGN_PROFILE", "AZURE_SIGN_PUBLISHER",
                                "AZURE_CLIENT_ID", "AZURE_TENANT_ID")
-STORE_CREDENTIALS = ("MS_STORE_PRODUCT_ID", "MS_STORE_TENANT_ID",
-                     "MS_STORE_CLIENT_ID", "MS_STORE_CLIENT_SECRET")
+# Every name the Store lane consumes, read from the lane's own steps in
+# ``desktop-bundled-release.yml``: the five names the ``stable-store`` job's ``env``
+# binds (``origin/main`` 2487-2497, transcribed into ``tests/fixtures/store_lane/``)
+# -- the four the Partner Center submission itself takes plus the seller account
+# ``msstore reconfigure`` is configured with (2513).  The set is what ``pubconfig``
+# folds into the gate that refuses a run up front, so a name the lane reads and this
+# list omits is a hole the gate can be satisfied around;
+# ``_reconcile_store_gate_covers_the_lane`` fails the sync when that happens.  Written
+# one name per line because a hand-wrapped tuple is what ``ruff format`` produces, and
+# a gate edit must not add formatter drift.
+STORE_CREDENTIALS = (
+    "MS_STORE_PRODUCT_ID",
+    "MS_STORE_SELLER_ID",
+    "MS_STORE_TENANT_ID",
+    "MS_STORE_CLIENT_ID",
+    "MS_STORE_CLIENT_SECRET",
+)
+# The subset ``scripts/releases/store.py`` reads for itself.  The seller account
+# belongs to the ``msstore`` CLI in the workflow, not to the Partner Center REST
+# call the script makes, so the script's own configured check must not demand it:
+# listing it there would declare a submission unconfigured that the workflow can
+# still complete.  The order is the order the shipped check reports it in.
+STORE_REST_CREDENTIALS = (
+    "MS_STORE_PRODUCT_ID",
+    "MS_STORE_TENANT_ID",
+    "MS_STORE_CLIENT_ID",
+    "MS_STORE_CLIENT_SECRET",
+)
 
 # Windows needs three handoffs and two targets but one decision, so its rows
 # share one claim key and one exclusion.  ``claim_flags``, ``excluded``,
@@ -7031,6 +7408,21 @@ def _signing_lane_env(indent: str = "") -> tuple[str, ...]:
 
 class SigningGatedLaneError(ValueError):
     """A signing-gated lane anchor moved, so the reconcile cannot be applied."""
+
+
+class StoreLaneGateError(ValueError):
+    """The Store lane consumes a credential its gate does not list.
+
+    Measured on ``origin/main`` (2026-10-25): the lane reads five ``MS_STORE_*``
+    names -- the ``stable-store`` job's ``env`` at 2487-2497, with
+    ``MS_STORE_SELLER_ID`` consumed again by the ``msstore reconfigure`` step at 2513
+    -- while the shipped gate listed four, and ``pubconfig`` put the fifth in
+    ``ungated-consumed``, its only such name over the tree's 58 workflows and 181
+    credential references.  Failing the sync beats returning quietly: that verdict
+    means the pre-flight admits a publish-phase run whose Store job reads an empty
+    seller id, and GitHub's empty-string substitution then surfaces inside
+    ``msstore reconfigure`` halfway through the submission instead of up front.
+    """
 
 
 def _sgl_literal(value: str) -> str:
@@ -7427,7 +7819,7 @@ def _reconcile_signing_gated_store(dst: str) -> bool:
     if text is None:
         return False
     before = text
-    credentials = "(" + ", ".join(_sgl_literal(name) for name in STORE_CREDENTIALS) + ")"
+    credentials = "(" + ", ".join(_sgl_literal(name) for name in STORE_REST_CREDENTIALS) + ")"
     text = _sgl_sub(
         text,
         "def check_from_env(env: dict, run=_http_run) -> str:\n",
@@ -7466,6 +7858,114 @@ def _reconcile_signing_gated_store(dst: str) -> bool:
     if text != before:
         _sgl_write(dst, _STORE, text)
     return text != before
+
+
+#: The Store lane's own CLI invocation, as the fork's workflow writes it
+#: (origin/main ``desktop-bundled-release.yml:2513``, ``msstore reconfigure --...``).
+#: The completeness audit uses it as the lane anchor: a workflow that runs ``msstore``
+#: is a Store lane whether or not the parser can still see its credentials.
+_MSSTORE_ANCHOR_RE = re.compile(r"\bmsstore\b")
+
+
+def _store_credential_family(gate: frozenset[str]) -> str:
+    """The name prefix every credential in ``gate`` shares, or ``""`` if none.
+
+    The Store lane's credentials are one family (``MS_STORE_*``), so the family
+    prefix is how the completeness check tells a Store name from a credential a
+    neighbouring job reads (``DOCKERHUB_*``, ``CLOUDFLARE_R2_*``).  It is derived
+    from the gate's own names, never typed here, so a gate rename moves it with
+    the gate.  A prefix that does not end at a name boundary is rejected, because
+    a family short enough to be a bare stem would match names the lane does not
+    own and refuse a lane that is fine.
+    """
+    prefix = os.path.commonprefix(sorted(gate))
+    return prefix if prefix.endswith("_") and len(prefix) >= 3 else ""
+
+
+def _reconcile_store_gate_covers_the_lane(dst: str) -> None:
+    """Refuse a tree whose Store lane reads a credential the gate left out.
+
+    Measured on the branch every sync publishes into (``origin/main``, 2026-10-25):
+    ``desktop-bundled-release.yml:2494`` maps
+    ``MS_STORE_SELLER_ID: ${{ secrets.MS_STORE_SELLER_ID }}`` and ``:2513`` runs
+    ``msstore reconfigure --tenantId … --sellerId "$MS_STORE_SELLER_ID" …``, so the
+    lane consumes five ``MS_STORE_*`` names; ``STORE_CREDENTIALS`` listed four, and
+    the only one missing was the seller id.  :func:`hundredways.pubconfig.analyze_root`
+    over that tree with the fork's real Actions inventory (11 repository secrets, 3
+    repository variables and the 2 ``release-signing`` secrets -- none of them
+    ``MS_STORE_*``) therefore put ``MS_STORE_SELLER_ID`` in ``ungated-consumed`` --
+    the verdict that means exactly "the gate can be fully satisfied while this job
+    reads an empty string" -- and it was the tree's *only* ungated-consumed name.
+    With the fifth name in the gate the same measurement reports
+    ``ungated-consumed 1 -> 0``, ``live-missing`` for the Store family ``4 -> 5``,
+    and the same 24 actionable names, so the pre-flight refuses the same runs, one
+    step earlier and for the honest reason.  No published run has reached the step
+    yet: the Store job is ``skipped`` in runs 39582399772, 39950918422, 40090674912
+    and 40191180790 (a publish-phase dispatch is what runs it), so the mid-publish
+    crash is the mechanism the verdict documents, not an observed red.
+
+    Hand-maintaining the set does not scale, so completeness is proven by reading the
+    workflows with ``pubconfig.load_workflows`` and ``pubconfig.workflow_references``
+    -- the same reader and parser ``pubconfig.analyze`` classifies with -- and
+    asserting every consumed name in the Store credential family is one the gate
+    lists.  The check is one-way (strengthening): a consumed name missing from the
+    gate raises, while a gate name the lane never reads costs only a harmless extra
+    refusal.  It also refuses when the workflow runs ``msstore`` yet the parser reads
+    no name of the family at all, because a blind parser proves nothing and would
+    let the same hole reopen silently.  It fails as :class:`StoreLaneGateError` (a
+    ``ValueError``) rather than returning quietly because a silently short gate *is*
+    the defect.  The limit is honest: only names carrying the family prefix are
+    caught, so a Store credential upstream invents under a different stem still needs
+    a human -- no parser can tell those from a neighbouring job's credential without
+    the same prefix assumption.
+    """
+    workflows = os.path.join(dst, ".github", "workflows")
+    if not os.path.isdir(workflows) or not any(
+        entry.suffix in (".yml", ".yaml") for entry in Path(workflows).iterdir()
+    ):
+        # No CI in this tree, so no Store lane to audit; a real sync always carries
+        # the fork's release workflows here, and an empty directory holds no lane
+        # rather than a hidden one.
+        return
+    from .pubconfig import load_workflows, workflow_references
+
+    gate = frozenset(STORE_CREDENTIALS)
+    prefix = _store_credential_family(gate)
+    if not prefix:
+        raise StoreLaneGateError(
+            "STORE_CREDENTIALS share no name-family prefix, so the completeness "
+            "check cannot tell a Store credential from another job's; refusing to "
+            "guess which consumed names belong to the lane."
+        )
+    consumed: set[str] = set()
+    anchored = False
+    for name, text in load_workflows(dst):
+        anchored = anchored or _MSSTORE_ANCHOR_RE.search(text) is not None
+        consumed.update(
+            reference.name
+            for reference in workflow_references(text, workflow=name)
+            if reference.name.startswith(prefix)
+        )
+    if anchored and not consumed:
+        raise StoreLaneGateError(
+            f"a workflow in {workflows} runs the msstore CLI but no "
+            f"{prefix}* credential parses out of it, so this audit is blind and "
+            "cannot prove STORE_CREDENTIALS covers the lane. Re-derive where the "
+            "lane reads its credentials -- the fork's ``stable-store`` job binds them "
+            "in its ``env`` block and consumes them in the ``msstore reconfigure`` "
+            "step of desktop-bundled-release.yml -- the sync stops rather than "
+            "ship a gate nothing measures."
+        )
+    left_out = sorted(consumed - gate)
+    if left_out:
+        raise StoreLaneGateError(
+            f"the Store lane reads {', '.join(left_out)}, which "
+            f"STORE_CREDENTIALS does not list, so a pubconfig pre-flight admits the "
+            "run with that credential unset and the job gets an empty string where "
+            "the lane needs a value; add the name to STORE_CREDENTIALS. Measured: "
+            f"the gate lists {len(gate)} name(s), the workflows consume "
+            f"{len(consumed)}."
+        )
 
 
 def _reconcile_signing_gated_workflow(dst: str) -> bool:
