@@ -7450,6 +7450,7 @@ SIGNING_CREDENTIAL_CONTEXT = {
 }
 
 _STABLE_RELEASE_WORKFLOW = ".github/workflows/stable-release.yml"
+_DESKTOP_BUNDLED_RELEASE = ".github/workflows/desktop-bundled-release.yml"
 _OPTIONAL_PLATFORMS = "scripts/releases/optional_platforms.py"
 _STABLE_RELEASE = "scripts/releases/stable.py"
 # Upstream renamed ``optional_platforms.py`` into the lane table ``lanes.py``.
@@ -8109,20 +8110,23 @@ def _reconcile_signing_gated_workflow(dst: str) -> bool:
 
 
 _LANES_DEFAULT = "DEFAULT = frozenset(lane.name for lane in LANES if lane.default)\n"
-_LANES_DEFAULT_MARK = "# NasTech: a release ships only the lanes this fork can sign."
+_LANES_DEFAULT_MARK = "# NasTech: every lane this fork can ship is on, signing or not."
 _LANES_DEFAULT_FORK = (
     _LANES_DEFAULT_MARK + "\n"
-    "# The Apple and Azure/Store signing accounts are unconfigured, so those\n"
-    "# lanes stay out of the default set; --with re-enables one once its\n"
-    "# credentials exist.  Termux needs no signing, so it is on.\n"
-    "# smoke and upgrade gate on built desktop packages: with every desktop lane\n"
-    "# off they would run nothing, and stable.require_smokes_match_claim rejects a\n"
-    "# claim whose test policy names smokes a release cannot produce.\n"
+    "# The fork publishes its desktop packages unsigned: the Apple and Azure/Store\n"
+    "# signing accounts are unconfigured, and a release must not wait on them.  The\n"
+    "# macOS and Windows lanes are therefore ON and pass `skip-signed` to the bundled\n"
+    "# builder, which still verifies any build that claims to be signed.  Every Linux\n"
+    "# lane stays on, and Termux is on although upstream leaves it opt-in: its APT\n"
+    "# channel is part of what this fork ships.\n"
+    "# smoke and upgrade gate on built desktop packages: until a signed desktop\n"
+    "# channel exists they would smoke a payload the update channel cannot ship, and\n"
+    "# stable.require_smokes_match_claim rejects a claim whose test policy names\n"
+    "# smokes a release cannot produce.\n"
     "DEFAULT = frozenset(\n"
     "    lane.name for lane in LANES\n"
     "    if lane.default\n"
-    '    and lane.name not in {"macos-arm64", "macos-intel", "windows", "windows-store",'
-    ' "smoke", "upgrade"}\n'
+    '    and lane.name not in {"smoke", "upgrade"}\n'
     ') | {"termux"}\n'
 )
 
@@ -8165,6 +8169,83 @@ def _reconcile_signing_gated_defaults(dst: str) -> bool:
     return text != before
 
 
+# The Apple half of the bundled builder gates on signing unconditionally, while the
+# Windows half already honours ``skip-signed``.  This fork publishes its desktop packages
+# without signing accounts, so the three Apple steps take the same escape hatch and the
+# desktop lanes can ship unsigned.  The guard opens only when the caller declares
+# ``skip-signed: true``: a build that IS signed is still verified, so a signature that
+# silently went missing can never pass unnoticed.
+_UNSIGNED_DESKTOP_GUARD = "inputs.skip-signed != true && ("
+_APPLE_PUBLISH_IF = (
+    "        if: inputs.upload_release == true || inputs.release-phase == 'candidate' || "
+    "inputs.build_commit != '' || inputs.channel != ''\n"
+)
+_APPLE_PUBLISH_IF_UNSIGNED = (
+    "        if: inputs.skip-signed != true && (inputs.upload_release == true || "
+    "inputs.release-phase == 'candidate' || inputs.build_commit != '' || inputs.channel != '')\n"
+)
+
+
+def _unsigned_gate_pair(tail: str) -> tuple[str, str]:
+    """(upstream text, guarded text) for one Apple signing gate, sharing its step body."""
+    return _APPLE_PUBLISH_IF + tail, _APPLE_PUBLISH_IF_UNSIGNED + tail
+
+
+_UNSIGNED_DESKTOP_EDITS = (
+    _unsigned_gate_pair(
+        "        shell: bash\n        env:\n          CSC_LINK: ${{ secrets.CSC_LINK }}"
+    ),
+    _unsigned_gate_pair(
+        "        shell: bash\n        env:\n"
+        "          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}"
+    ),
+    _unsigned_gate_pair(
+        "        shell: bash\n        run: |\n"
+        "          shopt -s nullglob\n"
+        "          apps=(apps/desktop/release/mac*/*.app)"
+    ),
+)
+
+
+class UnsignedDesktopPublishError(ValueError):
+    """A signing gate in the bundled builder no longer matches the shape this rule edits."""
+
+
+def _reconcile_unsigned_desktop_publish(dst: str) -> bool:
+    """Let the bundled builder publish macOS packages when signing is declared skipped.
+
+    Upstream requires the Apple signing/notarization credentials before a publish build
+    and verifies every packed ``.app`` against Gatekeeper afterwards; the Windows half of
+    the same workflow already accepts ``skip-signed: true``.  This fork has no Apple or
+    Azure account and must still ship desktop packages, so the three Apple steps take
+    that same escape hatch -- and only that one, because the verify step still runs
+    whenever a build claims to be signed.  Idempotent; a moved anchor raises
+    :class:`UnsignedDesktopPublishError` rather than leaving half the gates patched.
+    """
+    text = _sgl_read(dst, _DESKTOP_BUNDLED_RELEASE)
+    if text is None:
+        return False
+    before = text
+    for old, new in _UNSIGNED_DESKTOP_EDITS:
+        if new in text:
+            continue
+        if old not in text:
+            raise UnsignedDesktopPublishError(
+                f"{_DESKTOP_BUNDLED_RELEASE} no longer contains the signing anchor {old!r}; "
+                "the pre-flight or the notarization backstop was reworded upstream. Update "
+                "_UNSIGNED_DESKTOP_EDITS to the new shape before the next sync."
+            )
+        if text.count(old) != 1:
+            raise UnsignedDesktopPublishError(
+                f"{_DESKTOP_BUNDLED_RELEASE} has {text.count(old)} copies of the signing "
+                f"anchor {old!r}, so the step to guard is ambiguous"
+            )
+        text = text.replace(old, new, 1)
+    if text != before:
+        _sgl_write(dst, _DESKTOP_BUNDLED_RELEASE, text)
+    return text != before
+
+
 def _reconcile_signing_gated_release_lanes(dst: str) -> list[str]:
     """Keep the signed desktop lanes skippable, so Linux and Termux can publish.
 
@@ -8190,6 +8271,8 @@ def _reconcile_signing_gated_release_lanes(dst: str) -> list[str]:
     if _lanes_own_the_signing_gate(dst):
         if _reconcile_signing_gated_defaults(dst):
             changed.append(_LANES_MODULE)
+        if _reconcile_unsigned_desktop_publish(dst):
+            changed.append(_DESKTOP_BUNDLED_RELEASE)
         return changed
     for rel, apply in ((_OPTIONAL_PLATFORMS, _reconcile_signing_gated_lanes),
                        (_STABLE_RELEASE, _reconcile_signing_gated_stable),
@@ -8197,6 +8280,8 @@ def _reconcile_signing_gated_release_lanes(dst: str) -> list[str]:
                        (_STABLE_RELEASE_WORKFLOW, _reconcile_signing_gated_workflow)):
         if apply(dst):
             changed.append(rel)
+    if _reconcile_unsigned_desktop_publish(dst):
+        changed.append(_DESKTOP_BUNDLED_RELEASE)
     return changed
 
 
@@ -8267,13 +8352,13 @@ def test_the_default_builds_everything_but_macos_intel_and_termux():
 ''',
         r'''from scripts.releases import lanes as lane_set
 
-# NasTech contract: this fork ships only the lanes it can sign. The Apple and
-# Azure/Store signing accounts are unconfigured, and smoke/upgrade gate on built
-# desktop packages, so those lanes stay out of DEFAULT until --with names them.
-UNSIGNED_LANES = {"macos-arm64", "macos-intel", "windows", "windows-store", "smoke", "upgrade"}
+# NasTech contract: the desktop lanes ship unsigned (the bundled builder takes
+# `skip-signed`), and only the two desktop-gated test lanes stay out until a
+# signed update channel exists.
+UNSIGNED_LANES = {"smoke", "upgrade"}
 
 
-def test_the_default_ships_the_lanes_this_fork_can_sign():
+def test_the_default_ships_every_lane_this_fork_publishes():
     assert lane_set.DEFAULT == (set(lane_set.NAMES) - UNSIGNED_LANES) | {"termux"}
 ''',
     ),
@@ -8286,10 +8371,8 @@ def test_the_default_ships_the_lanes_this_fork_can_sign():
     (
         r'''    assert lane_set.flags(lane_set.DEFAULT)["desktop-channel"] is True
 ''',
-        r'''    assert lane_set.flags(lane_set.DEFAULT)["desktop-channel"] is False
-    # The channel needs both signed desktop lanes; --with restores them.
-    signed = lane_set.DEFAULT | {"windows", "macos-arm64"}
-    assert lane_set.flags(signed)["desktop-channel"] is True
+        r'''    # Both desktop lanes are on, so the protected channel they drive is on too.
+    assert lane_set.flags(lane_set.DEFAULT)["desktop-channel"] is True
 ''',
     ),
     (
@@ -8302,8 +8385,7 @@ def test_the_default_ships_the_lanes_this_fork_can_sign():
     (
         r'''    assert lane_set.advances_desktop(lane_set.DEFAULT)
 ''',
-        r'''    assert not lane_set.advances_desktop(lane_set.DEFAULT)
-    assert lane_set.advances_desktop(lane_set.DEFAULT | {"windows", "macos-arm64"})
+        r'''    assert lane_set.advances_desktop(lane_set.DEFAULT)
 ''',
     ),
 )

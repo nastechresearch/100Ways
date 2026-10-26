@@ -298,8 +298,10 @@ def _default_of(dst):
 def test_reconcile_sets_the_default_lane_set_on_upstreams_lane_table(lane_tree):
     assert _reconcile(lane_tree) == ["scripts/releases/lanes.py"]
     default = _default_of(lane_tree)
-    assert {"macos-intel", "macos-arm64", "windows", "windows-store"}.isdisjoint(default)
-    assert {"termux", "docker", "ci"} <= default
+    # The desktop lanes ship unsigned (the bundled builder honours `skip-signed`), so only
+    # the two desktop-gated test lanes leave, and Termux joins although upstream opts out.
+    assert {"smoke", "upgrade"}.isdisjoint(default)
+    assert {"termux", "docker", "ci", "macos-arm64", "windows"} <= default
 
 
 def test_reconcile_leaves_the_lane_table_alone_the_second_time(lane_tree):
@@ -704,3 +706,61 @@ def test_the_entrypoint_banner_is_untouched(fork):
     # banner must not learn a flag it cannot honour.
     text = _reconciled("entrypoint.py")
     assert "include-macos-arm64" not in text
+
+
+def _bundled_release_tree(tmp_path, body=None):
+    dst = tmp_path / "branded"
+    workflows = dst / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    if body is None:
+        body = (
+            "\n".join(
+                [
+                    "      - name: Require signing credentials when publishing",
+                    *updates._UNSIGNED_DESKTOP_EDITS[0][0].splitlines(),
+                    "      - name: Write App Store Connect key for notarytool",
+                    *updates._UNSIGNED_DESKTOP_EDITS[1][0].splitlines(),
+                    "      - name: Verify the build is signed and notarized",
+                    *updates._UNSIGNED_DESKTOP_EDITS[2][0].splitlines(),
+                    '          codesign --verify --strict --verbose=2 "$app"',
+                    '          xcrun stapler validate "$app"',
+                ]
+            )
+            + "\n"
+        )
+    (workflows / "desktop-bundled-release.yml").write_text(body, encoding="utf-8")
+    return dst
+
+
+def test_the_apple_signing_gates_take_the_declared_unsigned_escape(tmp_path):
+    dst = _bundled_release_tree(tmp_path)
+
+    assert updates._reconcile_unsigned_desktop_publish(str(dst)) is True
+
+    text = (dst / updates._DESKTOP_BUNDLED_RELEASE).read_text(encoding="utf-8")
+    assert text.count(updates._UNSIGNED_DESKTOP_GUARD) == 3
+    # The post-build Gatekeeper backstop is guarded, not deleted: a build that claims to
+    # be signed is still verified.
+    assert "xcrun stapler validate" in text and "codesign --verify" in text
+
+
+def test_the_unsigned_escape_is_written_once(tmp_path):
+    dst = _bundled_release_tree(tmp_path)
+    updates._reconcile_unsigned_desktop_publish(str(dst))
+    first = (dst / updates._DESKTOP_BUNDLED_RELEASE).read_text(encoding="utf-8")
+
+    assert updates._reconcile_unsigned_desktop_publish(str(dst)) is False
+    assert (dst / updates._DESKTOP_BUNDLED_RELEASE).read_text(encoding="utf-8") == first
+
+
+def test_a_tree_without_the_bundled_builder_is_left_alone(tmp_path):
+    assert updates._reconcile_unsigned_desktop_publish(str(tmp_path)) is False
+
+
+def test_a_reworded_signing_gate_stops_the_sync(tmp_path):
+    dst = _bundled_release_tree(tmp_path, body="      - name: Require something else\n")
+
+    with pytest.raises(
+        updates.UnsignedDesktopPublishError, match="no longer contains the signing anchor"
+    ):
+        updates._reconcile_unsigned_desktop_publish(str(dst))
