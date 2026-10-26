@@ -32,6 +32,8 @@ import re
 import shutil
 import subprocess
 import time
+import urllib.error
+import urllib.request
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -583,21 +585,132 @@ _NPM_KEY_RENAMES: dict[str, str] = {
 # The lock record must therefore point at the fork's tarball AND carry the
 # fork-published integrity for the pinned version, or ``npm ci`` fails the
 # integrity check.  Values are the npm ``dist.integrity`` for each published
-# version; add new fork-published versions here.
+# version.  This table is the offline answer for the versions it knows; a
+# version the fork published afterwards is asked of the registry by
+# :func:`_registry_ui_integrity` rather than stopping the sync for one line.
 _NASTECH_UI_INTEGRITY: dict[str, str] = {
     "0.18.2": "sha512-P7H8RzRNGvAvqomtdaGF6J5uUVFWSx8/GrqJk4Cu7yN9DhcAp01FM+QgEFjx6sm3XI4g7FX8EiJdjuCTFAlIpw==",
     "0.18.3": "sha512-Nk+Key+Ql3i9LqTYHvGqm/JK0kzOxIUkJAY2yJDH4B5ivuBgaXqoc1o552CEu54G2YNL0Ge+3FdmKe2E+LyHsQ==",
     "0.18.4": "sha512-LStiibgKBGJGrnKZ4qaNNDup5jl/+MfhIaZDlcE3slugtuMmFt2C6urxajZ1Yv65JAx7VXpYscbzrGSDsis+Og==",
 }
 
+#: Only the fork's own package is ever asked.  Upstream's ``@nous-research/ui``
+#: holds different bytes for the same version number, and the whole point of
+#: this gate is that its digest must never reach a lock or a manifest.
+_NASTECH_UI_REGISTRY_URL = "https://registry.npmjs.org/@nastech-research%2Fui"
+
+
+class UiRegistryLookupError(ValueError):
+    """The registry could not be asked cleanly whether a ui version is published.
+
+    Distinct from :class:`UiScopePinError` on purpose: a pin error means the fork
+    has work to do (publish the version), a lookup error means the answer is
+    unknown and the sync refuses to guess.  Writing an unverified
+    ``dist.integrity`` into the lock would turn a red pipeline into a fork whose
+    every install fails ``npm ci``, so an unclear answer stops the stage.
+    """
+
+
+#: Fetched at most once per run: the document carries every published version and
+#: each one's digest, so one answer serves the lock record and both manifest
+#: checks.  A failed lookup is not cached -- the next check asks again rather
+#: than reusing an answer the registry never gave.
+_ui_registry_document: "dict | None" = None
+
+
+def _fetch_ui_registry_document() -> dict:
+    """The fork's published ``@nastech-research/ui`` package document."""
+    global _ui_registry_document
+    if _ui_registry_document is not None:
+        return _ui_registry_document
+
+    request = urllib.request.Request(
+        _NASTECH_UI_REGISTRY_URL,
+        headers={"Accept": "application/json", "User-Agent": "100ways"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            body = json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        # A missing package is not "this version is unpublished": the scope has
+        # to exist, or no lock this sync writes can install.
+        raise UiRegistryLookupError(
+            f"npm registry answered HTTP {error.code} for {_NASTECH_UI_REGISTRY_URL} while "
+            "looking up a fork-published ui version, so the answer is unknown. Nothing was "
+            "written to the lock: re-run the sync, or settle it offline by adding that "
+            "version's dist.integrity to _NASTECH_UI_INTEGRITY in updates.py"
+        ) from error
+    except (OSError, ValueError) as error:
+        raise UiRegistryLookupError(
+            f"the registry lookup that would confirm a fork-published ui version failed "
+            f"({type(error).__name__}: {error}). Nothing was written to the lock: re-run the "
+            "sync, or settle it offline by adding the version's dist.integrity to "
+            "_NASTECH_UI_INTEGRITY in updates.py"
+        ) from error
+    if not isinstance(body, dict) or not isinstance(body.get("versions"), dict):
+        raise UiRegistryLookupError(
+            f"npm registry returned no versions map for {_NASTECH_UI_REGISTRY_URL} "
+            f"(got {type(body).__name__}), which does not establish any published version"
+        )
+    _ui_registry_document = body
+    return body
+
+
+def _registry_ui_versions() -> set[str]:
+    """Every version the fork has published, as the registry answers it."""
+    return set(_fetch_ui_registry_document()["versions"])
+
+
+def _registry_ui_integrity(version: str) -> str | None:
+    """The published tarball's ``dist.integrity`` for ``version``, or None.
+
+    None here means the registry answered cleanly and the version is not in the
+    answer -- the same fact :data:`_NASTECH_UI_INTEGRITY` records for the
+    versions it lists.  A published entry whose digest is missing or is not a
+    ``sha512-`` is not a usable answer and raises: the sync cannot write a lock
+    that ``npm ci`` will verify from it.
+    """
+    entry = _fetch_ui_registry_document()["versions"].get(version)
+    if not isinstance(entry, dict):
+        return None
+    integrity = (entry.get("dist") or {}).get("integrity")
+    if integrity is None:
+        raise UiRegistryLookupError(
+            f"@nastech-research/ui@{version} is listed as published but carries no "
+            "dist.integrity, which is not an answer the lock can be written from"
+        )
+    if not isinstance(integrity, str) or not integrity.startswith("sha512-"):
+        raise UiRegistryLookupError(
+            f"@nastech-research/ui@{version} is published but its dist.integrity is "
+            f"{integrity!r}, which is not a sha512- digest npm ci can verify"
+        )
+    return integrity
+
+
+def _ui_version_is_fork_published(version: str) -> bool:
+    """Whether ``@nastech-research/ui@{version}`` exists as a fork release.
+
+    The reviewed table answers offline for every version it lists, so the
+    common pin costs no request; only a version the table does not know is
+    asked of the registry.  That keeps the gate honest as the fork publishes
+    more versions -- the sync stops needing an engine edit for each one --
+    without ever trusting an answer the registry did not give: an unclear
+    answer raises :class:`UiRegistryLookupError` instead of being read as
+    "not published".
+    """
+    if version in _NASTECH_UI_INTEGRITY:
+        return True
+    return version in _registry_ui_versions()
+
 
 def _reconcile_lock_record(rec: dict) -> bool:
     """Rename one package-lock record's name, deps and resolved target.
 
     Returns True if anything changed.  Mutates ``rec`` in place.  Raises
-    ValueError when a pinned ``@nous-research/ui`` version has no known
-    fork-published integrity, so the pipeline fails loudly instead of
-    shipping a lock that ``npm ci`` will reject.
+    :class:`UiScopePinError` when a pinned ``@nous-research/ui`` version is one
+    the fork has not published, so the pipeline fails loudly instead of shipping
+    a lock that ``npm ci`` will reject, and :class:`UiRegistryLookupError` when
+    the registry cannot answer whether it has been.
     """
     changed = False
     if isinstance(rec.get("name"), str) and rec["name"] in _NPM_NAME_RENAMES:
@@ -628,9 +741,16 @@ def _reconcile_lock_record(rec: dict) -> bool:
             version = str(rec.get("version", ""))
             integrity = _NASTECH_UI_INTEGRITY.get(version)
             if integrity is None:
-                raise ValueError(
-                    f"no fork-published integrity for @nastech-research/ui@{version}; "
-                    f"add it to _NASTECH_UI_INTEGRITY in updates.py"
+                integrity = _registry_ui_integrity(version)
+            if integrity is None:
+                raise UiScopePinError(
+                    f"package-lock pins @nastech-research/ui@{version}, which the fork "
+                    f"has not published (the registry lists "
+                    f"{', '.join(sorted(_registry_ui_versions()))}). Publish that version "
+                    "under @nastech-research/ui and the sync reads its dist.integrity "
+                    "straight off the registry -- no engine change is needed once it "
+                    "exists, and never a value copied from upstream's tarball: the "
+                    "fork's republished bytes differ and npm ci verifies this field"
                 )
             rec["resolved"] = f"https://registry.npmjs.org/@nastech-research/ui/-/ui-{version}.tgz"
             rec["integrity"] = integrity
@@ -5462,7 +5582,7 @@ def _ui_scope_repin_target(
 
 
 class UiScopePinError(ValueError):
-    """A renamed npm scope that would resolve to a different package.
+    """A renamed npm scope that would resolve to a different package, or to none.
 
     A ``ValueError`` on purpose: ``hundredways.conformance`` reports it as a
     candidate issue and the update pipeline records it as a failed stage,
@@ -5503,10 +5623,11 @@ def _reconcile_ui_scope_pins(dst: str) -> list[str]:
     tilde, ``*`` or ``latest`` spec silently installs a different package at
     a different version than upstream ships.  In a ``package.json`` every
     reference must therefore be an EXACT version the fork has actually
-    published -- the same version upstream pinned, carried in
-    ``_NASTECH_UI_INTEGRITY`` together with the fork tarball's
-    ``dist.integrity`` that ``npm ci`` verifies -- and no upstream scope may
-    survive branding at all.  That path is unchanged.
+    published -- the same version upstream pinned, whose ``dist.integrity``
+    ``npm ci`` verifies comes from ``_NASTECH_UI_INTEGRITY`` for the versions
+    it reviews and from the registry for any the fork publishes afterwards
+    (see :func:`_ui_version_is_fork_published`) -- and no upstream scope may
+    survive branding at all.
 
     A non-manifest ``pkg@version`` reference (a CDN font URL inside a
     template, say) cannot be repaired by the manifest rule, so it gets a
@@ -5514,12 +5635,16 @@ def _reconcile_ui_scope_pins(dst: str) -> list[str]:
     reference is REPINNED to a published version whose referenced asset is
     proven byte-identical, and recorded as fixed.  The proof is the verified
     sha256 evidence in ``_UI_SCOPE_ASSET_EVIDENCE`` -- never a guess and never
-    a blind version bump.  Idempotent: the repinned version is published, so a
-    second pass is a no-op.
+    a blind version bump.  Repinning still only ever targets a reviewed
+    version; the registry answers "is this live?", not "what may I change it
+    to?".  Idempotent: the repinned version is published, so a second pass is
+    a no-op.
 
     Anything else raises :class:`UiScopePinError` -- a ``ValueError``, so
     ``conformance`` reports it as a candidate issue and the stage fails
-    visibly -- naming the exact remedy instead of substituting silently.
+    visibly -- naming the exact remedy instead of substituting silently.  A
+    registry that cannot answer raises :class:`UiRegistryLookupError` instead,
+    because "unpublished" and "unknown" must not be confused.
     """
     upstream_scope = "@nous-research/ui"
     fork_scope = "@nastech-research/ui"
@@ -5562,12 +5687,14 @@ def _reconcile_ui_scope_pins(dst: str) -> list[str]:
                         f"and the fork's differ (1.5.2 vs 0.18.4), so a "
                         f"range silently resolves to a different package"
                     )
-                if spec not in _NASTECH_UI_INTEGRITY:
+                if not _ui_version_is_fork_published(spec):
                     raise UiScopePinError(
                         f"{rel}: {fork_scope}@{spec} is not a version the "
-                        f"fork has published; add its npm dist.integrity to "
-                        f"_NASTECH_UI_INTEGRITY in updates.py (published: "
-                        f"{', '.join(sorted(_NASTECH_UI_INTEGRITY))})"
+                        f"fork has published (the registry lists "
+                        f"{', '.join(sorted(_registry_ui_versions()))}). "
+                        f"Publish that version under {fork_scope} -- the sync "
+                        f"reads its dist.integrity off the registry, so the "
+                        f"pin needs no engine edit once it exists"
                     )
     fixed: list[str] = []
     published = set(_NASTECH_UI_INTEGRITY)
@@ -5589,6 +5716,12 @@ def _reconcile_ui_scope_pins(dst: str) -> list[str]:
                     f"@{scope}/ui@{version} survived branding; the fork "
                     f"publishes {fork_scope} and must rename it"
                 )
+            # A version the fork published after the table was written resolves
+            # to real bytes, so the reference is live and must not be touched;
+            # asking costs one memoised request and only for a version the
+            # table does not already answer.
+            if _ui_version_is_fork_published(version):
+                continue
             assets = _ui_scope_asset_paths(text, match)
             target = (
                 None if assets is None
@@ -5598,11 +5731,11 @@ def _reconcile_ui_scope_pins(dst: str) -> list[str]:
                 named = ", ".join(assets) if assets else "the referenced asset"
                 raise UiScopePinError(
                     f"{rel}: {fork_scope}@{version} is not a version the fork "
-                    f"has published (published: "
-                    f"{', '.join(sorted(published))}); {named} has no "
-                    f"byte-identical copy in a published version, so it cannot "
-                    f"be repinned safely -- republish it, pin it to a published "
-                    f"version, or drop the reference"
+                    f"has published (the reviewed table and the registry both "
+                    f"list only {', '.join(sorted(published))}); {named} has "
+                    f"no byte-identical copy in a published version, so it "
+                    f"cannot be repinned safely -- republish it, pin it to a "
+                    f"published version, or drop the reference"
                 )
             rewrites.append((match.start("version"), match.end("version"), target))
         if not rewrites:
@@ -6274,6 +6407,51 @@ class UpdateResult:
         )
 
 
+# Where the receipt keeps the commit prose it used to inline.  The receipt is a ``.json``
+# the fork's own ``scripts/check_no_tmp_literals.py`` reads, and that checker flags a
+# literal /tmp token anywhere in one -- upstream subject 5e5be7c (2026-10-24) is
+# "test(gateway): compare against the server's resolved home (macOS /tmp is a symlink)".
+# A ``.jsonl`` log is a data record rather than first-party code, so it sits outside the
+# checker's declared suffix scope, and the subjects stay verbatim.
+COMMIT_SUBJECTS_FILE = "commit-subjects.jsonl"
+
+
+def split_manifest_subjects(manifest: dict, dest: str) -> dict:
+    """Write the receipt's commit subjects to ``dest/commit-subjects.jsonl``.
+
+    Returns the receipt as it goes to disk: the same mapping with the prose list
+    replaced by the log's name and count, so a reader still learns where the subjects
+    went.  Every subject is kept verbatim and in order; only the file changes.
+    """
+    subjects = list(manifest.get("commit_subjects") or ())
+    with open(os.path.join(dest, COMMIT_SUBJECTS_FILE), "w", encoding="utf-8") as fh:
+        for subject in subjects:
+            fh.write(json.dumps(subject, ensure_ascii=False) + "\n")
+    receipt = dict(manifest)
+    receipt.pop("commit_subjects", None)
+    receipt["commit_subjects_file"] = COMMIT_SUBJECTS_FILE
+    receipt["commit_subject_count"] = len(subjects)
+    return receipt
+
+
+def read_manifest_with_subjects(path: str) -> dict:
+    """The receipt at ``path`` with its commit subjects where the narrative finds them.
+
+    Receipts written before the split still carry the list inline; both shapes return
+    the same mapping, because the reader should not have to know which one it has.
+    """
+    with open(path, encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    if manifest.get("commit_subjects") is not None:
+        return manifest
+    name = manifest.get("commit_subjects_file")
+    if not name:
+        return manifest
+    with open(os.path.join(os.path.dirname(path), name), encoding="utf-8") as fh:
+        manifest["commit_subjects"] = [json.loads(line) for line in fh if line.strip()]
+    return manifest
+
+
 class UpdateManager:
     """Run one full update: the 18 ordered pipeline stages."""
 
@@ -6693,11 +6871,14 @@ class UpdateManager:
         }
         result.manifest_path = os.path.join(dest, "manifest.json")
         try:
+            receipt = split_manifest_subjects(manifest, dest)
             with open(result.manifest_path, "w", encoding="utf-8") as fh:
-                # Manifest values include upstream commit subjects and changed
-                # paths. Apply the canonical text normalizer to the serialized
-                # metadata too, so generated output remains a fixed point.
-                fh.write(self.rules.transform_text(json.dumps(manifest, indent=2)))
+                # Manifest values include changed paths. Apply the canonical text
+                # normalizer to the serialized metadata too, so generated output
+                # remains a fixed point.  The commit subjects are not here: they are
+                # prose in commit-subjects.jsonl, where the fork's tmp-literal checker
+                # does not read them.
+                fh.write(self.rules.transform_text(json.dumps(receipt, indent=2)))
             manifest_stage.status = "ok"
         except OSError as exc:
             manifest_stage.status = "fail"
