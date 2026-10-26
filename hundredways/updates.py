@@ -8113,20 +8113,26 @@ _LANES_DEFAULT = "DEFAULT = frozenset(lane.name for lane in LANES if lane.defaul
 _LANES_DEFAULT_MARK = "# NasTech: every lane this fork can ship is on, signing or not."
 _LANES_DEFAULT_FORK = (
     _LANES_DEFAULT_MARK + "\n"
-    "# The fork publishes its desktop packages unsigned: the Apple and Azure/Store\n"
-    "# signing accounts are unconfigured, and a release must not wait on them.  The\n"
-    "# macOS and Windows lanes are therefore ON and pass `skip-signed` to the bundled\n"
-    "# builder, which still verifies any build that claims to be signed.  Every Linux\n"
-    "# lane stays on, and Termux is on although upstream leaves it opt-in: its APT\n"
-    "# channel is part of what this fork ships.\n"
-    "# smoke and upgrade gate on built desktop packages: until a signed desktop\n"
-    "# channel exists they would smoke a payload the update channel cannot ship, and\n"
-    "# stable.require_smokes_match_claim rejects a claim whose test policy names\n"
-    "# smokes a release cannot produce.\n"
+    "# The fork publishes its desktop packages unsigned: the Apple and Azure signing\n"
+    "# accounts are unconfigured, and a release must not wait on them.  The macOS and\n"
+    "# Windows lanes are therefore ON, and stable-release.yml calls every desktop leg\n"
+    "# with `skip-signed: true` (see _reconcile_unsigned_desktop_callers), which still\n"
+    "# verifies any build that claims to be signed.  Every Linux lane stays on, and\n"
+    "# Termux is on although upstream leaves it opt-in: its APT channel is part of what\n"
+    "# this fork ships.\n"
+    "# windows-store stays out: submitting to Partner Center needs the MS_STORE_*\n"
+    "# credentials this fork has never had, so turning the lane on would only turn a red\n"
+    "# on; --with windows-store re-enables it once they are provisioned.\n"
+    "# smoke and upgrade stay out too, for the same reason one level down: the bundled\n"
+    "# builder gates its Windows MSIX smoke jobs on `inputs.skip-signed != true`, so with\n"
+    "# every desktop leg declared unsigned a claim that names `smoke` asks for smokes its\n"
+    "# own build refuses to run, and the upgrade arms install the previously published\n"
+    "# signed package this fork's channel has never carried.  Both lanes come back with\n"
+    "# the signing credentials: --with smoke --with upgrade.\n"
     "DEFAULT = frozenset(\n"
     "    lane.name for lane in LANES\n"
     "    if lane.default\n"
-    '    and lane.name not in {"smoke", "upgrade"}\n'
+    '    and lane.name not in {"windows-store", "smoke", "upgrade"}\n'
     ') | {"termux"}\n'
 )
 
@@ -8150,13 +8156,14 @@ def _reconcile_signing_gated_defaults(dst: str) -> bool:
     outputs, every job's ``if`` and the gates' ``skipped`` expectations -- so the
     fork's only remaining decision is which lanes a release asks for.  Its
     default is therefore upstream's minus the lanes whose signing accounts are
-    unconfigured, plus Termux, which needs no signing.  The two desktop-gated test
-    lanes (``smoke``, ``upgrade``) leave with them: they smoke and upgrade the
-    desktop packages a lane builds, so with every desktop lane off they would run
-    nothing, while ``stable.require_smokes_match_claim`` refuses a claim whose
-    test policy names smokes the release cannot produce.  Idempotent, and a moved
-    anchor raises so the sync fails rather than shipping a default set that no
-    longer means what this fork needs.
+    unconfigured, plus Termux, which needs no signing.  The two desktop test lanes
+    (``smoke``, ``upgrade``) leave for the same reason one level down: the bundled
+    builder will not smoke a package it was told to build unsigned, and the upgrade
+    arms install the previously published signed package.  So a default claim ships
+    every desktop package, tests none of them, and ``stable.require_smokes_match_claim``
+    keeps accepting it because the claim names no smoke the release cannot produce.
+    Idempotent, and a moved anchor raises so the sync fails rather than shipping a
+    default set that no longer means what this fork needs.
     """
     text = _sgl_read(dst, _LANES_MODULE)
     if text is None:
@@ -8184,6 +8191,14 @@ _APPLE_PUBLISH_IF_UNSIGNED = (
     "        if: inputs.skip-signed != true && (inputs.upload_release == true || "
     "inputs.release-phase == 'candidate' || inputs.build_commit != '' || inputs.channel != '')\n"
 )
+_SKIP_SIGNED_DESCRIPTION = (
+    "        description: 'Stable candidates only: build no signed Windows package "
+    "(the claim has no windows lane). Needs no Azure signing.'\n"
+)
+_SKIP_SIGNED_DESCRIPTION_UNSIGNED = (
+    "        description: 'Stable candidates only: build no signed package at all -- no Azure "
+    "signing for Windows, no Apple signing or notarization for macOS. Needs neither account.'\n"
+)
 
 
 def _unsigned_gate_pair(tail: str) -> tuple[str, str]:
@@ -8204,6 +8219,10 @@ _UNSIGNED_DESKTOP_EDITS = (
         "          shopt -s nullglob\n"
         "          apps=(apps/desktop/release/mac*/*.app)"
     ),
+    (
+        _SKIP_SIGNED_DESCRIPTION.rstrip("\n"),
+        _SKIP_SIGNED_DESCRIPTION_UNSIGNED.rstrip("\n"),
+    ),
 )
 
 
@@ -8219,8 +8238,10 @@ def _reconcile_unsigned_desktop_publish(dst: str) -> bool:
     the same workflow already accepts ``skip-signed: true``.  This fork has no Apple or
     Azure account and must still ship desktop packages, so the three Apple steps take
     that same escape hatch -- and only that one, because the verify step still runs
-    whenever a build claims to be signed.  Idempotent; a moved anchor raises
-    :class:`UnsignedDesktopPublishError` rather than leaving half the gates patched.
+    whenever a build claims to be signed.  The input's own description is reworded to
+    name macOS, because after this rule it is no longer a Windows-only switch.
+    Idempotent; a moved anchor raises :class:`UnsignedDesktopPublishError` rather than
+    leaving half the gates patched.
     """
     text = _sgl_read(dst, _DESKTOP_BUNDLED_RELEASE)
     if text is None:
@@ -8232,8 +8253,8 @@ def _reconcile_unsigned_desktop_publish(dst: str) -> bool:
         if old not in text:
             raise UnsignedDesktopPublishError(
                 f"{_DESKTOP_BUNDLED_RELEASE} no longer contains the signing anchor {old!r}; "
-                "the pre-flight or the notarization backstop was reworded upstream. Update "
-                "_UNSIGNED_DESKTOP_EDITS to the new shape before the next sync."
+                "the pre-flight, the notarization backstop or the input description moved "
+                "upstream. Update _UNSIGNED_DESKTOP_EDITS to the new shape before the next sync."
             )
         if text.count(old) != 1:
             raise UnsignedDesktopPublishError(
@@ -8243,6 +8264,72 @@ def _reconcile_unsigned_desktop_publish(dst: str) -> bool:
         text = text.replace(old, new, 1)
     if text != before:
         _sgl_write(dst, _DESKTOP_BUNDLED_RELEASE, text)
+    return text != before
+
+
+# Every desktop leg of the stable release calls the bundled builder with its own ``with:``
+# block.  The two macOS legs never mention ``skip-signed`` at all -- so it defaults to false
+# and the gates above stay shut -- and the three Windows legs pass it inverted: upstream's
+# expression skips signing when the Windows lane is *off*, which is exactly when the leg does
+# not run.  A fork that ships unsigned has to say so at the call site, or the escape hatch
+# this file's own rules open is never opened.
+_CALLER_SKIP_TESTS = "      skip-tests: ${{ !fromJSON(needs.admit.outputs.lanes).smoke }}\n"
+_WINDOWS_SKIP_SIGNED = "      skip-signed: ${{ !fromJSON(needs.admit.outputs.lanes).windows }}\n"
+_UNSIGNED_CALLER_LINE = "      skip-signed: true\n"
+
+
+def _caller_leg(job: str) -> str:
+    """The leg text upstream writes for one bundled-builder job group."""
+    return "      jobs: " + job + "\n" + _CALLER_SKIP_TESTS
+
+
+_UNSIGNED_DESKTOP_CALLER_EDITS = tuple(
+    (job, _caller_leg(job), _caller_leg(job) + _UNSIGNED_CALLER_LINE)
+    for job in ("darwin-arm64", "darwin-x64")
+) + tuple(
+    (job, _caller_leg(job) + _WINDOWS_SKIP_SIGNED, _caller_leg(job) + _UNSIGNED_CALLER_LINE)
+    for job in ("win32-arm64", "win32-x64", "win32-bundle")
+)
+
+
+class UnsignedDesktopCallerError(ValueError):
+    """A desktop leg of the stable release no longer matches the shape this rule edits."""
+
+
+def _reconcile_unsigned_desktop_callers(dst: str) -> bool:
+    """Make every desktop leg of the stable release declare that it ships unsigned.
+
+    ``_reconcile_unsigned_desktop_publish`` lets the bundled builder publish without Apple
+    or Azure credentials, but only when its caller passes ``skip-signed: true``.  Upstream
+    passes nothing on the macOS legs and the lane's opposite polarity on the Windows legs,
+    so a fork with no signing accounts would still hit "Require signing credentials when
+    publishing" as soon as its desktop lanes were on.  Termux and Linux legs are left alone:
+    they build nothing that this gate signs.  Idempotent, and a leg whose shape moved raises
+    :class:`UnsignedDesktopCallerError` rather than shipping a release that silently reverts
+    to signed-or-nothing.
+    """
+    text = _sgl_read(dst, _STABLE_RELEASE_WORKFLOW)
+    if text is None or "desktop-bundled-release.yml" not in text:
+        return False
+    before = text
+    for job, old, new in _UNSIGNED_DESKTOP_CALLER_EDITS:
+        if new in text:
+            continue
+        if old not in text:
+            raise UnsignedDesktopCallerError(
+                f"{_STABLE_RELEASE_WORKFLOW} no longer contains the {job} desktop caller leg "
+                f"{old!r}; upstream reworded the leg that builds this fork's desktop package. "
+                "Re-derive _UNSIGNED_DESKTOP_CALLER_EDITS against upstream's current workflow "
+                "before the next sync, or the desktop lanes ship signed-or-nothing again."
+            )
+        if text.count(old) != 1:
+            raise UnsignedDesktopCallerError(
+                f"{_STABLE_RELEASE_WORKFLOW} has {text.count(old)} copies of the {job} desktop "
+                f"caller leg, so which leg to declare unsigned is ambiguous"
+            )
+        text = text.replace(old, new, 1)
+    if text != before:
+        _sgl_write(dst, _STABLE_RELEASE_WORKFLOW, text)
     return text != before
 
 
@@ -8262,10 +8349,13 @@ def _reconcile_signing_gated_release_lanes(dst: str) -> list[str]:
     a tree whose signed lanes can no longer be skipped.  Returns the changed
     relative paths.
 
-    A tree synced past upstream's lane table does that job itself, so only the
-    fork's default lane set is re-derived there; the optional-platforms shape
-    below is kept for a tree that has not moved yet, and the two are told apart
-    by whether the lane table and ``stable.py``'s import of it are both present.
+    A tree synced past upstream's lane table does that job itself, so three
+    things are re-derived there instead: the default lane set, the bundled
+    builder's Apple gates and the ``skip-signed`` value every desktop caller leg
+    passes (see :func:`_reconcile_unsigned_desktop_callers`).  The
+    optional-platforms shape below is kept for a tree that has not moved yet, and
+    the two are told apart by whether the lane table and ``stable.py``'s import of
+    it are both present.
     """
     changed: list[str] = []
     if _lanes_own_the_signing_gate(dst):
@@ -8273,6 +8363,8 @@ def _reconcile_signing_gated_release_lanes(dst: str) -> list[str]:
             changed.append(_LANES_MODULE)
         if _reconcile_unsigned_desktop_publish(dst):
             changed.append(_DESKTOP_BUNDLED_RELEASE)
+        if _reconcile_unsigned_desktop_callers(dst):
+            changed.append(_STABLE_RELEASE_WORKFLOW)
         return changed
     for rel, apply in ((_OPTIONAL_PLATFORMS, _reconcile_signing_gated_lanes),
                        (_STABLE_RELEASE, _reconcile_signing_gated_stable),
@@ -8352,14 +8444,15 @@ def test_the_default_builds_everything_but_macos_intel_and_termux():
 ''',
         r'''from scripts.releases import lanes as lane_set
 
-# NasTech contract: the desktop lanes ship unsigned (the bundled builder takes
-# `skip-signed`), and only the two desktop-gated test lanes stay out until a
-# signed update channel exists.
-UNSIGNED_LANES = {"smoke", "upgrade"}
+# NasTech contract: the fork publishes its desktop packages unsigned, so every lane it can
+# build is in the default set.  What stays out: macos-intel (upstream opts out; its runner
+# adds over an hour), windows-store (Partner Center needs the MS_STORE_* credentials this
+# fork has never had), and smoke and upgrade (they gate on a signed desktop channel).
+OUT_OF_DEFAULT = {"macos-intel", "windows-store", "smoke", "upgrade"}
 
 
 def test_the_default_ships_every_lane_this_fork_publishes():
-    assert lane_set.DEFAULT == (set(lane_set.NAMES) - UNSIGNED_LANES) | {"termux"}
+    assert lane_set.DEFAULT == (set(lane_set.NAMES) - OUT_OF_DEFAULT) | {"termux"}
 ''',
     ),
     (
@@ -8463,16 +8556,15 @@ LEGACY_DEFAULT = frozenset(set(lane_set.NAMES) - {"macos-intel", "termux"})
     off = {"candidates-darwin-x64", "transitions-darwin-x64", "macos-packaged-x64",
            "candidates-termux", "termux-checks"}
 ''',
-        r'''def test_a_default_claim_builds_no_desktop_packages_and_lanes_restore_them(
+        r'''def test_a_default_claim_ships_unsigned_desktops_and_lanes_restore_them(
         tmp_path, r2_server, https_origin, monkeypatch):
-    """NasTech DEFAULT ships the signable lanes only: every desktop build and its test
-    arms are skipped, and --with restores a lane once its signing credentials exist."""
+    """NasTech DEFAULT builds every desktop package, unsigned: what still leaves is the
+    Intel Mac candidate and the upgrade arms, which need a signed channel to upgrade."""
     from scripts.releases import stable
 
-    off = {"candidates-darwin-x64", "transitions-darwin-x64", "macos-packaged-x64",
-           "candidates-darwin-arm64", "transitions-darwin-arm64", "macos-packaged-arm64",
-           "candidates-win32-arm64", "candidates-win32-x64", "candidates-win32-bundle",
-           "transitions-win32", "windows-packaged"}
+    off = {"candidates-darwin-x64",
+           "transitions-darwin-arm64", "transitions-darwin-x64", "transitions-win32",
+           "macos-packaged-arm64", "macos-packaged-x64", "windows-packaged"}
 ''',
     ),
     (
@@ -8539,9 +8631,9 @@ _RELEASE_ENTRYPOINT_TESTS_EDITS = (
     assert "Not built: macos-intel, termux." in text
     assert "Not tested" not in text
 ''',
-        r'''    # The default set names what it leaves out: this fork signs no desktop package by default,
-    # and the desktop-gated test lanes (smoke, upgrade) are off with them.
-    assert "Not built: windows, windows-store, macos-arm64, macos-intel." in text
+        r'''    # The default set names what it leaves out: this fork builds no Store bundle and no Intel
+    # macOS package, and it tests no desktop package it cannot sign.
+    assert "Not built: windows-store, macos-intel." in text
     assert "Not tested: smoke, upgrade" in text
 ''',
     ),
@@ -8551,7 +8643,7 @@ _RELEASE_ENTRYPOINT_TESTS_EDITS = (
 _RELEASE_ENTRYPOINT = "scripts/releases/entrypoint.py"
 _RELEASE_ENTRYPOINT_MARK = "# The note warns about a partial DESKTOP release:"
 _RELEASE_LANES_TESTS = "tests/scripts/test_release_lanes.py"
-_RELEASE_LANES_TESTS_MARK = "UNSIGNED_LANES = {"
+_RELEASE_LANES_TESTS_MARK = "OUT_OF_DEFAULT = {"
 _RELEASE_CHANNELS_TESTS = "tests/scripts/test_release_channels.py"
 _RELEASE_CHANNELS_TESTS_MARK = "SIGNED = frozenset(lane_set.NAMES)"
 _STABLE_RELEASE_TESTS_MARK = "DESKTOP_SIGNED = frozenset("

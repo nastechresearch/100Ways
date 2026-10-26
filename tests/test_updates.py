@@ -5757,28 +5757,38 @@ def test_fork_lane_release_noops_on_a_tree_without_the_release_files(tmp_path):
     assert _reconcile_fork_lane_release_surface(str(tmp_path / "empty")) == []
 
 
+def _quoted_in(pattern: str, text: str, flags: int = 0) -> set:
+    """The lane names inside ``pattern``'s capture group; a lost match fails the pairing."""
+    found = re.search(pattern, text, flags)
+    assert found, f"{pattern!r} no longer matches, so the lane pairing cannot be read"
+    return set(re.findall(r'"([a-z0-9-]+)"', found.group(1)))
+
+
 def test_fork_lane_release_default_set_and_its_test_agree(tmp_path):
     """The lane test may not name a lane set the lane table does not exclude.
 
     ``_reconcile_signing_gated_defaults`` writes the fork's ``DEFAULT`` and this
-    rule writes the test that asserts it; the two lists are hand-typed in separate
-    constants, so a lane added to one and not the other goes red in the fork's
-    release suite with nothing pointing at the pairing.
+    rule writes the test that asserts it; the lists are hand-typed in separate
+    constants, and what the test names is the lane table's own exclusions **plus**
+    whatever upstream already leaves opt-in -- so ``macos-intel`` belongs in the
+    test without appearing in the fork's ``not in`` line.  A lane added to one and
+    not the other goes red in the fork's release suite with nothing pointing at the
+    pairing.
     """
-    root, path = _lane_release_tree(
-        tmp_path, _RELEASE_LANES_TESTS, _RELEASE_LANES_TESTS_EDITS)
+    root, path = _lane_release_tree(tmp_path, _RELEASE_LANES_TESTS, _RELEASE_LANES_TESTS_EDITS)
     assert _reconcile_fork_lane_release_surface(str(root)) == [_RELEASE_LANES_TESTS]
 
-    test_names = set(re.findall(
-        r'"([a-z0-9-]+)"',
-        re.search(r"UNSIGNED_LANES = \{([^}]*)\}", path.read_text(encoding="utf-8")).group(1)))
-    source_names = set(re.findall(
-        r'"([a-z0-9-]+)"',
-        re.search(r"lane\.name not in \{([^}]*)\}", _LANES_DEFAULT_FORK, re.S).group(1)))
-    assert test_names == source_names
+    test_names = _quoted_in(r"OUT_OF_DEFAULT = \{([^}]*)\}", path.read_text(encoding="utf-8"))
+    parts = _LANES_DEFAULT_FORK.split("if lane.default\n")[1]
+    source_names = _quoted_in(r"^    and lane\.name not in \{([^}]*)\}", parts, re.M)
+    added = _quoted_in(r"^\) \| \{([^}]*)\}", parts, re.M)
+    # Upstream's own opt-outs, read off the before-text this pair rewrites.
+    upstream = _RELEASE_LANES_TESTS_EDITS[0][0].split("set(lane_set.NAMES) - ")[1]
+    upstream_opt_in = set(re.findall(r'"([a-z0-9-]+)"', upstream))
+    assert test_names == source_names | (upstream_opt_in - added)
     # Termux is the one lane both sides put back in: it needs no signing.
-    assert '"termux"' in _LANES_DEFAULT_FORK
-    assert 'termux' not in test_names
+    assert added == {"termux"}
+    assert "termux" not in test_names
 
 
 @pytest.mark.parametrize("drop", [1, 4])
