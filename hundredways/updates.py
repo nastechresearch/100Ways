@@ -1537,6 +1537,71 @@ def _reconcile_set_theme_catalog_line(dst: str) -> list[str]:
     return fixed
 
 
+# The fork kept a picker test that upstream deleted, and its fake mirrors
+# ``curses_radiolist``'s keyword list.  Every upstream addition to that widget turns the
+# mirror into a TypeError (``headings``, upstream 15307dece7) while production stays
+# correct, so the fake binds the live signature instead -- a copy cannot go stale.
+_ORPHAN_PICKER_TEST_REL = "tests/nastech_cli/test_setup_menu_curses_migration.py"
+_ORPHAN_PICKER_TEST_BOUND = "bind = signature(curses_ui.curses_radiolist).bind"
+_ORPHAN_PICKER_TEST_MIRRORED = """    def _fake(
+        title,
+        items,
+        *,
+        selected=0,
+        cancel_returns=None,
+        description=None,
+        searchable=False,
+        search_labels=None,
+    ):
+        seen["title"] = title
+        seen["items"] = items
+        seen["search_labels"] = search_labels
+        return 1  # pick second model
+"""
+_ORPHAN_PICKER_TEST_BINDING = """    from inspect import signature
+
+    from nastech_cli import curses_ui
+
+    bind = signature(curses_ui.curses_radiolist).bind
+
+    def _fake(*args, **kwargs):
+        seen.update(bind(*args, **kwargs).arguments)
+        return 1  # pick second model
+"""
+
+
+class OrphanPickerFakeError(ValueError):
+    """The orphan picker test carries neither the mirrored fake nor the bound one."""
+
+
+def _reconcile_orphan_picker_fake(dst: str) -> list[str]:
+    """Bind the orphan picker test's fake to the live radiolist signature.
+
+    Upstream deleted its copy of this test, so the fork's is preserved verbatim by
+    ``preserve_fork_files`` -- including a fake that lists the widget's keywords.  The
+    moment upstream widens ``curses_radiolist`` the mirror raises ``TypeError`` in CI
+    while the picker it guards is fine, so the fork's copy is rewritten once to bind
+    the live signature.  Returns the relative path when it changed; a second pass is a
+    no-op, and a file carrying neither shape stops the sync instead of shipping a test
+    nobody can trust.
+    """
+    text = _reconcile_budget_read(dst, _ORPHAN_PICKER_TEST_REL)
+    if text is None or _ORPHAN_PICKER_TEST_BOUND in text:
+        return []
+    if _ORPHAN_PICKER_TEST_MIRRORED not in text:
+        raise OrphanPickerFakeError(
+            f"{_ORPHAN_PICKER_TEST_REL} carries neither the mirrored radiolist fake nor the "
+            "signature-bound one, so the widget's keyword set moved again. Replace "
+            "_ORPHAN_PICKER_TEST_MIRRORED with the fake upstream's test now carries."
+        )
+    _reconcile_budget_write(
+        dst,
+        _ORPHAN_PICKER_TEST_REL,
+        text.replace(_ORPHAN_PICKER_TEST_MIRRORED, _ORPHAN_PICKER_TEST_BINDING, 1),
+    )
+    return [_ORPHAN_PICKER_TEST_REL]
+
+
 def _reconcile_prompt_surface_snapshot(dst: str) -> list[str]:
     """Re-align the committed prompt-surface snapshot after branding.
 
@@ -6325,6 +6390,12 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     # the description and its snapshot copy have to be shortened first or the manifest counts
     # describe the pre-fix text.
     for rel in _reconcile_set_theme_catalog_line(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    # The picker test upstream deleted is preserved from the fork, fake and all; binding
+    # its fake to the live widget signature keeps it from going red on the next upstream
+    # keyword without touching the code it guards.
+    for rel in _reconcile_orphan_picker_fake(dst):
         result.total += 1
         result.fixed.append(rel)
     # Prompt-surface LAST: it counts characters in the rendered prompts, and
