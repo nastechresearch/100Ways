@@ -139,6 +139,10 @@ from hundredways.updates import (
     _WINDOWS_SUSPEND_TEST_REL,
     _WINDOWS_SUSPEND_WAIT,
     WindowsSuspendObservationError,
+    _reconcile_orphan_picker_fake,
+    _ORPHAN_PICKER_TEST_MIRRORED,
+    _ORPHAN_PICKER_TEST_REL,
+    OrphanPickerFakeError,
     _NASTECH_UI_INTEGRITY,
     _SET_THEME_CATALOG_BUDGET,
     _SET_THEME_LONG,
@@ -7222,3 +7226,61 @@ def test_a_receipt_with_no_subjects_at_all_still_reads(tmp_path):
     path.write_text(json.dumps({"number": 4}), encoding="utf-8")
 
     assert read_manifest_with_subjects(str(path)) == {"number": 4}
+
+
+def _orphan_picker_tree(tmp_path, body=None):
+    path = tmp_path / _ORPHAN_PICKER_TEST_REL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        '"""Regression tests for the setup pickers."""\n'
+        "from unittest.mock import patch\n\n\n"
+        "def test_prompt_model_selection_uses_curses_radiolist():\n"
+        "    from nastech_cli.auth import _prompt_model_selection\n"
+        "    from nastech_cli.curses_ui import radio_item_plain\n\n"
+        "    seen = {}\n\n"
+        + (_ORPHAN_PICKER_TEST_MIRRORED if body is None else body)
+        + "\n\n"
+        + (
+            ""
+            if body is not None
+            else '    with patch("nastech_cli.curses_ui.curses_radiolist", side_effect=_fake):\n'
+            '        _prompt_model_selection(["model-a", "model-b"])\n\n'
+            '    assert seen["title"] == "Select default model:"\n'
+            '    assert [radio_item_plain(item) for item in seen["items"]]\n'
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_the_orphan_picker_fake_binds_the_live_widget_signature(tmp_path):
+    path = _orphan_picker_tree(tmp_path)
+
+    changed = _reconcile_orphan_picker_fake(str(tmp_path))
+
+    assert changed == [_ORPHAN_PICKER_TEST_REL]
+    text = path.read_text(encoding="utf-8")
+    assert "bind = signature(curses_ui.curses_radiolist).bind" in text
+    assert "def _fake(*args, **kwargs):" in text
+    assert "search_labels=None," not in text, "the mirrored keyword list must be gone"
+
+
+def test_a_second_pass_over_the_bound_fake_changes_nothing(tmp_path):
+    path = _orphan_picker_tree(tmp_path)
+    _reconcile_orphan_picker_fake(str(tmp_path))
+    first = path.read_text(encoding="utf-8")
+
+    assert _reconcile_orphan_picker_fake(str(tmp_path)) == []
+    assert path.read_text(encoding="utf-8") == first
+
+
+def test_a_tree_without_the_orphan_test_is_left_alone(tmp_path):
+    assert _reconcile_orphan_picker_fake(str(tmp_path)) == []
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_fake_the_rule_does_not_recognise_stops_the_sync(tmp_path):
+    _orphan_picker_tree(tmp_path, body="    def _fake(something_else):\n        return 1\n")
+
+    with pytest.raises(OrphanPickerFakeError, match="keyword set moved again"):
+        _reconcile_orphan_picker_fake(str(tmp_path))
