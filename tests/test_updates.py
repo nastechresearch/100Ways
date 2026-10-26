@@ -28,11 +28,14 @@ from hundredways.updates import (
     BrowseBudgetDdlError,
     BrowseBudgetFlockTestError,
     ChannelReaderUserAgentError,
+    DocsSearchHydrationGateError,
     ForkLaneReleaseEditError,
     FreeRunnerParallelismError,
     GatewayAllowlistReloadError,
     GatewayPluginGateError,
     NastechSuitePinError,
+    PluginCatalogAdmissionError,
+    SetThemeCatalogLineError,
     StoreLaneGateError,
     TermuxAptKeyDocError,
     UpdateManager,
@@ -91,6 +94,7 @@ from hundredways.updates import (
     _reconcile_windows_boot_lifecycle_race,
     _reconcile_windows_real_git_locate,
     _reconcile_docs_posix_separators,
+    _reconcile_docs_search_hydration_gate,
     _reconcile_drop_vercel_deploy_job,
     _reconcile_fork_skill_catalogs,
     _reconcile_fork_skill_sidebars,
@@ -105,7 +109,7 @@ from hundredways.updates import (
     _reconcile_managed_gateway_wire_headers,
     _reconcile_nastech_home_env_prefix,
     _reconcile_pinned_source_clones,
-    _reconcile_plugin_catalog_sync_exemption,
+    _reconcile_plugin_catalog_admission,
     _reconcile_plugin_guard_trusted_installer_hosts,
     _reconcile_portable_shebang,
     _reconcile_portal_override_test_collision,
@@ -113,6 +117,7 @@ from hundredways.updates import (
     _reconcile_prompt_surface_snapshot,
     _reconcile_python_test_timeout,
     _reconcile_reasoning_effort_selection,
+    _reconcile_set_theme_catalog_line,
     _reconcile_sigv4_vectors,
     _reconcile_skill_description_hardline,
     _reconcile_skill_docs_order,
@@ -128,7 +133,17 @@ from hundredways.updates import (
     _reconcile_unsigned_darwin_build_env,
     _reconcile_vercel_prepare,
     _reconcile_windows_boot_lifecycle_race,
+    _reconcile_windows_suspend_observation,
+    _WINDOWS_SUSPEND_BUDGET_S,
+    _WINDOWS_SUSPEND_ONE_SHOT,
+    _WINDOWS_SUSPEND_TEST_REL,
+    _WINDOWS_SUSPEND_WAIT,
+    WindowsSuspendObservationError,
     _NASTECH_UI_INTEGRITY,
+    _SET_THEME_CATALOG_BUDGET,
+    _SET_THEME_LONG,
+    _SET_THEME_SHORT,
+    _SET_THEME_SOURCE_REL,
     _UI_SCOPE_ASSET_EVIDENCE,
     UiRegistryLookupError,
     UiScopePinError,
@@ -883,6 +898,135 @@ def test_windows_boot_lifecycle_accepts_already_gone_taskkill(tmp_path):
     assert "def _kill_raced_its_target(" in text
     assert "killed.returncode == 0 or _kill_raced_its_target(killed)" in text
     assert _reconcile_windows_boot_lifecycle_race(str(candidate)) is False
+
+
+_WINDOWS_SUSPEND_TEST_TEXT = (
+    "import time\n"
+    "\n\n"
+    "def _wait(predicate, timeout=10):\n"
+    "    deadline = time.monotonic() + timeout\n"
+    "    while time.monotonic() < deadline:\n"
+    "        if predicate():\n"
+    "            return True\n"
+    "        time.sleep(.03)\n"
+    "    return bool(predicate())\n"
+    "\n\n"
+    "def test_failed_setup_never_runs_child_and_releases_handles(tmp_path, monkeypatch):\n"
+    "    marker = tmp_path / 'child executed'\n"
+    "\n"
+    "    def assign(job, proc):\n"
+    "        children.append(proc)\n"
+    "        assert psutil.Process(proc.pid).status() == psutil.STATUS_STOPPED\n"
+    "        assert not marker.exists()\n"
+    "        real_assign(job, proc)\n"
+)
+
+
+def _windows_suspend_candidate(tmp_path, *, text=None):
+    """A candidate carrying the upstream-owned Windows test the rule patches."""
+    candidate = tmp_path / "candidate"
+    path = candidate / _WINDOWS_SUSPEND_TEST_REL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_WINDOWS_SUSPEND_TEST_TEXT if text is None else text, encoding="utf-8")
+    return candidate, path
+
+
+def test_windows_suspend_observation_polls_for_the_suspended_child(tmp_path):
+    candidate, path = _windows_suspend_candidate(tmp_path)
+
+    assert _reconcile_windows_suspend_observation(str(candidate)) is True
+
+    text = path.read_text(encoding="utf-8")
+    assert _WINDOWS_SUSPEND_ONE_SHOT not in text
+    assert "assert _wait(\n" in text
+    assert "child never observed suspended" in text
+    # The same claim, just given the kernel time to make it observable.
+    assert text.count("psutil.STATUS_STOPPED") == 1
+    assert "lambda: psutil.Process(proc.pid).status() == psutil.STATUS_STOPPED," in text
+    # The product guard under it stays upstream's, untouched.
+    assert "        assert not marker.exists()\n" in text
+    compile(text, path.name, "exec")
+
+
+def test_windows_suspend_observation_bounds_the_poll_it_adds(tmp_path):
+    """A timeout is what separates a poll from a hang, so pin that it is passed."""
+    candidate, path = _windows_suspend_candidate(tmp_path)
+    assert _reconcile_windows_suspend_observation(str(candidate)) is True
+    text = path.read_text(encoding="utf-8")
+    assert f"timeout={_WINDOWS_SUSPEND_BUDGET_S},\n" in text
+    assert "while True" not in text
+
+
+def test_windows_suspend_observation_adds_no_wall_clock_sleep():
+    """The fork's HX013 ratchet: a test waits on a condition, never on the clock.
+
+    ``_WINDOWS_SUSPEND_WAIT`` is text the fork receives as its own source, so the fork
+    measures it in its next PR: a new literal sleep is a blocking finding there, and a
+    slower race here.  The 88-char bound is ruff's default; the fork does not select
+    E501, but injected source should still read like its neighbours.
+    """
+    assert "time.sleep" not in _WINDOWS_SUSPEND_WAIT
+    assert f"timeout={_WINDOWS_SUSPEND_BUDGET_S}," in _WINDOWS_SUSPEND_WAIT
+    assert all(len(line) <= 88 for line in _WINDOWS_SUSPEND_WAIT.splitlines())
+
+
+def test_windows_suspend_observation_is_a_fixed_point(tmp_path):
+    candidate, path = _windows_suspend_candidate(tmp_path)
+    assert _reconcile_windows_suspend_observation(str(candidate)) is True
+    once = path.read_text(encoding="utf-8")
+    assert _reconcile_windows_suspend_observation(str(candidate)) is False
+    assert path.read_text(encoding="utf-8") == once
+
+
+def test_windows_suspend_observation_raises_when_the_assert_is_reworded(tmp_path):
+    """A moved anchor stops the sync; it does not ship the racy one-shot read."""
+    text = _WINDOWS_SUSPEND_TEST_TEXT.replace(
+        _WINDOWS_SUSPEND_ONE_SHOT,
+        '        assert str(psutil.Process(proc.pid).status()) == "stopped"\n',
+    )
+    candidate, path = _windows_suspend_candidate(tmp_path, text=text)
+
+    with pytest.raises(WindowsSuspendObservationError) as excinfo:
+        _reconcile_windows_suspend_observation(str(candidate))
+
+    message = str(excinfo.value)
+    assert _WINDOWS_SUSPEND_TEST_REL in message
+    assert "_WINDOWS_SUSPEND_ONE_SHOT" in message
+    assert "Windows-only tests (arm64)" in message
+    assert _WINDOWS_SUSPEND_ONE_SHOT not in path.read_text(encoding="utf-8")
+
+
+def test_windows_suspend_observation_requires_the_wait_helper_it_calls(tmp_path):
+    """Injecting a ``_wait`` call into a file without that helper is a NameError."""
+    text = _WINDOWS_SUSPEND_TEST_TEXT.replace(
+        "def _wait(predicate, timeout=10):\n", "def _settled(predicate, timeout=10):\n"
+    )
+    candidate, _ = _windows_suspend_candidate(tmp_path, text=text)
+
+    with pytest.raises(WindowsSuspendObservationError) as excinfo:
+        _reconcile_windows_suspend_observation(str(candidate))
+    assert "_wait" in str(excinfo.value)
+
+
+def test_windows_suspend_observation_stands_down_when_upstream_drops_the_test(tmp_path):
+    """Upstream deleting the test says nothing about the race, so it is not a red gate."""
+    candidate, path = _windows_suspend_candidate(tmp_path, text="import psutil\n")
+    assert _reconcile_windows_suspend_observation(str(candidate)) is False
+    assert path.read_text(encoding="utf-8") == "import psutil\n"
+
+
+def test_windows_suspend_observation_absent_file_is_a_no_op(tmp_path):
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    assert _reconcile_windows_suspend_observation(str(candidate)) is False
+
+
+def test_windows_suspend_observation_registered_in_reconcile_tree(tmp_path):
+    """``reconcile_tree`` must dispatch the rule, or the fork never receives it."""
+    candidate, path = _windows_suspend_candidate(tmp_path)
+    result = reconcile_tree(str(candidate))
+    assert _WINDOWS_SUSPEND_TEST_REL in result.fixed
+    assert "child never observed suspended" in path.read_text(encoding="utf-8")
 
 
 def test_windows_real_git_locate_picks_every_git_for_windows_layout(tmp_path):
@@ -2013,6 +2157,239 @@ def test_reconcile_docusaurus_site_config_subpath_url_collapses(tmp_path):
     assert _reconcile_docusaurus_site_config(str(root)) == 0
 
 
+# The Docs Search Monitor's live probe, as the branded tree carries it today.
+# The fixture is byte-identical to the fork's website/scripts/
+# check-live-search.mjs (its lines 145-172 are byte-identical to upstream), so
+# the anchors pinned below are the ones the reconcile reads on a real sync.
+_DOCS_SEARCH_FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "docs_search")
+_DOCS_SEARCH_REL = "website/scripts/check-live-search.mjs"
+_DOCS_SEARCH_URL = "https://nastechresearch.github.io/nastech-agent/docs"
+
+# Pre-image: the probe clicks the server-rendered button the moment
+# ``domcontentloaded`` fired, with no mount gate between the two lines.
+_DOCS_SEARCH_PRE_ANCHOR = (
+    "    await page.goto(`${DOCS_URL}/`, "
+    "{ waitUntil: 'domcontentloaded', timeout: 30_000 });\n"
+    "    await page.locator('.DocSearch-Button').first()"
+    ".click({ timeout: 20_000 });\n"
+)
+
+# Post-image: the same click, now behind a wait for the mounted render's
+# ``<kbd>`` hint, bounded by the file's own REQUEST_TIMEOUT_MS.  Every timeout
+# in it is the one upstream wrote -- the gate only adds a line.
+_DOCS_SEARCH_POST_ANCHOR = (
+    "    await page.goto(`${DOCS_URL}/`, "
+    "{ waitUntil: 'domcontentloaded', timeout: 30_000 });\n"
+    "    // The server render carries this button, but on a cold Pages CDN\n"
+    "    // DocSearch mounts its handler seconds later, and a click before\n"
+    "    // that is dropped: .DocSearch-Input is then never created and the\n"
+    "    // fill below times out.  The <kbd> hints inside\n"
+    "    // .DocSearch-Button-Keys exist only in the mounted render, so\n"
+    "    // waiting for one is the readiness a visitor already has.  A site\n"
+    "    // that never hydrates still fails here, red.\n"
+    "    await page.locator('.DocSearch-Button-Keys kbd').first()"
+    ".waitFor({ timeout: REQUEST_TIMEOUT_MS });\n"
+    "    await page.locator('.DocSearch-Button').first()"
+    ".click({ timeout: 20_000 });\n"
+)
+
+
+def _live_search_probe_source():
+    with open(
+        os.path.join(_DOCS_SEARCH_FIXTURE, "check-live-search.pre.mjs"), encoding="utf-8"
+    ) as fh:
+        return fh.read()
+
+
+def _write_live_search_probe(root, text):
+    scripts = root / "website" / "scripts"
+    scripts.mkdir(parents=True)
+    probe = scripts / "check-live-search.mjs"
+    probe.write_text(text, encoding="utf-8")
+    return probe
+
+
+def test_reconcile_docs_search_hydration_gate(tmp_path):
+    """The probe must not click the docs search button before it is mounted."""
+    pre = _live_search_probe_source()
+    assert pre.count(_DOCS_SEARCH_PRE_ANCHOR) == 1, "the anchor is one exact place"
+
+    root = tmp_path / "branded"
+    probe = _write_live_search_probe(root, pre)
+    assert _reconcile_docs_search_hydration_gate(str(root)) is True
+
+    text = probe.read_text(encoding="utf-8")
+    expected = pre.replace(_DOCS_SEARCH_PRE_ANCHOR, _DOCS_SEARCH_POST_ANCHOR, 1)
+    # Byte-for-byte: the gate is the only change the rule makes to the probe.
+    assert text == expected
+    assert text.count(_DOCS_SEARCH_POST_ANCHOR) == 1, "the replacement is one place"
+    assert _DOCS_SEARCH_PRE_ANCHOR not in text
+    # No guard moved: the click, the fill, the hit wait and the goto budgets.
+    assert ".click({ timeout: 20_000 });" in text
+    assert ".fill(QUERIES[0], { timeout: 10_000 });" in text
+    assert ".waitFor({ timeout: 15_000 });" in text
+    assert "timeout: 30_000 });" in text
+    assert "PROBE_DEADLINE_MS = 240_000;" in text
+
+    # Fixed point: the gate line marks the patched file, so a second pass is a
+    # no-op rather than a second wait.
+    assert _reconcile_docs_search_hydration_gate(str(root)) is False
+    assert probe.read_text(encoding="utf-8") == text
+
+
+def test_reconcile_docs_search_hydration_gate_skips_missing_file(tmp_path):
+    assert _reconcile_docs_search_hydration_gate(str(tmp_path)) is False
+
+
+def test_reconcile_docs_search_hydration_gate_flags_a_moved_anchor(tmp_path):
+    """A probe that no longer clicks straight after the goto must stop the sync.
+
+    Returning ``False`` here would be the same return as "already gated", so the
+    fork would ship an ungated monitor and the only sign would be the next red
+    Docs Search run -- the failure mode this rule exists to prevent.
+    """
+    pre = _live_search_probe_source()
+    mutated = pre.replace(
+        "{ waitUntil: 'domcontentloaded', timeout: 30_000 }",
+        "{ waitUntil: 'networkidle', timeout: 60_000 }",
+    )
+    root = tmp_path / "branded"
+    probe = _write_live_search_probe(root, mutated)
+
+    with pytest.raises(DocsSearchHydrationGateError) as excinfo:
+        _reconcile_docs_search_hydration_gate(str(root))
+    # The raise carries the evidence, so the stop is arguable at sync time.
+    assert "run 40211574851" in str(excinfo.value)
+    assert "locator.fill: Timeout 10000ms exceeded" in str(excinfo.value)
+    assert probe.read_text(encoding="utf-8") == mutated
+
+    with pytest.raises(DocsSearchHydrationGateError):
+        reconcile_tree(str(root))
+
+
+def test_reconcile_tree_gates_the_probe_after_the_domain_rewrite(tmp_path):
+    """The gate runs after branding, and is recorded as a reconciled path."""
+    root = tmp_path / "branded"
+    probe = _write_live_search_probe(root, _live_search_probe_source())
+
+    result = reconcile_tree(str(root))
+    assert _DOCS_SEARCH_REL in result.fixed
+    text = probe.read_text(encoding="utf-8")
+    assert _DOCS_SEARCH_POST_ANCHOR in text
+
+    source = open(
+        sys.modules[_reconcile_docs_search_hydration_gate.__module__].__file__,
+        encoding="utf-8",
+    ).read()
+    dispatch = source.split("def reconcile_tree", 1)[1].split("\ndef ", 1)[0]
+    # ``_reconcile_domains`` is what gives this file its Pages ``DOCS_URL``; the
+    # gate is a site-specific reference a global brand rule cannot decide, so it
+    # has to be derived from the text that rewrite produced.
+    assert dispatch.index("_reconcile_domains(") < dispatch.index(
+        "_reconcile_docs_search_hydration_gate("
+    )
+
+
+def _run_live_search_probe(tmp_path, *, gated, hydrated):
+    """Run the generated probe under node, with the world modelled outside it.
+
+    Only two things are stubbed, both outside the script: ``fetch`` (preloaded
+    with ``node --require``, so nothing reaches GitHub Pages or Algolia) and the
+    browser driver (resolved through the probe's own
+    ``createRequire(PLAYWRIGHT_DIR)`` seam, and switched between the measured
+    mounted render and the measured server render).  The script itself is the
+    engine's output, byte for byte, and its exit code, its failure reason and
+    the timeouts it passes to every locator are what these tests read.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not available")
+
+    root = tmp_path / "branded"
+    probe = _write_live_search_probe(root, _live_search_probe_source())
+    if gated:
+        assert _reconcile_docs_search_hydration_gate(str(root)) is True
+
+    calls = tmp_path / "calls.jsonl"
+    calls.write_text("", encoding="utf-8")
+    env = {
+        **os.environ,
+        "DOCS_URL": _DOCS_SEARCH_URL,
+        "PLAYWRIGHT_DIR": os.path.join(_DOCS_SEARCH_FIXTURE, "pw"),
+        "STUB_HYDRATED": "1" if hydrated else "0",
+        "STUB_CALL_LOG": str(calls),
+    }
+    env.pop("GITHUB_ACTIONS", None)
+    env.pop("GITHUB_STEP_SUMMARY", None)
+    proc = subprocess.run(
+        [
+            node,
+            "--require",
+            os.path.join(_DOCS_SEARCH_FIXTURE, "net-stub.cjs"),
+            str(probe),
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return {
+        "code": proc.returncode,
+        "out": proc.stdout,
+        "err": proc.stderr,
+        "calls": [json.loads(line) for line in calls.read_text(encoding="utf-8").splitlines()],
+    }
+
+
+def test_ungated_probe_crashes_on_the_never_hydrating_site(tmp_path):
+    """The harness reproduces run 40211574851 before it proves the fix.
+
+    The click resolves, the fill dies, and the last step of the monitor is red:
+    that is the measured failing state, so a green result on the gated probe
+    below cannot be an artefact of the double.
+    """
+    result = _run_live_search_probe(tmp_path, gated=False, hydrated=False)
+
+    assert result["code"] == 1
+    assert "browser check crashed: locator.fill: Timeout 10000ms exceeded." in result["err"]
+    assert [c["op"] for c in result["calls"]] == ["goto", "click", "fill", "close"]
+
+
+def test_never_hydrating_site_still_crashes_the_probe_red(tmp_path):
+    """The gate is a hard await: a site that never mounts DocSearch still fails.
+
+    Nothing was weakened to make the fork green -- the wait is a plain ``await``
+    inside ``checkBrowser``, so its rejection escapes exactly as the fill's did,
+    the browser is still closed in the ``finally``, and the probe still exits 1
+    with a reason naming the real cause and its own budget.
+    """
+    result = _run_live_search_probe(tmp_path, gated=True, hydrated=False)
+
+    assert result["code"] == 1
+    assert "browser check crashed: locator.waitFor: Timeout 20000ms exceeded." in result["err"]
+    # The gate fires before the click, so the dropped click never happens.
+    assert [c.get("timeout") for c in result["calls"]] == [30_000, 20_000, None]
+    assert [c["op"] for c in result["calls"]] == ["goto", "waitFor", "close"]
+    assert not any(c["sel"] == ".DocSearch-Button" for c in result["calls"])
+
+
+def test_hydrating_site_passes_with_every_budget_untouched(tmp_path):
+    """The mounted render goes green, and each step keeps upstream's timeout."""
+    result = _run_live_search_probe(tmp_path, gated=True, hydrated=True)
+
+    assert result["code"] == 0, result["err"]
+    assert 'ok   browser: search modal lists 5 results for "telegram"' in result["out"]
+    assert [(c["sel"], c["op"], c.get("timeout")) for c in result["calls"]] == [
+        ("page", "goto", 30_000),
+        (".DocSearch-Button-Keys kbd", "waitFor", 20_000),
+        (".DocSearch-Button", "click", 20_000),
+        (".DocSearch-Input", "fill", 10_000),
+        (".DocSearch-Hit", "waitFor", 15_000),
+        ("browser", "close", None),
+    ]
+
+
 def test_reconcile_prompt_surface_snapshot(tmp_path):
     root = tmp_path / "branded"
     snap = root / "tests" / "fixtures" / "prompt_surface"
@@ -2108,6 +2485,196 @@ def test_reconcile_prompt_surface_snapshot(tmp_path):
 
     # Idempotent once the snapshot carries the branded render.
     assert _reconcile_prompt_surface_snapshot(str(root)) == []
+
+
+# ---------------------------------------------------------------------------
+# Brand-length guard on set_theme's catalog line (candidate 7f790c348, upstream
+# 5894e750c3; jobs 120743383196 and 120743383269).
+# ---------------------------------------------------------------------------
+
+# tools/set_theme_tool.py's first sentence as upstream ships it, and the same string after
+# the brand map.  The measured delta is what the rule exists for, so it is pinned here rather
+# than derived from the rule's own needles.
+_UPSTREAM_SET_THEME_SENTENCE = (
+    "Change how the Hermes desktop app looks: accent colour, light/dark mode, layout."
+)
+_BRANDED_SET_THEME_SENTENCE = _UPSTREAM_SET_THEME_SENTENCE.replace("Hermes", "Nastech")
+
+
+def _clip_like_short_desc(text: str, max_chars: int = _SET_THEME_CATALOG_BUDGET) -> str:
+    """``tools/tool_search_catalog._short_desc``'s clip, mirrored on one already-extracted sentence.
+
+    Same arithmetic as upstream: over budget, cut at ``max_chars``, drop the trailing partial
+    word, strip ``,;: `` and append the ellipsis the fork's guard forbids.
+    """
+    if len(text) <= max_chars:
+        return text
+    clipped = text[:max_chars]
+    clipped = clipped.rsplit(" ", 1)[0] if " " in clipped else clipped
+    return clipped.rstrip(",;: ") + "…"
+
+
+def _set_theme_source(*, sentence: str = _BRANDED_SET_THEME_SENTENCE) -> str:
+    return (
+        "SET_THEME_SCHEMA = {\n"
+        '    "name": "set_theme",\n'
+        '    "description": (\n'
+        f'        "{sentence} Pass the values "\n'
+        '        "to apply them now; the result says what was applied."\n'
+        "    ),\n"
+        '    "parameters": {"type": "object", "properties": {}},\n'
+        "}\n"
+    )
+
+
+def _set_theme_tree(tmp_path, *, sentence: str = _BRANDED_SET_THEME_SENTENCE):
+    """A branded tree: the real source file plus a snapshot that quotes the same sentence."""
+    root = tmp_path / "branded"
+    (root / "tools").mkdir(parents=True)
+    source = _set_theme_source(sentence=sentence)
+    (root / "tools" / "set_theme_tool.py").write_text(source, encoding="utf-8")
+    snap_tools = root / "tests" / "fixtures" / "prompt_surface" / "tools"
+    snap_tools.mkdir(parents=True)
+    listing = (
+        "Search the tool catalog.\n"
+        f"- set_theme: {sentence}\n"
+        "- show_tip: Point at one desktop UI element with a small arrow bubble "
+        "(no dimming or tour)."
+    )
+    (snap_tools / "tool_search.desktop.claude.json").write_text(
+        json.dumps(
+            {"name": "tool_search", "description": listing, "parameters": {}},
+            indent=2,
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_branding_pushes_the_sentence_over_the_catalog_budget():
+    """The whole bug in two numbers: upstream fits, the brand does not."""
+    assert len(_UPSTREAM_SET_THEME_SENTENCE) == _SET_THEME_CATALOG_BUDGET
+    assert len(_BRANDED_SET_THEME_SENTENCE) == _SET_THEME_CATALOG_BUDGET + 1
+    assert not _clip_like_short_desc(_UPSTREAM_SET_THEME_SENTENCE).endswith("…")
+    assert _clip_like_short_desc(_BRANDED_SET_THEME_SENTENCE).endswith("…")
+
+
+def test_reconcile_set_theme_catalog_line(tmp_path):
+    """Shorten the branded sentence so the catalog line stays whole, in both files."""
+    root = _set_theme_tree(tmp_path)
+
+    changed = _reconcile_set_theme_catalog_line(str(root))
+    assert changed == [
+        _SET_THEME_SOURCE_REL,
+        "tests/fixtures/prompt_surface/tools/tool_search.desktop.claude.json",
+    ]
+
+    text = (root / "tools" / "set_theme_tool.py").read_text(encoding="utf-8")
+    assert _SET_THEME_SHORT in text
+    assert _SET_THEME_LONG not in text
+    compile(text, str(root / "tools" / "set_theme_tool.py"), "exec")
+
+    snapshot = (
+        root / "tests" / "fixtures" / "prompt_surface" / "tools" / "tool_search.desktop.claude.json"
+    )
+    listing = json.loads(snapshot.read_text(encoding="utf-8"))["description"]
+    assert _SET_THEME_LONG not in listing
+    line = next(row for row in listing.splitlines() if row.startswith("- set_theme: "))
+    sentence = line[len("- set_theme: ") :]
+    assert sentence == _SET_THEME_SHORT + " accent colour, light/dark mode, layout."
+    assert len(sentence) <= _SET_THEME_CATALOG_BUDGET
+    # The guard that was red: no catalog line may be clipped.
+    assert not _clip_like_short_desc(sentence).endswith("…")
+
+    # Idempotent: the shortened form is what the render now produces.
+    assert _reconcile_set_theme_catalog_line(str(root)) == []
+
+
+def test_reconcile_set_theme_catalog_line_skips_absent_files(tmp_path):
+    assert _reconcile_set_theme_catalog_line(str(tmp_path)) == []
+
+
+def test_reconcile_set_theme_catalog_line_leaves_a_short_line_alone(tmp_path):
+    """Upstream rewording that already fits is a no-op, not a raise."""
+    short = "Change how the Nastech desktop looks: accent colour, light/dark mode, layout."
+    root = _set_theme_tree(tmp_path, sentence=short)
+
+    assert _reconcile_set_theme_catalog_line(str(root)) == []
+
+
+def test_reconcile_set_theme_catalog_line_flags_a_reworded_description(tmp_path):
+    """A sentence this rule cannot see is a sync-time error, not a red fork lane days later."""
+    root = tmp_path / "branded"
+    (root / "tools").mkdir(parents=True)
+    reworded = "Restyle the desktop in Nastech: pick an accent, mode and layout."
+    (root / "tools" / "set_theme_tool.py").write_text(
+        _set_theme_source(sentence=reworded),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SetThemeCatalogLineError):
+        _reconcile_set_theme_catalog_line(str(root))
+    with pytest.raises(SetThemeCatalogLineError):
+        reconcile_tree(str(root))
+
+
+def test_reconcile_tree_registers_set_theme_catalog_line(tmp_path):
+    """The rule actually runs inside ``reconcile_tree``."""
+    root = _set_theme_tree(tmp_path)
+
+    result = reconcile_tree(str(root))
+    assert _SET_THEME_SOURCE_REL in result.fixed
+    assert "tests/fixtures/prompt_surface/tools/tool_search.desktop.claude.json" in result.fixed
+    assert _SET_THEME_LONG not in (root / "tools" / "set_theme_tool.py").read_text(encoding="utf-8")
+
+
+def test_set_theme_line_is_shortened_before_the_surface_counts(tmp_path):
+    """Ordering: ``surfaces.json`` counts the tool schemas on disk, so the rewrite must precede it.
+
+    The fork's ``test_committed_prompt_surface_is_current`` byte-compares a fresh render against
+    the manifest.  If the manifest is computed before the sentence is shortened it describes the
+    pre-fix text and reports ``stale: surfaces.json`` -- which is the second red this rule clears.
+    """
+    root = _set_theme_tree(tmp_path)
+    snap = root / "tests" / "fixtures" / "prompt_surface"
+    prompts = snap / "prompts"
+    prompts.mkdir(parents=True)
+    stable = "System prompt header.\nBe helpful.\n"
+    (prompts / "desktop.claude.txt").write_text("===== stable =====\n" + stable, encoding="utf-8")
+    tools_dir = snap / "tools"
+    long_schema = json.loads(
+        (tools_dir / "tool_search.desktop.claude.json").read_text(encoding="utf-8")
+    )
+    stale_count = len(json.dumps({"tool_search": long_schema}, sort_keys=True)) // 4
+    (snap / "surfaces.json").write_text(
+        json.dumps(
+            {
+                "desktop.claude": {
+                    "prompt_tokens": {"stable": len(stable) // 4},
+                    "tool_tokens": stale_count,
+                    "tools": ["tool_search"],
+                }
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = reconcile_tree(str(root))
+    assert "tests/fixtures/prompt_surface/surfaces.json" in result.fixed
+    manifest = json.loads((snap / "surfaces.json").read_text(encoding="utf-8"))
+    fixed_schema = json.loads(
+        (tools_dir / "tool_search.desktop.claude.json").read_text(encoding="utf-8")
+    )
+    expected = len(json.dumps({"tool_search": fixed_schema}, sort_keys=True)) // 4
+    assert manifest["desktop.claude"]["tool_tokens"] == expected
+    # Reordering the two rules would leave the manifest describing the clipped-brand text.
+    assert expected != stale_count
 
 
 def test_reconcile_drop_vercel_deploy_job(tmp_path):
@@ -3257,41 +3824,250 @@ def test_reconcile_connector_test_guest_offline_skips_unrelated_tree(tmp_path):
     assert path.read_text(encoding="utf-8") == original
 
 
-def test_reconcile_plugin_catalog_sync_exemption(tmp_path):
-    """The engine's 100WAYS sync PR must skip the data-only catalog gate."""
+# The verbatim upstream step the admission rule anchors on: hermes-agent
+# 86fa9e6ca1 ``.github/workflows/plugin-catalog-ci.yml`` lines 62-118, before
+# branding (branding only renames the word ``hermes`` in one comment line the
+# rewrite never touches).
+_UPSTREAM_CHANGED_ENTRIES_STEP = (
+    "      - name: Find changed catalog entries\n"
+    "        id: changed\n"
+    "        run: |\n"
+    "          set -euo pipefail\n"
+    "          # HEAD is the PR merge commit: diffing it against its first parent is\n"
+    "          # exactly what the PR would land. Refuse anything else rather than\n"
+    "          # silently diffing a single commit.\n"
+    "          if ! git rev-parse -q --verify 'HEAD^2' >/dev/null; then\n"
+    '            echo "::error::expected the pull_request merge commit as HEAD"\n'
+    "            exit 1\n"
+    "          fi\n"
+    "          CHANGED=$(git diff --name-only --diff-filter=AMRT 'HEAD^1' HEAD \\\n"
+    "            -- 'plugin-catalog/*.yaml' 'plugin-catalog/*.yml')\n"
+    "          CHANGED=$(printf '%s' \"$CHANGED\" | grep -v '/removed\\.yaml$' || true)\n"
+    '          if [ -n "$CHANGED" ]; then\n'
+    "            ALL=$(git diff --name-only 'HEAD^1' HEAD)\n"
+    "            OUTSIDE=$(printf '%s' \"$ALL\" | "
+    "grep -vE '^(plugin-catalog|contributors/emails)/' || true)\n"
+    '            if [ -n "$OUTSIDE" ]; then\n'
+    '              echo "::error::catalog entry PRs may only touch '
+    'plugin-catalog/** and contributors/emails/**, found:"\n'
+    "              printf '%s' \"$OUTSIDE\" | tr '\\0\\n' ' '\n"
+    "              echo\n"
+    "              exit 1\n"
+    "            fi\n"
+    "          fi\n"
+    '          echo "Changed catalog entries:"\n'
+    '          echo "${CHANGED:-<none>}"\n'
+    "          {\n"
+    "            echo 'files<<__EOF__'\n"
+    '            echo "$CHANGED"\n'
+    "            echo '__EOF__'\n"
+    '          } >> "$GITHUB_OUTPUT"\n'
+)
+
+_UPSTREAM_PLUGIN_CATALOG_CI = (
+    "name: Plugin Catalog CI\n"
+    "on:\n"
+    "  pull_request:\n"
+    "    paths:\n"
+    '      - "plugin-catalog/**"\n'
+    "jobs:\n"
+    "  pinned-source-validate:\n"
+    "    steps:\n"
+    + _UPSTREAM_CHANGED_ENTRIES_STEP
+    + "      - name: Clone each entry at its pinned sha and validate\n"
+    "        run: echo validated\n"
+)
+
+
+def _write_plugin_catalog_ci(tmp_path, text):
     root = tmp_path / "branded"
     wf = root / ".github" / "workflows"
     wf.mkdir(parents=True)
     target = wf / "plugin-catalog-ci.yml"
-    target.write_text(
-        "name: Plugin Catalog CI\n"
-        "jobs:\n"
-        "  pinned-source-validate:\n"
-        "    steps:\n"
-        "      - name: Find changed catalog entries\n"
-        "        id: changed\n"
-        "        run: |\n"
-        "          set -euo pipefail\n"
-        "          # HEAD is the PR merge commit:\n"
-        "          git diff --name-only HEAD^1 HEAD\n",
-        encoding="utf-8",
+    target.write_text(text, encoding="utf-8")
+    return root, target
+
+
+def _changed_entries_step_body(text):
+    """Extract the reconciled ``Find changed catalog entries`` block scalar."""
+    start = text.index("        run: |\n") + len("        run: |\n")
+    end = text.index("\n      - name: Clone each entry", start)
+    return text[start:end]
+
+
+def _catalog_merge_repo(tmp_path, changed_paths, slug):
+    """A repo whose HEAD is a pull_request-shaped merge commit (HEAD^2 exists).
+
+    ``changed_paths`` arrive on the second parent, exactly like a PR branch:
+    ``HEAD^1..HEAD`` diffs to those files and nothing else.
+    """
+    repo = tmp_path / f"repo-{slug}"
+    repo.mkdir()
+
+    def _git(*args):
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t", "-C", str(repo), *args],
+            check=True,
+            capture_output=True,
+        )
+
+    _git("init", "-q", "-b", "main")
+    (repo / "README.md").write_text("base\n", encoding="utf-8")
+    _git("add", "README.md")
+    _git("commit", "-q", "-m", "base")
+    _git("checkout", "-q", "-b", "pr")
+    for rel in changed_paths:
+        path = repo / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("entry: 1\n", encoding="utf-8")
+    _git("add", "-A")
+    _git("commit", "-q", "-m", "pr change")
+    _git("checkout", "-q", "main")
+    _git("merge", "-q", "--no-ff", "-m", "merge", "pr")
+    return repo
+
+
+def _changed_entries_script(text):
+    """De-block the reconciled step body into a runnable bash script."""
+    body = _changed_entries_step_body(text)
+    return "\n".join(line[10:] if line.startswith(" " * 10) else line for line in body.splitlines())
+
+
+def _run_changed_entries_step(tmp_path, script, *, head_ref, head_repo, changed_paths):
+    slug = f"{head_ref}-{head_repo}".replace("/", "-")
+    repo = _catalog_merge_repo(tmp_path, changed_paths, slug)
+    out_file = tmp_path / f"output-{slug}"
+    script = script.replace("${{ github.event.pull_request.head.repo.full_name }}", head_repo)
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": os.environ.get("HOME", "/tmp"),
+        "GITHUB_HEAD_REF": head_ref,
+        "GITHUB_OUTPUT": str(out_file),
+    }
+    proc = subprocess.run(
+        ["bash"],
+        input=script,
+        capture_output=True,
+        text=True,
+        cwd=repo,
+        env=env,
     )
+    output = out_file.read_text(encoding="utf-8") if out_file.exists() else ""
+    return proc, output
 
-    assert _reconcile_plugin_catalog_sync_exemption(str(root)) is True
+
+def test_reconcile_plugin_catalog_admission_exempts_sync_head(tmp_path):
+    """The guard block is inserted in front of the untouched data-only body."""
+    root, target = _write_plugin_catalog_ci(tmp_path, _UPSTREAM_PLUGIN_CATALOG_CI)
+
+    assert _reconcile_plugin_catalog_admission(str(root)) is True
     text = target.read_text(encoding="utf-8")
-    assert 'GITHUB_HEAD_REF' in text
-    assert '"100WAYS"' in text
-    assert 'nastechresearch/nastech-agent' in text
-    assert "files<<__EOF__" in text
-    # The original body is preserved after the guarded early exit.
-    assert "          # HEAD is the PR merge commit:\n" in text
+    # The exemption keys on BOTH clauses: reserved branch AND same-repo head.
+    assert 'if [ "${GITHUB_HEAD_REF:-}" = "100WAYS" ] \\' in text
+    assert (
+        '&& [ "${{ github.event.pull_request.head.repo.full_name }}" = '
+        '"nastechresearch/nastech-agent" ]; then' in text
+    )
+    # Everything the step does for a real admission PR is preserved verbatim.
+    for line in _UPSTREAM_CHANGED_ENTRIES_STEP.splitlines()[3:]:
+        assert line in text
+    # Only the step header was rewritten: the tail after the anchor is intact.
+    anchor = "# HEAD is the PR merge commit:"
+    assert text.count(anchor) == 1
+    assert _UPSTREAM_CHANGED_ENTRIES_STEP.split(anchor)[1] in text
 
-    # Idempotent: the marker now sits behind the guard, so the needle is gone.
-    assert _reconcile_plugin_catalog_sync_exemption(str(root)) is False
+
+def test_reconcile_plugin_catalog_admission_is_a_fixed_point(tmp_path):
+    root, target = _write_plugin_catalog_ci(tmp_path, _UPSTREAM_PLUGIN_CATALOG_CI)
+    assert _reconcile_plugin_catalog_admission(str(root)) is True
+    once = target.read_bytes()
+    assert _reconcile_plugin_catalog_admission(str(root)) is False
+    assert target.read_bytes() == once
 
 
-def test_reconcile_plugin_catalog_sync_exemption_skips_missing_workflow(tmp_path):
-    assert _reconcile_plugin_catalog_sync_exemption(str(tmp_path)) is False
+def test_reconcile_plugin_catalog_admission_guard_behaviour(tmp_path):
+    """The reconciled step EXEMPTS only same-repo 100WAYS heads and still
+    enforces data-only admission for everyone else -- executed, not asserted
+    about the text: the script body is extracted from the reconciled file and
+    run with bash against a real merge-commit repo."""
+    root, target = _write_plugin_catalog_ci(tmp_path, _UPSTREAM_PLUGIN_CATALOG_CI)
+    assert _reconcile_plugin_catalog_admission(str(root)) is True
+    script = _changed_entries_script(target.read_text(encoding="utf-8"))
+
+    def run(head_ref, head_repo, changed_paths):
+        return _run_changed_entries_step(
+            tmp_path,
+            script,
+            head_ref=head_ref,
+            head_repo=head_repo,
+            changed_paths=changed_paths,
+        )
+
+    # A: the engine's own sync PR -- same repo, reserved branch, PR touches
+    # thousands of non-catalog files. Exempt, with an EMPTY file list so the
+    # downstream per-entry validation steps are skipped by their own gate.
+    proc, output = run(
+        "100WAYS",
+        "nastechresearch/nastech-agent",
+        ["plugin-catalog/timestamp-ref.yaml", "agent/foo.py", "tests/x.py"],
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "catalog admission gate does not apply" in proc.stdout
+    assert output == "files<<__EOF__\n__EOF__\n"
+
+    # B: a cross-repo PR even with a branch NAMED 100WAYS -- the same-repo
+    # clause blocks the exemption and the data-only rule fires.
+    proc, _ = run(
+        "100WAYS",
+        "evil-totals/nastech-agent",
+        ["plugin-catalog/timestamp-ref.yaml", "agent/foo.py"],
+    )
+    assert proc.returncode == 1
+    assert "may only touch plugin-catalog/**" in proc.stdout
+
+    # C: a same-repo PR from a non-reserved branch (a human shipping an entry
+    # plus tooling) -- the branch clause blocks the exemption and it fires too.
+    proc, _ = run(
+        "add-my-plugin",
+        "nastechresearch/nastech-agent",
+        ["plugin-catalog/timestamp-ref.yaml", "agent/foo.py"],
+    )
+    assert proc.returncode == 1
+    assert "may only touch plugin-catalog/**" in proc.stdout
+
+    # D: a genuine data-only admission PR from outside still runs the FULL
+    # gate: not exempt, entry listed for the pinned-sha validation steps.
+    proc, output = run("add-my-plugin", "somebody/else", ["plugin-catalog/new.yaml"])
+    assert proc.returncode == 0, proc.stderr
+    assert "plugin-catalog/new.yaml" in output
+
+
+def test_reconcile_plugin_catalog_admission_moved_anchor_raises(tmp_path):
+    """A reworded upstream anchor stops the sync instead of silently dropping
+    the exemption -- that silent drop is how the 2026-10-13 red was born."""
+    moved = _UPSTREAM_PLUGIN_CATALOG_CI.replace(
+        "# HEAD is the PR merge commit:", "# HEAD names the PR merge commit:"
+    )
+    root, target = _write_plugin_catalog_ci(tmp_path, moved)
+    with pytest.raises(PluginCatalogAdmissionError, match="plugin-catalog-ci.yml"):
+        _reconcile_plugin_catalog_admission(str(root))
+    # Still untouched: raising must not half-write the file.
+    assert "Fork 100WAYS sync PR" not in target.read_text(encoding="utf-8")
+    assert issubclass(PluginCatalogAdmissionError, ValueError)
+
+
+def test_reconcile_plugin_catalog_admission_skips_missing_workflow(tmp_path):
+    """Absent file (an engine-local tree without the upstream workflow) is a
+    no-op -- the fail-loud contract covers only trees that carry the file."""
+    assert _reconcile_plugin_catalog_admission(str(tmp_path)) is False
+
+
+def test_reconcile_plugin_catalog_admission_registered_in_reconcile_tree(tmp_path):
+    """reconcile_tree must dispatch it, or every sync re-publishes the red."""
+    root, target = _write_plugin_catalog_ci(tmp_path, _UPSTREAM_PLUGIN_CATALOG_CI)
+    result = reconcile_tree(str(root))
+    assert ".github/workflows/plugin-catalog-ci.yml" in result.fixed
+    assert "Fork 100WAYS sync PR" in target.read_text(encoding="utf-8")
 
 
 def test_reconcile_pinned_source_clones_names_every_external_ref(tmp_path):
