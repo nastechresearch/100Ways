@@ -4547,6 +4547,150 @@ def _reconcile_fifo_compaction_trigger_margin(dst: str) -> bool:
     return True
 
 
+class TermuxBuildToolchainError(ValueError):
+    """The Termux build step moved, so its toolchain cannot be widened to Node.
+
+    A ``ValueError`` on purpose: :mod:`hundredways.conformance` reports it as a candidate
+    issue and the ``reconcile`` stage fails the update rather than publishing a tree whose
+    Termux build resolves the runner's Node 22 against a repo that requires >=26.
+    """
+
+
+_TERMUX_BUILD_TOOLCHAIN_REL = ".github/workflows/desktop-bundled-release.yml"
+_TERMUX_BUILD_TOOLCHAIN_JOB = "  termux-deb:\n"
+_TERMUX_BUILD_TOOLCHAIN_BEFORE = (
+    "      - name: Set up the locked build toolchain\n"
+    "        id: pm\n"
+    "        uses: ./.github/actions/setup-pm\n"
+    "        with:\n"
+    "          toolchain: python\n"
+)
+_TERMUX_BUILD_TOOLCHAIN_AFTER = (
+    "      - name: Set up the locked build toolchain\n"
+    "        id: pm\n"
+    "        uses: ./.github/actions/setup-pm\n"
+    "        with:\n"
+    "          # scripts/termux/build.py builds the TUI with a bare `node`, and every\n"
+    "          # workspace pins engines >=26 while this image ships 22: install the\n"
+    "          # locked Node beside Python or node-deps.mjs refuses the run.\n"
+    "          toolchain: all\n"
+)
+
+
+def _reconcile_termux_build_toolchain(dst: str) -> bool:
+    """Install the locked Node in the Termux build job, beside Python.
+
+    ``scripts/termux/build.py`` runs ``node scripts/build/node-deps.mjs`` and
+    ``node scripts/build/tui.mjs`` before ``build_deb.sh`` -- a bare ``node`` from PATH.
+    The Termux job set up ``toolchain: python`` only, so on ``ubuntu-24.04-arm`` that
+    resolved to the image's Node **22.23.3** while ``package.json``, ``apps/desktop`` and
+    ``website`` all pin ``engines.node >= 26``, and node-deps refuses outright:
+    ``Error: node 22.23.3 violates >=26`` (job 121804877690 of run 40388437305, step
+    "Assemble the .deb").  The lane is upstream's opt-in lane -- ``Lane("termux", False)``
+    -- so upstream has never run this path; this fork ships Termux, so it must.
+
+    ``all`` is the action's documented value for "Python and uv plus Node and npm", and
+    both come from ``pm/lock.json`` -- the same pins the desktop and JS jobs install.  No
+    version is chosen here and no check is relaxed: the missing dependency is installed,
+    and ``node-deps`` then compares the locked Node against the same ``>=26``.
+
+    A moved step raises :class:`TermuxBuildToolchainError` so the sync fails loudly
+    instead of shipping a Termux build that cannot resolve Node; a workflow without the
+    Termux job stands the rule down.
+    """
+    rel = _TERMUX_BUILD_TOOLCHAIN_REL
+    text = _reconcile_budget_read(dst, rel)
+    if text is None or _TERMUX_BUILD_TOOLCHAIN_JOB not in text:
+        return False
+    if _TERMUX_BUILD_TOOLCHAIN_AFTER in text:
+        return False
+    if _TERMUX_BUILD_TOOLCHAIN_BEFORE not in text:
+        raise TermuxBuildToolchainError(
+            f"{rel} no longer holds the Termux job's toolchain step as "
+            f"{_TERMUX_BUILD_TOOLCHAIN_BEFORE!r}, so the sync cannot install the locked "
+            "Node. The build then runs the runner's node 22.23.3 against a repo that "
+            "requires >=26 and 'Assemble the .deb' dies with 'Error: node 22.23.3 "
+            "violates >=26' -- no Termux package, so no Termux release. Re-derive "
+            "_TERMUX_BUILD_TOOLCHAIN_BEFORE against upstream's current workflow."
+        )
+    _reconcile_budget_write(
+        dst, rel, text.replace(_TERMUX_BUILD_TOOLCHAIN_BEFORE, _TERMUX_BUILD_TOOLCHAIN_AFTER, 1)
+    )
+    return True
+
+
+class TermuxTuiSetupGateError(ValueError):
+    """The canonical TUI's setup gate moved, so a blank install can create an unusable session.
+
+    A ``ValueError`` on purpose: :mod:`hundredways.conformance` reports it as a candidate
+    issue and the ``reconcile`` stage fails the update rather than shipping a TUI whose
+    first run reports ``error:storage_unavailable`` instead of showing Setup Required.
+    """
+
+
+_TERMUX_TUI_SETUP_GATE_REL = "ui-tui/src/app/useSessionLifecycle.ts"
+_TERMUX_TUI_SETUP_GATE_EDITS = (
+    (
+        "        const setup = gw.isCanonical ? null : "
+        "await rpc<SetupStatusResponse>('setup.status', {})\n",
+        "        const setup = await rpc<SetupStatusResponse>('setup.status', {})\n",
+    ),
+    (
+        "      return (gw.isCanonical ? Promise.resolve(null) : "
+        "rpc<SetupStatusResponse>('setup.status', {}))\n",
+        "      return rpc<SetupStatusResponse>('setup.status', {})\n",
+    ),
+)
+
+
+def _reconcile_termux_tui_setup_gate(dst: str) -> bool:
+    """Ask ``setup.status`` on the canonical transport too.
+
+    On a blank home the canonical TUI creates a session with no model: ``stage_local_session``
+    resolves ``policy.model is None`` through ``_resolve_gateway_model()``, which falls back to
+    ``trial_model()`` -- ``''`` on a fresh install (``nastech_cli/anon_auth.py``) -- and
+    ``gateway/session_local.py`` writes ``model=None``.  ``restore_local_session`` then calls
+    ``restore_policy``, which rejects a non-``str`` model and raises
+    ``RuntimeStoreError('storage_unavailable')``; the TUI renders ``· error:storage_unavailable``,
+    never ``Setup Required``.  Both gate sites skipped the check with
+    ``gw.isCanonical ? null : rpc('setup.status')``, so the setup panel existed for every
+    transport but the canonical one.
+
+    This is upstream's regression, not the fork's: the Termux packaging proof fails the same way
+    on ``NousResearch/hermes-agent`` (job 117934960321, 2026-10-19) while its jobs passed on
+    2026-10-10..13 before the unified-gateway landing.  The ``setup.status`` RPC exists on the
+    canonical server (``tui_gateway/server.py``), so the two calls simply stop skipping it --
+    nothing is relaxed, and a session that *has* a provider still sees ``provider_configured``.
+
+    Both sites move together or the sync stops (a half-applied gate hides the panel on one path);
+    if upstream drops the canonical skip itself, the rule stands down.
+    """
+    rel = _TERMUX_TUI_SETUP_GATE_REL
+    text = _reconcile_budget_read(dst, rel)
+    if text is None or not any(before in text for before, _ in _TERMUX_TUI_SETUP_GATE_EDITS):
+        return False  # upstream rewrote or removed the gate; theirs is authoritative
+    edited = text
+    changed = False
+    for before, after in _TERMUX_TUI_SETUP_GATE_EDITS:
+        if after in edited:
+            continue
+        if before not in edited:
+            raise TermuxTuiSetupGateError(
+                f"{rel} holds one canonical setup-gate site but not "
+                f"{before.strip()!r}; the sync cannot restore the gate on both paths. A "
+                "canonical TUI that skips setup.status creates a session with no model, and "
+                "the first run reports 'error:storage_unavailable' instead of Setup Required "
+                "-- which is what reds the Termux .deb validation (job 121602994464). "
+                "Re-derive _TERMUX_TUI_SETUP_GATE_EDITS against upstream's current file."
+            )
+        edited = edited.replace(before, after, 1)
+        changed = True
+    if not changed:
+        return False
+    _reconcile_budget_write(dst, rel, edited)
+    return True
+
+
 class WindowsRealGitLocateError(ValueError):
     """``_locate_real_git`` no longer matches the shape the robustness patch needs.
 
@@ -6318,6 +6462,12 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_fifo_compaction_trigger_margin(dst):
         result.total += 1
         result.fixed.append(_FIFO_COMPACTION_TEST_REL)
+    if _reconcile_termux_build_toolchain(dst):
+        result.total += 1
+        result.fixed.append(_TERMUX_BUILD_TOOLCHAIN_REL)
+    if _reconcile_termux_tui_setup_gate(dst):
+        result.total += 1
+        result.fixed.append(_TERMUX_TUI_SETUP_GATE_REL)
     if _reconcile_install_ps1_store_guard_test(dst):
         result.total += 1
         result.fixed.append("scripts/tests/test-install-ps1-store-guard.ps1")
