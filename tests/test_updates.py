@@ -31,6 +31,7 @@ from hundredways.updates import (
     GatewayAllowlistReloadError,
     GatewayPluginGateError,
     NastechSuitePinError,
+    SetThemeCatalogLineError,
     TermuxAptKeyDocError,
     UpdateManager,
     UnsignedDarwinBuildEnvError,
@@ -110,6 +111,7 @@ from hundredways.updates import (
     _reconcile_prompt_surface_snapshot,
     _reconcile_python_test_timeout,
     _reconcile_reasoning_effort_selection,
+    _reconcile_set_theme_catalog_line,
     _reconcile_sigv4_vectors,
     _reconcile_skill_description_hardline,
     _reconcile_skill_docs_order,
@@ -125,6 +127,10 @@ from hundredways.updates import (
     _reconcile_vercel_prepare,
     _reconcile_windows_boot_lifecycle_race,
     _NASTECH_UI_INTEGRITY,
+    _SET_THEME_CATALOG_BUDGET,
+    _SET_THEME_LONG,
+    _SET_THEME_SHORT,
+    _SET_THEME_SOURCE_REL,
     _UI_SCOPE_ASSET_EVIDENCE,
     UiRegistryLookupError,
     UiScopePinError,
@@ -2104,6 +2110,196 @@ def test_reconcile_prompt_surface_snapshot(tmp_path):
 
     # Idempotent once the snapshot carries the branded render.
     assert _reconcile_prompt_surface_snapshot(str(root)) == []
+
+
+# ---------------------------------------------------------------------------
+# Brand-length guard on set_theme's catalog line (candidate 7f790c348, upstream
+# 5894e750c3; jobs 120743383196 and 120743383269).
+# ---------------------------------------------------------------------------
+
+# tools/set_theme_tool.py's first sentence as upstream ships it, and the same string after
+# the brand map.  The measured delta is what the rule exists for, so it is pinned here rather
+# than derived from the rule's own needles.
+_UPSTREAM_SET_THEME_SENTENCE = (
+    "Change how the Hermes desktop app looks: accent colour, light/dark mode, layout."
+)
+_BRANDED_SET_THEME_SENTENCE = _UPSTREAM_SET_THEME_SENTENCE.replace("Hermes", "Nastech")
+
+
+def _clip_like_short_desc(text: str, max_chars: int = _SET_THEME_CATALOG_BUDGET) -> str:
+    """``tools/tool_search_catalog._short_desc``'s clip, mirrored on one already-extracted sentence.
+
+    Same arithmetic as upstream: over budget, cut at ``max_chars``, drop the trailing partial
+    word, strip ``,;: `` and append the ellipsis the fork's guard forbids.
+    """
+    if len(text) <= max_chars:
+        return text
+    clipped = text[:max_chars]
+    clipped = clipped.rsplit(" ", 1)[0] if " " in clipped else clipped
+    return clipped.rstrip(",;: ") + "…"
+
+
+def _set_theme_source(*, sentence: str = _BRANDED_SET_THEME_SENTENCE) -> str:
+    return (
+        "SET_THEME_SCHEMA = {\n"
+        '    "name": "set_theme",\n'
+        '    "description": (\n'
+        f'        "{sentence} Pass the values "\n'
+        '        "to apply them now; the result says what was applied."\n'
+        "    ),\n"
+        '    "parameters": {"type": "object", "properties": {}},\n'
+        "}\n"
+    )
+
+
+def _set_theme_tree(tmp_path, *, sentence: str = _BRANDED_SET_THEME_SENTENCE):
+    """A branded tree: the real source file plus a snapshot that quotes the same sentence."""
+    root = tmp_path / "branded"
+    (root / "tools").mkdir(parents=True)
+    source = _set_theme_source(sentence=sentence)
+    (root / "tools" / "set_theme_tool.py").write_text(source, encoding="utf-8")
+    snap_tools = root / "tests" / "fixtures" / "prompt_surface" / "tools"
+    snap_tools.mkdir(parents=True)
+    listing = (
+        "Search the tool catalog.\n"
+        f"- set_theme: {sentence}\n"
+        "- show_tip: Point at one desktop UI element with a small arrow bubble "
+        "(no dimming or tour)."
+    )
+    (snap_tools / "tool_search.desktop.claude.json").write_text(
+        json.dumps(
+            {"name": "tool_search", "description": listing, "parameters": {}},
+            indent=2,
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_branding_pushes_the_sentence_over_the_catalog_budget():
+    """The whole bug in two numbers: upstream fits, the brand does not."""
+    assert len(_UPSTREAM_SET_THEME_SENTENCE) == _SET_THEME_CATALOG_BUDGET
+    assert len(_BRANDED_SET_THEME_SENTENCE) == _SET_THEME_CATALOG_BUDGET + 1
+    assert not _clip_like_short_desc(_UPSTREAM_SET_THEME_SENTENCE).endswith("…")
+    assert _clip_like_short_desc(_BRANDED_SET_THEME_SENTENCE).endswith("…")
+
+
+def test_reconcile_set_theme_catalog_line(tmp_path):
+    """Shorten the branded sentence so the catalog line stays whole, in both files."""
+    root = _set_theme_tree(tmp_path)
+
+    changed = _reconcile_set_theme_catalog_line(str(root))
+    assert changed == [
+        _SET_THEME_SOURCE_REL,
+        "tests/fixtures/prompt_surface/tools/tool_search.desktop.claude.json",
+    ]
+
+    text = (root / "tools" / "set_theme_tool.py").read_text(encoding="utf-8")
+    assert _SET_THEME_SHORT in text
+    assert _SET_THEME_LONG not in text
+    compile(text, str(root / "tools" / "set_theme_tool.py"), "exec")
+
+    snapshot = (
+        root / "tests" / "fixtures" / "prompt_surface" / "tools" / "tool_search.desktop.claude.json"
+    )
+    listing = json.loads(snapshot.read_text(encoding="utf-8"))["description"]
+    assert _SET_THEME_LONG not in listing
+    line = next(row for row in listing.splitlines() if row.startswith("- set_theme: "))
+    sentence = line[len("- set_theme: ") :]
+    assert sentence == _SET_THEME_SHORT + " accent colour, light/dark mode, layout."
+    assert len(sentence) <= _SET_THEME_CATALOG_BUDGET
+    # The guard that was red: no catalog line may be clipped.
+    assert not _clip_like_short_desc(sentence).endswith("…")
+
+    # Idempotent: the shortened form is what the render now produces.
+    assert _reconcile_set_theme_catalog_line(str(root)) == []
+
+
+def test_reconcile_set_theme_catalog_line_skips_absent_files(tmp_path):
+    assert _reconcile_set_theme_catalog_line(str(tmp_path)) == []
+
+
+def test_reconcile_set_theme_catalog_line_leaves_a_short_line_alone(tmp_path):
+    """Upstream rewording that already fits is a no-op, not a raise."""
+    short = "Change how the Nastech desktop looks: accent colour, light/dark mode, layout."
+    root = _set_theme_tree(tmp_path, sentence=short)
+
+    assert _reconcile_set_theme_catalog_line(str(root)) == []
+
+
+def test_reconcile_set_theme_catalog_line_flags_a_reworded_description(tmp_path):
+    """A sentence this rule cannot see is a sync-time error, not a red fork lane days later."""
+    root = tmp_path / "branded"
+    (root / "tools").mkdir(parents=True)
+    reworded = "Restyle the desktop in Nastech: pick an accent, mode and layout."
+    (root / "tools" / "set_theme_tool.py").write_text(
+        _set_theme_source(sentence=reworded),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SetThemeCatalogLineError):
+        _reconcile_set_theme_catalog_line(str(root))
+    with pytest.raises(SetThemeCatalogLineError):
+        reconcile_tree(str(root))
+
+
+def test_reconcile_tree_registers_set_theme_catalog_line(tmp_path):
+    """The rule actually runs inside ``reconcile_tree``."""
+    root = _set_theme_tree(tmp_path)
+
+    result = reconcile_tree(str(root))
+    assert _SET_THEME_SOURCE_REL in result.fixed
+    assert "tests/fixtures/prompt_surface/tools/tool_search.desktop.claude.json" in result.fixed
+    assert _SET_THEME_LONG not in (root / "tools" / "set_theme_tool.py").read_text(encoding="utf-8")
+
+
+def test_set_theme_line_is_shortened_before_the_surface_counts(tmp_path):
+    """Ordering: ``surfaces.json`` counts the tool schemas on disk, so the rewrite must precede it.
+
+    The fork's ``test_committed_prompt_surface_is_current`` byte-compares a fresh render against
+    the manifest.  If the manifest is computed before the sentence is shortened it describes the
+    pre-fix text and reports ``stale: surfaces.json`` -- which is the second red this rule clears.
+    """
+    root = _set_theme_tree(tmp_path)
+    snap = root / "tests" / "fixtures" / "prompt_surface"
+    prompts = snap / "prompts"
+    prompts.mkdir(parents=True)
+    stable = "System prompt header.\nBe helpful.\n"
+    (prompts / "desktop.claude.txt").write_text("===== stable =====\n" + stable, encoding="utf-8")
+    tools_dir = snap / "tools"
+    long_schema = json.loads(
+        (tools_dir / "tool_search.desktop.claude.json").read_text(encoding="utf-8")
+    )
+    stale_count = len(json.dumps({"tool_search": long_schema}, sort_keys=True)) // 4
+    (snap / "surfaces.json").write_text(
+        json.dumps(
+            {
+                "desktop.claude": {
+                    "prompt_tokens": {"stable": len(stable) // 4},
+                    "tool_tokens": stale_count,
+                    "tools": ["tool_search"],
+                }
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = reconcile_tree(str(root))
+    assert "tests/fixtures/prompt_surface/surfaces.json" in result.fixed
+    manifest = json.loads((snap / "surfaces.json").read_text(encoding="utf-8"))
+    fixed_schema = json.loads(
+        (tools_dir / "tool_search.desktop.claude.json").read_text(encoding="utf-8")
+    )
+    expected = len(json.dumps({"tool_search": fixed_schema}, sort_keys=True)) // 4
+    assert manifest["desktop.claude"]["tool_tokens"] == expected
+    # Reordering the two rules would leave the manifest describing the clipped-brand text.
+    assert expected != stale_count
 
 
 def test_reconcile_drop_vercel_deploy_job(tmp_path):
