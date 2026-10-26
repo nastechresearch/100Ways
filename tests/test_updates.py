@@ -148,6 +148,12 @@ from hundredways.updates import (
     _TERMUX_TUI_SETUP_GATE_EDITS,
     _TERMUX_TUI_SETUP_GATE_REL,
     TermuxTuiSetupGateError,
+    _reconcile_canary_unsigned_dispatch,
+    _CANARY_DISPATCH_INPUT_BEFORE,
+    _CANARY_DISPATCH_INPUT_AFTER,
+    _CANARY_RELEASE_PY_BEFORE,
+    _CANARY_RELEASE_PY_AFTER,
+    CanaryUnsignedDispatchError,
     _WINDOWS_SUSPEND_BUDGET_S,
     _WINDOWS_SUSPEND_ONE_SHOT,
     _WINDOWS_SUSPEND_TEST_REL,
@@ -1756,6 +1762,98 @@ def test_termux_tui_setup_gate_absent_file_is_a_no_op(tmp_path):
 
 def test_termux_tui_setup_gate_registered_in_reconcile_tree():
     assert _reconcile_termux_tui_setup_gate.__name__ in _names_called_inside(
+        updates, "reconcile_tree"
+    )
+
+
+_CANARY_WORKFLOW_TEXT = (
+    "on:\n"
+    "  workflow_dispatch:\n"
+    "    inputs:\n"
+    "      tag:\n"
+    "        type: string\n"
+    "      upload_release:\n"
+    "        description: 'Upload artifacts to the R2 release bucket (staging + feeds)'\n"
+    "        required: false\n"
+    "        type: boolean\n"
+    "        default: false\n"
+    "\n"
+    "permissions:\n"
+    "  contents: write\n"
+)
+_CANARY_RELEASE_TEXT = (
+    "def dispatch(tag, canary):\n"
+    "    cmd = ['gh', 'workflow', 'run', 'desktop-bundled-release.yml', '--ref', 'main']\n"
+    "    if canary:\n"
+    "        cmd += [\"-f\", \"upload_release=true\"]\n"
+    "    return cmd\n"
+)
+
+
+def _canary_candidate(tmp_path, *, workflow=None, release_py=None):
+    candidate = tmp_path / "candidate"
+    wf = candidate / ".github/workflows/desktop-bundled-release.yml"
+    rp = candidate / "scripts/release.py"
+    wf.parent.mkdir(parents=True, exist_ok=True)
+    rp.parent.mkdir(parents=True, exist_ok=True)
+    wf.write_text(_CANARY_WORKFLOW_TEXT if workflow is None else workflow, encoding="utf-8")
+    rp.write_text(_CANARY_RELEASE_TEXT if release_py is None else release_py, encoding="utf-8")
+    return candidate, wf, rp
+
+
+def test_canary_unsigned_dispatch_exposes_skip_signed_and_passes_it(tmp_path):
+    """A dispatched unsigned fork must be able to say so, or it stops at the credential gates."""
+    candidate, wf, rp = _canary_candidate(tmp_path)
+
+    changed = _reconcile_canary_unsigned_dispatch(str(candidate))
+
+    assert sorted(changed) == [
+        ".github/workflows/desktop-bundled-release.yml",
+        "scripts/release.py",
+    ]
+    assert _CANARY_DISPATCH_INPUT_AFTER.strip() in wf.read_text(encoding="utf-8")
+    assert _CANARY_RELEASE_PY_AFTER.strip() in rp.read_text(encoding="utf-8")
+
+
+def test_canary_unsigned_dispatch_leaves_every_other_byte_alone(tmp_path):
+    candidate, wf, rp = _canary_candidate(tmp_path)
+    _reconcile_canary_unsigned_dispatch(str(candidate))
+    assert wf.read_text(encoding="utf-8").replace(
+        _CANARY_DISPATCH_INPUT_AFTER, _CANARY_DISPATCH_INPUT_BEFORE, 1
+    ) == _CANARY_WORKFLOW_TEXT
+    assert rp.read_text(encoding="utf-8").replace(
+        _CANARY_RELEASE_PY_AFTER, _CANARY_RELEASE_PY_BEFORE, 1
+    ) == _CANARY_RELEASE_TEXT
+
+
+def test_canary_unsigned_dispatch_is_a_fixed_point(tmp_path):
+    candidate, wf, rp = _canary_candidate(tmp_path)
+    assert _reconcile_canary_unsigned_dispatch(str(candidate)) != []
+    once = (wf.read_text(encoding="utf-8"), rp.read_text(encoding="utf-8"))
+    assert _reconcile_canary_unsigned_dispatch(str(candidate)) == []
+    assert (wf.read_text(encoding="utf-8"), rp.read_text(encoding="utf-8")) == once
+
+
+def test_canary_unsigned_dispatch_raises_when_the_dispatch_moves(tmp_path):
+    text = _CANARY_RELEASE_TEXT.replace("upload_release=true", "upload_release=false")
+    candidate, wf, rp = _canary_candidate(tmp_path, release_py=text)
+
+    with pytest.raises(CanaryUnsignedDispatchError) as excinfo:
+        _reconcile_canary_unsigned_dispatch(str(candidate))
+
+    assert "release.py" in str(excinfo.value)
+    assert "CSC_LINK" in str(excinfo.value) or "AZURE_SIGN" in str(excinfo.value)
+    assert rp.read_text(encoding="utf-8") == text
+
+
+def test_canary_unsigned_dispatch_absent_files_are_a_no_op(tmp_path):
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    assert _reconcile_canary_unsigned_dispatch(str(candidate)) == []
+
+
+def test_canary_unsigned_dispatch_registered_in_reconcile_tree():
+    assert _reconcile_canary_unsigned_dispatch.__name__ in _names_called_inside(
         updates, "reconcile_tree"
     )
 

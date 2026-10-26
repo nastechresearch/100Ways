@@ -4691,6 +4691,96 @@ def _reconcile_termux_tui_setup_gate(dst: str) -> bool:
     return True
 
 
+class CanaryUnsignedDispatchError(ValueError):
+    """The canary dispatch moved, so the daily desktop build cannot declare itself unsigned.
+
+    A ``ValueError`` on purpose: :mod:`hundredways.conformance` reports it as a candidate
+    issue and the ``reconcile`` stage fails the update rather than publishing a tree whose
+    daily canary build stops at the Apple/Azure credential gates every morning.
+    """
+
+
+_CANARY_DISPATCH_WORKFLOW_REL = ".github/workflows/desktop-bundled-release.yml"
+_CANARY_DISPATCH_RELEASE_PY_REL = "scripts/release.py"
+_CANARY_DISPATCH_INPUT_BEFORE = (
+    "      upload_release:\n"
+    "        description: 'Upload artifacts to the R2 release bucket (staging + feeds)'\n"
+    "        required: false\n"
+    "        type: boolean\n"
+    "        default: false\n"
+)
+_CANARY_DISPATCH_INPUT_AFTER = _CANARY_DISPATCH_INPUT_BEFORE + (
+    "      skip-signed:\n"
+    "        description: 'Unsigned build: skip Azure and Apple signing; artifacts still "
+    "stage and upload'\n"
+    "        required: false\n"
+    "        type: boolean\n"
+    "        default: false\n"
+)
+_CANARY_RELEASE_PY_BEFORE = '    if canary:\n        cmd += ["-f", "upload_release=true"]\n'
+_CANARY_RELEASE_PY_AFTER = (
+    "    if canary:\n"
+    "        # NasTech ships unsigned: declare it here too, or the dispatched build stops\n"
+    "        # at the Apple/Azure credential gates before it builds anything.\n"
+    '        cmd += ["-f", "upload_release=true", "-f", "skip-signed=true"]\n'
+)
+
+
+def _reconcile_canary_unsigned_dispatch(dst: str) -> list[str]:
+    """Let the daily canary build declare itself unsigned, and make it do so.
+
+    ``canary-release.yml`` runs ``release.py --canary --publish`` every morning, which
+    tags a draft and dispatches ``desktop-bundled-release.yml`` with ``upload_release=true``.
+    ``skip-signed`` existed only on ``workflow_call``, so a dispatch could not say
+    "unsigned", and the build stopped at ``Require signing credentials when publishing`` /
+    ``Require Azure signing when publishing`` with ``CSC_LINK CSC_KEY_PASSWORD
+    APPLE_API_KEY_P8 APPLE_API_KEY_ID APPLE_API_ISSUER`` and ``AZURE_SIGN_*`` missing from
+    ``release-signing`` -- every daily run, while the forks' stable caller legs had declared
+    ``skip-signed: true`` since #158.
+
+    Exposing the input makes the fork's policy expressible; passing it from ``release.py``
+    makes the scheduled build use it.  The unsigned artifacts still stage to the R2 tag
+    archive and still render into the draft's builds table -- only the signed channels
+    (updater feeds, Store submission, notarized verification) stay off, which is exactly
+    what an unsigned build may not claim.
+    """
+    wf_rel, py_rel = _CANARY_DISPATCH_WORKFLOW_REL, _CANARY_DISPATCH_RELEASE_PY_REL
+    workflow = _reconcile_budget_read(dst, wf_rel)
+    script = _reconcile_budget_read(dst, py_rel)
+    if workflow is None or script is None:
+        return []
+    changed: list[str] = []
+    if _CANARY_DISPATCH_INPUT_AFTER not in workflow:
+        if _CANARY_DISPATCH_INPUT_BEFORE not in workflow:
+            raise CanaryUnsignedDispatchError(
+                f"{wf_rel} no longer declares the workflow_dispatch ``upload_release`` input as "
+                f"{_CANARY_DISPATCH_INPUT_BEFORE!r}, so the sync cannot expose ``skip-signed`` "
+                "to a dispatch. The scheduled canary build then stops at 'required "
+                "signing/notarization credentials are missing from release-signing: CSC_LINK "
+                "CSC_KEY_PASSWORD APPLE_API_KEY_P8 APPLE_API_KEY_ID APPLE_API_ISSUER' and "
+                "'required Azure Trusted Signing vars are missing'. Re-derive "
+                "_CANARY_DISPATCH_INPUT_BEFORE against upstream's current workflow."
+            )
+        updated = workflow.replace(_CANARY_DISPATCH_INPUT_BEFORE, _CANARY_DISPATCH_INPUT_AFTER, 1)
+        _reconcile_budget_write(dst, wf_rel, updated)
+        changed.append(wf_rel)
+    if _CANARY_RELEASE_PY_AFTER not in script:
+        if _CANARY_RELEASE_PY_BEFORE not in script:
+            raise CanaryUnsignedDispatchError(
+                f"{py_rel} no longer dispatches a canary with "
+                f"{_CANARY_RELEASE_PY_BEFORE!r}, so the "
+                "sync cannot pass ``skip-signed``. The daily build then demands the Apple "
+                "(CSC_LINK, APPLE_API_*) and Azure (AZURE_SIGN_*) credentials this fork will "
+                "never have, and never produces the unsigned packages. Re-derive "
+                "_CANARY_RELEASE_PY_BEFORE against upstream's current release.py."
+            )
+        _reconcile_budget_write(
+            dst, py_rel, script.replace(_CANARY_RELEASE_PY_BEFORE, _CANARY_RELEASE_PY_AFTER, 1)
+        )
+        changed.append(py_rel)
+    return changed
+
+
 class WindowsRealGitLocateError(ValueError):
     """``_locate_real_git`` no longer matches the shape the robustness patch needs.
 
@@ -6468,6 +6558,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_termux_tui_setup_gate(dst):
         result.total += 1
         result.fixed.append(_TERMUX_TUI_SETUP_GATE_REL)
+    for rel in _reconcile_canary_unsigned_dispatch(dst):
+        result.total += 1
+        result.fixed.append(rel)
     if _reconcile_install_ps1_store_guard_test(dst):
         result.total += 1
         result.fixed.append("scripts/tests/test-install-ps1-store-guard.ps1")
