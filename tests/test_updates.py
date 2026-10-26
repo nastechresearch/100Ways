@@ -21,6 +21,8 @@ from hundredways.assets import OwnedAssets
 from hundredways.integrity import audit_candidate_tree
 from hundredways.updates import (
     STAGES,
+    STORE_CREDENTIALS,
+    STORE_REST_CREDENTIALS,
     AgentsChainCapError,
     AssetsWorkerIndexError,
     BrowseBudgetDdlError,
@@ -34,6 +36,7 @@ from hundredways.updates import (
     NastechSuitePinError,
     PluginCatalogAdmissionError,
     SetThemeCatalogLineError,
+    StoreLaneGateError,
     TermuxAptKeyDocError,
     UpdateManager,
     UnsignedDarwinBuildEnvError,
@@ -118,6 +121,7 @@ from hundredways.updates import (
     _reconcile_sigv4_vectors,
     _reconcile_skill_description_hardline,
     _reconcile_skill_docs_order,
+    _reconcile_store_gate_covers_the_lane,
     _reconcile_telegram_mention_context_lengths,
     _reconcile_dead_api_defaults,
     _reconcile_domains,
@@ -6510,6 +6514,296 @@ def test_unsigned_darwin_build_env_stops_when_the_step_moves(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# The Store credential gate must list every name the lane consumes
+# ---------------------------------------------------------------------------
+
+
+def _store_workflow(names, *, extra=()):
+    """A minimal workflow whose ``stable-store`` job consumes ``names``.
+
+    ``workflow_references`` only reads names inside a job block under a top-level
+    ``jobs:`` map, so the names go in the job's ``env``.  ``extra`` adds a
+    neighbouring job's credentials to prove the gate ignores names outside the
+    Store family (``DOCKERHUB_*`` is a different lane's business).
+    """
+    env = "".join(f"          {n}: ${{{{ secrets.{n} }}}}\n" for n in names)
+    other = "".join(f"          {n}: ${{{{ secrets.{n} }}}}\n" for n in extra)
+    body = (
+        "name: desktop release\n"
+        "on:\n  workflow_dispatch:\n"
+        "jobs:\n"
+        "  stable-store:\n"
+        "    runs-on: windows-latest\n"
+        "    steps:\n"
+        "      - run: msstore reconfigure\n"
+        "        env:\n"
+        f"{env}"
+    )
+    if other:
+        body += (
+            "  docker-publish:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: docker push\n"
+            "        env:\n"
+            f"{other}"
+        )
+    return body
+
+
+def _store_tree(tmp_path, text, filename="desktop-bundled-release.yml"):
+    candidate = tmp_path / "candidate"
+    wf = candidate / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / filename).write_text(text, encoding="utf-8")
+    return candidate
+
+
+def _store_gate_reads(candidate):
+    """The Store-family names ``pubconfig``'s parser reads out of a tree.
+
+    Derived with the same reader and parser the pre-flight classifies with, so the
+    consumed set is never a list typed next to the gate it is compared against.
+    """
+    from hundredways import pubconfig
+
+    references = []
+    for name, text in pubconfig.load_workflows(str(candidate)):
+        references.extend(pubconfig.workflow_references(text, workflow=name))
+    return {r.name for r in references if r.name.startswith("MS_STORE_")}
+
+
+def test_the_shipped_gate_covers_the_forks_own_store_lane():
+    """``STORE_CREDENTIALS`` == the names the fork's real Store job reads.
+
+    The workflow here is a verbatim transcription of the fork's lane
+    (``tests/fixtures/store_lane``, from ``origin/main``
+    ``desktop-bundled-release.yml`` measured 2026-10-25: ``stable-store`` at 2477, the
+    credential ``env`` at 2487-2497, the ``msstore reconfigure`` of ``--sellerId`` at
+    2513), not a fixture built from the gate -- so dropping ``MS_STORE_SELLER_ID`` from
+    the gate fails this test instead of shipping the hole again.
+    """
+    lane = os.path.join(os.path.dirname(__file__), "fixtures", "store_lane")
+
+    assert _store_gate_reads(lane) == frozenset(STORE_CREDENTIALS)
+    assert "MS_STORE_SELLER_ID" in STORE_CREDENTIALS
+    assert _reconcile_store_gate_covers_the_lane(lane) is None
+
+
+def test_store_gate_lists_every_name_a_lane_consumes(tmp_path):
+    """A gate written to match its lane passes; the completeness is derived twice.
+
+    The consumed set comes from the parser, the gated set from the engine's table,
+    and the rule compares them the same way ``pubconfig`` will at pre-flight.
+    """
+    candidate = _store_tree(tmp_path, _store_workflow(STORE_CREDENTIALS))
+
+    assert _store_gate_reads(candidate) == frozenset(STORE_CREDENTIALS)
+    assert _reconcile_store_gate_covers_the_lane(str(candidate)) is None
+
+
+def test_store_gate_refuses_a_sixth_credential_the_lane_consumes(tmp_path):
+    """A credential upstream adds to the lane but the gate omits must fail the sync.
+
+    Without the raise the gate admits a run whose Store job reads the new name
+    as an empty string -- exactly the shape that let the seller-id hole ship.
+    """
+    candidate = _store_tree(
+        tmp_path,
+        _store_workflow((*STORE_CREDENTIALS, "MS_STORE_CERT_HASH")),
+    )
+
+    with pytest.raises(StoreLaneGateError, match="MS_STORE_CERT_HASH"):
+        _reconcile_store_gate_covers_the_lane(str(candidate))
+
+
+def test_store_gate_refuses_a_lane_it_cannot_measure(tmp_path):
+    """A visible ``msstore`` step with no parsable credential is a moved anchor.
+
+    The audit is only worth shipping if it can see the lane: a tree whose Store step
+    reads its credentials somewhere the parser does not look would report an empty
+    consumed set, pass, and let the same hole reopen silently.  The rule raises and
+    names the file:line a human has to re-derive.
+    """
+    moved = _store_workflow(STORE_CREDENTIALS).replace("secrets.MS_STORE_", "env.MS_STORE_")
+    assert "msstore" in moved
+    candidate = _store_tree(tmp_path, moved)
+
+    assert _store_gate_reads(candidate) == set()
+    with pytest.raises(StoreLaneGateError, match="blind"):
+        _reconcile_store_gate_covers_the_lane(str(candidate))
+
+
+def test_store_gate_refuses_a_gate_that_is_not_one_name_family(tmp_path, monkeypatch):
+    """The family prefix is derived from the gate, so a mixed gate cannot be audited.
+
+    Guessing a shorter stem would match names the lane does not own; refusing says
+    so instead of quietly checking nothing.
+    """
+    from hundredways import updates
+
+    candidate = _store_tree(tmp_path, _store_workflow(STORE_CREDENTIALS))
+    monkeypatch.setattr(updates, "STORE_CREDENTIALS", ("MS_STORE_TENANT_ID", "DOCKERHUB_TOKEN"))
+
+    with pytest.raises(StoreLaneGateError, match="name-family prefix"):
+        updates._reconcile_store_gate_covers_the_lane(str(candidate))
+
+
+def test_store_gate_ignores_a_neighbour_lanes_credentials(tmp_path):
+    """A name outside the Store family is another lane's hole, not a short gate.
+
+    Refusing here would widen the guard onto credentials the Store lane never
+    reads (``DOCKERHUB_TOKEN`` belongs to the image publish), which is not this
+    rule's job and would block a sync whose Store lane is complete.
+    """
+    candidate = _store_tree(
+        tmp_path,
+        _store_workflow(STORE_CREDENTIALS, extra=("DOCKERHUB_TOKEN",)),
+    )
+
+    assert _reconcile_store_gate_covers_the_lane(str(candidate)) is None
+
+
+def test_store_gate_is_read_only_and_absent_ci_is_a_no_op(tmp_path):
+    """The rule audits, it never edits: a pass leaves the tree byte-for-byte alone."""
+    candidate = _store_tree(tmp_path, _store_workflow(STORE_CREDENTIALS))
+    workflow = candidate / ".github/workflows/desktop-bundled-release.yml"
+    before = workflow.read_bytes()
+    empty_ci = tmp_path / "empty-ci"
+    (empty_ci / ".github" / "workflows").mkdir(parents=True)
+
+    assert _reconcile_store_gate_covers_the_lane(str(candidate)) is None
+    assert _reconcile_store_gate_covers_the_lane(str(candidate)) is None
+    assert workflow.read_bytes() == before
+    # no CI directory at all, and a CI directory holding no workflow, are both
+    # "nothing to audit" -- not a crash and not a silently green gate.
+    assert _reconcile_store_gate_covers_the_lane(str(tmp_path / "empty")) is None
+    assert _reconcile_store_gate_covers_the_lane(str(empty_ci)) is None
+
+
+def test_store_gate_runs_from_reconcile_tree(tmp_path):
+    """``reconcile_tree`` must dispatch the gate check, or the fork ships the hole.
+
+    The lane goes in its own workflow file here because the audit reads *every*
+    workflow while the unrelated darwin-anchor rule only knows
+    ``desktop-bundled-release.yml``; naming the real file would make this test fail
+    on that rule's anchor instead of on the dispatch it pins.
+    """
+    candidate = _store_tree(
+        tmp_path,
+        _store_workflow((*STORE_CREDENTIALS, "MS_STORE_CERT_HASH")),
+        filename="store-lane.yml",
+    )
+
+    with pytest.raises(StoreLaneGateError, match="MS_STORE_CERT_HASH"):
+        reconcile_tree(str(candidate))
+
+
+def test_store_gate_is_dispatched_after_every_workflow_writer():
+    """Ordering is load-bearing: the audit measures the tree the sync ships.
+
+    Derived from the engine's own AST rather than a remembered list: every
+    ``_reconcile_*`` rule that touches a ``.github/workflows/`` path -- by literal,
+    through a module constant holding one, or through a rule it calls -- must be
+    dispatched before the Store-gate audit, or the audit grades a workflow a later
+    rule then rewrites.
+    """
+    from hundredways import updates as updates_module
+
+    tree = ast.parse(open(updates_module.__file__, encoding="utf-8").read())
+    path_consts = set()
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Constant):
+            continue
+        if isinstance(node.value.value, str) and node.value.value.startswith(".github/workflows/"):
+            path_consts.update(t.id for t in node.targets if isinstance(t, ast.Name))
+    rules = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("_reconcile_")
+    }
+
+    def touches_a_workflow(node):
+        for sub in ast.walk(node):
+            if (
+                isinstance(sub, ast.Constant)
+                and isinstance(sub.value, str)
+                and sub.value.startswith(".github/workflows/")
+            ):
+                return True
+            if isinstance(sub, ast.Name) and sub.id in path_consts:
+                return True
+        return False
+
+    writers = {name for name, node in rules.items() if touches_a_workflow(node)}
+    grown = True
+    while grown:
+        grown = False
+        for name, node in rules.items():
+            if name in writers:
+                continue
+            called = {
+                sub.func.id
+                for sub in ast.walk(node)
+                if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
+            }
+            if called & writers:
+                writers.add(name)
+                grown = True
+
+    body = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "reconcile_tree"
+    )
+    order = {}
+    for sub in ast.walk(body):
+        if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and sub.func.id in rules:
+            order[sub.func.id] = min(sub.lineno, order.get(sub.func.id, sub.lineno))
+
+    assert writers, "the sync writes workflows, so this ordering has to be pinned"
+    assert "_reconcile_store_gate_covers_the_lane" in order
+    audit = order["_reconcile_store_gate_covers_the_lane"]
+    late = sorted(name for name, line in order.items() if name in writers and line > audit)
+    assert not late, f"the Store audit runs before workflow writers: {late}"
+
+
+def test_store_credentials_gate_has_no_ungated_store_name(tmp_path):
+    """The pre-flight agrees: with the fix the Store lane has no ungated-consumed name."""
+    from hundredways import pubconfig
+
+    candidate = _store_tree(tmp_path, _store_workflow(STORE_CREDENTIALS))
+    (candidate / ".github/workflows/docker.yml").write_text(
+        _store_workflow((), extra=("DOCKERHUB_TOKEN",)), encoding="utf-8"
+    )
+    found = pubconfig.analyze_root(str(candidate), pubconfig.ActionsInventory())
+
+    ungated = {f.name for f in found if f.verdict == pubconfig.UNGATED_CONSUMED}
+    assert not {n for n in ungated if n.startswith("MS_STORE_")}
+    assert _reconcile_store_gate_covers_the_lane(str(candidate)) is None
+
+
+def test_store_rest_credentials_stay_the_four_the_script_reads(tmp_path):
+    """The lane set grew, the ``store.py`` fold did not: it still reads only REST names."""
+    from hundredways.updates import _reconcile_signing_gated_store
+
+    fixture = os.path.join(os.path.dirname(__file__), "fixtures", "signing_lanes")
+    candidate = tmp_path / "fork"
+    shutil.copytree(fixture, str(candidate))
+    store_py = candidate / "scripts/releases/store.py"
+
+    assert _reconcile_signing_gated_store(str(candidate)) is True
+    after = store_py.read_text(encoding="utf-8")
+
+    # The injected tuple names exactly the REST set, so the seller id -- which the
+    # workflow's msstore CLI uses but the Partner Center call never reads -- does
+    # not turn a configured submission into a false skip.
+    injected = after.split("_STORE_CREDENTIALS = (", 1)[1].split(")", 1)[0]
+    for name in STORE_REST_CREDENTIALS:
+        assert f'"{name}"' in injected
+    assert "MS_STORE_SELLER_ID" not in injected
+    # The fold is idempotent: a second pass changes the file not at all.
+    assert _reconcile_signing_gated_store(str(candidate)) is False
 # The receipt's commit prose lives in a data log, not in the JSON the fork lints
 # ---------------------------------------------------------------------------
 

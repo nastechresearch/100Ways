@@ -354,6 +354,56 @@ def test_lanes_that_share_a_credential_set_share_one_gate():
     assert labels[0].count("Windows") >= 2
 
 
+def test_the_store_gate_lists_the_names_the_forks_own_lane_reads():
+    """The Store gate's set is the lane's consumed set, measured, not hand-listed.
+
+    ``tests/fixtures/store_lane`` transcribes the fork's ``stable-store`` job
+    (``origin/main``, ``desktop-bundled-release.yml`` measured 2026-10-25: job at 2477,
+    the credential ``env`` at 2487-2497, ``msstore reconfigure --sellerId`` at 2513), so
+    the gate is compared against the lane rather than against a copy of itself -- the
+    four-name gate that left ``MS_STORE_SELLER_ID`` ``ungated-consumed`` fails here, and
+    so does an engine that stops folding ``STORE_CREDENTIALS`` into the gate at all.
+    """
+    lane = os.path.join(
+        os.path.dirname(__file__),
+        "fixtures",
+        "store_lane",
+        ".github",
+        "workflows",
+        "desktop-bundled-release.yml",
+    )
+    references = workflow_references(
+        open(lane, encoding="utf-8").read(),
+        workflow="desktop-bundled-release.yml",
+    )
+    consumed = frozenset(r.name for r in references if r.name.startswith("MS_STORE_"))
+    gate = next(g for g in credential_gates() if g.label == "Microsoft Store submission")
+
+    assert consumed == gate.names
+    assert "MS_STORE_SELLER_ID" in gate.names
+    found = analyze(references, EMPTY, gates=credential_gates())
+    assert not [
+        item
+        for item in found
+        if item.verdict == pubconfig.UNGATED_CONSUMED and item.name.startswith("MS_STORE_")
+    ]
+    assert "MS_STORE_SELLER_ID" in {
+        item.name for item in found if item.verdict == pubconfig.LIVE_MISSING
+    }
+    # The lane's one foreign name is a different lane's gap and stays attributed
+    # to it, so the Store gate's fix is not a licence to widen the guard: with the
+    # fork's real inventory, which does provide it, nothing is ungated at all.
+    r2 = [item for item in found if item.name == "CLOUDFLARE_R2_PUBLIC_URL"]
+    assert r2 and r2[0].verdict == pubconfig.UNGATED_CONSUMED
+    provided = ActionsInventory(repo_vars=frozenset({"CLOUDFLARE_R2_PUBLIC_URL"}))
+    still_ungated = [
+        item.name
+        for item in analyze(references, provided, gates=credential_gates())
+        if item.verdict == pubconfig.UNGATED_CONSUMED
+    ]
+    assert not still_ungated
+
+
 def test_render_is_plain_text_and_carries_the_names_the_owner_must_type():
     found = analyze(references(), EMPTY, gates=GATES)
     text = render(found, repo="nastechresearch/nastech-agent", inventory=EMPTY)
@@ -469,7 +519,13 @@ def test_the_real_fork_reports_the_measured_gap_and_nothing_else_as_urgent():
         verdict: sorted(item.name for item in found if item.verdict == verdict)
         for verdict in pubconfig.VERDICT_ORDER
     }
-    assert by_verdict[pubconfig.UNGATED_CONSUMED] == ["MS_STORE_SELLER_ID"]
+    # ``MS_STORE_SELLER_ID`` is now in the Store gate, so the lane no longer
+    # consumes a credential the gate omits: it moves out of ungated-consumed (the
+    # hole that let a run be admitted and fail mid-publish) and, the fork not
+    # having set it, lands in live-missing -- still actionable, so ``pubconfig``
+    # refuses the run up front exactly as before, just for the honest reason.
+    assert by_verdict[pubconfig.UNGATED_CONSUMED] == []
+    assert "MS_STORE_SELLER_ID" in by_verdict[pubconfig.LIVE_MISSING]
     assert {"APP_PRIVATE_KEY", "APP_CLIENT_ID"} <= set(by_verdict[pubconfig.LIVE_MISSING])
     assert {"CSC_LINK", "CSC_KEY_PASSWORD", "APPLE_API_KEY_P8"} <= set(
         by_verdict[pubconfig.DECLARED_SKIP]
