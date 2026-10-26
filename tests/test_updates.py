@@ -13,10 +13,11 @@ import sys
 import threading
 import types
 import zipfile
+from pathlib import Path
 
 import pytest
 
-from hundredways import updates
+from hundredways import conformance, updates
 from hundredways.assets import OwnedAssets
 from hundredways.integrity import audit_candidate_tree
 from hundredways.updates import (
@@ -143,6 +144,9 @@ from hundredways.updates import (
     _ORPHAN_PICKER_TEST_MIRRORED,
     _ORPHAN_PICKER_TEST_REL,
     OrphanPickerFakeError,
+    _STABLE_RELEASE_GRAPH_TESTS,
+    _STABLE_RELEASE_GRAPH_TESTS_EDITS,
+    _STABLE_RELEASE_GRAPH_TESTS_MARK,
     _NASTECH_UI_INTEGRITY,
     _SET_THEME_CATALOG_BUDGET,
     _SET_THEME_LONG,
@@ -5721,7 +5725,19 @@ _FORK_LANE_EDITS = (
     (_RELEASE_CHANNELS_TESTS, _RELEASE_CHANNELS_TESTS_EDITS),
     (_STABLE_RELEASE_TESTS, _STABLE_RELEASE_TESTS_EDITS),
     (_RELEASE_ENTRYPOINT_TESTS, _RELEASE_ENTRYPOINT_TESTS_EDITS),
+    (_STABLE_RELEASE_GRAPH_TESTS, _STABLE_RELEASE_GRAPH_TESTS_EDITS),
 )
+
+
+def test_the_edits_under_test_are_the_ones_the_rule_runs():
+    """This mirror may not drift from the table the production rule walks.
+
+    The pairs are restated here so each file gets its own parametrised case, which
+    is only honest while the two lists name the same files: #156 added a rewrite
+    to the rule and left this mirror behind, so a whole release-surface file shipped
+    un-patched while the suite stayed green.
+    """
+    assert [(rel, edits) for rel, _, edits in updates._FORK_LANE_RELEASE] == list(_FORK_LANE_EDITS)
 
 
 def _lane_release_tree(tmp_path, rel, edits):
@@ -5755,6 +5771,43 @@ def test_fork_lane_release_pairs_apply_once_and_reach_a_fixed_point(tmp_path, re
 def test_fork_lane_release_noops_on_a_tree_without_the_release_files(tmp_path):
     """A pre-lane tree has nothing to align: absence is a no-op, not an error."""
     assert _reconcile_fork_lane_release_surface(str(tmp_path / "empty")) == []
+
+
+_UNSIGNED_LEG_LOOP = (
+    r'for name in \(([^)]*)\):\n'
+    r'        assert jobs\[name\]\["with"\]\["skip-signed"\] == "true", name'
+)
+
+
+def test_the_release_graph_contract_names_every_unsigned_desktop_leg(tmp_path):
+    """The graph test reads the workflow the caller-leg rewrite patches.
+
+    ``tests/ci/test_stable_release_graph.py`` checks that each candidate leg's inputs
+    reach the reusable builder, and it hard-codes upstream's inverted Windows
+    expression.  Once every desktop leg declares ``skip-signed: true`` that line is
+    the red the fork ships with, and it is a *contract* red: it only goes green again
+    if the legs go back to signing conditionally -- the opposite of this fork's policy.
+    """
+    root, path = _lane_release_tree(
+        tmp_path, _STABLE_RELEASE_GRAPH_TESTS, _STABLE_RELEASE_GRAPH_TESTS_EDITS
+    )
+
+    assert _reconcile_fork_lane_release_surface(str(root)) == [_STABLE_RELEASE_GRAPH_TESTS]
+
+    text = path.read_text(encoding="utf-8")
+    assert _quoted_in(_UNSIGNED_LEG_LOOP, text) == {
+        "candidates-darwin-arm64",
+        "candidates-darwin-x64",
+        "candidates-win32-arm64",
+        "candidates-win32-x64",
+        "candidates-win32-bundle",
+    }
+    assert '["with"]["skip-signed"] == "${{ !fromJSON' not in text
+    # The Store lane stays lane-gated: this fork still submits nothing to Partner Center.
+    assert 'jobs[name]["with"]["skip-store"] == store_off, name' in text
+    # The marker is what makes the rewrite idempotent, so it must be in the file it guards.
+    assert _STABLE_RELEASE_GRAPH_TESTS_MARK in text
+    assert _reconcile_fork_lane_release_surface(str(root)) == []
 
 
 def _quoted_in(pattern: str, text: str, flags: int = 0) -> set:
@@ -7266,7 +7319,7 @@ def _orphan_picker_tree(tmp_path, body=None):
 def test_the_orphan_picker_fake_binds_the_live_widget_signature(tmp_path):
     path = _orphan_picker_tree(tmp_path)
 
-    changed = _reconcile_orphan_picker_fake(str(tmp_path))
+    changed = _reconcile_orphan_picker_fake(str(tmp_path), [_ORPHAN_PICKER_TEST_REL])
 
     assert changed == [_ORPHAN_PICKER_TEST_REL]
     text = path.read_text(encoding="utf-8")
@@ -7277,20 +7330,80 @@ def test_the_orphan_picker_fake_binds_the_live_widget_signature(tmp_path):
 
 def test_a_second_pass_over_the_bound_fake_changes_nothing(tmp_path):
     path = _orphan_picker_tree(tmp_path)
-    _reconcile_orphan_picker_fake(str(tmp_path))
+    _reconcile_orphan_picker_fake(str(tmp_path), [_ORPHAN_PICKER_TEST_REL])
     first = path.read_text(encoding="utf-8")
 
-    assert _reconcile_orphan_picker_fake(str(tmp_path)) == []
+    assert _reconcile_orphan_picker_fake(str(tmp_path), [_ORPHAN_PICKER_TEST_REL]) == []
     assert path.read_text(encoding="utf-8") == first
 
 
 def test_a_tree_without_the_orphan_test_is_left_alone(tmp_path):
-    assert _reconcile_orphan_picker_fake(str(tmp_path)) == []
+    assert _reconcile_orphan_picker_fake(str(tmp_path), []) == []
     assert list(tmp_path.iterdir()) == []
+
+
+def test_a_picker_file_preservation_did_not_carry_is_left_alone(tmp_path):
+    """Only ``preserve_fork_files`` puts this path in the tree, so that list is the scope.
+
+    Upstream deleted its copy, so a sync whose fork has since dropped the test too
+    must not stop on a ``OrphanPickerFakeError`` about a file nobody ships.
+    """
+    path = _orphan_picker_tree(tmp_path)
+    before = path.read_text(encoding="utf-8")
+
+    assert _reconcile_orphan_picker_fake(str(tmp_path), ["optional-skills/other.md"]) == []
+    assert path.read_text(encoding="utf-8") == before
 
 
 def test_a_fake_the_rule_does_not_recognise_stops_the_sync(tmp_path):
     _orphan_picker_tree(tmp_path, body="    def _fake(something_else):\n        return 1\n")
 
     with pytest.raises(OrphanPickerFakeError, match="keyword set moved again"):
-        _reconcile_orphan_picker_fake(str(tmp_path))
+        _reconcile_orphan_picker_fake(str(tmp_path), [_ORPHAN_PICKER_TEST_REL])
+
+
+def _names_called_inside(module, function_name: str) -> set:
+    """Every bare function call inside ``function_name``, closures included."""
+    tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            return {
+                child.func.id
+                for child in ast.walk(node)
+                if isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+            }
+    raise AssertionError(f"{function_name} is not in {module.__file__}")
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "_reconcile_orphan_picker_fake",
+        "_reconcile_fork_skill_catalogs",
+        "_reconcile_docs_posix_separators",
+        "_reconcile_fork_skill_sidebars",
+        "_reconcile_assets_worker_config",
+        "_reconcile_assets_worker_index",
+    ],
+)
+def test_a_rule_that_needs_a_fork_only_file_never_runs_before_preservation(rule):
+    """``reconcile_tree`` is the stage *before* ``preserve_fork_files``.
+
+    A fork-only path does not exist while it runs, so a rule that rewrites one from
+    inside ``reconcile_tree`` reads ``None``, returns ``[]`` and reports success.  That
+    is how #155 merged green -- its unit test created the file first -- while every
+    published candidate kept shipping the stale mirrored radiolist fake the rule
+    exists to repair, and the fork's CI stayed red for it.  Each of these rules is
+    therefore called from the preserve stage with the paths preservation carried in.
+    """
+    assert rule not in _names_called_inside(updates, "reconcile_tree")
+    assert rule in _names_called_inside(updates, "_preserve")
+
+
+def test_the_parity_rebuild_replays_the_preserved_picker_fix():
+    """Without the replay, ``verify_final_candidate`` expects the stale bytes and
+    reports the repaired candidate as a source-parity mismatch, so the fix cannot ship.
+    """
+    assert "_reconcile_orphan_picker_fake" in _names_called_inside(
+        conformance, "verify_final_candidate"
+    )

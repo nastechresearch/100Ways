@@ -1574,32 +1574,34 @@ class OrphanPickerFakeError(ValueError):
     """The orphan picker test carries neither the mirrored fake nor the bound one."""
 
 
-def _reconcile_orphan_picker_fake(dst: str) -> list[str]:
+def _reconcile_orphan_picker_fake(dst: str, preserved: list[str]) -> list[str]:
     """Bind the orphan picker test's fake to the live radiolist signature.
 
-    Upstream deleted its copy of this test, so the fork's is preserved verbatim by
-    ``preserve_fork_files`` -- including a fake that lists the widget's keywords.  The
-    moment upstream widens ``curses_radiolist`` the mirror raises ``TypeError`` in CI
-    while the picker it guards is fine, so the fork's copy is rewritten once to bind
-    the live signature.  Returns the relative path when it changed; a second pass is a
-    no-op, and a file carrying neither shape stops the sync instead of shipping a test
+    Upstream deleted its copy of this test, so the fork's arrives only with
+    ``preserve_fork_files`` -- which is also why this rule runs after that stage and
+    scopes itself to ``preserved``.  Called any earlier it reads a path that is not
+    in the tree yet, returns ``[]``, and the candidate ships the fake it was written
+    to repair: the mirrored keyword list raises ``TypeError`` in the fork's CI the
+    moment upstream widens ``curses_radiolist``, while the picker it guards is fine.
+    Returns the relative path when it changed; a second pass is a no-op, and a
+    preserved file carrying neither shape stops the sync instead of shipping a test
     nobody can trust.
     """
-    text = _reconcile_budget_read(dst, _ORPHAN_PICKER_TEST_REL)
+    rel = _ORPHAN_PICKER_TEST_REL
+    if rel not in (preserved or []):
+        return []
+    text = _reconcile_budget_read(dst, rel)
     if text is None or _ORPHAN_PICKER_TEST_BOUND in text:
         return []
     if _ORPHAN_PICKER_TEST_MIRRORED not in text:
         raise OrphanPickerFakeError(
-            f"{_ORPHAN_PICKER_TEST_REL} carries neither the mirrored radiolist fake nor the "
+            f"{rel} carries neither the mirrored radiolist fake nor the "
             "signature-bound one, so the widget's keyword set moved again. Replace "
             "_ORPHAN_PICKER_TEST_MIRRORED with the fake upstream's test now carries."
         )
-    _reconcile_budget_write(
-        dst,
-        _ORPHAN_PICKER_TEST_REL,
-        text.replace(_ORPHAN_PICKER_TEST_MIRRORED, _ORPHAN_PICKER_TEST_BINDING, 1),
-    )
-    return [_ORPHAN_PICKER_TEST_REL]
+    _reconcile_budget_write(dst, rel, text.replace(_ORPHAN_PICKER_TEST_MIRRORED,
+                                                  _ORPHAN_PICKER_TEST_BINDING, 1))
+    return [rel]
 
 
 def _reconcile_prompt_surface_snapshot(dst: str) -> list[str]:
@@ -6392,12 +6394,8 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     for rel in _reconcile_set_theme_catalog_line(dst):
         result.total += 1
         result.fixed.append(rel)
-    # The picker test upstream deleted is preserved from the fork, fake and all; binding
-    # its fake to the live widget signature keeps it from going red on the next upstream
-    # keyword without touching the code it guards.
-    for rel in _reconcile_orphan_picker_fake(dst):
-        result.total += 1
-        result.fixed.append(rel)
+    # The picker test upstream deleted is preserved from the fork, fake and all, so its
+    # rewrite runs with the other preserved-file rules -- see ``_preserve`` below.
     # Prompt-surface LAST: it counts characters in the rendered prompts, and
     # _reconcile_domains above rewrites the domain hosts inside those prompt
     # files.  Computing it any earlier leaves surfaces.json describing the
@@ -6966,6 +6964,17 @@ class UpdateManager:
                 owned_paths=set(self.owned.mapping) if self.owned else set(),
                 allow_unclassified_fork_files=bool(baseline_sha),
             )
+            # The picker test exists only in the fork, so this is the first moment its
+            # text is in the tree; binding its fake to the live widget signature keeps
+            # the next upstream keyword from turning it red in CI (see the rule).
+            for rel in _reconcile_orphan_picker_fake(dest, preserved):
+                rel_path = os.path.join(dest, rel)
+                if os.path.isfile(rel_path):
+                    try:
+                        with open(rel_path, "rb") as fh:
+                            reconciled_map[rel] = fh.read()
+                    except OSError:
+                        pass
             # Fork-preserved skills are invisible to the upstream-derived skill
             # catalogs; re-sync the catalogs so the docs-contract tests pass,
             # and register the changed files with the parity gates so they are
@@ -8640,6 +8649,28 @@ _RELEASE_ENTRYPOINT_TESTS_EDITS = (
 )
 
 
+_STABLE_RELEASE_GRAPH_TESTS = "tests/ci/test_stable_release_graph.py"
+_STABLE_RELEASE_GRAPH_TESTS_MARK = '["with"]["skip-signed"] == "true", name'
+_STABLE_RELEASE_GRAPH_TESTS_EDITS = (
+    (
+        r'''    store_off = "${{ !fromJSON(needs.admit.outputs.lanes)['windows-store'] }}"
+    for name in ("candidates-win32-arm64", "candidates-win32-x64", "candidates-win32-bundle"):
+        assert jobs[name]["with"]["skip-signed"] == "${{ !fromJSON(needs.admit.outputs.lanes).windows }}", name
+        assert jobs[name]["with"]["skip-store"] == store_off, name
+''',
+        r'''    store_off = "${{ !fromJSON(needs.admit.outputs.lanes)['windows-store'] }}"
+    # NasTech ships every desktop package unsigned, so no candidate leg asks the shared
+    # builder to sign one: the input is the literal ``true``.  A fork that has signing
+    # credentials puts the lane-gated expression back on its own legs.
+    for name in ("candidates-darwin-arm64", "candidates-darwin-x64", "candidates-win32-arm64",
+                 "candidates-win32-x64", "candidates-win32-bundle"):
+        assert jobs[name]["with"]["skip-signed"] == "true", name
+    for name in ("candidates-win32-arm64", "candidates-win32-x64", "candidates-win32-bundle"):
+        assert jobs[name]["with"]["skip-store"] == store_off, name
+''',
+    ),
+)
+
 _RELEASE_ENTRYPOINT = "scripts/releases/entrypoint.py"
 _RELEASE_ENTRYPOINT_MARK = "# The note warns about a partial DESKTOP release:"
 _RELEASE_LANES_TESTS = "tests/scripts/test_release_lanes.py"
@@ -8657,6 +8688,8 @@ _FORK_LANE_RELEASE = (
     (_STABLE_RELEASE_TESTS, _STABLE_RELEASE_TESTS_MARK, _STABLE_RELEASE_TESTS_EDITS),
     (_RELEASE_ENTRYPOINT_TESTS, _RELEASE_ENTRYPOINT_TESTS_MARK,
      _RELEASE_ENTRYPOINT_TESTS_EDITS),
+    (_STABLE_RELEASE_GRAPH_TESTS, _STABLE_RELEASE_GRAPH_TESTS_MARK,
+     _STABLE_RELEASE_GRAPH_TESTS_EDITS),
 )
 
 

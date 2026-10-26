@@ -28,6 +28,7 @@ from .updates import (
     _reconcile_docs_posix_separators,
     _reconcile_fork_skill_catalogs,
     _reconcile_fork_skill_sidebars,
+    _reconcile_orphan_picker_fake,
     _reconcile_skill_docs_order,
     apply_owned_assets,
     brand_tree,
@@ -190,6 +191,10 @@ def verify_final_candidate(
             )
         reconciled_bytes: dict[str, bytes] = {}
         for relative in reconciled.fixed:
+            expected_path = expected / relative
+            if expected_path.is_file():
+                reconciled_bytes[relative] = expected_path.read_bytes()
+        for relative in _reconcile_orphan_picker_fake(str(expected), preserved):
             expected_path = expected / relative
             if expected_path.is_file():
                 reconciled_bytes[relative] = expected_path.read_bytes()
