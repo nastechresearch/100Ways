@@ -26,6 +26,7 @@ from hundredways.updates import (
     BrowseBudgetDdlError,
     BrowseBudgetFlockTestError,
     ChannelReaderUserAgentError,
+    DocsSearchHydrationGateError,
     ForkLaneReleaseEditError,
     FreeRunnerParallelismError,
     GatewayAllowlistReloadError,
@@ -90,6 +91,7 @@ from hundredways.updates import (
     _reconcile_windows_boot_lifecycle_race,
     _reconcile_windows_real_git_locate,
     _reconcile_docs_posix_separators,
+    _reconcile_docs_search_hydration_gate,
     _reconcile_drop_vercel_deploy_job,
     _reconcile_fork_skill_catalogs,
     _reconcile_fork_skill_sidebars,
@@ -2149,6 +2151,239 @@ def test_reconcile_docusaurus_site_config_subpath_url_collapses(tmp_path):
 
     # Idempotent once the config carries the project-pages contract.
     assert _reconcile_docusaurus_site_config(str(root)) == 0
+
+
+# The Docs Search Monitor's live probe, as the branded tree carries it today.
+# The fixture is byte-identical to the fork's website/scripts/
+# check-live-search.mjs (its lines 145-172 are byte-identical to upstream), so
+# the anchors pinned below are the ones the reconcile reads on a real sync.
+_DOCS_SEARCH_FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "docs_search")
+_DOCS_SEARCH_REL = "website/scripts/check-live-search.mjs"
+_DOCS_SEARCH_URL = "https://nastechresearch.github.io/nastech-agent/docs"
+
+# Pre-image: the probe clicks the server-rendered button the moment
+# ``domcontentloaded`` fired, with no mount gate between the two lines.
+_DOCS_SEARCH_PRE_ANCHOR = (
+    "    await page.goto(`${DOCS_URL}/`, "
+    "{ waitUntil: 'domcontentloaded', timeout: 30_000 });\n"
+    "    await page.locator('.DocSearch-Button').first()"
+    ".click({ timeout: 20_000 });\n"
+)
+
+# Post-image: the same click, now behind a wait for the mounted render's
+# ``<kbd>`` hint, bounded by the file's own REQUEST_TIMEOUT_MS.  Every timeout
+# in it is the one upstream wrote -- the gate only adds a line.
+_DOCS_SEARCH_POST_ANCHOR = (
+    "    await page.goto(`${DOCS_URL}/`, "
+    "{ waitUntil: 'domcontentloaded', timeout: 30_000 });\n"
+    "    // The server render carries this button, but on a cold Pages CDN\n"
+    "    // DocSearch mounts its handler seconds later, and a click before\n"
+    "    // that is dropped: .DocSearch-Input is then never created and the\n"
+    "    // fill below times out.  The <kbd> hints inside\n"
+    "    // .DocSearch-Button-Keys exist only in the mounted render, so\n"
+    "    // waiting for one is the readiness a visitor already has.  A site\n"
+    "    // that never hydrates still fails here, red.\n"
+    "    await page.locator('.DocSearch-Button-Keys kbd').first()"
+    ".waitFor({ timeout: REQUEST_TIMEOUT_MS });\n"
+    "    await page.locator('.DocSearch-Button').first()"
+    ".click({ timeout: 20_000 });\n"
+)
+
+
+def _live_search_probe_source():
+    with open(
+        os.path.join(_DOCS_SEARCH_FIXTURE, "check-live-search.pre.mjs"), encoding="utf-8"
+    ) as fh:
+        return fh.read()
+
+
+def _write_live_search_probe(root, text):
+    scripts = root / "website" / "scripts"
+    scripts.mkdir(parents=True)
+    probe = scripts / "check-live-search.mjs"
+    probe.write_text(text, encoding="utf-8")
+    return probe
+
+
+def test_reconcile_docs_search_hydration_gate(tmp_path):
+    """The probe must not click the docs search button before it is mounted."""
+    pre = _live_search_probe_source()
+    assert pre.count(_DOCS_SEARCH_PRE_ANCHOR) == 1, "the anchor is one exact place"
+
+    root = tmp_path / "branded"
+    probe = _write_live_search_probe(root, pre)
+    assert _reconcile_docs_search_hydration_gate(str(root)) is True
+
+    text = probe.read_text(encoding="utf-8")
+    expected = pre.replace(_DOCS_SEARCH_PRE_ANCHOR, _DOCS_SEARCH_POST_ANCHOR, 1)
+    # Byte-for-byte: the gate is the only change the rule makes to the probe.
+    assert text == expected
+    assert text.count(_DOCS_SEARCH_POST_ANCHOR) == 1, "the replacement is one place"
+    assert _DOCS_SEARCH_PRE_ANCHOR not in text
+    # No guard moved: the click, the fill, the hit wait and the goto budgets.
+    assert ".click({ timeout: 20_000 });" in text
+    assert ".fill(QUERIES[0], { timeout: 10_000 });" in text
+    assert ".waitFor({ timeout: 15_000 });" in text
+    assert "timeout: 30_000 });" in text
+    assert "PROBE_DEADLINE_MS = 240_000;" in text
+
+    # Fixed point: the gate line marks the patched file, so a second pass is a
+    # no-op rather than a second wait.
+    assert _reconcile_docs_search_hydration_gate(str(root)) is False
+    assert probe.read_text(encoding="utf-8") == text
+
+
+def test_reconcile_docs_search_hydration_gate_skips_missing_file(tmp_path):
+    assert _reconcile_docs_search_hydration_gate(str(tmp_path)) is False
+
+
+def test_reconcile_docs_search_hydration_gate_flags_a_moved_anchor(tmp_path):
+    """A probe that no longer clicks straight after the goto must stop the sync.
+
+    Returning ``False`` here would be the same return as "already gated", so the
+    fork would ship an ungated monitor and the only sign would be the next red
+    Docs Search run -- the failure mode this rule exists to prevent.
+    """
+    pre = _live_search_probe_source()
+    mutated = pre.replace(
+        "{ waitUntil: 'domcontentloaded', timeout: 30_000 }",
+        "{ waitUntil: 'networkidle', timeout: 60_000 }",
+    )
+    root = tmp_path / "branded"
+    probe = _write_live_search_probe(root, mutated)
+
+    with pytest.raises(DocsSearchHydrationGateError) as excinfo:
+        _reconcile_docs_search_hydration_gate(str(root))
+    # The raise carries the evidence, so the stop is arguable at sync time.
+    assert "run 40211574851" in str(excinfo.value)
+    assert "locator.fill: Timeout 10000ms exceeded" in str(excinfo.value)
+    assert probe.read_text(encoding="utf-8") == mutated
+
+    with pytest.raises(DocsSearchHydrationGateError):
+        reconcile_tree(str(root))
+
+
+def test_reconcile_tree_gates_the_probe_after_the_domain_rewrite(tmp_path):
+    """The gate runs after branding, and is recorded as a reconciled path."""
+    root = tmp_path / "branded"
+    probe = _write_live_search_probe(root, _live_search_probe_source())
+
+    result = reconcile_tree(str(root))
+    assert _DOCS_SEARCH_REL in result.fixed
+    text = probe.read_text(encoding="utf-8")
+    assert _DOCS_SEARCH_POST_ANCHOR in text
+
+    source = open(
+        sys.modules[_reconcile_docs_search_hydration_gate.__module__].__file__,
+        encoding="utf-8",
+    ).read()
+    dispatch = source.split("def reconcile_tree", 1)[1].split("\ndef ", 1)[0]
+    # ``_reconcile_domains`` is what gives this file its Pages ``DOCS_URL``; the
+    # gate is a site-specific reference a global brand rule cannot decide, so it
+    # has to be derived from the text that rewrite produced.
+    assert dispatch.index("_reconcile_domains(") < dispatch.index(
+        "_reconcile_docs_search_hydration_gate("
+    )
+
+
+def _run_live_search_probe(tmp_path, *, gated, hydrated):
+    """Run the generated probe under node, with the world modelled outside it.
+
+    Only two things are stubbed, both outside the script: ``fetch`` (preloaded
+    with ``node --require``, so nothing reaches GitHub Pages or Algolia) and the
+    browser driver (resolved through the probe's own
+    ``createRequire(PLAYWRIGHT_DIR)`` seam, and switched between the measured
+    mounted render and the measured server render).  The script itself is the
+    engine's output, byte for byte, and its exit code, its failure reason and
+    the timeouts it passes to every locator are what these tests read.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not available")
+
+    root = tmp_path / "branded"
+    probe = _write_live_search_probe(root, _live_search_probe_source())
+    if gated:
+        assert _reconcile_docs_search_hydration_gate(str(root)) is True
+
+    calls = tmp_path / "calls.jsonl"
+    calls.write_text("", encoding="utf-8")
+    env = {
+        **os.environ,
+        "DOCS_URL": _DOCS_SEARCH_URL,
+        "PLAYWRIGHT_DIR": os.path.join(_DOCS_SEARCH_FIXTURE, "pw"),
+        "STUB_HYDRATED": "1" if hydrated else "0",
+        "STUB_CALL_LOG": str(calls),
+    }
+    env.pop("GITHUB_ACTIONS", None)
+    env.pop("GITHUB_STEP_SUMMARY", None)
+    proc = subprocess.run(
+        [
+            node,
+            "--require",
+            os.path.join(_DOCS_SEARCH_FIXTURE, "net-stub.cjs"),
+            str(probe),
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return {
+        "code": proc.returncode,
+        "out": proc.stdout,
+        "err": proc.stderr,
+        "calls": [json.loads(line) for line in calls.read_text(encoding="utf-8").splitlines()],
+    }
+
+
+def test_ungated_probe_crashes_on_the_never_hydrating_site(tmp_path):
+    """The harness reproduces run 40211574851 before it proves the fix.
+
+    The click resolves, the fill dies, and the last step of the monitor is red:
+    that is the measured failing state, so a green result on the gated probe
+    below cannot be an artefact of the double.
+    """
+    result = _run_live_search_probe(tmp_path, gated=False, hydrated=False)
+
+    assert result["code"] == 1
+    assert "browser check crashed: locator.fill: Timeout 10000ms exceeded." in result["err"]
+    assert [c["op"] for c in result["calls"]] == ["goto", "click", "fill", "close"]
+
+
+def test_never_hydrating_site_still_crashes_the_probe_red(tmp_path):
+    """The gate is a hard await: a site that never mounts DocSearch still fails.
+
+    Nothing was weakened to make the fork green -- the wait is a plain ``await``
+    inside ``checkBrowser``, so its rejection escapes exactly as the fill's did,
+    the browser is still closed in the ``finally``, and the probe still exits 1
+    with a reason naming the real cause and its own budget.
+    """
+    result = _run_live_search_probe(tmp_path, gated=True, hydrated=False)
+
+    assert result["code"] == 1
+    assert "browser check crashed: locator.waitFor: Timeout 20000ms exceeded." in result["err"]
+    # The gate fires before the click, so the dropped click never happens.
+    assert [c.get("timeout") for c in result["calls"]] == [30_000, 20_000, None]
+    assert [c["op"] for c in result["calls"]] == ["goto", "waitFor", "close"]
+    assert not any(c["sel"] == ".DocSearch-Button" for c in result["calls"])
+
+
+def test_hydrating_site_passes_with_every_budget_untouched(tmp_path):
+    """The mounted render goes green, and each step keeps upstream's timeout."""
+    result = _run_live_search_probe(tmp_path, gated=True, hydrated=True)
+
+    assert result["code"] == 0, result["err"]
+    assert 'ok   browser: search modal lists 5 results for "telegram"' in result["out"]
+    assert [(c["sel"], c["op"], c.get("timeout")) for c in result["calls"]] == [
+        ("page", "goto", 30_000),
+        (".DocSearch-Button-Keys kbd", "waitFor", 20_000),
+        (".DocSearch-Button", "click", 20_000),
+        (".DocSearch-Input", "fill", 10_000),
+        (".DocSearch-Hit", "waitFor", 15_000),
+        ("browser", "close", None),
+    ]
 
 
 def test_reconcile_prompt_surface_snapshot(tmp_path):
