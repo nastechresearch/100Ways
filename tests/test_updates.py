@@ -595,6 +595,114 @@ def _browse_budget_tree(tmp_path, text):
     return candidate, path
 
 
+#: Upstream's own pin of the browse budget, which no rewrite pair touches.  It rides along in the
+#: fixture so a test can prove the rule leaves the budget value alone instead of trusting that it
+#: did: ``3.0`` is the number the red lane was measured against.
+_BROWSE_BUDGET_PIN = (
+    "    assert reconcile.BROWSE_INTEGRITY_BUDGET_S == reconcile.BROWSE_RECONCILE_BUDGET_S == 3.0\n"
+)
+
+
+def _browse_budget_pre():
+    """The pre-rewrite file: every pair's pre-image, in order, plus the untouched budget pin."""
+    return "".join(before for before, _ in _BROWSE_BUDGET_EDITS) + _BROWSE_BUDGET_PIN
+
+
+def _browse_budget_rewritten(tmp_path):
+    """Run the rule on the real pre-image and hand back the produced file text."""
+    candidate, path = _browse_budget_tree(tmp_path, _browse_budget_pre())
+    assert _reconcile_browse_budget_flock_tests(str(candidate)) is True
+    return path.read_text(encoding="utf-8")
+
+
+class _BudgetSkip(Exception):
+    """Raised by the stubbed ``pytest.skip`` so the executed block can report a skip."""
+
+
+def _budget_block(text):
+    """The produced file's parse-and-bound block, dedented, ready to exec.
+
+    The tests below execute the injected source against frames the child itself would print,
+    instead of restating its arithmetic here -- a re-implementation would pass when the rewrite
+    does not.
+    """
+    lines = text.splitlines()
+    start = next(i for i, line in enumerate(lines) if 'result.split(" ", 7)' in line)
+    end = next(i for i, line in enumerate(lines) if line == "    assert charge < budget_s + 2, out")
+    picked = [line[4:] if line.startswith("    ") else line for line in lines[start : end + 1]]
+    return "\n".join(picked)
+
+
+def _budget_child_report(text):
+    """The produced child's own frame-print, as source, from its end stamp onwards."""
+    lines = text.splitlines()
+    start = next(i for i, line in enumerate(lines) if line == "    ended = time.monotonic()")
+    tail = "exc.detail, flush=True)"
+    end = next(i for i, line in enumerate(lines[start:], start) if line.rstrip().endswith(tail))
+    picked = [line[4:] if line.startswith("    ") else line for line in lines[start : end + 1]]
+    return "\n".join(picked) + "\n"
+
+
+def _budget_child_slow(text):
+    """The produced child's ``slow()`` body, dedented to module level."""
+    lines = text.splitlines()
+    start = next(i for i, line in enumerate(lines) if line == "        def slow():")
+    body = []
+    for line in lines[start + 1 :]:
+        if not line.startswith("            "):
+            break
+        body.append(line[8:])
+    return "def slow():\n" + "\n".join(body) + "\n"
+
+
+def _budget_child_stamp(text):
+    """The produced child's stamp block, dedented: where the window begins and late is snapshot."""
+    lines = text.splitlines()
+    start = next(
+        i
+        for i, line in enumerate(lines)
+        if line == '    if holding_lock() and (phase == "integrity") == read_only:'
+    )
+    end = next(i for i, line in enumerate(lines[start:], start) if 'print("slowed"' in line)
+    picked = [line[4:] if line.startswith("    ") else line for line in lines[start : end + 1]]
+    return "\n".join(picked) + "\n"
+
+
+class _DrivenClock:
+    """A monotonic clock we advance ourselves: its ``sleep`` arrives ``late_by`` seconds late.
+
+    No real sleeping, and no literal delay added to the suite -- the host's lateness is the datum,
+    so the test supplies it directly.
+    """
+
+    def __init__(self, late_by=0.0):
+        self.now = 0.0
+        self.late_by = late_by
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds + self.late_by
+
+
+def _run_budget_block(text, frame, budget_s=3.0, wait_s=5.0):
+    """Exec the produced bound block against one child frame; returns its namespace or raises."""
+
+    def _skip(message):
+        raise _BudgetSkip(message)
+
+    namespace = {
+        "result": frame,
+        "out": frame,
+        "budget_s": budget_s,
+        "wait_s": wait_s,
+        "pytest": types.SimpleNamespace(skip=_skip),
+    }
+    exec(compile(_budget_block(text), "<budget bound>", "exec"), namespace)
+    return namespace
+
+
 def test_browse_budget_flock_tests_rebuild_the_host_aware_bounds(tmp_path):
     """Every rewrite pair applies, in order, and the result is a fixed point.
 
@@ -602,8 +710,8 @@ def test_browse_budget_flock_tests_rebuild_the_host_aware_bounds(tmp_path):
     upstream -- or one that overlaps its neighbour's context -- fails here instead of on the
     fork's macOS lane.
     """
-    pre = "".join(before for before, _ in _BROWSE_BUDGET_EDITS)
-    expected = "".join(after for _, after in _BROWSE_BUDGET_EDITS)
+    pre = _browse_budget_pre()
+    expected = "".join(after for _, after in _BROWSE_BUDGET_EDITS) + _BROWSE_BUDGET_PIN
     candidate, path = _browse_budget_tree(tmp_path, pre)
 
     assert _reconcile_browse_budget_flock_tests(str(candidate)) is True
@@ -612,12 +720,12 @@ def test_browse_budget_flock_tests_rebuild_the_host_aware_bounds(tmp_path):
     assert _reconcile_browse_budget_flock_tests(str(candidate)) is False
     assert path.read_text(encoding="utf-8") == expected
     # The rewritten file must charge the budgeted window, not the child's whole wall time.
-    assert "assert window < budget_s + 2, out" in text
-    assert 'result.split(" ", 4)' in text
+    assert "assert charge < budget_s + 2, out" in text
+    assert 'result.split(" ", 7)' in text
     assert "assert float(elapsed) < budget_s + 2" not in text
 
 
-@pytest.mark.parametrize("drop", [0, 3, 7, 11])
+@pytest.mark.parametrize("drop", [0, 3, 4, 5, 7, 11, 13])
 def test_browse_budget_flock_tests_fail_loudly_when_upstream_moved(tmp_path, drop):
     """A rewrite that stopped matching raises; it never no-ops into a silent red lane."""
     pairs = list(_BROWSE_BUDGET_EDITS)
@@ -632,6 +740,253 @@ def test_browse_budget_flock_tests_fail_loudly_when_upstream_moved(tmp_path, dro
     assert f"rewrite #{drop + 1}" in message
     assert "_reconcile_browse_budget_flock_tests" in message
     assert "macOS" in message
+    # The raise carries the red it is guarding, measured on the lane, so the sync failure is
+    # self-explaining: the assertion that crossed and the budget it crossed.
+    assert "assert 5.773591583999973 < (3.0 + 2)" in message
+
+
+def test_browse_budget_child_and_parent_share_one_report(tmp_path):
+    """The bound is fed by the child's own account: exec the child's print, exec the parent's read.
+
+    Nothing here restates the arithmetic -- the two snippets come out of the rewritten file and run
+    against a clock the test drives, so the frame the child writes is literally the frame the parent
+    parses.
+    """
+    text = _browse_budget_rewritten(tmp_path)
+    clock = _DrivenClock()
+    clock.now = 6.77  # the instant the child's budgeted phase ends, on the host's own clock
+    written = []
+    namespace = {
+        "time": clock,
+        "started": 0.4,
+        "slowed_at": 1.0,
+        "late_at": 1.2,  # the lateness already accrued when this window was stamped
+        "callbacks": 302,
+        "late": 2.9,
+        "exc": types.SimpleNamespace(status_code=503, detail="nothing was changed here"),
+        "print": lambda *a, **kw: written.append(" ".join(str(part) for part in a)),
+    }
+    exec(compile(_budget_child_report(text), "<child frame>", "exec"), namespace)
+    frame = written[0]
+
+    # The same frame, read back by the parent block the rule produced: the window the child stamped,
+    # the lateness it counted and the snapshot taken at the stamp are what the bound is compared to.
+    env = _run_budget_block(text, frame)
+    assert env["window"] == pytest.approx(5.77)
+    assert env["callbacks"] == 302 and env["late"] == pytest.approx(2.9)
+    assert env["late_at"] == pytest.approx(1.2)
+    assert env["status"] == "503"
+    assert env["charge"] == pytest.approx(5.77 - (2.9 - 1.2))
+
+
+def test_browse_budget_bound_charges_the_reported_evidence(tmp_path):
+    """A phase that ran its callbacks and arrived late inside its own window passes on that proof.
+
+    These are job 120651211235's numbers: ``window`` 5.77 s against ``3.0 + 2``, with
+    ``assert status == "503"`` already passed in front of it. The ``late_at`` field says almost
+    all of that lateness accrued after the window's stamp, so the credit is real.
+    """
+    text = _browse_budget_rewritten(tmp_path)
+    frame = "RESULT 503 6.121000250000009 5.773591584 302 2.91 0.01 nothing was changed"
+
+    env = _run_budget_block(text, frame)
+    assert env["charge"] == pytest.approx(5.773591584 - (2.91 - 0.01))
+    assert env["charge"] < 3.0 + 2  # the untouched bound, fed by the child's own account
+    # The raw window on its own was over the bound -- that is the red this closes.
+    assert env["window"] > 3.0 + 2
+
+
+def test_browse_budget_bound_still_fails_a_real_overshoot(tmp_path):
+    """A browse that genuinely runs past its budget is still red, lateness or no lateness.
+
+    Measured on a doctored product that ignores its own abort until 8 s: ``window`` 8.14 s, 796
+    callbacks, within-window lateness only 0.14 s -- the injected disk time it accrued stays
+    charged.
+    """
+    text = _browse_budget_rewritten(tmp_path)
+    frame = "RESULT 503 9.001 8.142554323 796 0.139849165 0.0 nothing was changed"
+
+    with pytest.raises(AssertionError):
+        _run_budget_block(text, frame)
+
+
+@pytest.mark.parametrize(
+    ("window", "callbacks", "late", "late_at"),
+    [
+        # No callback ran, so there is no account to credit: charge the whole wall time.
+        (5.77, 0, 2.9, 0.0),
+        # The within-window excess cannot exceed the window it lives in: an incoherent report
+        # earns nothing.
+        (5.77, 302, 9.9, 0.0),
+        # A negative lateness is not a subtraction the bound may make.
+        (5.77, 302, -1.0, 0.0),
+        # The hole this closes: late == the whole window, but ALL of it accrued before this
+        # window's stamp (late_at == late), so the credit is zero and the raw window is charged.
+        # The branch as pushed credited 5.77 - 5.77 = 0 here and passed a phase that overslept.
+        (5.77, 302, 5.77, 5.77),
+        # A snapshot ahead of the counter it snapshots is not an account: charge the whole wall
+        # time.
+        (5.77, 302, 2.9, 9.9),
+        # The child stamped no phase at all, so its window is the -1.0 sentinel: an unmeasured
+        # window must read as "unproven", never as "cost nothing". The real child cannot reach
+        # the bound like this (it asserts the "slowed" line first), but the bound may not depend
+        # on that -- this is the frame that would have gone green on -1.0 < 5.
+        (-1.0, 0, 0.0, -1.0),
+    ],
+)
+def test_browse_budget_bound_only_credit_a_coherent_account(
+    tmp_path, window, callbacks, late, late_at
+):
+    """The credit is withheld unless the report proves the lateness is inside the window charged.
+
+    A window the child never stamped is the same class of unproven claim, so the fallback charges
+    the whole wall time rather than the sentinel.
+    """
+    text = _browse_budget_rewritten(tmp_path)
+    frame = f"RESULT 503 6.121 {window} {callbacks} {late} {late_at} nothing was changed"
+
+    with pytest.raises(AssertionError):
+        _run_budget_block(text, frame)
+
+
+def test_browse_budget_child_counts_lateness_not_its_own_injected_delay(tmp_path):
+    """The child's counter charges the simulated disk fully and credits only the scheduler.
+
+    ``late_by=0`` is a host that wakes exactly when told: the delay it slept is the fixture's work,
+    so nothing is credited. ``late_by=0.05`` is a host that oversleeps: that, and only that, is.
+    """
+    text = _browse_budget_rewritten(tmp_path)
+    source = compile(_budget_child_slow(text), "<child slow>", "exec")
+
+    def run(late_by, times):
+        clock = _DrivenClock(late_by=late_by)
+        namespace = {
+            "time": clock,
+            "handler": lambda: 0,
+            "_STEP_S": 0.01,
+            "callbacks": 0,
+            "late": 0.0,
+        }
+        exec(source, namespace)
+        for _ in range(times):
+            namespace["slow"]()
+        return namespace
+
+    on_time = run(0.0, 4)
+    assert on_time["callbacks"] == 4
+    assert on_time["late"] == pytest.approx(0.0)
+
+    oversleeping = run(0.05, 4)
+    assert oversleeping["callbacks"] == 4
+    assert oversleeping["late"] == pytest.approx(0.2)
+
+
+def test_browse_budget_second_stamp_credits_only_its_own_window(tmp_path):
+    """A re-stamped window cannot be excused by lateness an earlier phase accrued.
+
+    This drives the produced child itself -- its stamp block, its ``slow()`` and its frame print,
+    all extracted from the rewritten file and exec'd against a driven clock -- across TWO slowed
+    phases: the first oversleeps its injected delay by 2.0 s in total, the second does the
+    budgeted phase's own work slowly but sleeps exactly when told. The child's own print therefore
+    reports ``late == late_at == 2.0`` with ``window == 6.0``, and the parent bound, exec'd on
+    those bytes, must charge the full 6.0 s and go red. The branch as pushed credited the whole
+    2.0 s (``0.0 <= late <= window``), charged 4.0 s against ``3.0 + 2`` and passed -- the green
+    test that asserted nothing this closes.
+    """
+    text = _browse_budget_rewritten(tmp_path)
+    slow_src = compile(_budget_child_slow(text), "<child slow>", "exec")
+    stamp_src = compile(_budget_child_stamp(text), "<child stamp>", "exec")
+    report_src = compile(_budget_child_report(text), "<child frame>", "exec")
+    clock = _DrivenClock(late_by=0.0)
+    written = []
+    namespace = {
+        "time": clock,
+        "handler": lambda: 0,
+        "_STEP_S": 0.01,
+        "callbacks": 0,
+        "late": 0.0,
+        "holding_lock": lambda: True,
+        "phase": "browse",
+        "read_only": False,
+        "slowed_at": None,
+        "late_at": None,
+        "started": 1.0,
+        "exc": types.SimpleNamespace(status_code=503, detail="nothing was changed here"),
+        "print": lambda *a, **kw: written.append(" ".join(str(part) for part in a)),
+    }
+    exec(slow_src, namespace)
+
+    # Phase one: the lock is ours, the window is stamped, and the host oversleeps every injected
+    # delay by half a second.
+    clock.now = 1.0
+    exec(stamp_src, namespace)
+    clock.late_by = 0.5
+    for _ in range(4):
+        namespace["slow"]()
+    assert namespace["late"] == pytest.approx(2.0)
+    assert written[0] == "slowed"
+
+    # The child re-stamps: a second budgeted connect qualifies, so `window` will now measure only
+    # what follows this stamp -- and everything the first phase overslept is outside it.
+    clock.late_by = 0.0
+    exec(stamp_src, namespace)
+    assert namespace["late_at"] == pytest.approx(2.0)
+
+    # Phase two: six seconds of budgeted work, run on time (the advance beyond the four callbacks
+    # stands for the slow product, not a slow scheduler).
+    stamp_now = clock.now
+    clock.now += 6.0 - 4 * 0.01
+    for _ in range(4):
+        namespace["slow"]()
+    exec(report_src, namespace)
+    frame = written[-1]
+
+    # The bytes are the child's own proof: window six, lateness two, snapshot two -- all of the
+    # credited quantity accrued before the window being charged.
+    parts = frame.split(" ")
+    assert parts[0] == "RESULT" and parts[1] == "503"
+    assert float(parts[3]) == pytest.approx(6.0)  # window
+    assert float(parts[5]) == pytest.approx(2.0)  # late (process-wide)
+    assert float(parts[6]) == pytest.approx(2.0)  # late_at (snapshot at the stamp)
+    assert " ".join(parts[7:]) == "nothing was changed here"
+    assert namespace["slowed_at"] == pytest.approx(stamp_now)
+
+    # wait_s 6.0 keeps the startup skip's margin (3.0 s) wider than the 2.0 s the first phase
+    # spent before the final stamp, so the skip predicate -- which this bound must not borrow --
+    # stays silent and the full window reaches the assertion.
+    with pytest.raises(AssertionError):
+        _run_budget_block(text, frame, wait_s=6.0)
+
+
+def test_browse_budget_bound_and_constants_survive_the_rewrite(tmp_path):
+    """Neither the margin nor the budget is edited: the produced file still says what upstream did.
+
+    The pin upstream writes for the budget value itself rides through the fixture untouched, so a
+    rule that quietly moved ``3.0`` or padded ``+ 2`` would fail here rather than in the lane.
+    """
+    text = _browse_budget_rewritten(tmp_path)
+    assert text.count("budget_s + 2") == 1
+    assert "assert charge < budget_s + 2, out" in text
+    assert 'getattr(reconcile, "BROWSE_RECONCILE_BUDGET_S", 2.0)' in text
+    assert _BROWSE_BUDGET_PIN in text  # the == 3.0 pin, verbatim
+    for widened in ("budget_s + 3", "budget_s + 2.5", "budget_s * 2", "BUDGET_S = 4"):
+        assert widened not in text
+
+
+def test_browse_budget_host_skip_did_not_get_broader(tmp_path):
+    """The only skip paths are the two the rule shipped with, on the predicates it shipped with.
+
+    A lane that skips by asserting nothing is worse than a red one, so this pins the skip count and
+    the predicate: the host escape is still keyed on measured process hand-off and startup, never
+    on the lateness the child is allowed to report.
+    """
+    text = _browse_budget_rewritten(tmp_path)
+    assert text.count("pytest.skip(") == 2
+    assert "pytest.skip_if" not in text and "skipif" not in text and "xfail" not in text
+    guard = next(line for line in text.splitlines() if "startup > margin" in line)
+    assert guard == "    if window >= 0 and startup > margin:"
+    assert "late" not in guard and "callbacks" not in guard
+    assert "    margin = wait_s - budget_s" in text
 
 
 def test_browse_budget_flock_reconcile_is_registered_in_reconcile_tree(tmp_path):
@@ -639,11 +994,19 @@ def test_browse_budget_flock_reconcile_is_registered_in_reconcile_tree(tmp_path)
     root = tmp_path / "candidate"
     path = root / _BROWSE_BUDGET_TEST_REL
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("".join(before for before, _ in _BROWSE_BUDGET_EDITS), encoding="utf-8")
+    path.write_text(_browse_budget_pre(), encoding="utf-8")
 
     result = reconcile_tree(str(root))
     assert _BROWSE_BUDGET_TEST_REL in result.fixed
     assert "def _hold_release_latency(" in path.read_text(encoding="utf-8")
+    # What the pipeline delivers is byte-for-byte what the rule alone produces -- and the two
+    # blocks it injected compile as real source (the stitched fixture is fragments, so the whole
+    # file is compiled on the branded tree instead, where it is one).
+    delivered = path.read_text(encoding="utf-8")
+    assert delivered == _browse_budget_rewritten(tmp_path / "direct")
+    compile(_budget_child_report(delivered), "<child frame>", "exec")
+    compile(_budget_block(delivered), "<budget bound>", "exec")
+    compile(_budget_child_slow(delivered), "<child slow>", "exec")
 
 
 def test_new_timeout_reconciles_are_registered_in_reconcile_tree(tmp_path):
