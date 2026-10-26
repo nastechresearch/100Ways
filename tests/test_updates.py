@@ -135,6 +135,10 @@ from hundredways.updates import (
     _reconcile_vercel_prepare,
     _reconcile_windows_boot_lifecycle_race,
     _reconcile_windows_suspend_observation,
+    _reconcile_fifo_compaction_trigger_margin,
+    _FIFO_COMPACTION_EDITS,
+    _FIFO_COMPACTION_TEST_REL,
+    FifoCompactionTriggerMarginError,
     _WINDOWS_SUSPEND_BUDGET_S,
     _WINDOWS_SUSPEND_ONE_SHOT,
     _WINDOWS_SUSPEND_TEST_REL,
@@ -1398,6 +1402,141 @@ def test_windows_suspend_observation_registered_in_reconcile_tree(tmp_path):
     result = reconcile_tree(str(candidate))
     assert _WINDOWS_SUSPEND_TEST_REL in result.fixed
     assert "child never observed suspended" in path.read_text(encoding="utf-8")
+
+
+_FIFO_COMPACTION_TEST_TEXT = (
+    "import json\n"
+    "\n"
+    "\n"
+    "class CompactingModel:\n"
+    "\n"
+    "    def do_POST(self):\n"
+    "        body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))\n"
+    "        messages = body.get('messages', [])\n"
+    "        wire = json.dumps(messages)\n"
+    "        if body.get('model') == 'original' and len(wire) > 50000:\n"
+    "            return self._send(400, b'', 'application/json')\n"
+    "\n"
+    "\n"
+    "def test_followers_survive_compression(tmp_path):\n"
+    "    assert FOLLOWERS == ('FOLLOWER_1',)\n"
+    "    (home / 'config.yaml').write_text(json.dumps({\n"
+    "        'compression': {'protect_first_n': 1, 'protect_last_n': 2, "
+    "'threshold_tokens': 12000,\n"
+    "                        'threshold': 0.5, 'in_place': False},\n"
+    "    }))\n"
+)
+
+
+def _fifo_compaction_candidate(tmp_path, *, text=None):
+    """A candidate carrying the upstream-owned compression journey test."""
+    candidate = tmp_path / "candidate"
+    path = candidate / _FIFO_COMPACTION_TEST_REL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_FIFO_COMPACTION_TEST_TEXT if text is None else text, encoding="utf-8")
+    return candidate, path
+
+
+def test_fifo_compaction_margin_moves_both_triggers_together(tmp_path):
+    """The overflow cliff and the product threshold must leave the retained tail behind.
+
+    The test's fake model 400s an ``original`` request once the wire passes its cliff, and
+    the compaction that follows keeps the most recent turns verbatim.  The journey's last
+    assertion expects ``PRESSURE_1`` to exist only inside the summary, which is true only
+    while compaction fires late enough that the retained tail cannot reach back to it.
+    """
+    candidate, path = _fifo_compaction_candidate(tmp_path)
+
+    assert _reconcile_fifo_compaction_trigger_margin(str(candidate)) is True
+
+    text = path.read_text(encoding="utf-8")
+    assert "and len(wire) > 90000:" in text
+    assert "'threshold_tokens': 24000," in text
+    assert "and len(wire) > 50000:" not in text
+    assert "'threshold_tokens': 12000," not in text
+    compile(text, path.name, "exec")
+
+
+def test_fifo_compaction_margin_leaves_every_other_byte_alone(tmp_path):
+    candidate, path = _fifo_compaction_candidate(tmp_path)
+    assert _reconcile_fifo_compaction_trigger_margin(str(candidate)) is True
+
+    text = path.read_text(encoding="utf-8")
+    assert text != _FIFO_COMPACTION_TEST_TEXT
+    for before, after in _FIFO_COMPACTION_EDITS:
+        text = text.replace(after, before, 1)
+    assert text == _FIFO_COMPACTION_TEST_TEXT
+
+
+def test_fifo_compaction_margin_is_a_fixed_point(tmp_path):
+    candidate, path = _fifo_compaction_candidate(tmp_path)
+    assert _reconcile_fifo_compaction_trigger_margin(str(candidate)) is True
+    once = path.read_text(encoding="utf-8")
+    assert _reconcile_fifo_compaction_trigger_margin(str(candidate)) is False
+    assert path.read_text(encoding="utf-8") == once
+
+
+def test_fifo_compaction_margin_finishes_a_half_applied_rewrite(tmp_path):
+    """A tree that already carries one edit keeps it and receives the other."""
+    text = _FIFO_COMPACTION_TEST_TEXT.replace(
+        _FIFO_COMPACTION_EDITS[0][0], _FIFO_COMPACTION_EDITS[0][1], 1
+    )
+    candidate, path = _fifo_compaction_candidate(tmp_path, text=text)
+
+    assert _reconcile_fifo_compaction_trigger_margin(str(candidate)) is True
+
+    rewritten = path.read_text(encoding="utf-8")
+    assert "and len(wire) > 90000:" in rewritten
+    assert "'threshold_tokens': 24000," in rewritten
+    assert rewritten.count("> 90000") == 1
+
+
+def test_fifo_compaction_margin_raises_when_the_cliff_moves(tmp_path):
+    """A moved cliff stops the sync instead of shipping the 1.6 KB margin."""
+    text = _FIFO_COMPACTION_TEST_TEXT.replace("> 50000:", "> 50001:")
+    candidate, path = _fifo_compaction_candidate(tmp_path, text=text)
+
+    with pytest.raises(FifoCompactionTriggerMarginError) as excinfo:
+        _reconcile_fifo_compaction_trigger_margin(str(candidate))
+
+    message = str(excinfo.value)
+    assert _FIFO_COMPACTION_TEST_REL in message
+    assert "50000" in message
+    assert path.read_text(encoding="utf-8") == text
+
+
+def test_fifo_compaction_margin_raises_when_the_threshold_moves_alone(tmp_path):
+    """Raising the cliff without the threshold leaves the product's own trigger at the cliff."""
+    text = _FIFO_COMPACTION_TEST_TEXT.replace(
+        "'threshold_tokens': 12000", "'threshold_tokens': 13000"
+    )
+    candidate, path = _fifo_compaction_candidate(tmp_path, text=text)
+
+    with pytest.raises(FifoCompactionTriggerMarginError) as excinfo:
+        _reconcile_fifo_compaction_trigger_margin(str(candidate))
+
+    assert "threshold_tokens" in str(excinfo.value)
+    assert path.read_text(encoding="utf-8") == text
+
+
+def test_fifo_compaction_margin_stands_down_when_upstream_drops_the_journey(tmp_path):
+    candidate, path = _fifo_compaction_candidate(tmp_path, text="import json\n")
+    assert _reconcile_fifo_compaction_trigger_margin(str(candidate)) is False
+    assert path.read_text(encoding="utf-8") == "import json\n"
+
+
+def test_fifo_compaction_margin_absent_file_is_a_no_op(tmp_path):
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    assert _reconcile_fifo_compaction_trigger_margin(str(candidate)) is False
+
+
+def test_fifo_compaction_margin_registered_in_reconcile_tree(tmp_path):
+    """``reconcile_tree`` must dispatch the rule, or the candidate keeps the 1.6 KB margin."""
+    candidate, path = _fifo_compaction_candidate(tmp_path)
+    result = reconcile_tree(str(candidate))
+    assert _FIFO_COMPACTION_TEST_REL in result.fixed
+    assert "and len(wire) > 90000:" in path.read_text(encoding="utf-8")
 
 
 def test_windows_real_git_locate_picks_every_git_for_windows_layout(tmp_path):

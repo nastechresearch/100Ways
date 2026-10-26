@@ -4477,6 +4477,76 @@ def _reconcile_windows_suspend_observation(dst: str) -> bool:
     )
 
 
+class FifoCompactionTriggerMarginError(ValueError):
+    """The compression journey's two triggers moved, so the sync cannot widen their margin.
+
+    A ``ValueError`` on purpose: :mod:`hundredways.conformance` reports it as a candidate
+    issue and the ``reconcile`` stage fails the update rather than publishing a tree in
+    which the journey asserts against a cliff it sits ~1.6 KB below.
+    """
+
+
+_FIFO_COMPACTION_TEST_REL = "tests/gateway/test_journey_compress_restart_fifo.py"
+_FIFO_COMPACTION_EDITS = (
+    ("and len(wire) > 50000:\n", "and len(wire) > 90000:\n"),
+    ("'threshold_tokens': 12000,", "'threshold_tokens': 24000,"),
+)
+
+
+def _reconcile_fifo_compaction_trigger_margin(dst: str) -> bool:
+    """Move the journey's compaction triggers clear of the tail it asserts against.
+
+    The fake model 400s an ``original`` request once ``len(json.dumps(messages)) > 50000``,
+    and the compaction that follows keeps the most recent turns verbatim.  The journey's
+    last assertion (``not any(t.startswith('PRESSURE_1 '))``) therefore holds only while
+    compaction fires at the fourth pressure turn or later, because the retained tail spans
+    ~3 turns.  At the current sizes the third request is 48,406 chars -- 1,594 under that
+    cliff -- so any ~1.6 KB of system-prompt growth (a longer checkout path, a reworded
+    catalog line) flips compaction to turn 3, the tail reaches back to ``PRESSURE_1``, and
+    ``Run tests (7/8)`` goes red on both params with ``AssertionError: FOLLOWER_1``.  It
+    failed on every candidate built from the daec3cd4 sync, in whichever shard it landed.
+
+    Reproduced on a fork tree: system prompt 3,234 chars -> compaction at ``pressure-4``
+    (pass); adding 2,880 chars of project context -> ``pressure-3`` and both params fail
+    with the CI's own message.  Nothing about the product is wrong -- one summary, FIFO
+    order, exactly-once, followers on the compressed child -- the journey's premise about
+    where the middle ends is what the cliff decides.
+
+    A 90,000-char cliff with a 24,000-token trigger puts compaction at ~turn 6 (the request
+    ladder is 14,425 chars/turn), about three turns clear of the tail, and keeps the
+    overflow-then-compact path the journey is built on: the 400 is still what triggers the
+    summary, the retry still parks, and every assertion is untouched.  The threshold is
+    raised with the cliff so the product's own preflight cannot re-create the same boundary
+    from below if its deferral changes.  Both edits are required: a cliff alone leaves the
+    threshold at ~48,000 chars, which is where today's margin is measured from.
+    """
+    rel = _FIFO_COMPACTION_TEST_REL
+    text = _reconcile_budget_read(dst, rel)
+    if text is None or "FOLLOWER_1" not in text:
+        return False  # upstream dropped the journey; nothing to reconcile
+    edited = text
+    changed = False
+    for before, after in _FIFO_COMPACTION_EDITS:
+        if edited.count(after) == 1:
+            continue  # this trigger already carries the margin
+        if edited.count(before) != 1:
+            raise FifoCompactionTriggerMarginError(
+                f"{rel} no longer holds exactly one {before.strip()!r}, so the sync cannot "
+                "move both compaction triggers together and the journey keeps the 1.6 KB "
+                "margin that reds Run tests (7/8): the third pressure request is 48,406 "
+                "chars against a 50,000-char overflow cliff, and the retained tail reaches "
+                "back to PRESSURE_1 when compaction fires a turn earlier (both params, "
+                "AssertionError: FOLLOWER_1). Re-derive _FIFO_COMPACTION_EDITS against "
+                "upstream's current file."
+            )
+        edited = edited.replace(before, after, 1)
+        changed = True
+    if not changed:
+        return False
+    _reconcile_budget_write(dst, rel, edited)
+    return True
+
+
 class WindowsRealGitLocateError(ValueError):
     """``_locate_real_git`` no longer matches the shape the robustness patch needs.
 
@@ -6245,6 +6315,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_windows_suspend_observation(dst):
         result.total += 1
         result.fixed.append(_WINDOWS_SUSPEND_TEST_REL)
+    if _reconcile_fifo_compaction_trigger_margin(dst):
+        result.total += 1
+        result.fixed.append(_FIFO_COMPACTION_TEST_REL)
     if _reconcile_install_ps1_store_guard_test(dst):
         result.total += 1
         result.fixed.append("scripts/tests/test-install-ps1-store-guard.ps1")
