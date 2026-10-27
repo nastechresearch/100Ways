@@ -4700,7 +4700,7 @@ _TERMUX_TUI_SETUP_GATE_EDITS = (
 )
 
 
-def _reconcile_termux_tui_setup_gate(dst: str) -> bool:
+def _reconcile_termux_tui_setup_gate(dst: str) -> list[str]:
     """Ask ``setup.status`` on the canonical transport too.
 
     On a blank home the canonical TUI creates a session with no model: ``stage_local_session``
@@ -4725,9 +4725,9 @@ def _reconcile_termux_tui_setup_gate(dst: str) -> bool:
     rel = _TERMUX_TUI_SETUP_GATE_REL
     text = _reconcile_budget_read(dst, rel)
     if text is None or not any(before in text for before, _ in _TERMUX_TUI_SETUP_GATE_EDITS):
-        return False  # upstream rewrote or removed the gate; theirs is authoritative
+        return []  # upstream rewrote or removed the gate; theirs is authoritative
     edited = text
-    changed = False
+    changed: list[str] = []
     for before, after in _TERMUX_TUI_SETUP_GATE_EDITS:
         if after in edited:
             continue
@@ -4741,7 +4741,8 @@ def _reconcile_termux_tui_setup_gate(dst: str) -> bool:
                 "Re-derive _TERMUX_TUI_SETUP_GATE_EDITS against upstream's current file."
             )
         edited = edited.replace(before, after, 1)
-        changed = True
+        if rel not in changed:
+            changed.append(rel)
     for stub_rel in _TERMUX_TUI_SETUP_GATE_STUBS:
         stub = _reconcile_budget_read(dst, stub_rel)
         if stub is None or _TERMUX_TUI_STUB_AFTER in stub:
@@ -4758,11 +4759,12 @@ def _reconcile_termux_tui_setup_gate(dst: str) -> bool:
         _reconcile_budget_write(
             dst, stub_rel, stub.replace(_TERMUX_TUI_STUB_BEFORE, _TERMUX_TUI_STUB_AFTER, 1)
         )
-        changed = True
+        changed.append(stub_rel)
     if not changed:
-        return False
-    _reconcile_budget_write(dst, rel, edited)
-    return True
+        return []
+    if rel in changed:
+        _reconcile_budget_write(dst, rel, edited)
+    return changed
 
 
 class CanaryUnsignedDispatchError(ValueError):
@@ -6656,9 +6658,11 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_termux_build_toolchain(dst):
         result.total += 1
         result.fixed.append(_TERMUX_BUILD_TOOLCHAIN_REL)
-    if _reconcile_termux_tui_setup_gate(dst):
+    # Every path this rule writes has to reach ``result.fixed``: a file edited on disk but
+    # missing from the reconciled map is counted as an unexplained rewrite and fails the gate.
+    for rel in _reconcile_termux_tui_setup_gate(dst):
         result.total += 1
-        result.fixed.append(_TERMUX_TUI_SETUP_GATE_REL)
+        result.fixed.append(rel)
     for rel in _reconcile_canary_unsigned_dispatch(dst):
         result.total += 1
         result.fixed.append(rel)

@@ -1721,7 +1721,7 @@ def test_termux_tui_setup_gate_asks_every_transport(tmp_path):
     """A canonical TUI that skips ``setup.status`` creates a session with no model."""
     candidate, path = _termux_tui_candidate(tmp_path)
 
-    assert _reconcile_termux_tui_setup_gate(str(candidate)) is True
+    assert _reconcile_termux_tui_setup_gate(str(candidate)) != []
 
     text = path.read_text(encoding="utf-8")
     for before, after in _TERMUX_TUI_SETUP_GATE_EDITS:
@@ -1731,7 +1731,7 @@ def test_termux_tui_setup_gate_asks_every_transport(tmp_path):
 
 def test_termux_tui_setup_gate_leaves_every_other_byte_alone(tmp_path):
     candidate, path = _termux_tui_candidate(tmp_path)
-    assert _reconcile_termux_tui_setup_gate(str(candidate)) is True
+    assert _reconcile_termux_tui_setup_gate(str(candidate)) != []
 
     text = path.read_text(encoding="utf-8")
     for before, after in _TERMUX_TUI_SETUP_GATE_EDITS:
@@ -1741,9 +1741,9 @@ def test_termux_tui_setup_gate_leaves_every_other_byte_alone(tmp_path):
 
 def test_termux_tui_setup_gate_is_a_fixed_point(tmp_path):
     candidate, path = _termux_tui_candidate(tmp_path)
-    assert _reconcile_termux_tui_setup_gate(str(candidate)) is True
+    assert _reconcile_termux_tui_setup_gate(str(candidate)) != []
     once = path.read_text(encoding="utf-8")
-    assert _reconcile_termux_tui_setup_gate(str(candidate)) is False
+    assert _reconcile_termux_tui_setup_gate(str(candidate)) == []
     assert path.read_text(encoding="utf-8") == once
 
 
@@ -1787,14 +1787,14 @@ def test_termux_tui_setup_gate_stands_down_when_upstream_dropped_the_skip(tmp_pa
         "}\n"
     )
     candidate, path = _termux_tui_candidate(tmp_path, text=bare)
-    assert _reconcile_termux_tui_setup_gate(str(candidate)) is False
+    assert _reconcile_termux_tui_setup_gate(str(candidate)) == []
     assert path.read_text(encoding="utf-8") == bare
 
 
 def test_termux_tui_setup_gate_absent_file_is_a_no_op(tmp_path):
     candidate = tmp_path / "candidate"
     candidate.mkdir()
-    assert _reconcile_termux_tui_setup_gate(str(candidate)) is False
+    assert _reconcile_termux_tui_setup_gate(str(candidate)) == []
 
 
 _CANONICAL_STUB_TEXT = (
@@ -1816,14 +1816,17 @@ def test_termux_tui_setup_gate_teaches_the_canonical_viewer_fakes(tmp_path):
     stub.parent.mkdir(parents=True, exist_ok=True)
     stub.write_text(_CANONICAL_STUB_TEXT, encoding="utf-8")
 
-    assert _reconcile_termux_tui_setup_gate(str(candidate)) is True
+    changed = _reconcile_termux_tui_setup_gate(str(candidate))
+    # Every file the rule writes must be reported: one missing from result.fixed is an
+    # unexplained rewrite, and the pipeline gate fails on exactly that (3 files, #162).
+    assert sorted(changed) == sorted([_TERMUX_TUI_SETUP_GATE_REL, stub_rel])
 
     text = stub.read_text(encoding="utf-8")
     assert "wire.method === 'setup.status'" in text
     assert "provider_configured: true" in text
     assert _TERMUX_TUI_STUB_AFTER in text
     assert text.count(_TERMUX_TUI_STUB_BEFORE) == 1  # the throw still guards everything else
-    assert _reconcile_termux_tui_setup_gate(str(candidate)) is False
+    assert _reconcile_termux_tui_setup_gate(str(candidate)) == []
     assert stub.read_text(encoding="utf-8") == text
 
 
