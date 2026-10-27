@@ -4670,6 +4670,22 @@ class TermuxTuiSetupGateError(ValueError):
 
 
 _TERMUX_TUI_SETUP_GATE_REL = "ui-tui/src/app/useSessionLifecycle.ts"
+#: The canonical-viewer fakes that reject any operation they do not know; the setup gate adds one.
+_TERMUX_TUI_SETUP_GATE_STUBS = (
+    "ui-tui/src/__tests__/canonicalDetachClose.test.tsx",
+    "ui-tui/src/__tests__/canonicalDetachOrdering.test.tsx",
+    "ui-tui/src/__tests__/canonicalSwitcherClose.test.tsx",
+)
+_TERMUX_TUI_STUB_BEFORE = "    throw new Error(`unexpected viewer operation: ${wire.method}`)\n"
+_TERMUX_TUI_STUB_AFTER = (
+    "    if (wire.method === 'setup.status') {\n"
+    "      // The setup gate asks on the canonical transport too: a blank install must see\n"
+    "      // Setup Required before any session is created with no model.\n"
+    "      return Promise.resolve({ provider_configured: true })\n"
+    "    }\n"
+    "\n"
+    "    throw new Error(`unexpected viewer operation: ${wire.method}`)\n"
+)
 _TERMUX_TUI_SETUP_GATE_EDITS = (
     (
         "        const setup = gw.isCanonical ? null : "
@@ -4725,6 +4741,23 @@ def _reconcile_termux_tui_setup_gate(dst: str) -> bool:
                 "Re-derive _TERMUX_TUI_SETUP_GATE_EDITS against upstream's current file."
             )
         edited = edited.replace(before, after, 1)
+        changed = True
+    for stub_rel in _TERMUX_TUI_SETUP_GATE_STUBS:
+        stub = _reconcile_budget_read(dst, stub_rel)
+        if stub is None or _TERMUX_TUI_STUB_AFTER in stub:
+            continue
+        if stub.count(_TERMUX_TUI_STUB_BEFORE) != 1:
+            raise TermuxTuiSetupGateError(
+                f"{stub_rel} no longer holds exactly one "
+                f"{_TERMUX_TUI_STUB_BEFORE.strip()!r}, so the sync cannot teach its viewer fake "
+                "``setup.status``. The canonical detach/close suites then fail with "
+                "'unexpected viewer operation: setup.status' (13 tests across the three "
+                "canonical suites on candidate 363259984) even though the product is right. "
+                "Re-derive _TERMUX_TUI_STUB_BEFORE against upstream's current test."
+            )
+        _reconcile_budget_write(
+            dst, stub_rel, stub.replace(_TERMUX_TUI_STUB_BEFORE, _TERMUX_TUI_STUB_AFTER, 1)
+        )
         changed = True
     if not changed:
         return False

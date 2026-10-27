@@ -147,6 +147,9 @@ from hundredways.updates import (
     _TERMUX_BUILD_TOOLCHAIN_REL,
     TermuxBuildToolchainError,
     _reconcile_termux_tui_setup_gate,
+    _TERMUX_TUI_SETUP_GATE_STUBS,
+    _TERMUX_TUI_STUB_BEFORE,
+    _TERMUX_TUI_STUB_AFTER,
     _TERMUX_TUI_SETUP_GATE_EDITS,
     _TERMUX_TUI_SETUP_GATE_REL,
     TermuxTuiSetupGateError,
@@ -1792,6 +1795,50 @@ def test_termux_tui_setup_gate_absent_file_is_a_no_op(tmp_path):
     candidate = tmp_path / "candidate"
     candidate.mkdir()
     assert _reconcile_termux_tui_setup_gate(str(candidate)) is False
+
+
+_CANONICAL_STUB_TEXT = (
+    "  const request = vi.fn((method: string) => {\n"
+    "    if (method === 'session.detach') {\n"
+    "      return Promise.resolve({ detached: true })\n"
+    "    }\n"
+    "\n"
+    "    throw new Error(`unexpected viewer operation: ${wire.method}`)\n"
+    "  })\n"
+)
+
+
+def test_termux_tui_setup_gate_teaches_the_canonical_viewer_fakes(tmp_path):
+    """The canonical suites' fake viewer rejects unknown operations; setup.status is now one."""
+    candidate, path = _termux_tui_candidate(tmp_path)
+    stub_rel = _TERMUX_TUI_SETUP_GATE_STUBS[0]
+    stub = candidate / stub_rel
+    stub.parent.mkdir(parents=True, exist_ok=True)
+    stub.write_text(_CANONICAL_STUB_TEXT, encoding="utf-8")
+
+    assert _reconcile_termux_tui_setup_gate(str(candidate)) is True
+
+    text = stub.read_text(encoding="utf-8")
+    assert "wire.method === 'setup.status'" in text
+    assert "provider_configured: true" in text
+    assert _TERMUX_TUI_STUB_AFTER in text
+    assert text.count(_TERMUX_TUI_STUB_BEFORE) == 1  # the throw still guards everything else
+    assert _reconcile_termux_tui_setup_gate(str(candidate)) is False
+    assert stub.read_text(encoding="utf-8") == text
+
+
+def test_termux_tui_setup_gate_raises_when_a_viewer_stub_moves(tmp_path):
+    candidate, _ = _termux_tui_candidate(tmp_path)
+    stub = candidate / _TERMUX_TUI_SETUP_GATE_STUBS[1]
+    stub.parent.mkdir(parents=True, exist_ok=True)
+    moved = _CANONICAL_STUB_TEXT.replace("unexpected viewer operation", "unknown viewer operation")
+    stub.write_text(moved, encoding="utf-8")
+
+    with pytest.raises(TermuxTuiSetupGateError) as excinfo:
+        _reconcile_termux_tui_setup_gate(str(candidate))
+
+    assert _TERMUX_TUI_SETUP_GATE_STUBS[1] in str(excinfo.value)
+    assert stub.read_text(encoding="utf-8") == moved
 
 
 def test_termux_tui_setup_gate_registered_in_reconcile_tree():
