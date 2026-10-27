@@ -15,6 +15,7 @@ from hundredways.brandscan import _allowed
 from hundredways.rules import (
     BrandingRules,
     preserved_algolia_index_spans,
+    preserved_external_url_spans,
     provisioned_algolia_indices,
     transform_strict_metadata_text,
 )
@@ -195,3 +196,95 @@ def test_the_audit_exemption_follows_the_owner_index_hook(monkeypatch):
 
     assert _allowed("website/docusaurus.config.ts", "hermes", line) is False
     assert _allowed_brand_occurrence("hermes", line, "website/docusaurus.config.ts") is False
+
+
+# Each row is a URL a human clicks, measured 2026-10-27 by fetching both
+# spellings: the inherited path answers 200 on a service the fork does not run
+# and the branded one 4xx's (or, for the fragment rows, is an anchor the page
+# does not carry).
+MEASURED_EXTERNAL_LINES = [
+    "https://docs.honcho.dev/v3/guides/integrations/hermes",
+    "https://hindsight.vectorize.io/sdks/integrations/hermes",
+    "https://botcabinet.com/hermes/manual/",
+    "https://docs.apify.com/integrations/hermes-agent",
+    "https://docs.cortexlayer.net/docs/agents/hermes",
+    "https://docs.openmail.sh/integrations/hermes",
+    "https://pidgeon.ai/docs/hermes",
+    "https://mybot.farm/install/hermes",
+    "https://linchpin.studio/school-of-hermes/manual/",
+    "https://patrykkopycinski.github.io/hermes-plugin-agent-memory-es/",
+    "https://briancaffey.github.io/hermes-otel/",
+]
+
+
+@pytest.fixture(autouse=True)
+def _no_owned_service_hosts(monkeypatch):
+    """Keep ``HUNDREDWAYS_OWNED_URL_HOSTS`` out of the default expectations."""
+    monkeypatch.delenv("HUNDREDWAYS_OWNED_URL_HOSTS", raising=False)
+
+
+@pytest.mark.parametrize("line", MEASURED_EXTERNAL_LINES)
+def test_a_path_on_a_host_the_fork_does_not_run_survives_branding(line):
+    assert preserved_external_url_spans(line)
+    assert BrandingRules().transform_text(line) == line
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "plugin-catalog/bot-cabinet-v2.yaml",
+        "website/docs/user-guide/features/memory-providers.md",
+    ],
+)
+def test_the_two_brand_audits_agree_that_a_preserved_url_is_not_a_leak(path):
+    line = (
+        "https://botcabinet.com/hermes/manual/ docs "
+        "https://docs.honcho.dev/v3/guides/integrations/hermes"
+    )
+    word = "hermes"
+
+    allowed = _allowed(path, word, line)
+    assert allowed is True
+    assert allowed is _allowed_brand_occurrence(word, line, path)
+
+
+def test_the_two_brand_audits_still_flag_a_brand_word_outside_a_preserved_url():
+    """The exemption is the URL, not the line: prose next to it is still ours."""
+    line = "The hermes manual lives at https://openrouter.ai/pricing"
+
+    assert preserved_external_url_spans(line) == ()
+    assert _allowed("README.md", "hermes", line) is False
+    assert _allowed_brand_occurrence("hermes", line, "README.md") is False
+
+
+def test_a_host_the_owner_has_provisioned_is_brandable_again(monkeypatch):
+    """The env hook is what the owner flips once a Nastech object exists."""
+    monkeypatch.setenv("HUNDREDWAYS_OWNED_URL_HOSTS", "docs.honcho.dev")
+    line = "read https://docs.honcho.dev/v3/guides/integrations/hermes"
+
+    assert preserved_external_url_spans(line) == ()
+    assert BrandingRules().transform_text(line) == (
+        "read https://docs.honcho.dev/v3/guides/integrations/nastech"
+    )
+
+
+def test_brand_tree_ships_the_third_party_links_a_human_clicks(tmp_path):
+    """End to end: publishing the tree must not break a catalog entry's docs."""
+    from hundredways.updates import brand_tree
+
+    source = tmp_path / "upstream"
+    target = tmp_path / "fork"
+    (source / "plugin-catalog").mkdir(parents=True)
+    (source / "plugin-catalog" / "apify.yaml").write_text(
+        "name: Hermes Scraper\n"
+        "description: The Hermes agent integration by Apify.\n"
+        "docs_url: https://docs.apify.com/integrations/hermes-agent\n",
+        encoding="utf-8",
+    )
+
+    brand_tree(str(source), str(target))
+
+    shipped = (target / "plugin-catalog" / "apify.yaml").read_text(encoding="utf-8")
+    assert "docs_url: https://docs.apify.com/integrations/hermes-agent\n" in shipped
+    assert "name: Nastech Scraper" in shipped
+    assert "The Nastech agent integration by Apify" in shipped

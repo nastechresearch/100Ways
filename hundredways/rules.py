@@ -439,6 +439,106 @@ def preserved_algolia_index_spans(
     return tuple(spans)
 
 
+# A whole URL whose host somebody else runs is the same object in a bigger
+# namespace: ``docs.honcho.dev/v3/guides/integrations/hermes`` is *their* page
+# about the integration, and the branded spelling is a page that has never
+# existed.  Measured 2026-10-27 by fetching both spellings of every third-party
+# link the published fork tree carries: 20 of 23 sampled pairs answer 200
+# inherited and 4xx branded -- ``botcabinet.com/hermes/manual/`` 200 against
+# ``botcabinet.com/nastech/manual/`` 404, ``vshulcz.github.io/deja-vu/guide/memory-for-hermes.html``
+# 200 against ``.../memory-for-nastech.html`` 404 -- and the two pairs that
+# differ only in their fragment carry the inherited anchor id and not the
+# branded one.  The scheme is required so a bare domain in prose is never
+# mistaken for a link.
+EXTERNAL_URL_RE = re.compile(
+    r"https?://(?P<host>[A-Za-z0-9._-]+)(?P<tail>[/?#][^\s\"'<>()\[\]{}|`]*)?"
+)
+
+# Hosts the fork runs, so a path under them is ours to brand.  Inherited hosts
+# are not listed: a URL the rules move *into* one of these is a first-party
+# link, which is why the test is made of both spellings.
+OWNED_URL_HOSTS: frozenset[str] = frozenset(
+    {"nastechresearch.github.io", "nastechresearch.com", "nastechresearch.workers.dev"}
+)
+
+# Third-party hosts whose path, query or fragment names an object on *their*
+# service, measured live on 2026-10-27 (inherited 200, branded 4xx or an absent
+# anchor).  A GitHub Pages host needs no entry here: ``<user>.github.io`` is
+# provably that user's site, so it is covered by the shape rule below.
+#
+# The test for this set is whether the fork CAN create the branded object, not
+# whether the branded link happens to 404.  ``discord.gg`` is deliberately
+# absent: ``https://discord.com/api/v10/invites/NousResearch`` answers the guild
+# "Nous Research" while ``.../invites/NastechResearch`` answers
+# ``{"message": "Unknown Invite", "code": 10006}``, and the code
+# ``nastechresearch`` is unclaimed.  So 32 links across 19 files of the
+# published fork tree -- the new-issue contact form, every README badge, the
+# desktop crash overlay and its send-diagnostics dialog, ``nastech debug`` --
+# point at an invite nobody has made yet, and the fix is five minutes of owner
+# action, not a permanent rule that sends Nastech's users to the upstream
+# community.  Preserving it would also have taken 10 birth-tree files against
+# the 8 of reviewed drift this engine's parity floor has room for.
+#
+# When the fork creates its own object on one of these -- a Nastech page on
+# Honcho's docs site, say -- delete that host from this set and branding
+# resumes on it.  Do not instead delete the URL from the docs: every row here
+# is a link a human clicks.
+THIRD_PARTY_SERVICE_HOSTS: frozenset[str] = frozenset(
+    {
+        "botcabinet.com",
+        "docs.apify.com",
+        "docs.cortexlayer.net",
+        "docs.honcho.dev",
+        "docs.openmail.sh",
+        "hindsight.vectorize.io",
+        "linchpin.studio",
+        "mybot.farm",
+        "pidgeon.ai",
+    }
+)
+
+
+def owned_url_hosts() -> frozenset[str]:
+    """Hosts the fork runs, including any the owner has since provisioned.
+
+    ``HUNDREDWAYS_OWNED_URL_HOSTS`` is a comma list of hosts the fork now
+    controls, so a branded path under one is a real object rather than a 404.
+    """
+    raw = os.environ.get("HUNDREDWAYS_OWNED_URL_HOSTS", "")
+    extra = {item.strip().lower().removeprefix("*.") for item in raw.split(",") if item.strip()}
+    return {host.lower() for host in OWNED_URL_HOSTS} | extra
+
+
+def third_party_service_hosts() -> frozenset[str]:
+    """Third-party hosts whose branded paths are measured 404s."""
+    return {host.lower() for host in THIRD_PARTY_SERVICE_HOSTS}
+
+
+def _host_under(host: str, roots: frozenset[str]) -> bool:
+    """True when ``host`` is one of ``roots`` or sits under one of them."""
+    return any(host == root or host.endswith(f".{root}") for root in roots)
+
+
+def preserved_external_url_spans(
+    line: str, rules: "BrandingRules | None" = None
+) -> tuple[re.Match, ...]:
+    """URLs in ``line`` whose host branding does not control.
+
+    A host is somebody else's when neither the inherited spelling nor the
+    branded one is a host the fork runs, and it is either a GitHub Pages site
+    (which belongs to the user its subdomain names) or a host on
+    :data:`THIRD_PARTY_SERVICE_HOSTS`.  The scan gates call this the same way
+    they call :func:`preserved_repo_url_spans`: a brand word inside one of
+    these spans is inherited text, not a leak the fork has to fix.
+    """
+    rules = rules if rules is not None else BrandingRules()
+    return tuple(
+        match
+        for match in EXTERNAL_URL_RE.finditer(line)
+        if rules.preserves_external_url(match.group(0))
+    )
+
+
 # Placeholder sentinels used to carry a preserved URL through the token pass.
 # They live in a private-use block and hold no digits, so no normalizer can
 # rewrite them and no brand token can match inside them.
@@ -526,6 +626,28 @@ class BrandingRules:
             self.brand_repo_path(path)
         )
 
+    def preserves_external_url(self, url: str) -> bool:
+        """True when branding must leave this whole URL verbatim.
+
+        The repository rule's test, made of a host instead of an owner: neither
+        the inherited host nor the one the rules would move it into may be a host
+        the fork runs, and the path has to be an object that host serves -- a
+        GitHub Pages site, which belongs to the user its subdomain names, or a
+        host measured on :data:`THIRD_PARTY_SERVICE_HOSTS`.  Anything else stays
+        on the ordinary policy, so a badge label or a display-text parameter on a
+        third-party host still carries our wordmark.
+        """
+        match = EXTERNAL_URL_RE.search(url)
+        if match is None:
+            return False
+        host = match.group("host").lower()
+        roots = owned_url_hosts()
+        if _host_under(host, roots):
+            return False
+        if _host_under(self.brand_service_name(host).lower(), roots):
+            return False
+        return host.endswith(".github.io") or host in third_party_service_hosts()
+
     def transform_text(self, text: str) -> str:
         """Apply all branding tokens to free text.
 
@@ -591,6 +713,28 @@ class BrandingRules:
             return _mask(len(spans) - 1)
 
         working = ALGOLIA_INDEX_NAME_RE.sub(_stash_index, working)
+
+        def _stash_url(match: re.Match) -> str:
+            url = match.group(0)
+            if not self.preserves_external_url(url):
+                return url
+            if _MASK_OPEN in url:
+                # The span holds a repository identifier an earlier pass already
+                # stashed.  Stashing the whole URL again would re-insert that
+                # placeholder after its own replacement had run, leaving the
+                # sentinel in the published text, so the inner identifier keeps
+                # its own preservation and the URL is not masked a second time.
+                return url
+            if self.brand_service_name(url) == url:
+                # Nothing would rename it, so it needs no protection -- and
+                # stashing it anyway would hide a brand word elsewhere in the
+                # same line from the scan gates.
+                return url
+            spans.append(url)
+            identifiers.append(None)
+            return _mask(len(spans) - 1)
+
+        working = EXTERNAL_URL_RE.sub(_stash_url, working)
         if not spans:
             return self._apply_tokens(working)
         branded = self._apply_tokens(working)

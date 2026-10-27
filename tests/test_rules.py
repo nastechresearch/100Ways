@@ -244,6 +244,115 @@ def test_the_path_after_a_repository_we_own_is_branded_with_it():
     assert rules.transform_text(once) == once
 
 
+def test_a_path_on_a_host_the_fork_does_not_run_stays_whole():
+    """A URL into somebody else's site is their object, one level above a repo.
+
+    ``GITHUB_REPO_RE`` stops the brand at a foreign repository; the same
+    reasoning applies to a whole URL whose host the fork does not run, because
+    the path is a page on *their* service.  Measured 2026-10-27 by fetching both
+    spellings of every third-party link the published fork tree carries: 20 of
+    23 sampled pairs answer 200 inherited and 4xx branded, e.g.
+    ``botcabinet.com/hermes/manual/`` 200 against ``botcabinet.com/nastech/manual/``
+    404, ``vshulcz.github.io/deja-vu/guide/memory-for-hermes.html`` 200 against
+    the branded 404.  The two pairs differing only in their fragment carry the
+    inherited anchor id and not the branded one.
+    """
+    rules = BrandingRules()
+    for url in (
+        "https://docs.honcho.dev/v3/guides/integrations/hermes",
+        "https://docs.honcho.dev/v3/guides/integrations/hermes"
+        "#running-honcho-locally-with-hermes",
+        "https://hindsight.vectorize.io/sdks/integrations/hermes",
+        "https://docs.apify.com/integrations/hermes-agent",
+        "https://docs.cortexlayer.net/docs/agents/hermes",
+        "https://docs.openmail.sh/integrations/hermes",
+        "https://pidgeon.ai/docs/hermes",
+        "https://mybot.farm/install/hermes",
+        "https://botcabinet.com/hermes/manual/",
+        "https://linchpin.studio/school-of-hermes/manual/",
+        "https://patrykkopycinski.github.io/hermes-plugin-agent-memory-es/",
+        "https://adolanium.github.io/hermes-gadget-sdk/docs/connect-hermes.html",
+        "https://briancaffey.github.io/hermes-otel/",
+    ):
+        once = rules.transform_text(f"docs: {url} next")
+        assert once == f"docs: {url} next", url
+        assert rules.transform_text(once) == once, url
+
+    # Only the URL is preserved; the sentence around it still brands.
+    assert rules.transform_text(
+        "run `hermes plugin install`, then read https://mybot.farm/install/hermes"
+    ) == "run `nastech plugin install`, then read https://mybot.farm/install/hermes"
+    # A markdown link's closing bracket ends the URL instead of swallowing it.
+    assert rules.transform_text("[manual](https://botcabinet.com/hermes/manual/)") == (
+        "[manual](https://botcabinet.com/hermes/manual/)"
+    )
+
+
+def test_a_third_party_object_the_fork_can_claim_itself_still_brands():
+    """Preserving a link is for pages we cannot publish, not for ones we haven't yet.
+
+    ``discord.gg`` is the measured case: the invite API answers the guild "Nous
+    Research" for ``NousResearch`` and ``{"message": "Unknown Invite", "code":
+    10006}`` for ``NastechResearch``, and the code ``nastechresearch`` is
+    unclaimed.  Keeping the upstream community in our docs would send Nastech's
+    users to somebody else's server forever, and would cost 10 of the 8 files
+    of reviewed drift the rules gate leaves under its parity floor, so the
+    engine brands it and the owner creates the invite.
+    """
+    rules = BrandingRules()
+    assert rules.transform_text("join https://discord.gg/NousResearch") == (
+        "join https://discord.gg/NastechResearch"
+    )
+    assert not rules.preserves_external_url("https://discord.gg/NousResearch")
+    # Once the fork runs its own object on a host, saying so resumes branding
+    # without a code change: the same escape hatch the Algolia rule uses.
+    assert rules.preserves_external_url("https://docs.honcho.dev/v3/guides/integrations/hermes")
+
+
+def test_display_text_on_a_third_party_host_is_still_ours_to_brand():
+    """Preserving somebody's page is not preserving a label that names us.
+
+    The rule is about objects a host serves, so a badge caption or a free-text
+    parameter keeps the brand: ``img.shields.io`` renders whatever the path
+    says, and the ascii skill asks the service to draw our wordmark.
+    """
+    rules = BrandingRules()
+    assert rules.transform_text("https://img.shields.io/badge/discord-hermes-blue") == (
+        "https://img.shields.io/badge/discord-nastech-blue"
+    )
+    assert rules.transform_text(
+        "https://asciified.thelicato.io/api/v2/ascii?text=HERMES&font=Slant"
+    ) == "https://asciified.thelicato.io/api/v2/ascii?text=NASTECH&font=Slant"
+
+
+def test_a_host_the_rules_move_onto_a_host_we_run_is_never_preserved():
+    """The ``*.github.io`` shape ends where our own Pages origin begins."""
+    rules = BrandingRules()
+    assert rules.transform_text("https://nousresearch.github.io/hermes-agent/docs") == (
+        "https://nastechresearch.github.io/nastech-agent/docs"
+    )
+    assert rules.transform_text("https://nousresearch.com") == "https://nastechresearch.com"
+
+
+def test_a_preserved_url_carrying_a_repository_identifier_keeps_both_rules():
+    """A nested identifier is not masked twice, so no sentinel reaches output.
+
+    The repository pass runs first, so a URL that embeds one arrives here with a
+    placeholder inside it.  Masking the whole span again would restore that
+    placeholder after its own substitution had already run and publish it.
+    """
+    rules = BrandingRules()
+    out = rules.transform_text(
+        "https://docs.honcho.dev/redirect?to=https://github.com/Adolanium/hermes-clinepass"
+        " plus https://github.com/NousResearch/hermes-agent"
+    )
+    assert "\ue000" not in out
+    assert out == (
+        "https://docs.honcho.dev/redirect?to=https://github.com/Adolanium/hermes-clinepass"
+        " plus https://github.com/NastechResearch/nastech-agent"
+    )
+
+
 def test_preserved_repository_path_is_a_branding_fixed_point():
     """The audit defines clean as ``transform_text(text) == text``.
 

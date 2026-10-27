@@ -158,8 +158,45 @@ jobs:
           service_preservation_drift = {
               "website/docusaurus.config.ts",
           }
+          # Reviewed rule change: the external-URL preservation fix (see
+          # rules.THIRD_PARTY_SERVICE_HOSTS) stops renaming a path that is a page
+          # on somebody else's site.  Measured 2026-10-27 on the birth tree: the
+          # rule moves exactly 8 files, and every one of them is a Honcho docs
+          # link -- ``docs.honcho.dev/v3/guides/integrations/hermes`` answers 200
+          # while ``.../integrations/nastech`` answers 404, because Honcho
+          # documents its own integration and the fork cannot publish a page on
+          # their host.  Stripping those URLs makes each file byte-identical
+          # again.  The other preserved hosts (botcabinet, apify, the
+          # ``*.github.io`` shape) cost nothing here: no brand token sat in a
+          # path on them at the birth commit.
+          #
+          # ``discord.gg`` is NOT in the rule, and that is deliberate rather than
+          # an oversight: the invite API answers the guild "Nous Research" for
+          # ``NousResearch`` and ``{"message": "Unknown Invite", "code": 10006}``
+          # for ``NastechResearch``, and the code ``nastechresearch`` is
+          # unclaimed, so the 10 files and 14 links it touches here -- 32 links
+          # across 19 files of the published tree, counting the new-issue
+          # contact form and the desktop crash overlay -- are fixed by an owner
+          # creating their own invite: not by a rule that sends Nastech's
+          # users to the upstream community.  Preserving it would also have taken
+          # 10 files against the 8 this gate has room for before parity drops
+          # below 0.99, which is a signal worth keeping honest.
+          external_url_preservation_drift = {
+              "apps/desktop/src/app/settings/memory/provider-config-modal.test.tsx",
+              "apps/desktop/src/app/settings/memory/provider-config-panel.test.tsx",
+              "optional-skills/autonomous-ai-agents/honcho/SKILL.md",
+              "plugins/memory/honcho/README.md",
+              "plugins/memory/honcho/config_schema.py",
+              "website/docs/user-guide/features/memory-providers.md",
+              "website/docs/user-guide/skills/optional/autonomous-ai-agents/"
+              "autonomous-ai-agents-honcho.md",
+              "website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/"
+              "user-guide/skills/optional/autonomous-ai-agents/"
+              "autonomous-ai-agents-honcho.md",
+          }
           allowlist |= url_preservation_drift
           allowlist |= service_preservation_drift
+          allowlist |= external_url_preservation_drift
           drifted = {f.mapped_path for f in report.failed}
           new_drift = drifted - allowlist
           if report.pass_ratio < 0.99:
