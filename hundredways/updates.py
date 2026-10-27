@@ -4686,6 +4686,35 @@ _TERMUX_TUI_STUB_AFTER = (
     "\n"
     "    throw new Error(`unexpected viewer operation: ${wire.method}`)\n"
 )
+#: Resume-path fakes that stub the whole viewer instead of rejecting what they do not know.  With
+#: the gate open they answer ``setup.status`` with ``undefined`` (so ``.then`` throws) or queue it
+#: into a hand-rolled call ledger (so the test resolves the setup reply and then waits forever for
+#: the resume that was never sent).  Each one gets its own escape, in its own shape.
+_TERMUX_TUI_GATE_FAKE_EDITS = (
+    (
+        "ui-tui/src/__tests__/inkResumeSnapshotFence.test.tsx",
+        "    lifecycle = useSessionLifecycle({ colsRef: { current: 80 }, "
+        "composerActions: { setComposerTokens: vi.fn() }, gw, rpc: vi.fn(),\n",
+        "    lifecycle = useSessionLifecycle({ colsRef: { current: 80 }, "
+        "composerActions: { setComposerTokens: vi.fn() }, gw,\n"
+        "      // The gate asks the canonical transport too, so the bare viewer fake answers it.\n"
+        "      rpc: vi.fn(async () => ({ provider_configured: true })),\n",
+    ),
+    (
+        "ui-tui/src/__tests__/resumeEpochRenderer.test.tsx",
+        "  const request = vi.fn((method: string, params: any) =>\n"
+        "    new Promise(resolve => pending.push({ method, params, resolve })))\n",
+        "  const request = vi.fn((method: string, params: any) => {\n"
+        "    // The gate asks setup.status before the attach; the ledger tracks session RPCs,\n"
+        "    // so the setup reply answers at once instead of taking a resume's queue slot.\n"
+        "    if (method === 'setup.status') {\n"
+        "      return Promise.resolve({ provider_configured: true })\n"
+        "    }\n"
+        "\n"
+        "    return new Promise(resolve => pending.push({ method, params, resolve }))\n"
+        "  })\n",
+    ),
+)
 _TERMUX_TUI_SETUP_GATE_EDITS = (
     (
         "        const setup = gw.isCanonical ? null : "
@@ -4721,6 +4750,13 @@ def _reconcile_termux_tui_setup_gate(dst: str) -> list[str]:
 
     Both sites move together or the sync stops (a half-applied gate hides the panel on one path);
     if upstream drops the canonical skip itself, the rule stands down.
+
+    The gate is a new RPC on a path whose test fakes enumerate the viewer calls, so every fake that
+    cannot answer it is taught in the same pass: a product fix that reds the suite is not a fix the
+    sync can ship, and the pipeline's parity gate only lets a rewrite through when the rule reports
+    the file it wrote.  The fake loop rides inside the gate stand-down on purpose -- if upstream
+    opens the gate itself it must have taught its own fakes in the same commit, and re-deriving an
+    anchor upstream already fixed would raise on every sync from here.
     """
     rel = _TERMUX_TUI_SETUP_GATE_REL
     text = _reconcile_budget_read(dst, rel)
@@ -4760,6 +4796,23 @@ def _reconcile_termux_tui_setup_gate(dst: str) -> list[str]:
             dst, stub_rel, stub.replace(_TERMUX_TUI_STUB_BEFORE, _TERMUX_TUI_STUB_AFTER, 1)
         )
         changed.append(stub_rel)
+    for fake_rel, before, after in _TERMUX_TUI_GATE_FAKE_EDITS:
+        fake = _reconcile_budget_read(dst, fake_rel)
+        if fake is None or after in fake:
+            continue
+        if fake.count(before) != 1:
+            raise TermuxTuiSetupGateError(
+                f"{fake_rel} no longer holds exactly one resume-path viewer fake in the shape "
+                f"{before.strip()!r}, so the sync cannot give it a ``setup.status`` answer. The "
+                "canonical resume suites then fail on the fork's own gate: 'TypeError: Cannot "
+                "read properties of undefined (reading then)' at useSessionLifecycle.ts:663 and "
+                "'AssertionError: expected null to be a' at resumeEpochRenderer.test.tsx:148 "
+                "(both on candidate 885f30b6) even though the product is right. Re-derive "
+                "_TERMUX_TUI_GATE_FAKE_EDITS against upstream's current tests."
+            )
+        _reconcile_budget_write(dst, fake_rel, fake.replace(before, after, 1))
+        if fake_rel not in changed:
+            changed.append(fake_rel)
     if not changed:
         return []
     if rel in changed:
