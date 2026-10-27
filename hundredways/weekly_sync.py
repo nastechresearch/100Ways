@@ -23,6 +23,7 @@ from .rules import (
     is_immutable_path,
     is_locked_path,
     preserved_algolia_index_spans,
+    preserved_external_url_spans,
     preserved_repo_url_spans,
 )
 from .skill_policy import SkillPolicyIssue, audit_skill_firewall
@@ -313,6 +314,13 @@ def _allowed_brand_occurrence(token: str, line: str, path: str) -> bool:
     if any(
         token.lower() in match.group("value").lower()
         for match in preserved_algolia_index_spans(line)
+    ):
+        return True
+    # And the same for a whole URL on a host the fork does not run: its path is
+    # somebody else's page, so the inherited word in it is not ours to fix.
+    # Mirrors brandscan._allowed.
+    if any(
+        token.lower() in match.group(0).lower() for match in preserved_external_url_spans(line)
     ):
         return True
     if path == "package-lock.json" and token == "hermes":

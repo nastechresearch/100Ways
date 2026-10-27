@@ -33,6 +33,7 @@ from .rules import (
     is_immutable_path,
     is_locked_path,
     preserved_algolia_index_spans,
+    preserved_external_url_spans,
     preserved_repo_url_spans,
 )
 
@@ -95,6 +96,11 @@ def _allowed(path: str, word: str, line: str) -> bool:
     if any(
         word in match.group("value").lower() for match in preserved_algolia_index_spans(line)
     ):
+        return True
+    # A whole URL on a host the fork does not run is the same object problem one
+    # level up: its path is their page, so the inherited word inside it is not a
+    # leak we can fix without breaking the link.
+    if any(word in match.group(0).lower() for match in preserved_external_url_spans(line)):
         return True
     lower = line.lower()
     if path == "package-lock.json" and word == "hermes":
