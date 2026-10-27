@@ -539,6 +539,63 @@ def preserved_external_url_spans(
     )
 
 
+# ---------------------------------------------------------------------------
+# Plugin catalog directories.  A catalog entry says which repository to clone
+# and which directory inside it holds the plugin, so the directory belongs to
+# whoever runs that repository.  Branding it points the installer at a path
+# that has never existed there.
+# ---------------------------------------------------------------------------
+
+# The catalog's own shape: one entry per file, both keys at column zero.  A
+# value may be quoted, bare, or followed by a YAML comment, and an unquoted
+# value may contain an apostrophe -- all of which are ordinary catalog YAML.
+CATALOG_REPO_KEY_RE = re.compile(
+    r"^repo:[ \t]*(?P<value>\"[^\"\n]*\"|'[^'\n]*'|[^#\n]*?)[ \t]*(?:#[^\n]*)?$", re.M
+)
+CATALOG_SUBDIR_KEY_RE = re.compile(
+    r"^subdir:[ \t]*(?P<value>\"[^\"\n]*\"|'[^'\n]*'|[^#\n]*?)[ \t]*(?:#[^\n]*)?$", re.M
+)
+
+
+def catalog_key_value(match: re.Match) -> str:
+    """The value without its YAML quotes or surrounding space."""
+    value = match.group("value").strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1]
+    return value
+
+
+def catalog_entry_repo_url(text: str) -> str | None:
+    """The ``repo:`` URL of a single plugin catalog entry, or ``None``.
+
+    ``None`` when the text is not shaped like one entry: a file with two or
+    zero top-level ``repo:`` keys is not a catalog document, and guessing which
+    entry an indented ``subdir`` belongs to would protect the wrong repository.
+    """
+    matches = list(CATALOG_REPO_KEY_RE.finditer(text))
+    if len(matches) != 1:
+        return None
+    return catalog_key_value(matches[0])
+
+
+def preserved_catalog_subdir_spans(line: str) -> tuple[re.Match, ...]:
+    """The ``subdir`` key on a catalog line whose value the brand must not carry.
+
+    The scan gates cannot repeat the whole-document test
+    :meth:`BrandingRules.preserves_catalog_subdir` makes, so they pair this with
+    :func:`catalog_entry_repo_url`: the caller passes the document's single
+    ``repo:`` URL, and a surviving inherited word then means that repository is
+    not ours -- an entry we *do* own arrives already branded.  A document with
+    no single ``repo:`` line gets no exemption, exactly as the transform
+    preserves nothing in it.
+    """
+    return tuple(
+        match
+        for match in CATALOG_SUBDIR_KEY_RE.finditer(line)
+        if catalog_key_value(match)
+    )
+
+
 # Placeholder sentinels used to carry a preserved URL through the token pass.
 # They live in a private-use block and hold no digits, so no normalizer can
 # rewrite them and no brand token can match inside them.
@@ -648,6 +705,22 @@ class BrandingRules:
             return False
         return host.endswith(".github.io") or host in third_party_service_hosts()
 
+    def preserves_catalog_subdir(self, repo_url: str, subdir: str) -> bool:
+        """True when a catalog entry's ``subdir`` names a path we do not run.
+
+        The same two-ended test the repository rule makes of an owner, made here
+        of the directory inside it: the entry is preserved only when neither the
+        inherited repository nor the one the rules would move it into is ours.
+        An entry that points at ``NousResearch/hermes-official-plugins`` is not
+        preserved, because the rules re-point it at a repository we do publish,
+        where a branded directory is one we can create.
+        """
+        if not subdir:
+            return False
+        if self.brand_repo_path(subdir) == subdir:
+            return False
+        return self.preserves_repo_path(repo_url)
+
     def transform_text(self, text: str) -> str:
         """Apply all branding tokens to free text.
 
@@ -735,6 +808,24 @@ class BrandingRules:
             return _mask(len(spans) - 1)
 
         working = EXTERNAL_URL_RE.sub(_stash_url, working)
+
+        repo_url = catalog_entry_repo_url(text)
+        if repo_url:
+
+            def _stash_subdir(match: re.Match) -> str:
+                if _MASK_OPEN in match.group(0):
+                    # The line already carries a stashed span; masking it whole
+                    # would re-insert that placeholder after its own replacement
+                    # had run.  The inner span keeps its own preservation.
+                    return match.group(0)
+                if not self.preserves_catalog_subdir(repo_url, catalog_key_value(match)):
+                    return match.group(0)
+                spans.append(match.group(0))
+                identifiers.append(None)
+                return _mask(len(spans) - 1)
+
+            working = CATALOG_SUBDIR_KEY_RE.sub(_stash_subdir, working)
+
         if not spans:
             return self._apply_tokens(working)
         branded = self._apply_tokens(working)
