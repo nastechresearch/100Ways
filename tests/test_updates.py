@@ -155,6 +155,9 @@ from hundredways.updates import (
     _CANARY_DISPATCH_INPUT_AFTER,
     _CANARY_RELEASE_PY_BEFORE,
     _CANARY_RELEASE_PY_AFTER,
+    _CANARY_DISPATCH_TEST_BEFORE,
+    _CANARY_DISPATCH_TEST_AFTER,
+    _CANARY_DISPATCH_TEST_REL,
     CanaryUnsignedDispatchError,
     _WINDOWS_SUSPEND_BUDGET_S,
     _WINDOWS_SUSPEND_ONE_SHOT,
@@ -1881,6 +1884,49 @@ def test_canary_unsigned_dispatch_absent_files_are_a_no_op(tmp_path):
     candidate = tmp_path / "candidate"
     candidate.mkdir()
     assert _reconcile_canary_unsigned_dispatch(str(candidate)) == []
+
+
+_CANARY_PIN_TEXT = (
+    "    assert dispatch == [\n"
+    '        "gh", "workflow", "run", "desktop-bundled-release.yml", "--ref", "main",\n'
+    '        "-f", f"tag={tag}", "-f", "upload_release=true", "--repo", "fixture/release",\n'
+    "    ]\n"
+)
+
+
+def test_canary_unsigned_dispatch_aligns_the_test_that_pins_the_argv(tmp_path):
+    """The canary test asserts the exact argv; the flag and its pin move together."""
+    candidate, _, _ = _canary_candidate(tmp_path)
+    pin = candidate / _CANARY_DISPATCH_TEST_REL
+    pin.parent.mkdir(parents=True, exist_ok=True)
+    pin.write_text(_CANARY_PIN_TEXT, encoding="utf-8")
+
+    changed = _reconcile_canary_unsigned_dispatch(str(candidate))
+
+    assert sorted(changed) == [
+        ".github/workflows/desktop-bundled-release.yml",
+        "scripts/release.py",
+        _CANARY_DISPATCH_TEST_REL,
+    ]
+    text = pin.read_text(encoding="utf-8")
+    assert '"-f", "skip-signed=true",' in text
+    assert _CANARY_DISPATCH_TEST_AFTER in text
+    assert _CANARY_DISPATCH_TEST_BEFORE not in text
+    assert _reconcile_canary_unsigned_dispatch(str(candidate)) == []
+
+
+def test_canary_unsigned_dispatch_raises_when_the_pin_moves(tmp_path):
+    candidate, _, _ = _canary_candidate(tmp_path)
+    pin = candidate / _CANARY_DISPATCH_TEST_REL
+    pin.parent.mkdir(parents=True, exist_ok=True)
+    moved = _CANARY_PIN_TEXT.replace("upload_release=true", "upload_release=yes")
+    pin.write_text(moved, encoding="utf-8")
+
+    with pytest.raises(CanaryUnsignedDispatchError) as excinfo:
+        _reconcile_canary_unsigned_dispatch(str(candidate))
+
+    assert _CANARY_DISPATCH_TEST_REL in str(excinfo.value)
+    assert pin.read_text(encoding="utf-8") == moved
 
 
 def test_canary_unsigned_dispatch_registered_in_reconcile_tree():

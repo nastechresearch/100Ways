@@ -4759,6 +4759,14 @@ _CANARY_DISPATCH_INPUT_AFTER = _CANARY_DISPATCH_INPUT_BEFORE + (
     "        default: false\n"
 )
 _CANARY_RELEASE_PY_BEFORE = '    if canary:\n        cmd += ["-f", "upload_release=true"]\n'
+_CANARY_DISPATCH_TEST_REL = "tests/scripts/test_release_canary_git.py"
+_CANARY_DISPATCH_TEST_BEFORE = (
+    '        "-f", f"tag={tag}", "-f", "upload_release=true", "--repo", "fixture/release",\n'
+)
+_CANARY_DISPATCH_TEST_AFTER = (
+    '        "-f", f"tag={tag}", "-f", "upload_release=true", "-f", "skip-signed=true",\n'
+    '        "--repo", "fixture/release",\n'
+)
 _CANARY_RELEASE_PY_AFTER = (
     "    if canary:\n"
     "        # NasTech ships unsigned: declare it here too, or the dispatched build stops\n"
@@ -4819,6 +4827,25 @@ def _reconcile_canary_unsigned_dispatch(dst: str) -> list[str]:
             dst, py_rel, script.replace(_CANARY_RELEASE_PY_BEFORE, _CANARY_RELEASE_PY_AFTER, 1)
         )
         changed.append(py_rel)
+    test_rel = _CANARY_DISPATCH_TEST_REL
+    pinned = _reconcile_budget_read(dst, test_rel)
+    if pinned is not None and _CANARY_DISPATCH_TEST_AFTER not in pinned:
+        # The test pins the dispatch argv; leaving it behind reds Run tests (8/8) with
+        # "assert ['gh', 'workf...'] == [...]" the moment the flag exists.
+        if _CANARY_DISPATCH_TEST_BEFORE not in pinned:
+            raise CanaryUnsignedDispatchError(
+                f"{test_rel} no longer pins the canary dispatch as "
+                f"{_CANARY_DISPATCH_TEST_BEFORE!r}, so the sync cannot line the contract test up "
+                "with the dispatch it now sends. The lane then fails with an argv mismatch "
+                "instead of checking the behaviour. Re-derive _CANARY_DISPATCH_TEST_BEFORE "
+                "against upstream's current test."
+            )
+        _reconcile_budget_write(
+            dst,
+            test_rel,
+            pinned.replace(_CANARY_DISPATCH_TEST_BEFORE, _CANARY_DISPATCH_TEST_AFTER, 1),
+        )
+        changed.append(test_rel)
     return changed
 
 
