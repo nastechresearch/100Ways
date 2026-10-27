@@ -195,6 +195,55 @@ def test_raw_asset_urls_into_repositories_we_own_are_still_branded():
     assert rules.transform_text(once) == once
 
 
+def test_the_path_after_a_foreign_repository_is_not_ours_to_rename():
+    """A tree, blob or asset path inside somebody else's repo stays verbatim.
+
+    Matching ``raw.githubusercontent.com`` protected the repository name but not
+    what comes after it, and the segment after the name is a directory or a file
+    in the same foreign repository.  Measured in the published fork tree: 78
+    distinct URLs of this shape answer 404, 76 of them with a live 200 twin under
+    the inherited spelling --
+    ``plastic-labs/honcho/tree/main/nastech-plugin-honcho`` versus
+    ``.../hermes-plugin-honcho``, and the catalog banner
+    ``cocktailpeanut/nastech-mod/master/nastech.png`` versus
+    ``.../hermes-mod/master/hermes.png``.
+    """
+    rules = BrandingRules()
+    for url in (
+        "https://github.com/plastic-labs/honcho/tree/main/hermes-plugin-honcho",
+        "https://github.com/plastic-labs/honcho/blob/main/hermes-plugin-honcho/cli.py",
+        "https://raw.githubusercontent.com/cocktailpeanut/hermes-mod/master/hermes.png",
+        "https://github.com/ActVox/actvox-plugins/tree/main/hermes",
+    ):
+        assert rules.transform_text(f"docs: {url} next") == f"docs: {url} next"
+
+    # Prose and markup delimiters end the identifier, so a second URL written
+    # straight after the first is still read as one -- and still branded.
+    assert rules.transform_text(
+        "see https://github.com/o/r/tree/main/hermes,"
+        "https://github.com/NousResearch/hermes-agent for more"
+    ) == (
+        "see https://github.com/o/r/tree/main/hermes,"
+        "https://github.com/NastechResearch/nastech-agent for more"
+    )
+    link = "https://github.com/plastic-labs/honcho/tree/main/hermes-plugin-honcho"
+    assert rules.transform_text(f"[honcho]({link})") == f"[honcho]({link})"
+    assert rules.transform_text(f"image: {link}#inline") == f"image: {link}#inline"
+
+
+def test_the_path_after_a_repository_we_own_is_branded_with_it():
+    """The tail group is not an exemption: our own tree keeps moving with us."""
+    rules = BrandingRules()
+    assert rules.transform_text(
+        "https://api.github.com/repos/NousResearch/hermes-agent/contents/hermes_cli"
+    ) == "https://api.github.com/repos/NastechResearch/nastech-agent/contents/nastech_cli"
+    once = rules.transform_text(
+        "https://github.com/NousResearch/hermes-agent/blob/main/hermes_cli/pm/__init__.py"
+    )
+    assert "nastech_cli" in once
+    assert rules.transform_text(once) == once
+
+
 def test_preserved_repository_path_is_a_branding_fixed_point():
     """The audit defines clean as ``transform_text(text) == text``.
 

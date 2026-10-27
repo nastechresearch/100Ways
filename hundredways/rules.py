@@ -304,6 +304,17 @@ DEFAULT_TOKENS: list[TokenRule] = [
 # because that host was not matched the file was re-branded anyway (measured
 # again 8/8: ``Adolanium/nastech-clinepass`` 404, ``Adolanium/hermes-clinepass``
 # 200).
+#
+# Matching the host was still only half the identifier.  A catalog entry or a
+# docs line reaches into somebody else's tree --
+# ``github.com/plastic-labs/honcho/tree/main/hermes-plugin-honcho``, or the
+# screenshot ``raw.githubusercontent.com/cocktailpeanut/hermes-mod/master/hermes.png``
+# -- and the segment after the repository name is exactly as little ours as the
+# name is.  Branding it leaves the owner and branch intact and renames a
+# directory or an image that has never carried our brand, so the link 404s while
+# its inherited spelling returns 200 (measured in the published fork tree: 78
+# distinct URLs of this shape, 76 of them with a live 200 twin).  The tail is
+# therefore part of the matched identifier.
 GITHUB_REPO_RE = re.compile(
     # A repository identifier in the web form
     # (``github.com/<owner>/<repo>``), the REST form
@@ -323,6 +334,13 @@ GITHUB_REPO_RE = re.compile(
     r"(?:(?:api|uploads)\.github\.com/repos/|raw\.githubusercontent\.com/"
     r"|(?:[a-z0-9-]+\.)?github\.com/)"
     r"(?P<owner>[A-Za-z0-9._-]+)/(?P<repo>[A-Za-z0-9._-]+)"
+    # The path after the repository name, segment by segment.  Each segment
+    # stops at whitespace and at the punctuation that ends a URL in prose (a
+    # closing bracket, ``)``, a comma or a sentence mark), at a query or a
+    # fragment, and at the next ``/``.  Stopping at the delimiters matters as
+    # much as matching: an over-greedy tail would swallow a second URL written
+    # right after the first and leave that one un-branded.
+    r"""(?P<tail>(?:/[^/?#\s<>"'`|\\)`,;:!]+)*)"""
 )
 
 # GitHub owners whose repositories we control and may therefore rename.
