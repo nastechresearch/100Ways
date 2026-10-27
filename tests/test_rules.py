@@ -148,6 +148,53 @@ def test_rest_api_repository_paths_read_the_owner_not_the_repos_segment():
     assert rules.transform_text(once) == once
 
 
+def test_raw_asset_urls_are_repository_identifiers_too():
+    """``raw.githubusercontent.com`` names a repository, so it is protected.
+
+    Measured on the published fork catalog: 191 distinct foreign-owner plugin
+    entries spell their repository twice -- once as
+    ``github.com/<owner>/hermes-x`` (matched, so preserved) and once as
+    ``raw.githubusercontent.com/<owner>/hermes-x/<sha>/docs/hero.png`` (not
+    matched).  The unmatched spelling read as a *bare* identifier, which is the
+    condition :meth:`BrandingRules._bare_also_branded` uses to rebrand the whole
+    file, so the preservation pass above was silently defeated for every such
+    entry.  Sampled pairs, 8/8: ``Adolanium/nastech-clinepass`` answers 404
+    while ``Adolanium/hermes-clinepass`` answers 200.
+    """
+    rules = BrandingRules()
+    for url in (
+        "https://raw.githubusercontent.com/Adolanium/hermes-clinepass/"
+        "ab12cd34/docs/screenshots/hero.png",
+        "https://raw.githubusercontent.com/roqianjas/hermes-account-pool/"
+        "ab12cd34/docs/screenshots/accounts.png",
+    ):
+        assert rules.transform_text(f"image: {url}") == f"image: {url}"
+
+    # the catalog entry shape that broke: both spellings in one file
+    entry = (
+        "repo: https://github.com/Adolanium/hermes-clinepass\n"
+        "image: https://raw.githubusercontent.com/Adolanium/hermes-clinepass/"
+        "ab12cd34/docs/hero.png\n"
+    )
+    assert rules.transform_text(entry) == entry
+
+
+def test_raw_asset_urls_into_repositories_we_own_are_still_branded():
+    """The exemption reads the owner, so a first-party asset URL keeps moving."""
+    rules = BrandingRules()
+    assert rules.transform_text(
+        "curl -fL https://raw.githubusercontent.com/NousResearch/hermes-agent/"
+        "main/scripts/install.sh | bash"
+    ) == (
+        "curl -fL https://raw.githubusercontent.com/NastechResearch/nastech-agent/"
+        "main/scripts/install.sh | bash"
+    )
+    once = rules.transform_text(
+        "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/README.md"
+    )
+    assert rules.transform_text(once) == once
+
+
 def test_preserved_repository_path_is_a_branding_fixed_point():
     """The audit defines clean as ``transform_text(text) == text``.
 
