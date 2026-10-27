@@ -2743,7 +2743,11 @@ def test_cli_banner_reconciliation_handles_getattr_skin_logo_form(tmp_path):
     assert fixed == ["nastech_cli/banner.py"]
     assert "_logo = NASTECH_AGENT_LOGO" in banner
     assert 'getattr(_bskin, "banner_logo"' not in banner
-    assert "console.print(_logo)" in banner
+    # The print has to be a statement of its own, not text swallowed by the
+    # comment above it: a literal ``\n`` here published a banner with no logo.
+    lines = banner.splitlines()
+    assert any(line.strip() == "console.print(_logo)" for line in lines)
+    assert not any("#" in line and "console.print(_logo)" in line for line in lines)
 
 
 def test_cli_defaults_have_no_machine_paths():
