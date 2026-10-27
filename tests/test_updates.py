@@ -3090,18 +3090,22 @@ def test_reconcile_trims_skill_description_to_fork_bytes(tmp_path):
 
 
 
-def test_reconcile_pages_workflow_publishes_installer_and_root_redirect(tmp_path):
-    root = tmp_path / "branded"
+def _pages_workflow_fixture(root, staging=True):
     workflow = root / ".github" / "workflows" / "deploy-site.yml"
     workflow.parent.mkdir(parents=True)
-    (root / "scripts").mkdir(parents=True)
+    (root / "scripts").mkdir(parents=True, exist_ok=True)
     (root / "scripts" / "install.sh").write_text("#!/usr/bin/env bash\n")
-    workflow.write_text(
-        "      - name: Stage deployment\n"
-        "        run: |\n"
-        "          mkdir -p _site/docs\n"
-        "          cp -r website/build/* _site/docs/\n"
-    )
+    body = "      - name: Stage deployment\n        run: |\n"
+    if staging:
+        body += "          mkdir -p _site/docs\n          cp -r website/build/* _site/docs/\n"
+    workflow.write_text(body)
+    return workflow
+
+
+def test_reconcile_pages_workflow_publishes_installer_and_root_redirect(tmp_path):
+    root = tmp_path / "branded"
+    workflow = _pages_workflow_fixture(root)
+    (root / "scripts" / "install.ps1").write_text("# PowerShell\n")
 
     result = reconcile_tree(str(root))
     text = workflow.read_text()
@@ -3110,6 +3114,81 @@ def test_reconcile_pages_workflow_publishes_installer_and_root_redirect(tmp_path
     assert "cp scripts/install.sh _site/install.sh" in text
     assert "cat > _site/index.html <<'HTML'" in text
     assert "url=./docs/" in text
+
+
+def test_reconcile_pages_workflow_stages_the_windows_installer_readme_documents(tmp_path):
+    """Every README locale tells Windows users to fetch ``.../install.ps1``.
+
+    A staged artifact without that file is a documented 404, so the staging
+    step has to copy it beside ``install.sh`` -- and a second pass must not
+    copy it twice.
+    """
+    root = tmp_path / "branded"
+    workflow = _pages_workflow_fixture(root)
+    (root / "scripts" / "install.ps1").write_text("# PowerShell\n")
+
+    assert reconcile_tree(str(root)).fixed.count(
+        ".github/workflows/deploy-site.yml"
+    ) == 1
+    text = workflow.read_text()
+    assert text.count("cp scripts/install.ps1 _site/install.ps1") == 1
+    assert text.index("cp scripts/install.sh") < text.index("cp scripts/install.ps1")
+
+    again = reconcile_tree(str(root))
+    assert ".github/workflows/deploy-site.yml" not in again.fixed
+    assert workflow.read_text() == text
+
+
+def test_reconcile_pages_workflow_upgrades_a_tree_staged_before_the_windows_copy(
+    tmp_path,
+):
+    """The legacy injection staged only the POSIX installer.
+
+    Re-running the sync on a fork already carrying that block must add the
+    Windows copy rather than insert a second whole block.
+    """
+    root = tmp_path / "branded"
+    workflow = _pages_workflow_fixture(root)
+    workflow.write_text(
+        workflow.read_text()
+        + "          cp scripts/install.sh _site/install.sh\n"
+        + "          cat > _site/index.html <<'HTML'\n          HTML\n"
+    )
+    (root / "scripts" / "install.ps1").write_text("# PowerShell\n")
+
+    assert reconcile_tree(str(root)).fixed.count(
+        ".github/workflows/deploy-site.yml"
+    ) == 1
+    text = workflow.read_text()
+    assert text.count("cp scripts/install.sh _site/install.sh") == 1
+    assert text.count("cp scripts/install.ps1 _site/install.ps1") == 1
+
+
+def test_reconcile_pages_workflow_skips_a_missing_windows_installer(tmp_path):
+    """``cp`` of a file upstream stopped shipping would red the docs deploy.
+
+    The step runs under ``set -euo pipefail``, so the copy is only staged when
+    the branded tree really carries the script.
+    """
+    root = tmp_path / "branded"
+    workflow = _pages_workflow_fixture(root)
+
+    assert reconcile_tree(str(root)).fixed.count(
+        ".github/workflows/deploy-site.yml"
+    ) == 1
+    text = workflow.read_text()
+    assert "cp scripts/install.sh _site/install.sh" in text
+    assert "install.ps1" not in text
+
+
+def test_reconcile_pages_workflow_stand_down_when_upstream_rewrites_staging(tmp_path):
+    root = tmp_path / "branded"
+    workflow = _pages_workflow_fixture(root, staging=False)
+    (root / "scripts" / "install.ps1").write_text("# PowerShell\n")
+
+    result = reconcile_tree(str(root))
+    assert ".github/workflows/deploy-site.yml" not in result.fixed
+    assert "install.ps1" not in workflow.read_text()
 
 
 def test_reconcile_quickstart_hardware_fixture(tmp_path):

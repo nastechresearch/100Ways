@@ -1820,8 +1820,18 @@ def _reconcile_pages_deploy_workflow(dst: str) -> int:
     """Keep the generated GitHub Pages artifact aligned with Docusaurus URLs.
 
     The Nastech workflow stages Docusaurus under ``_site/docs``.  Publish the
-    documented installer at the artifact root and provide a root redirect so
+    documented installers at the artifact root and provide a root redirect so
     existing download links do not land on a blank GitHub Pages path.
+
+    Both installers are documented: every ``README*.md`` locale gives a POSIX
+    ``curl .../install.sh | bash`` and a Windows ``iex (irm .../install.ps1)``,
+    but staging copied only the POSIX one, so the URL the fork tells Windows
+    users to fetch answered 404 while ``install.sh`` answered 200 (measured
+    2026-10-27 against ``nastechresearch.github.io/nastech-agent/``; upstream
+    serves both from its own origin).  The ``cp`` is added only when the
+    branded tree really carries ``scripts/install.ps1``: the step runs under
+    ``set -euo pipefail``, so copying a file upstream stopped shipping would
+    red the docs deploy rather than fix a link.
     """
     path = os.path.join(dst, ".github", "workflows", "deploy-site.yml")
     if not os.path.isfile(path):
@@ -1831,15 +1841,27 @@ def _reconcile_pages_deploy_workflow(dst: str) -> int:
             text = fh.read()
     except OSError:
         return 0
-    needle = """          mkdir -p _site/docs
+    posix_copy = "          cp scripts/install.sh _site/install.sh\n"
+    windows_copy = "          cp scripts/install.ps1 _site/install.ps1\n"
+    has_ps1 = os.path.isfile(os.path.join(dst, "scripts", "install.ps1"))
+    copies = posix_copy + (windows_copy if has_ps1 else "")
+    staging = """          mkdir -p _site/docs
           cp -r website/build/* _site/docs/
 """
-    replacement = """          mkdir -p _site/docs
-          cp -r website/build/* _site/docs/
-          # The docs build is staged under /docs/, while installers and legacy
+    if posix_copy in text:
+        if windows_copy in text or not has_ps1:
+            return 0
+        updated = text.replace(posix_copy, copies, 1)
+    else:
+        if staging not in text:
+            return 0  # upstream rewrote the staging step; theirs is authoritative
+        replacement = (
+            staging
+            + """          # The docs build is staged under /docs/, while installers and legacy
           # links are intentionally published at the project root.
-          cp scripts/install.sh _site/install.sh
-          cat > _site/index.html <<'HTML'
+"""
+            + copies
+            + """          cat > _site/index.html <<'HTML'
           <!doctype html>
           <meta charset=\"utf-8\">
           <meta http-equiv=\"refresh\" content=\"0; url=./docs/\">
@@ -1848,10 +1870,12 @@ def _reconcile_pages_deploy_workflow(dst: str) -> int:
           <p><a href=\"./docs/\">Open Nastech Agent documentation</a></p>
           HTML
 """
-    if needle not in text or replacement in text:
+        )
+        updated = text.replace(staging, replacement, 1)
+    if updated == text:
         return 0
     with open(path, "w", encoding="utf-8") as fh:
-        fh.write(text.replace(needle, replacement, 1))
+        fh.write(updated)
     return 1
 
 
