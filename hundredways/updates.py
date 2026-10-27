@@ -6702,6 +6702,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     for rel in _reconcile_free_runner_parallelism(dst):
         result.total += 1
         result.fixed.append(rel)
+    for rel in _reconcile_free_runner_js_lane(dst):
+        result.total += 1
+        result.fixed.append(rel)
     for rel in _reconcile_unsigned_darwin_build_env(dst):
         result.total += 1
         result.fixed.append(rel)
@@ -9753,5 +9756,165 @@ def _reconcile_free_runner_parallelism(dst: str) -> list[str]:
                 "plain Windows row, which is why the rule used to delete it; the "
                 "arm64 legs are real coverage now, so re-derive the exact matrix "
                 "block against upstream instead of dropping the rows.")
+
+    return fixed
+
+
+# -- the JS lane -------------------------------------------------------------
+# Upstream's own comment in this file explains why it is one job: a 14-leg
+# matrix paid ~371 s of repeated setup to spread ~612 s of check payload, and a
+# 32-core host sizes vitest, tsc and eslint from the core count instead.  The
+# fork has no Blacksmith account, so ``_normalize_blacksmith`` lands the same
+# job on a free 4-core image, and one unit became the whole job.  Measured on
+# PR #172 (run 40496660072, job 122163805252): ``apps/desktop :: check:test:ui``
+# ran 1,684.3 s of the 1,682.5 s payload, all 1,423 files and 12,189 tests had
+# passed, and the job was still cancelled at its own ``timeout-minutes: 30``
+# while the trailing checkout-cleanliness step ran.  The other nine units
+# together took 1,043.4 s and finish inside the long unit's shadow, so the only
+# leg worth splitting is the UI suite -- and vitest shards files natively.
+_FREE_JS_UI_LEGS = 4
+_FREE_JS_UI_UNIT = "apps/desktop::check:test:ui"
+
+_UPSTREAM_JS_CHECK_NAME = "  check:\n    name: JS & TS checks\n"
+_FREE_JS_CHECK_NAME = (
+    "  check:\n"
+    "    name: JS & TS checks (${{ matrix.leg }})\n"
+    "    # The fork's runners are the free 4-core images, where this job's whole\n"
+    "    # payload is one unit: apps/desktop check:test:ui measured 1,684.3 s of a\n"
+    "    # 1,682.5 s job and was cancelled at the 30-minute cap below with every\n"
+    "    # test already passing (PR #172, job 122163805252). That unit is split\n"
+    "    # across legs with vitest's own --shard; the cap is not raised.\n"
+    "    strategy:\n"
+    "      fail-fast: false\n"
+    "      matrix:\n"
+    "        include:\n"
+    "          - leg: workspace\n"
+    "            ui_shard: ''\n"
+)
+_UPSTREAM_JS_STEP = (
+    "      - name: Run all workspace checks\n"
+    "        run: node .github/scripts/run-workspace-checks.mjs\n"
+)
+_FREE_JS_STEP_MARKER = "          JS_CHECK_SKIP: "
+_FREE_JS_SCRIPT_MARKER = "const skip = (process.env.JS_CHECK_SKIP || '')"
+
+
+def _free_js_matrix() -> str:
+    """The matrix legs: the workspace leg plus one leg per UI shard."""
+    legs = []
+    for index in range(1, _FREE_JS_UI_LEGS + 1):
+        legs.append(
+            f"          - leg: ui-{index}\n"
+            f"            ui_shard: {index}/{_FREE_JS_UI_LEGS}\n"
+        )
+    return "".join(legs)
+
+
+def _free_js_step() -> str:
+    """The two mutually exclusive check steps, one per leg kind."""
+    return (
+        "      - name: Run all workspace checks\n"
+        "        if: matrix.ui_shard == ''\n"
+        "        env:\n"
+        f"          JS_CHECK_SKIP: {_FREE_JS_UI_UNIT}\n"
+        "        run: node .github/scripts/run-workspace-checks.mjs\n"
+        "      - name: Run the desktop UI suite for this shard\n"
+        "        if: matrix.ui_shard != ''\n"
+        "        # The leaf script, not the ``check:test:ui`` wrapper: npm swallows\n"
+        "        # an appended flag before a chained ``npm run`` instead of passing\n"
+        "        # it to vitest.\n"
+        "        run: npm run --prefix apps/desktop test:ui -- "
+        "--shard=${{ matrix.ui_shard }}\n"
+    )
+
+
+_JS_SKIP_SEAM = (
+    "  // A CI leg subtracts units it has spread over other legs, so one long\n"
+    "  // unit can run on several runners without every leg re-running the rest.\n"
+    "  // Discovery stays automatic: a new package or check script needs no\n"
+    "  // change here.  A skip that matches no unit is an error, because a leg\n"
+    "  // that quietly checks nothing reports green.\n"
+    "  const skip = (process.env.JS_CHECK_SKIP || '').split(',').filter(Boolean)\n"
+    "  if (!skip.length) return units\n"
+    "  const labels = new Set(units.map((u) => `${u.pkg}::${u.script}`))\n"
+    "  const unmatched = skip.filter((label) => !labels.has(label))\n"
+    "  if (unmatched.length) {\n"
+    "    console.error(\n"
+    "      `::error::JS_CHECK_SKIP names ${unmatched.join(', ')} but no unit "
+    "matches`,\n"
+    "    )\n"
+    "    process.exit(1)\n"
+    "  }\n"
+    "  return units.filter((u) => !skip.includes(`${u.pkg}::${u.script}`))\n"
+)
+
+
+def _reconcile_free_runner_js_lane(dst: str) -> list[str]:
+    """Split the branded JS lane's one long unit across free 4-core runners.
+
+    See :data:`_FREE_JS_UI_LEGS` for the measurement.  Nothing here loosens a
+    budget: ``timeout-minutes: 30`` and vitest's per-test timeouts stay exactly
+    as upstream sets them, and every unit still runs -- four legs now share the
+    unit that used to define the job's wall clock.
+
+    Raises :class:`FreeRunnerParallelismError` when either file matches neither
+    the upstream shape nor the fork's fixed point, because the next sync would
+    otherwise re-publish the same 30-minute cancellation.
+    """
+    script_rel = ".github/scripts/run-workspace-checks.mjs"
+    workflow_rel = ".github/workflows/js-tests.yml"
+    script = _reconcile_budget_read(dst, script_rel)
+    text = _reconcile_budget_read(dst, workflow_rel)
+    if text is None or script is None:
+        return []
+
+    script_has_seam = _FREE_JS_SCRIPT_MARKER in script
+    workflow_is_fork = _FREE_JS_STEP_MARKER in text and _free_js_matrix() in text
+    if workflow_is_fork and not script_has_seam:
+        raise FreeRunnerParallelismError(
+            f"{workflow_rel} is sharded across legs but {script_rel} lost the "
+            "JS_CHECK_SKIP seam, so every leg would re-run the whole suite and "
+            "the job would hit timeout-minutes: 30 again. Re-derive the seam."
+        )
+    if script_has_seam and not workflow_is_fork:
+        raise FreeRunnerParallelismError(
+            f"{script_rel} carries the JS_CHECK_SKIP seam but {workflow_rel} "
+            "is not the sharded shape. The seam would then be dead code, which "
+            "means the fork silently reverted to the single long-pole job."
+        )
+
+    fixed: list[str] = []
+    if not script_has_seam:
+        if "\n  return units\n}\n" not in script:
+            raise FreeRunnerParallelismError(
+                f"{script_rel} no longer returns its discovered units at "
+                "`  return units`, so the JS_CHECK_SKIP seam has no anchor. "
+                "Re-derive it against upstream's current script; do not instead "
+                "raise the job's timeout-minutes, which is the cap this rule "
+                "exists to fit."
+            )
+        _reconcile_budget_write(
+            dst, script_rel,
+            script.replace("\n  return units\n}\n", "\n" + _JS_SKIP_SEAM + "}\n", 1),
+        )
+        fixed.append(script_rel)
+
+    if not workflow_is_fork:
+        for anchor, what in (
+            (_UPSTREAM_JS_CHECK_NAME, "the `check` job header"),
+            (_UPSTREAM_JS_STEP, "the `Run all workspace checks` step"),
+        ):
+            if anchor not in text:
+                raise FreeRunnerParallelismError(
+                    f"{workflow_rel} changed {what}, so the JS lane sharding has "
+                    "no anchor. Re-derive it against upstream's current "
+                    "js-tests.yml."
+                )
+        updated = text.replace(
+            _UPSTREAM_JS_CHECK_NAME, _FREE_JS_CHECK_NAME + _free_js_matrix(), 1
+        )
+        updated = updated.replace(_UPSTREAM_JS_STEP, _free_js_step(), 1)
+        _reconcile_budget_write(dst, workflow_rel, updated)
+        fixed.append(workflow_rel)
 
     return fixed

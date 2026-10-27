@@ -102,6 +102,7 @@ from hundredways.updates import (
     _reconcile_fork_skill_catalogs,
     _reconcile_fork_skill_sidebars,
     _reconcile_fork_lane_release_surface,
+    _reconcile_free_runner_js_lane,
     _reconcile_free_runner_parallelism,
     _reconcile_gateway_allowlist_live_reload,
     _reconcile_gateway_plugin_gate_native_ticket,
@@ -620,6 +621,107 @@ def test_free_runner_parallelism_stops_when_the_windows_rows_move(tmp_path):
     )
     with pytest.raises(FreeRunnerParallelismError, match="arm64"):
         _reconcile_free_runner_parallelism(str(candidate))
+
+
+def _free_runner_js_lane_tree(tmp_path):
+    """A branded candidate tree carrying upstream's JS lane job and script."""
+    candidate = tmp_path / "candidate"
+    scripts = candidate / ".github" / "scripts"
+    workflows = candidate / ".github" / "workflows"
+    scripts.mkdir(parents=True)
+    workflows.mkdir(parents=True)
+    (workflows / "js-tests.yml").write_text(
+        "jobs:\n"
+        "  check:\n"
+        "    name: JS & TS checks\n"
+        "    runs-on: ubuntu-latest\n"
+        "    timeout-minutes: 30\n"
+        "    steps:\n"
+        "      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a\n"
+        "      - name: Run all workspace checks\n"
+        "        run: node .github/scripts/run-workspace-checks.mjs\n"
+        "      - name: Check the checkout is clean\n"
+        "        uses: ./.github/actions/check-clean-worktree\n",
+        encoding="utf-8",
+    )
+    (scripts / "run-workspace-checks.mjs").write_text(
+        "/** @returns {{pkg: string, script: string}[]} */\n"
+        "function discoverUnits() {\n"
+        "  const units = []\n"
+        "  return units\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    return candidate, workflows, scripts
+
+
+def test_free_runner_js_lane_shards_the_one_long_unit(tmp_path):
+    """The UI suite spreads over legs; the job's 30-minute cap does not move.
+
+    Measured on PR #172 job 122163805252: ``apps/desktop :: check:test:ui`` ran
+    1,684.3 s of a 1,682.5 s job, every one of its 12,189 tests passing, and the
+    job was still cancelled at the cap.  Splitting that unit is the only edit
+    that fits it, because the other nine units finish inside its shadow.
+    """
+    candidate, workflows, scripts = _free_runner_js_lane_tree(tmp_path)
+    changed = _reconcile_free_runner_js_lane(str(candidate))
+    assert set(changed) == {
+        ".github/scripts/run-workspace-checks.mjs",
+        ".github/workflows/js-tests.yml",
+    }
+    text = (workflows / "js-tests.yml").read_text(encoding="utf-8")
+    assert "    timeout-minutes: 30\n" in text
+    assert "        include:\n          - leg: workspace\n" in text
+    for leg in range(1, 5):
+        assert f"            ui_shard: {leg}/4\n" in text
+    assert "          JS_CHECK_SKIP: apps/desktop::check:test:ui\n" in text
+    assert "        run: npm run --prefix apps/desktop test:ui -- " \
+           "--shard=${{ matrix.ui_shard }}\n" in text
+    # The lane contract: the cleanliness step stays the last step of the job.
+    assert text.rstrip().endswith("uses: ./.github/actions/check-clean-worktree")
+    seam = (scripts / "run-workspace-checks.mjs").read_text(encoding="utf-8")
+    assert "  return units\n" not in seam
+    assert "JS_CHECK_SKIP" in seam
+    assert _reconcile_free_runner_js_lane(str(candidate)) == []
+
+
+def test_free_runner_js_lane_stops_when_the_skip_seam_is_missing(tmp_path):
+    """Legs without the seam re-run every unit, which is the original timeout."""
+    candidate, workflows, scripts = _free_runner_js_lane_tree(tmp_path)
+    _reconcile_free_runner_js_lane(str(candidate))
+    (scripts / "run-workspace-checks.mjs").write_text(
+        "function discoverUnits() {\n  const units = []\n  return units\n}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(FreeRunnerParallelismError, match="JS_CHECK_SKIP"):
+        _reconcile_free_runner_js_lane(str(candidate))
+
+
+def test_free_runner_js_lane_stops_when_the_workflow_is_not_sharded(tmp_path):
+    """A seam nobody calls means the fork reverted to the single long-pole job."""
+    candidate, workflows, _scripts = _free_runner_js_lane_tree(tmp_path)
+    _reconcile_free_runner_js_lane(str(candidate))
+    (workflows / "js-tests.yml").write_text(
+        "jobs:\n"
+        "  check:\n"
+        "    name: JS & TS checks\n"
+        "    runs-on: ubuntu-latest\n"
+        "    timeout-minutes: 30\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(FreeRunnerParallelismError, match="dead code"):
+        _reconcile_free_runner_js_lane(str(candidate))
+
+
+def test_free_runner_js_lane_stops_when_the_step_anchor_moves(tmp_path):
+    candidate, workflows, scripts = _free_runner_js_lane_tree(tmp_path)
+    path = scripts / "run-workspace-checks.mjs"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("  return units\n", "  return []\n"),
+        encoding="utf-8",
+    )
+    with pytest.raises(FreeRunnerParallelismError, match="anchor|return units"):
+        _reconcile_free_runner_js_lane(str(candidate))
 
 
 def _browse_budget_tree(tmp_path, text):
