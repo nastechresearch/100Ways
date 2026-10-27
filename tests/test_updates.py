@@ -139,6 +139,21 @@ from hundredways.updates import (
     _FIFO_COMPACTION_EDITS,
     _FIFO_COMPACTION_TEST_REL,
     FifoCompactionTriggerMarginError,
+    _reconcile_termux_build_toolchain,
+    _TERMUX_BUILD_TOOLCHAIN_AFTER,
+    _TERMUX_BUILD_TOOLCHAIN_BEFORE,
+    _TERMUX_BUILD_TOOLCHAIN_REL,
+    TermuxBuildToolchainError,
+    _reconcile_termux_tui_setup_gate,
+    _TERMUX_TUI_SETUP_GATE_EDITS,
+    _TERMUX_TUI_SETUP_GATE_REL,
+    TermuxTuiSetupGateError,
+    _reconcile_canary_unsigned_dispatch,
+    _CANARY_DISPATCH_INPUT_BEFORE,
+    _CANARY_DISPATCH_INPUT_AFTER,
+    _CANARY_RELEASE_PY_BEFORE,
+    _CANARY_RELEASE_PY_AFTER,
+    CanaryUnsignedDispatchError,
     _WINDOWS_SUSPEND_BUDGET_S,
     _WINDOWS_SUSPEND_ONE_SHOT,
     _WINDOWS_SUSPEND_TEST_REL,
@@ -1537,6 +1552,310 @@ def test_fifo_compaction_margin_registered_in_reconcile_tree(tmp_path):
     result = reconcile_tree(str(candidate))
     assert _FIFO_COMPACTION_TEST_REL in result.fixed
     assert "and len(wire) > 90000:" in path.read_text(encoding="utf-8")
+
+
+_TERMUX_TOOLCHAIN_TEXT = (
+    "jobs:\n"
+    "  termux-deb:\n"
+    "    runs-on: ubuntu-24.04-arm\n"
+    "    steps:\n"
+    "      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1\n"
+    "\n"
+    "      - name: Set up the locked build toolchain\n"
+    "        id: pm\n"
+    "        uses: ./.github/actions/setup-pm\n"
+    "        with:\n"
+    "          toolchain: python\n"
+    "          archive-inputs: true\n"
+    "          cache-python: false\n"
+    "\n"
+    "      - name: Derive the channel from the tag\n"
+    "        run: echo ok\n"
+)
+
+
+def _termux_toolchain_candidate(tmp_path, *, text=None):
+    candidate = tmp_path / "candidate"
+    path = candidate / _TERMUX_BUILD_TOOLCHAIN_REL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_TERMUX_TOOLCHAIN_TEXT if text is None else text, encoding="utf-8")
+    return candidate, path
+
+
+def test_termux_build_toolchain_installs_the_locked_node(tmp_path):
+    """The TUI build runs bare ``node``; without the locked Node it is the runner's 22."""
+    candidate, path = _termux_toolchain_candidate(tmp_path)
+
+    assert _reconcile_termux_build_toolchain(str(candidate)) is True
+
+    text = path.read_text(encoding="utf-8")
+    assert "          toolchain: all\n" in text
+    assert "          toolchain: python\n" not in text
+    assert "cache-python: false\n" in text  # the rest of the block is untouched
+
+
+def test_termux_build_toolchain_leaves_every_other_byte_alone(tmp_path):
+    candidate, path = _termux_toolchain_candidate(tmp_path)
+    assert _reconcile_termux_build_toolchain(str(candidate)) is True
+
+    text = path.read_text(encoding="utf-8")
+    restored = text.replace(_TERMUX_BUILD_TOOLCHAIN_AFTER, _TERMUX_BUILD_TOOLCHAIN_BEFORE, 1)
+    assert restored == _TERMUX_TOOLCHAIN_TEXT
+
+
+def test_termux_build_toolchain_is_a_fixed_point(tmp_path):
+    candidate, path = _termux_toolchain_candidate(tmp_path)
+    assert _reconcile_termux_build_toolchain(str(candidate)) is True
+    once = path.read_text(encoding="utf-8")
+    assert _reconcile_termux_build_toolchain(str(candidate)) is False
+    assert path.read_text(encoding="utf-8") == once
+
+
+def test_termux_build_toolchain_raises_when_the_step_moves(tmp_path):
+    """A moved anchor stops the sync instead of shipping a build that cannot resolve Node."""
+    text = _TERMUX_TOOLCHAIN_TEXT.replace(
+        "          toolchain: python\n", "          toolchain: python3\n"
+    )
+    candidate, path = _termux_toolchain_candidate(tmp_path, text=text)
+
+    with pytest.raises(TermuxBuildToolchainError) as excinfo:
+        _reconcile_termux_build_toolchain(str(candidate))
+
+    message = str(excinfo.value)
+    assert _TERMUX_BUILD_TOOLCHAIN_REL in message
+    assert "node 22.23.3" in message
+    assert path.read_text(encoding="utf-8") == text
+
+
+def test_termux_build_toolchain_stands_down_when_the_job_is_gone(tmp_path):
+    bare = "jobs:\n  lint:\n    runs-on: ubuntu-latest\n"
+    candidate, path = _termux_toolchain_candidate(tmp_path, text=bare)
+    assert _reconcile_termux_build_toolchain(str(candidate)) is False
+    assert path.read_text(encoding="utf-8") == bare
+
+
+def test_termux_build_toolchain_absent_file_is_a_no_op(tmp_path):
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    assert _reconcile_termux_build_toolchain(str(candidate)) is False
+
+
+def test_termux_build_toolchain_registered_in_reconcile_tree():
+    """``reconcile_tree`` must dispatch it; the real workflow carries other rules' anchors."""
+    assert _reconcile_termux_build_toolchain.__name__ in _names_called_inside(
+        updates, "reconcile_tree"
+    )
+
+
+_TERMUX_TUI_TEXT = (
+    "import type { SetupStatusResponse } from './types'\n"
+    "\n"
+    "export function useSessionLifecycle(gw: Gateway, rpc: Rpc) {\n"
+    "  const create = async () => {\n"
+    "    try {\n"
+    "        const setup = gw.isCanonical ? null : "
+    "await rpc<SetupStatusResponse>('setup.status', {})\n"
+    "      if (setup?.provider_configured === false) {\n"
+    "        return null\n"
+    "      }\n"
+    "    } catch {\n"
+    "      return null\n"
+    "    }\n"
+    "  }\n"
+    "  const resume = async (id: string) => {\n"
+    "      return (gw.isCanonical ? Promise.resolve(null) : "
+    "rpc<SetupStatusResponse>('setup.status', {}))\n"
+    "      .then(setup => setup)\n"
+    "  }\n"
+    "  return { create, resume }\n"
+    "}\n"
+)
+
+
+def _termux_tui_candidate(tmp_path, *, text=None):
+    candidate = tmp_path / "candidate"
+    path = candidate / _TERMUX_TUI_SETUP_GATE_REL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_TERMUX_TUI_TEXT if text is None else text, encoding="utf-8")
+    return candidate, path
+
+
+def test_termux_tui_setup_gate_asks_every_transport(tmp_path):
+    """A canonical TUI that skips ``setup.status`` creates a session with no model."""
+    candidate, path = _termux_tui_candidate(tmp_path)
+
+    assert _reconcile_termux_tui_setup_gate(str(candidate)) is True
+
+    text = path.read_text(encoding="utf-8")
+    for before, after in _TERMUX_TUI_SETUP_GATE_EDITS:
+        assert before not in text
+        assert after in text or after.strip() in text
+
+
+def test_termux_tui_setup_gate_leaves_every_other_byte_alone(tmp_path):
+    candidate, path = _termux_tui_candidate(tmp_path)
+    assert _reconcile_termux_tui_setup_gate(str(candidate)) is True
+
+    text = path.read_text(encoding="utf-8")
+    for before, after in _TERMUX_TUI_SETUP_GATE_EDITS:
+        text = text.replace(after, before, 1)
+    assert text == _TERMUX_TUI_TEXT
+
+
+def test_termux_tui_setup_gate_is_a_fixed_point(tmp_path):
+    candidate, path = _termux_tui_candidate(tmp_path)
+    assert _reconcile_termux_tui_setup_gate(str(candidate)) is True
+    once = path.read_text(encoding="utf-8")
+    assert _reconcile_termux_tui_setup_gate(str(candidate)) is False
+    assert path.read_text(encoding="utf-8") == once
+
+
+def test_termux_tui_setup_gate_raises_when_one_site_moves(tmp_path):
+    """Half a gate is worse than none: a moved site stops the sync."""
+    text = _TERMUX_TUI_TEXT.replace(
+        "      return (gw.isCanonical ? Promise.resolve(null) : "
+        "rpc<SetupStatusResponse>('setup.status', {}))\n",
+        "      return lookupSetup()\n",
+    )
+    candidate, path = _termux_tui_candidate(tmp_path, text=text)
+
+    with pytest.raises(TermuxTuiSetupGateError) as excinfo:
+        _reconcile_termux_tui_setup_gate(str(candidate))
+
+    assert _TERMUX_TUI_SETUP_GATE_REL in str(excinfo.value)
+    assert "storage_unavailable" in str(excinfo.value)
+    assert path.read_text(encoding="utf-8") == text
+
+
+def test_termux_tui_setup_gate_raises_when_one_call_is_rewritten(tmp_path):
+    """A half-applied gate is worse than none: it stops the sync."""
+    text = _TERMUX_TUI_TEXT.replace(
+        "        const setup = gw.isCanonical ? null : "
+        "await rpc<SetupStatusResponse>('setup.status', {})\n",
+        "        const setup = await lookupSetup()\n",
+    )
+    candidate, path = _termux_tui_candidate(tmp_path, text=text)
+    assert "gw.isCanonical ? null" not in text
+    assert "gw.isCanonical ? Promise.resolve(null)" in text
+    with pytest.raises(TermuxTuiSetupGateError):
+        _reconcile_termux_tui_setup_gate(str(candidate))
+
+
+def test_termux_tui_setup_gate_stands_down_when_upstream_dropped_the_skip(tmp_path):
+    """Neither guarded call left: upstream owns the gate again."""
+    bare = (
+        "export function useSessionLifecycle(gw: Gateway, rpc: Rpc) {\n"
+        "  const setup = await rpc<SetupStatusResponse>('setup.status', {})\n"
+        "  return setup\n"
+        "}\n"
+    )
+    candidate, path = _termux_tui_candidate(tmp_path, text=bare)
+    assert _reconcile_termux_tui_setup_gate(str(candidate)) is False
+    assert path.read_text(encoding="utf-8") == bare
+
+
+def test_termux_tui_setup_gate_absent_file_is_a_no_op(tmp_path):
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    assert _reconcile_termux_tui_setup_gate(str(candidate)) is False
+
+
+def test_termux_tui_setup_gate_registered_in_reconcile_tree():
+    assert _reconcile_termux_tui_setup_gate.__name__ in _names_called_inside(
+        updates, "reconcile_tree"
+    )
+
+
+_CANARY_WORKFLOW_TEXT = (
+    "on:\n"
+    "  workflow_dispatch:\n"
+    "    inputs:\n"
+    "      tag:\n"
+    "        type: string\n"
+    "      upload_release:\n"
+    "        description: 'Upload artifacts to the R2 release bucket (staging + feeds)'\n"
+    "        required: false\n"
+    "        type: boolean\n"
+    "        default: false\n"
+    "\n"
+    "permissions:\n"
+    "  contents: write\n"
+)
+_CANARY_RELEASE_TEXT = (
+    "def dispatch(tag, canary):\n"
+    "    cmd = ['gh', 'workflow', 'run', 'desktop-bundled-release.yml', '--ref', 'main']\n"
+    "    if canary:\n"
+    "        cmd += [\"-f\", \"upload_release=true\"]\n"
+    "    return cmd\n"
+)
+
+
+def _canary_candidate(tmp_path, *, workflow=None, release_py=None):
+    candidate = tmp_path / "candidate"
+    wf = candidate / ".github/workflows/desktop-bundled-release.yml"
+    rp = candidate / "scripts/release.py"
+    wf.parent.mkdir(parents=True, exist_ok=True)
+    rp.parent.mkdir(parents=True, exist_ok=True)
+    wf.write_text(_CANARY_WORKFLOW_TEXT if workflow is None else workflow, encoding="utf-8")
+    rp.write_text(_CANARY_RELEASE_TEXT if release_py is None else release_py, encoding="utf-8")
+    return candidate, wf, rp
+
+
+def test_canary_unsigned_dispatch_exposes_skip_signed_and_passes_it(tmp_path):
+    """A dispatched unsigned fork must be able to say so, or it stops at the credential gates."""
+    candidate, wf, rp = _canary_candidate(tmp_path)
+
+    changed = _reconcile_canary_unsigned_dispatch(str(candidate))
+
+    assert sorted(changed) == [
+        ".github/workflows/desktop-bundled-release.yml",
+        "scripts/release.py",
+    ]
+    assert _CANARY_DISPATCH_INPUT_AFTER.strip() in wf.read_text(encoding="utf-8")
+    assert _CANARY_RELEASE_PY_AFTER.strip() in rp.read_text(encoding="utf-8")
+
+
+def test_canary_unsigned_dispatch_leaves_every_other_byte_alone(tmp_path):
+    candidate, wf, rp = _canary_candidate(tmp_path)
+    _reconcile_canary_unsigned_dispatch(str(candidate))
+    assert wf.read_text(encoding="utf-8").replace(
+        _CANARY_DISPATCH_INPUT_AFTER, _CANARY_DISPATCH_INPUT_BEFORE, 1
+    ) == _CANARY_WORKFLOW_TEXT
+    assert rp.read_text(encoding="utf-8").replace(
+        _CANARY_RELEASE_PY_AFTER, _CANARY_RELEASE_PY_BEFORE, 1
+    ) == _CANARY_RELEASE_TEXT
+
+
+def test_canary_unsigned_dispatch_is_a_fixed_point(tmp_path):
+    candidate, wf, rp = _canary_candidate(tmp_path)
+    assert _reconcile_canary_unsigned_dispatch(str(candidate)) != []
+    once = (wf.read_text(encoding="utf-8"), rp.read_text(encoding="utf-8"))
+    assert _reconcile_canary_unsigned_dispatch(str(candidate)) == []
+    assert (wf.read_text(encoding="utf-8"), rp.read_text(encoding="utf-8")) == once
+
+
+def test_canary_unsigned_dispatch_raises_when_the_dispatch_moves(tmp_path):
+    text = _CANARY_RELEASE_TEXT.replace("upload_release=true", "upload_release=false")
+    candidate, wf, rp = _canary_candidate(tmp_path, release_py=text)
+
+    with pytest.raises(CanaryUnsignedDispatchError) as excinfo:
+        _reconcile_canary_unsigned_dispatch(str(candidate))
+
+    assert "release.py" in str(excinfo.value)
+    assert "CSC_LINK" in str(excinfo.value) or "AZURE_SIGN" in str(excinfo.value)
+    assert rp.read_text(encoding="utf-8") == text
+
+
+def test_canary_unsigned_dispatch_absent_files_are_a_no_op(tmp_path):
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    assert _reconcile_canary_unsigned_dispatch(str(candidate)) == []
+
+
+def test_canary_unsigned_dispatch_registered_in_reconcile_tree():
+    assert _reconcile_canary_unsigned_dispatch.__name__ in _names_called_inside(
+        updates, "reconcile_tree"
+    )
 
 
 def test_windows_real_git_locate_picks_every_git_for_windows_layout(tmp_path):
