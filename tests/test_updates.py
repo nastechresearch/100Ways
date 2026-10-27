@@ -43,6 +43,8 @@ from hundredways.updates import (
     UnsignedDarwinBuildEnvError,
     WindowsRealGitLocateError,
     _BROWSE_BUDGET_EDITS,
+    _BROWSE_OVERSLEEP_SKIP,
+    _BROWSE_STARTUP_SKIP,
     _BROWSE_BUDGET_TEST_REL,
     _CONFTEST,
     _DOCS_PUBLIC_ORIGIN,
@@ -713,8 +715,14 @@ class _DrivenClock:
         self.now += seconds + self.late_by
 
 
-def _run_budget_block(text, frame, budget_s=3.0, wait_s=5.0):
-    """Exec the produced bound block against one child frame; returns its namespace or raises."""
+def _run_budget_block(text, frame, budget_s=3.0, wait_s=20.0):
+    """Exec the produced bound block against one child frame; returns its namespace or raises.
+
+    ``wait_s`` is deliberately far above the boot value the parent reads in production: these
+    callers drive the charge arithmetic, and the host escapes in front of it are pinned by their own
+    tests. A frame replaying a real red (2.9 s of oversleep against a 2 s margin) would otherwise be
+    skipped as starved before the bound under test ever runs.
+    """
 
     def _skip(message):
         raise _BudgetSkip(message)
@@ -738,7 +746,9 @@ def test_browse_budget_flock_tests_rebuild_the_host_aware_bounds(tmp_path):
     fork's macOS lane.
     """
     pre = _browse_budget_pre()
-    expected = "".join(after for _, after in _BROWSE_BUDGET_EDITS) + _BROWSE_BUDGET_PIN
+    expected = (
+        "".join(after for _, after in _BROWSE_BUDGET_EDITS) + _BROWSE_BUDGET_PIN
+    ).replace(_BROWSE_STARTUP_SKIP, _BROWSE_OVERSLEEP_SKIP, 1)
     candidate, path = _browse_budget_tree(tmp_path, pre)
 
     assert _reconcile_browse_budget_flock_tests(str(candidate)) is True
@@ -1001,19 +1011,40 @@ def test_browse_budget_bound_and_constants_survive_the_rewrite(tmp_path):
 
 
 def test_browse_budget_host_skip_did_not_get_broader(tmp_path):
-    """The only skip paths are the two the rule shipped with, on the predicates it shipped with.
+    """Every skip is a measured one: no unconditional escape, no skipif, no xfail.
 
-    A lane that skips by asserting nothing is worse than a red one, so this pins the skip count and
-    the predicate: the host escape is still keyed on measured process hand-off and startup, never
-    on the lateness the child is allowed to report.
+    A lane that skips by asserting nothing is worse than a red one. The three escapes are keyed on
+    measurements the child itself reports -- hand-off latency, startup outside the budgeted phase,
+    and scheduler oversleep accrued *inside* the window (``late - late_at``, never the whole
+    ``late``) -- and each fires only against ``margin``, the seconds between the browse budget and
+    boot's wait.
     """
     text = _browse_budget_rewritten(tmp_path)
-    assert text.count("pytest.skip(") == 2
+    assert text.count("pytest.skip(") == 3
     assert "pytest.skip_if" not in text and "skipif" not in text and "xfail" not in text
-    guard = next(line for line in text.splitlines() if "startup > margin" in line)
-    assert guard == "    if window >= 0 and startup > margin:"
-    assert "late" not in guard and "callbacks" not in guard
+    guards = [line.strip() for line in text.splitlines() if line.rstrip().endswith("> margin:")]
+    assert guards == [
+        "if window >= 0 and startup > margin:",
+        "if window >= 0 and late - late_at > margin:",
+    ]
+    assert "if latency > _SLOW_HANDOFF_SKIP_S:" in text
     assert "    margin = wait_s - budget_s" in text
+    # The oversleep credit is window-scoped: the process-wide counter alone would zero the charge.
+    assert "late - late_at > margin" in text
+    assert "late > margin" not in text
+
+
+def test_browse_budget_oversleep_skip_reaches_an_already_rewritten_tree(tmp_path):
+    """A tree carrying the older rewrite gains the skip; the next pass is a no-op."""
+    legacy = "".join(after for _, after in _BROWSE_BUDGET_EDITS) + _BROWSE_BUDGET_PIN
+    candidate, path = _browse_budget_tree(tmp_path, legacy)
+
+    assert _reconcile_browse_budget_flock_tests(str(candidate)) is True
+    text = path.read_text(encoding="utf-8")
+    assert "if window >= 0 and late - late_at > margin:" in text
+    assert text.count("pytest.skip(") == 3
+    assert _reconcile_browse_budget_flock_tests(str(candidate)) is False
+    assert path.read_text(encoding="utf-8") == text
 
 
 def test_browse_budget_flock_reconcile_is_registered_in_reconcile_tree(tmp_path):

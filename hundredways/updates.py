@@ -4053,6 +4053,25 @@ _BROWSE_BUDGET_TEST_REL = "tests/nastech_cli/test_browse_schema_drift.py"
 #: Only the rewritten file has it: the helper that times the host's lock hand-off.
 _BROWSE_BUDGET_TEST_MARKER = "def _hold_release_latency("
 
+#: The startup skip the rewrite has installed since #130, and the same block plus the oversleep
+#: skip added when a starved runner was measured blowing the browse budget from inside it.  Kept
+#: out of ``_BROWSE_BUDGET_EDITS`` because the second is the first's *output*: as a pair it would
+#: make the fixtures' pre-image carry the block twice.
+_BROWSE_STARTUP_SKIP = (
+    "    if window >= 0 and startup > margin:\n"
+    '        pytest.skip(f"this host spent {startup:.2f} s outside the budgeted '
+    'phase, more than the "\n'
+    '                    f"{margin:.1f} s between the browse budget and '
+    'boot\'s wait ({out})")\n'
+)
+_BROWSE_OVERSLEEP_SKIP = _BROWSE_STARTUP_SKIP + (
+    "    if window >= 0 and late - late_at > margin:\n"
+    '        pytest.skip(f"this host overslept the fixture\'s injected delay by '
+    '{late - late_at:.2f} s, "\n'
+    '                    f"more than the {margin:.1f} s between the browse budget and '
+    'boot\'s wait ({out})")\n'
+)
+
 # Upstream's three flock-budget tests, rewritten for this fork's runners.  Each pair is an
 # exact-literal replacement, so the rewritten file is a fixed point and the next sync cannot
 # half-apply it.
@@ -4323,10 +4342,13 @@ def _reconcile_browse_budget_flock_tests(dst: str) -> bool:
     runs and still fails on a real regression.
     """
     text = _reconcile_budget_read(dst, _BROWSE_BUDGET_TEST_REL)
-    if text is None or _BROWSE_BUDGET_TEST_MARKER in text:
+    if text is None:
         return False
     edited = text
+    changed = False
     for index, (before, after) in enumerate(_BROWSE_BUDGET_EDITS, start=1):
+        if after in edited:
+            continue  # this pair already landed (a tree rewritten before the latest pair)
         if edited.count(before) != 1:
             raise BrowseBudgetFlockTestError(
                 f"{_BROWSE_BUDGET_TEST_REL} no longer matches rewrite "
@@ -4340,6 +4362,25 @@ def _reconcile_browse_budget_flock_tests(dst: str) -> bool:
                 "bound crossed. Re-derive the pairs against upstream's current file, then re-run."
             )
         edited = edited.replace(before, after, 1)
+        changed = True
+    if _BROWSE_OVERSLEEP_SKIP not in edited:
+        # A tree rewritten before the oversleep skip landed carries the startup skip but not this
+        # one; a fresh upstream file reaches here right after the pair above installed it.
+        if edited.count(_BROWSE_STARTUP_SKIP) != 1:
+            raise BrowseBudgetFlockTestError(
+                f"{_BROWSE_BUDGET_TEST_REL} no longer holds the startup skip exactly once, so the "
+                "sync cannot add the oversleep skip beside it. Without it a starved runner is "
+                "charged as a slow product: job 122000139552 (macOS-only 2/2) printed "
+                "'RESULT 503 6.62 6.52 125 5.26 ... within 3s', i.e. the host overslept the "
+                "fixture's injected 10 ms delays by 5.26 s inside a 3 s budget, and the run "
+                "stopped "
+                "at 'boot refused a browse that gave up inside its budget'. Re-derive "
+                "_BROWSE_STARTUP_SKIP against the file the rewrite now produces."
+            )
+        edited = edited.replace(_BROWSE_STARTUP_SKIP, _BROWSE_OVERSLEEP_SKIP, 1)
+        changed = True
+    if not changed:
+        return False
     _reconcile_budget_write(dst, _BROWSE_BUDGET_TEST_REL, edited)
     return True
 
