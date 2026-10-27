@@ -20,9 +20,12 @@ from .assets import OwnedAssets
 from .ci_policy import WorkflowPolicyIssue, audit_workflow_security
 from .rules import (
     BrandingRules,
+    catalog_entry_repo_url,
+    catalog_key_value,
     is_immutable_path,
     is_locked_path,
     preserved_algolia_index_spans,
+    preserved_catalog_subdir_spans,
     preserved_external_url_spans,
     preserved_repo_url_spans,
 )
@@ -299,7 +302,9 @@ def audit_visual_assets(branded_root: str, upstream_root: str) -> list[VisualIss
     return compare_owned_to_upstream(owned.root, owned.mapping.values(), upstream_root)
 
 
-def _allowed_brand_occurrence(token: str, line: str, path: str) -> bool:
+def _allowed_brand_occurrence(
+    token: str, line: str, path: str, catalog_repo: str | None = None
+) -> bool:
     """Return True only for the user's explicit, path-scoped exceptions."""
     lower = line.lower()
     if path.startswith("contributors/names/"):
@@ -321,6 +326,15 @@ def _allowed_brand_occurrence(token: str, line: str, path: str) -> bool:
     # Mirrors brandscan._allowed.
     if any(
         token.lower() in match.group(0).lower() for match in preserved_external_url_spans(line)
+    ):
+        return True
+    # A catalog ``subdir`` names a directory inside the entry's repository, so an
+    # inherited word surviving in one means that repository is not ours.  Scoped
+    # by the document's single ``repo:`` line for the same reason the transform
+    # is.  Mirrors brandscan._allowed.
+    if catalog_repo is not None and any(
+        token.lower() in catalog_key_value(match).lower()
+        for match in preserved_catalog_subdir_spans(line)
     ):
         return True
     if path == "package-lock.json" and token == "hermes":
@@ -361,10 +375,11 @@ def audit_first_party_brand(
         text = index.text(rel)
         if text is None:
             continue
+        catalog_repo = catalog_entry_repo_url(text)
         for number, line in enumerate(text.splitlines(), start=1):
             for match in pattern.finditer(line):
                 token = match.group(1).lower()
-                if not _allowed_brand_occurrence(token, line, rel):
+                if not _allowed_brand_occurrence(token, line, rel, catalog_repo):
                     issues.append(AuditIssue("first-party-brand", rel, f"line {number}: {line.strip()[:180]}"))
     return issues
 
