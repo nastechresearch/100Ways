@@ -832,8 +832,34 @@ def _reconcile_package_lock(dst: str, name: str) -> int:
 # fails TLS).  Order matters for both: each compound must be rewritten
 # BEFORE the bare-domain form, otherwise the `.com` in the middle of the
 # compound would already be gone when the compound rule runs.
-_DOMAIN_FIXES: list[tuple[str, str]] = [
-    # Plain URLs and hostnames.
+# The apex on its own is a *home*, and the bare-domain rule below sends it to
+# the GitHub Pages user root, which serves no site: probed 2026-10-27, the root
+# answers 404 while ``/nastech-agent/`` answers 200.  Only a URL form is
+# rewritten -- an address (``support@nastechresearch.com``) is a mailbox and
+# must keep its domain -- and only when no subdomain label precedes it, because
+# ``portal.nastechresearch.com`` is a different host with its own rule.
+_BARE_APEX_RE = re.compile(
+    r"(?<=//)(?P<apex>nastechresearch\.com)(?![A-Za-z0-9.:-])", re.IGNORECASE
+)
+_APEX_TARGETS = {
+    "nastechresearch.com": "nastechresearch.github.io/nastech-agent",
+    "NastechResearch.com": "NastechResearch.github.io/nastech-agent",
+    "NASTECHRESEARCH.COM": "NASTECHRESEARCH.GITHUB.IO/NASTECH-AGENT",
+}
+
+
+def _fix_bare_apex(text: str) -> str:
+    return _BARE_APEX_RE.sub(
+        lambda match: _APEX_TARGETS.get(match.group("apex"), match.group("apex")),
+        text,
+    )
+
+
+# Undone after the domain pass: see the call site for why.
+_MAILBOX_UNDO = ("@nastechresearch.github.io", "@nastechresearch.com")
+
+
+_DOMAIN_FIXES: list[tuple[str, str]] = [    # Plain URLs and hostnames.
     ("nastech-agent.nastechresearch.com", "nastechresearch.github.io/nastech-agent"),
     # Assets go to the live worker host, not github.io (the bare-domain
     # rule below would otherwise produce the dead
@@ -894,9 +920,18 @@ def _reconcile_domains(dst: str) -> list[str]:
         text = data.decode("utf-8")
         if not any(needle in text for needle, _ in _DOMAIN_FIXES):
             continue
+        # Before the bare-domain rule, so the apex does not become the 404 root.
+        text = _fix_bare_apex(text)
         for needle, replacement in _DOMAIN_FIXES:
             if needle in text:
                 text = text.replace(needle, replacement)
+        # A mailbox is not a website.  The bare-domain rule cannot tell them
+        # apart, so it turned every address into ``@nastechresearch.github.io``
+        # -- a host with no MX record -- across ``.mailmap``, the Cargo and
+        # electron-builder author fields and the contributor scripts (25
+        # occurrences in 8 files at fork 8a7b0eb5d).  A ``.com`` address is at
+        # least a mailbox whose domain the owner may register.
+        text = text.replace(*_MAILBOX_UNDO)
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(text)
         fixed.append(rel)
@@ -6247,13 +6282,18 @@ def _reconcile_guest_identity_stub(dst: str) -> bool:
 # line -- and no Nastech mail domain exists, so the mailbox is dropped in
 # favour of the GitHub Security Advisory channel, which is real and live
 # (302 to sign-in on the fork's advisory page).
+#
+# ``nastechresearch.com`` is unregistered (NXDOMAIN), so an address there is
+# just as dead as one on the Pages host -- and ``_reconcile_domains`` restores
+# ordinary mailboxes to it after the domain pass.  Matching both spellings
+# keeps this rule independent of the order the two passes run in.
+_DEAD_MAIL_DOMAIN = r"(?:[A-Za-z0-9.\-]+\.github\.io|nastechresearch\.com)"
 _SECURITY_MAILBOX_RE = re.compile(
-    r"security@[A-Za-z0-9.\-]+\.github\.io", re.IGNORECASE)
+    rf"security@{_DEAD_MAIL_DOMAIN}", re.IGNORECASE)
 _SECURITY_REPORT_INSTRUCTION_RE = re.compile(
-    r"or \*\*security@[A-Za-z0-9.\-]+\.github\.io\*\*\.")
+    rf"or \*\*security@{_DEAD_MAIL_DOMAIN}\*\*.")
 _SECURITY_CHANNEL_RE = re.compile(
-    r" or email correspondence with\s*\n\s*"
-    r"security@[A-Za-z0-9.\-]+\.github\.io")
+    rf" or email correspondence with\s*\n\s*security@{_DEAD_MAIL_DOMAIN}")
 _NO_MAILBOX_REASON = (
     "only; this fork publishes no mailbox because a `.github.io` domain "
     "has no MX record."
