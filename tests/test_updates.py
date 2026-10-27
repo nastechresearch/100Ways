@@ -3088,16 +3088,23 @@ def test_reconcile_migrates_com_domains_to_github_io(tmp_path):
     with open(os.path.join(res.dir, "README.md"), encoding="utf-8") as fh:
         text = fh.read()
 
-    assert "nastechresearch.com" not in text
-    assert "NastechResearch.com" not in text
+    # No .com *URL* survives; a mailbox keeps its domain, because an address
+    # is not a website and ``@nastechresearch.github.io`` has no MX record.
+    assert "https://nastechresearch.com" not in text
+    assert "nastechresearch.com/" not in text
+    assert "NastechResearch.com/" not in text
 
     # docs compound (org/repo path style, not a subdomain)
     assert "https://nastechresearch.github.io/nastech-agent/docs" in text
     # subdomain forms keep their prefix on github.io
     assert "https://portal.nastechresearch.github.io" in text
     assert "https://inference-api.nastechresearch.github.io/v1" in text
-    # email address follows the same migration
-    assert "nastech@nastechresearch.github.io" in text
+    # An address is not a website: ``github.io`` has no MX record, so a
+    # mailbox must not be dragged onto it (this used to be asserted as the
+    # desired migration -- see ``.mailmap`` and the electron-builder author
+    # field, where a dead address silently breaks attribution).
+    assert "nastech@nastechresearch.com" in text
+    assert "nastech@nastechresearch.github.io" not in text
     # regex-escaped hostnames follow the same migration as literal URLs.
     assert r"ares-3009\.agents\.nastechresearch\.github\.io" in text
     assert r"ares-3009\.agents\.nastechresearch\.com" not in text
@@ -7254,6 +7261,31 @@ def test_reconcile_domains_keeps_the_real_assets_worker_host(tmp_path):
     assert "https://nastech-assets.nastechresearch.workers.dev/upstream/sha256/abc" in text
     assert "nastech-assets.nastechresearch.github.io" not in text
     assert "https://nastechresearch.github.io/nastech-agent/docs" in text
+
+
+def test_reconcile_domains_sends_the_apex_to_the_site_not_the_404_root(tmp_path):
+    """The Pages user root serves no site; only the repo path does.
+
+    Probed 2026-10-27: ``https://nastechresearch.github.io`` answers 404 while
+    ``https://nastechresearch.github.io/nastech-agent/`` answers 200.  A
+    subdomain, a mailbox and a port-qualified host are different objects and
+    keep their own rules.
+    """
+    (tmp_path / "notes.md").write_text(
+        "Home: https://nastechresearch.com\n"
+        "Bare: (https://nastechresearch.com)\n"
+        "Portal: https://portal.nastechresearch.com/login\n"
+        "Mail: security@nastechresearch.com\n"
+        "Port: https://nastechresearch.com:8443/x\n"
+    )
+
+    assert _reconcile_domains(str(tmp_path)) == ["notes.md"]
+    text = (tmp_path / "notes.md").read_text()
+    assert "https://nastechresearch.github.io/nastech-agent\n" in text
+    assert "(https://nastechresearch.github.io/nastech-agent)" in text
+    assert "https://portal.nastechresearch.github.io/login" in text
+    assert "security@nastechresearch.com" in text
+    assert "/nastech-agent:8443" not in text
 
 
 def test_pipeline_registers_the_dead_config_reconciles(tmp_path, monkeypatch):
