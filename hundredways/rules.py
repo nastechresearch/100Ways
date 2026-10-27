@@ -299,16 +299,29 @@ DEFAULT_TOKENS: list[TokenRule] = [
 # :data:`OWNED_GITHUB_ORGS` is therefore preserved verbatim, unless a token rule
 # redirects that path into an organization we do own -- which is how a plugin we
 # host ourselves (``nastechtest/nastech-plugin-holographic``) still gets branded.
+# That fix did not cover the whole catalog: 191 distinct foreign-owner entries
+# also spell their repository as a ``raw.githubusercontent.com`` asset URL, and
+# because that host was not matched the file was re-branded anyway (measured
+# again 8/8: ``Adolanium/nastech-clinepass`` 404, ``Adolanium/hermes-clinepass``
+# 200).
 GITHUB_REPO_RE = re.compile(
-    # A repository identifier in either the web form
-    # (``github.com/<owner>/<repo>``) or the REST form
-    # (``api.github.com/repos/<owner>/<repo>``).  The ``repos/`` segment belongs
-    # to the API path and never to the owner, so it is consumed explicitly; the
-    # leading boundary stops ``api.github.com`` from matching with the owner
-    # read as a literal ``repos``, which silently preserved a first-party URL
-    # (``NousResearch``) that branding must rename, and renamed a foreign one.
+    # A repository identifier in the web form
+    # (``github.com/<owner>/<repo>``), the REST form
+    # (``api.github.com/repos/<owner>/<repo>``) or the raw-asset form
+    # (``raw.githubusercontent.com/<owner>/<repo>/<ref>/<path>``).  The ``repos/``
+    # segment belongs to the API path and never to the owner, so it is consumed
+    # explicitly; the leading boundary stops ``api.github.com`` from matching with
+    # the owner read as a literal ``repos``, which silently preserved a
+    # first-party URL (``NousResearch``) that branding must rename, and renamed a
+    # foreign one.
+    #
+    # The raw host is in this alternation because a catalog entry spells its
+    # repository in both forms at once, and only matching one of them made the
+    # other read as a bare identifier, which re-brands the whole file
+    # (``_bare_also_branded``) and silently defeats the preservation above.
     r"(?<![.\w-])"
-    r"(?:(?:api|uploads)\.github\.com/repos/|(?:[a-z0-9-]+\.)?github\.com/)"
+    r"(?:(?:api|uploads)\.github\.com/repos/|raw\.githubusercontent\.com/"
+    r"|(?:[a-z0-9-]+\.)?github\.com/)"
     r"(?P<owner>[A-Za-z0-9._-]+)/(?P<repo>[A-Za-z0-9._-]+)"
 )
 
