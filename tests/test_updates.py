@@ -152,6 +152,7 @@ from hundredways.updates import (
     _TERMUX_TUI_STUB_AFTER,
     _TERMUX_TUI_SETUP_GATE_EDITS,
     _TERMUX_TUI_SETUP_GATE_REL,
+    _TERMUX_TUI_GATE_FAKE_EDITS,
     TermuxTuiSetupGateError,
     _reconcile_canary_unsigned_dispatch,
     _CANARY_DISPATCH_INPUT_BEFORE,
@@ -1842,6 +1843,133 @@ def test_termux_tui_setup_gate_raises_when_a_viewer_stub_moves(tmp_path):
 
     assert _TERMUX_TUI_SETUP_GATE_STUBS[1] in str(excinfo.value)
     assert stub.read_text(encoding="utf-8") == moved
+
+
+#: The two resume-path fakes exactly as upstream writes them -- ``inkResumeSnapshotFence`` hands
+#: the lifecycle a bare ``vi.fn()`` and ``resumeEpochRenderer`` queues every viewer call into a
+#: ledger it resolves by hand.  Both are copied from the upstream file's own bytes, because the
+#: proof these tests are worth is that the rule fires on what upstream actually says.
+_TERMUX_TUI_FENCE_TEXT = (
+    "  function Harness() {\n"
+    "    lifecycle = useSessionLifecycle({ colsRef: { current: 80 }, "
+    "composerActions: { setComposerTokens: vi.fn() }, gw, rpc: vi.fn(),\n"
+    "      scrollRef: { current: null }, panel: vi.fn(), sys: vi.fn() } as any)\n"
+    "    return <Text>session</Text>\n"
+    "  }\n"
+)
+_TERMUX_TUI_LEDGER_TEXT = (
+    "  const pending: Array<{ method: string; params: any; resolve: (value: any) => void }> = []\n"
+    "\n"
+    "  const request = vi.fn((method: string, params: any) =>\n"
+    "    new Promise(resolve => pending.push({ method, params, resolve })))\n"
+    "\n"
+    "  lifecycle.resumeById('a')\n"
+    "  await vi.waitFor(() => expect(pending).toHaveLength(1))\n"
+    "  pending.shift()!.resolve(result('a', 'sub-a'))\n"
+)
+
+
+def _termux_tui_resume_candidate(tmp_path, *, skip=()):
+    """A gated lifecycle plus the two resume-path fakes, minus any path named in ``skip``."""
+    candidate, _ = _termux_tui_candidate(tmp_path)
+    for rel, _, _ in _TERMUX_TUI_GATE_FAKE_EDITS:
+        if rel in skip:
+            continue
+        path = candidate / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        text = _TERMUX_TUI_FENCE_TEXT if "SnapshotFence" in rel else _TERMUX_TUI_LEDGER_TEXT
+        path.write_text(text, encoding="utf-8")
+    return candidate
+
+
+def test_termux_tui_setup_gate_teaches_the_resume_path_fakes(tmp_path):
+    """The gate opens on the canonical resume, so both fakes have to answer ``setup.status``."""
+    candidate = _termux_tui_resume_candidate(tmp_path)
+    fence_rel, fence_before, fence_after = _TERMUX_TUI_GATE_FAKE_EDITS[0]
+    ledger_rel, ledger_before, ledger_after = _TERMUX_TUI_GATE_FAKE_EDITS[1]
+
+    changed = _reconcile_termux_tui_setup_gate(str(candidate))
+    assert sorted(changed) == sorted([_TERMUX_TUI_SETUP_GATE_REL, fence_rel, ledger_rel])
+
+    fence = (candidate / fence_rel).read_text(encoding="utf-8")
+    ledger = (candidate / ledger_rel).read_text(encoding="utf-8")
+    for before, after, text in (
+        (fence_before, fence_after, fence),
+        (ledger_before, ledger_after, ledger),
+    ):
+        assert before not in text
+        assert after in text
+
+    # A second pass changes nothing: the marker is the after-image itself.
+    assert _reconcile_termux_tui_setup_gate(str(candidate)) == []
+    assert (candidate / fence_rel).read_text(encoding="utf-8") == fence
+    assert (candidate / ledger_rel).read_text(encoding="utf-8") == ledger
+
+
+def test_termux_tui_setup_gate_resume_edits_leave_every_other_byte_alone(tmp_path):
+    candidate = _termux_tui_resume_candidate(tmp_path)
+
+    assert _reconcile_termux_tui_setup_gate(str(candidate)) != []
+
+    for rel, before, after in _TERMUX_TUI_GATE_FAKE_EDITS:
+        pre = _TERMUX_TUI_FENCE_TEXT if "SnapshotFence" in rel else _TERMUX_TUI_LEDGER_TEXT
+        assert (candidate / rel).read_text(encoding="utf-8") == pre.replace(before, after, 1)
+
+
+def test_termux_tui_setup_gate_ledger_answers_setup_without_a_queue_slot(tmp_path):
+    """The ledger is how that file proves detach ordering; the setup reply must not enter it."""
+    candidate = _termux_tui_resume_candidate(tmp_path)
+
+    assert _reconcile_termux_tui_setup_gate(str(candidate)) != []
+
+    text = (candidate / _TERMUX_TUI_GATE_FAKE_EDITS[1][0]).read_text(encoding="utf-8")
+    assert text.count("pending.push(") == 1  # one ledger, and only ever for a session RPC
+    assert text.index("'setup.status'") < text.index("pending.push(")
+    assert "return Promise.resolve({ provider_configured: true })" in text
+    assert text.count("toHaveLength(1)") == 1  # the resume count the test asserts is unchanged
+    assert text.startswith("  const pending: Array<")  # the ledger's own shape is untouched
+
+
+def test_termux_tui_setup_gate_fence_fake_still_answers_like_a_viewer(tmp_path):
+    """The bare ``vi.fn()`` becomes an answering one, so ``.mock`` and the gate's read both hold."""
+    candidate = _termux_tui_resume_candidate(tmp_path)
+
+    assert _reconcile_termux_tui_setup_gate(str(candidate)) != []
+
+    text = (candidate / _TERMUX_TUI_GATE_FAKE_EDITS[0][0]).read_text(encoding="utf-8")
+    assert "rpc: vi.fn(async () => ({ provider_configured: true }))," in text
+    assert "rpc: vi.fn()," not in text
+    assert "provider_configured: false" not in text  # the fake must not trip the Setup Required arm
+    assert "scrollRef: { current: null }, panel: vi.fn(), sys: vi.fn() } as any)" in text
+
+
+def test_termux_tui_setup_gate_raises_when_a_resume_fake_moves(tmp_path):
+    candidate = _termux_tui_resume_candidate(tmp_path)
+    fence_rel = _TERMUX_TUI_GATE_FAKE_EDITS[0][0]
+    path = candidate / fence_rel
+    drift = _TERMUX_TUI_FENCE_TEXT.replace(", gw, rpc: vi.fn(),", ", gw, rpc: viewer,")
+    path.write_text(drift, encoding="utf-8")
+
+    with pytest.raises(TermuxTuiSetupGateError) as excinfo:
+        _reconcile_termux_tui_setup_gate(str(candidate))
+
+    assert fence_rel in str(excinfo.value)
+    assert "885f30b6" in str(excinfo.value)  # the run that showed what this miss costs
+    assert path.read_text(encoding="utf-8") == drift
+
+
+@pytest.mark.parametrize(
+    "missing", [fake_rel for fake_rel, _, _ in _TERMUX_TUI_GATE_FAKE_EDITS]
+)
+def test_termux_tui_setup_gate_still_gates_when_one_resume_fake_is_gone(tmp_path, missing):
+    """Upstream owns these files: if it deletes one, the gate and the other fake still move."""
+    candidate = _termux_tui_resume_candidate(tmp_path, skip=(missing,))
+
+    changed = _reconcile_termux_tui_setup_gate(str(candidate))
+
+    assert missing not in changed
+    assert _TERMUX_TUI_SETUP_GATE_REL in changed
+    assert not (candidate / missing).exists()
 
 
 def test_termux_tui_setup_gate_registered_in_reconcile_tree():
