@@ -4053,6 +4053,25 @@ _BROWSE_BUDGET_TEST_REL = "tests/nastech_cli/test_browse_schema_drift.py"
 #: Only the rewritten file has it: the helper that times the host's lock hand-off.
 _BROWSE_BUDGET_TEST_MARKER = "def _hold_release_latency("
 
+#: The startup skip the rewrite has installed since #130, and the same block plus the oversleep
+#: skip added when a starved runner was measured blowing the browse budget from inside it.  Kept
+#: out of ``_BROWSE_BUDGET_EDITS`` because the second is the first's *output*: as a pair it would
+#: make the fixtures' pre-image carry the block twice.
+_BROWSE_STARTUP_SKIP = (
+    "    if window >= 0 and startup > margin:\n"
+    '        pytest.skip(f"this host spent {startup:.2f} s outside the budgeted '
+    'phase, more than the "\n'
+    '                    f"{margin:.1f} s between the browse budget and '
+    'boot\'s wait ({out})")\n'
+)
+_BROWSE_OVERSLEEP_SKIP = _BROWSE_STARTUP_SKIP + (
+    "    if window >= 0 and late - late_at > margin:\n"
+    '        pytest.skip(f"this host overslept the fixture\'s injected delay by '
+    '{late - late_at:.2f} s, "\n'
+    '                    f"more than the {margin:.1f} s between the browse budget and '
+    'boot\'s wait ({out})")\n'
+)
+
 # Upstream's three flock-budget tests, rewritten for this fork's runners.  Each pair is an
 # exact-literal replacement, so the rewritten file is a fixed point and the next sync cannot
 # half-apply it.
@@ -4323,10 +4342,13 @@ def _reconcile_browse_budget_flock_tests(dst: str) -> bool:
     runs and still fails on a real regression.
     """
     text = _reconcile_budget_read(dst, _BROWSE_BUDGET_TEST_REL)
-    if text is None or _BROWSE_BUDGET_TEST_MARKER in text:
+    if text is None:
         return False
     edited = text
+    changed = False
     for index, (before, after) in enumerate(_BROWSE_BUDGET_EDITS, start=1):
+        if after in edited:
+            continue  # this pair already landed (a tree rewritten before the latest pair)
         if edited.count(before) != 1:
             raise BrowseBudgetFlockTestError(
                 f"{_BROWSE_BUDGET_TEST_REL} no longer matches rewrite "
@@ -4340,6 +4362,25 @@ def _reconcile_browse_budget_flock_tests(dst: str) -> bool:
                 "bound crossed. Re-derive the pairs against upstream's current file, then re-run."
             )
         edited = edited.replace(before, after, 1)
+        changed = True
+    if _BROWSE_OVERSLEEP_SKIP not in edited:
+        # A tree rewritten before the oversleep skip landed carries the startup skip but not this
+        # one; a fresh upstream file reaches here right after the pair above installed it.
+        if edited.count(_BROWSE_STARTUP_SKIP) != 1:
+            raise BrowseBudgetFlockTestError(
+                f"{_BROWSE_BUDGET_TEST_REL} no longer holds the startup skip exactly once, so the "
+                "sync cannot add the oversleep skip beside it. Without it a starved runner is "
+                "charged as a slow product: job 122000139552 (macOS-only 2/2) printed "
+                "'RESULT 503 6.62 6.52 125 5.26 ... within 3s', i.e. the host overslept the "
+                "fixture's injected 10 ms delays by 5.26 s inside a 3 s budget, and the run "
+                "stopped "
+                "at 'boot refused a browse that gave up inside its budget'. Re-derive "
+                "_BROWSE_STARTUP_SKIP against the file the rewrite now produces."
+            )
+        edited = edited.replace(_BROWSE_STARTUP_SKIP, _BROWSE_OVERSLEEP_SKIP, 1)
+        changed = True
+    if not changed:
+        return False
     _reconcile_budget_write(dst, _BROWSE_BUDGET_TEST_REL, edited)
     return True
 
@@ -4629,6 +4670,22 @@ class TermuxTuiSetupGateError(ValueError):
 
 
 _TERMUX_TUI_SETUP_GATE_REL = "ui-tui/src/app/useSessionLifecycle.ts"
+#: The canonical-viewer fakes that reject any operation they do not know; the setup gate adds one.
+_TERMUX_TUI_SETUP_GATE_STUBS = (
+    "ui-tui/src/__tests__/canonicalDetachClose.test.tsx",
+    "ui-tui/src/__tests__/canonicalDetachOrdering.test.tsx",
+    "ui-tui/src/__tests__/canonicalSwitcherClose.test.tsx",
+)
+_TERMUX_TUI_STUB_BEFORE = "    throw new Error(`unexpected viewer operation: ${wire.method}`)\n"
+_TERMUX_TUI_STUB_AFTER = (
+    "    if (wire.method === 'setup.status') {\n"
+    "      // The setup gate asks on the canonical transport too: a blank install must see\n"
+    "      // Setup Required before any session is created with no model.\n"
+    "      return Promise.resolve({ provider_configured: true })\n"
+    "    }\n"
+    "\n"
+    "    throw new Error(`unexpected viewer operation: ${wire.method}`)\n"
+)
 _TERMUX_TUI_SETUP_GATE_EDITS = (
     (
         "        const setup = gw.isCanonical ? null : "
@@ -4643,7 +4700,7 @@ _TERMUX_TUI_SETUP_GATE_EDITS = (
 )
 
 
-def _reconcile_termux_tui_setup_gate(dst: str) -> bool:
+def _reconcile_termux_tui_setup_gate(dst: str) -> list[str]:
     """Ask ``setup.status`` on the canonical transport too.
 
     On a blank home the canonical TUI creates a session with no model: ``stage_local_session``
@@ -4668,9 +4725,9 @@ def _reconcile_termux_tui_setup_gate(dst: str) -> bool:
     rel = _TERMUX_TUI_SETUP_GATE_REL
     text = _reconcile_budget_read(dst, rel)
     if text is None or not any(before in text for before, _ in _TERMUX_TUI_SETUP_GATE_EDITS):
-        return False  # upstream rewrote or removed the gate; theirs is authoritative
+        return []  # upstream rewrote or removed the gate; theirs is authoritative
     edited = text
-    changed = False
+    changed: list[str] = []
     for before, after in _TERMUX_TUI_SETUP_GATE_EDITS:
         if after in edited:
             continue
@@ -4684,11 +4741,30 @@ def _reconcile_termux_tui_setup_gate(dst: str) -> bool:
                 "Re-derive _TERMUX_TUI_SETUP_GATE_EDITS against upstream's current file."
             )
         edited = edited.replace(before, after, 1)
-        changed = True
+        if rel not in changed:
+            changed.append(rel)
+    for stub_rel in _TERMUX_TUI_SETUP_GATE_STUBS:
+        stub = _reconcile_budget_read(dst, stub_rel)
+        if stub is None or _TERMUX_TUI_STUB_AFTER in stub:
+            continue
+        if stub.count(_TERMUX_TUI_STUB_BEFORE) != 1:
+            raise TermuxTuiSetupGateError(
+                f"{stub_rel} no longer holds exactly one "
+                f"{_TERMUX_TUI_STUB_BEFORE.strip()!r}, so the sync cannot teach its viewer fake "
+                "``setup.status``. The canonical detach/close suites then fail with "
+                "'unexpected viewer operation: setup.status' (13 tests across the three "
+                "canonical suites on candidate 363259984) even though the product is right. "
+                "Re-derive _TERMUX_TUI_STUB_BEFORE against upstream's current test."
+            )
+        _reconcile_budget_write(
+            dst, stub_rel, stub.replace(_TERMUX_TUI_STUB_BEFORE, _TERMUX_TUI_STUB_AFTER, 1)
+        )
+        changed.append(stub_rel)
     if not changed:
-        return False
-    _reconcile_budget_write(dst, rel, edited)
-    return True
+        return []
+    if rel in changed:
+        _reconcile_budget_write(dst, rel, edited)
+    return changed
 
 
 class CanaryUnsignedDispatchError(ValueError):
@@ -4718,6 +4794,14 @@ _CANARY_DISPATCH_INPUT_AFTER = _CANARY_DISPATCH_INPUT_BEFORE + (
     "        default: false\n"
 )
 _CANARY_RELEASE_PY_BEFORE = '    if canary:\n        cmd += ["-f", "upload_release=true"]\n'
+_CANARY_DISPATCH_TEST_REL = "tests/scripts/test_release_canary_git.py"
+_CANARY_DISPATCH_TEST_BEFORE = (
+    '        "-f", f"tag={tag}", "-f", "upload_release=true", "--repo", "fixture/release",\n'
+)
+_CANARY_DISPATCH_TEST_AFTER = (
+    '        "-f", f"tag={tag}", "-f", "upload_release=true", "-f", "skip-signed=true",\n'
+    '        "--repo", "fixture/release",\n'
+)
 _CANARY_RELEASE_PY_AFTER = (
     "    if canary:\n"
     "        # NasTech ships unsigned: declare it here too, or the dispatched build stops\n"
@@ -4778,6 +4862,25 @@ def _reconcile_canary_unsigned_dispatch(dst: str) -> list[str]:
             dst, py_rel, script.replace(_CANARY_RELEASE_PY_BEFORE, _CANARY_RELEASE_PY_AFTER, 1)
         )
         changed.append(py_rel)
+    test_rel = _CANARY_DISPATCH_TEST_REL
+    pinned = _reconcile_budget_read(dst, test_rel)
+    if pinned is not None and _CANARY_DISPATCH_TEST_AFTER not in pinned:
+        # The test pins the dispatch argv; leaving it behind reds Run tests (8/8) with
+        # "assert ['gh', 'workf...'] == [...]" the moment the flag exists.
+        if _CANARY_DISPATCH_TEST_BEFORE not in pinned:
+            raise CanaryUnsignedDispatchError(
+                f"{test_rel} no longer pins the canary dispatch as "
+                f"{_CANARY_DISPATCH_TEST_BEFORE!r}, so the sync cannot line the contract test up "
+                "with the dispatch it now sends. The lane then fails with an argv mismatch "
+                "instead of checking the behaviour. Re-derive _CANARY_DISPATCH_TEST_BEFORE "
+                "against upstream's current test."
+            )
+        _reconcile_budget_write(
+            dst,
+            test_rel,
+            pinned.replace(_CANARY_DISPATCH_TEST_BEFORE, _CANARY_DISPATCH_TEST_AFTER, 1),
+        )
+        changed.append(test_rel)
     return changed
 
 
@@ -6555,9 +6658,11 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_termux_build_toolchain(dst):
         result.total += 1
         result.fixed.append(_TERMUX_BUILD_TOOLCHAIN_REL)
-    if _reconcile_termux_tui_setup_gate(dst):
+    # Every path this rule writes has to reach ``result.fixed``: a file edited on disk but
+    # missing from the reconciled map is counted as an unexplained rewrite and fails the gate.
+    for rel in _reconcile_termux_tui_setup_gate(dst):
         result.total += 1
-        result.fixed.append(_TERMUX_TUI_SETUP_GATE_REL)
+        result.fixed.append(rel)
     for rel in _reconcile_canary_unsigned_dispatch(dst):
         result.total += 1
         result.fixed.append(rel)

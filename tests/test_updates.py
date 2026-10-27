@@ -43,6 +43,8 @@ from hundredways.updates import (
     UnsignedDarwinBuildEnvError,
     WindowsRealGitLocateError,
     _BROWSE_BUDGET_EDITS,
+    _BROWSE_OVERSLEEP_SKIP,
+    _BROWSE_STARTUP_SKIP,
     _BROWSE_BUDGET_TEST_REL,
     _CONFTEST,
     _DOCS_PUBLIC_ORIGIN,
@@ -145,6 +147,9 @@ from hundredways.updates import (
     _TERMUX_BUILD_TOOLCHAIN_REL,
     TermuxBuildToolchainError,
     _reconcile_termux_tui_setup_gate,
+    _TERMUX_TUI_SETUP_GATE_STUBS,
+    _TERMUX_TUI_STUB_BEFORE,
+    _TERMUX_TUI_STUB_AFTER,
     _TERMUX_TUI_SETUP_GATE_EDITS,
     _TERMUX_TUI_SETUP_GATE_REL,
     TermuxTuiSetupGateError,
@@ -153,6 +158,9 @@ from hundredways.updates import (
     _CANARY_DISPATCH_INPUT_AFTER,
     _CANARY_RELEASE_PY_BEFORE,
     _CANARY_RELEASE_PY_AFTER,
+    _CANARY_DISPATCH_TEST_BEFORE,
+    _CANARY_DISPATCH_TEST_AFTER,
+    _CANARY_DISPATCH_TEST_REL,
     CanaryUnsignedDispatchError,
     _WINDOWS_SUSPEND_BUDGET_S,
     _WINDOWS_SUSPEND_ONE_SHOT,
@@ -713,8 +721,14 @@ class _DrivenClock:
         self.now += seconds + self.late_by
 
 
-def _run_budget_block(text, frame, budget_s=3.0, wait_s=5.0):
-    """Exec the produced bound block against one child frame; returns its namespace or raises."""
+def _run_budget_block(text, frame, budget_s=3.0, wait_s=20.0):
+    """Exec the produced bound block against one child frame; returns its namespace or raises.
+
+    ``wait_s`` is deliberately far above the boot value the parent reads in production: these
+    callers drive the charge arithmetic, and the host escapes in front of it are pinned by their own
+    tests. A frame replaying a real red (2.9 s of oversleep against a 2 s margin) would otherwise be
+    skipped as starved before the bound under test ever runs.
+    """
 
     def _skip(message):
         raise _BudgetSkip(message)
@@ -738,7 +752,9 @@ def test_browse_budget_flock_tests_rebuild_the_host_aware_bounds(tmp_path):
     fork's macOS lane.
     """
     pre = _browse_budget_pre()
-    expected = "".join(after for _, after in _BROWSE_BUDGET_EDITS) + _BROWSE_BUDGET_PIN
+    expected = (
+        "".join(after for _, after in _BROWSE_BUDGET_EDITS) + _BROWSE_BUDGET_PIN
+    ).replace(_BROWSE_STARTUP_SKIP, _BROWSE_OVERSLEEP_SKIP, 1)
     candidate, path = _browse_budget_tree(tmp_path, pre)
 
     assert _reconcile_browse_budget_flock_tests(str(candidate)) is True
@@ -1001,19 +1017,40 @@ def test_browse_budget_bound_and_constants_survive_the_rewrite(tmp_path):
 
 
 def test_browse_budget_host_skip_did_not_get_broader(tmp_path):
-    """The only skip paths are the two the rule shipped with, on the predicates it shipped with.
+    """Every skip is a measured one: no unconditional escape, no skipif, no xfail.
 
-    A lane that skips by asserting nothing is worse than a red one, so this pins the skip count and
-    the predicate: the host escape is still keyed on measured process hand-off and startup, never
-    on the lateness the child is allowed to report.
+    A lane that skips by asserting nothing is worse than a red one. The three escapes are keyed on
+    measurements the child itself reports -- hand-off latency, startup outside the budgeted phase,
+    and scheduler oversleep accrued *inside* the window (``late - late_at``, never the whole
+    ``late``) -- and each fires only against ``margin``, the seconds between the browse budget and
+    boot's wait.
     """
     text = _browse_budget_rewritten(tmp_path)
-    assert text.count("pytest.skip(") == 2
+    assert text.count("pytest.skip(") == 3
     assert "pytest.skip_if" not in text and "skipif" not in text and "xfail" not in text
-    guard = next(line for line in text.splitlines() if "startup > margin" in line)
-    assert guard == "    if window >= 0 and startup > margin:"
-    assert "late" not in guard and "callbacks" not in guard
+    guards = [line.strip() for line in text.splitlines() if line.rstrip().endswith("> margin:")]
+    assert guards == [
+        "if window >= 0 and startup > margin:",
+        "if window >= 0 and late - late_at > margin:",
+    ]
+    assert "if latency > _SLOW_HANDOFF_SKIP_S:" in text
     assert "    margin = wait_s - budget_s" in text
+    # The oversleep credit is window-scoped: the process-wide counter alone would zero the charge.
+    assert "late - late_at > margin" in text
+    assert "late > margin" not in text
+
+
+def test_browse_budget_oversleep_skip_reaches_an_already_rewritten_tree(tmp_path):
+    """A tree carrying the older rewrite gains the skip; the next pass is a no-op."""
+    legacy = "".join(after for _, after in _BROWSE_BUDGET_EDITS) + _BROWSE_BUDGET_PIN
+    candidate, path = _browse_budget_tree(tmp_path, legacy)
+
+    assert _reconcile_browse_budget_flock_tests(str(candidate)) is True
+    text = path.read_text(encoding="utf-8")
+    assert "if window >= 0 and late - late_at > margin:" in text
+    assert text.count("pytest.skip(") == 3
+    assert _reconcile_browse_budget_flock_tests(str(candidate)) is False
+    assert path.read_text(encoding="utf-8") == text
 
 
 def test_browse_budget_flock_reconcile_is_registered_in_reconcile_tree(tmp_path):
@@ -1684,7 +1721,7 @@ def test_termux_tui_setup_gate_asks_every_transport(tmp_path):
     """A canonical TUI that skips ``setup.status`` creates a session with no model."""
     candidate, path = _termux_tui_candidate(tmp_path)
 
-    assert _reconcile_termux_tui_setup_gate(str(candidate)) is True
+    assert _reconcile_termux_tui_setup_gate(str(candidate)) != []
 
     text = path.read_text(encoding="utf-8")
     for before, after in _TERMUX_TUI_SETUP_GATE_EDITS:
@@ -1694,7 +1731,7 @@ def test_termux_tui_setup_gate_asks_every_transport(tmp_path):
 
 def test_termux_tui_setup_gate_leaves_every_other_byte_alone(tmp_path):
     candidate, path = _termux_tui_candidate(tmp_path)
-    assert _reconcile_termux_tui_setup_gate(str(candidate)) is True
+    assert _reconcile_termux_tui_setup_gate(str(candidate)) != []
 
     text = path.read_text(encoding="utf-8")
     for before, after in _TERMUX_TUI_SETUP_GATE_EDITS:
@@ -1704,9 +1741,9 @@ def test_termux_tui_setup_gate_leaves_every_other_byte_alone(tmp_path):
 
 def test_termux_tui_setup_gate_is_a_fixed_point(tmp_path):
     candidate, path = _termux_tui_candidate(tmp_path)
-    assert _reconcile_termux_tui_setup_gate(str(candidate)) is True
+    assert _reconcile_termux_tui_setup_gate(str(candidate)) != []
     once = path.read_text(encoding="utf-8")
-    assert _reconcile_termux_tui_setup_gate(str(candidate)) is False
+    assert _reconcile_termux_tui_setup_gate(str(candidate)) == []
     assert path.read_text(encoding="utf-8") == once
 
 
@@ -1750,14 +1787,61 @@ def test_termux_tui_setup_gate_stands_down_when_upstream_dropped_the_skip(tmp_pa
         "}\n"
     )
     candidate, path = _termux_tui_candidate(tmp_path, text=bare)
-    assert _reconcile_termux_tui_setup_gate(str(candidate)) is False
+    assert _reconcile_termux_tui_setup_gate(str(candidate)) == []
     assert path.read_text(encoding="utf-8") == bare
 
 
 def test_termux_tui_setup_gate_absent_file_is_a_no_op(tmp_path):
     candidate = tmp_path / "candidate"
     candidate.mkdir()
-    assert _reconcile_termux_tui_setup_gate(str(candidate)) is False
+    assert _reconcile_termux_tui_setup_gate(str(candidate)) == []
+
+
+_CANONICAL_STUB_TEXT = (
+    "  const request = vi.fn((method: string) => {\n"
+    "    if (method === 'session.detach') {\n"
+    "      return Promise.resolve({ detached: true })\n"
+    "    }\n"
+    "\n"
+    "    throw new Error(`unexpected viewer operation: ${wire.method}`)\n"
+    "  })\n"
+)
+
+
+def test_termux_tui_setup_gate_teaches_the_canonical_viewer_fakes(tmp_path):
+    """The canonical suites' fake viewer rejects unknown operations; setup.status is now one."""
+    candidate, path = _termux_tui_candidate(tmp_path)
+    stub_rel = _TERMUX_TUI_SETUP_GATE_STUBS[0]
+    stub = candidate / stub_rel
+    stub.parent.mkdir(parents=True, exist_ok=True)
+    stub.write_text(_CANONICAL_STUB_TEXT, encoding="utf-8")
+
+    changed = _reconcile_termux_tui_setup_gate(str(candidate))
+    # Every file the rule writes must be reported: one missing from result.fixed is an
+    # unexplained rewrite, and the pipeline gate fails on exactly that (3 files, #162).
+    assert sorted(changed) == sorted([_TERMUX_TUI_SETUP_GATE_REL, stub_rel])
+
+    text = stub.read_text(encoding="utf-8")
+    assert "wire.method === 'setup.status'" in text
+    assert "provider_configured: true" in text
+    assert _TERMUX_TUI_STUB_AFTER in text
+    assert text.count(_TERMUX_TUI_STUB_BEFORE) == 1  # the throw still guards everything else
+    assert _reconcile_termux_tui_setup_gate(str(candidate)) == []
+    assert stub.read_text(encoding="utf-8") == text
+
+
+def test_termux_tui_setup_gate_raises_when_a_viewer_stub_moves(tmp_path):
+    candidate, _ = _termux_tui_candidate(tmp_path)
+    stub = candidate / _TERMUX_TUI_SETUP_GATE_STUBS[1]
+    stub.parent.mkdir(parents=True, exist_ok=True)
+    moved = _CANONICAL_STUB_TEXT.replace("unexpected viewer operation", "unknown viewer operation")
+    stub.write_text(moved, encoding="utf-8")
+
+    with pytest.raises(TermuxTuiSetupGateError) as excinfo:
+        _reconcile_termux_tui_setup_gate(str(candidate))
+
+    assert _TERMUX_TUI_SETUP_GATE_STUBS[1] in str(excinfo.value)
+    assert stub.read_text(encoding="utf-8") == moved
 
 
 def test_termux_tui_setup_gate_registered_in_reconcile_tree():
@@ -1850,6 +1934,49 @@ def test_canary_unsigned_dispatch_absent_files_are_a_no_op(tmp_path):
     candidate = tmp_path / "candidate"
     candidate.mkdir()
     assert _reconcile_canary_unsigned_dispatch(str(candidate)) == []
+
+
+_CANARY_PIN_TEXT = (
+    "    assert dispatch == [\n"
+    '        "gh", "workflow", "run", "desktop-bundled-release.yml", "--ref", "main",\n'
+    '        "-f", f"tag={tag}", "-f", "upload_release=true", "--repo", "fixture/release",\n'
+    "    ]\n"
+)
+
+
+def test_canary_unsigned_dispatch_aligns_the_test_that_pins_the_argv(tmp_path):
+    """The canary test asserts the exact argv; the flag and its pin move together."""
+    candidate, _, _ = _canary_candidate(tmp_path)
+    pin = candidate / _CANARY_DISPATCH_TEST_REL
+    pin.parent.mkdir(parents=True, exist_ok=True)
+    pin.write_text(_CANARY_PIN_TEXT, encoding="utf-8")
+
+    changed = _reconcile_canary_unsigned_dispatch(str(candidate))
+
+    assert sorted(changed) == [
+        ".github/workflows/desktop-bundled-release.yml",
+        "scripts/release.py",
+        _CANARY_DISPATCH_TEST_REL,
+    ]
+    text = pin.read_text(encoding="utf-8")
+    assert '"-f", "skip-signed=true",' in text
+    assert _CANARY_DISPATCH_TEST_AFTER in text
+    assert _CANARY_DISPATCH_TEST_BEFORE not in text
+    assert _reconcile_canary_unsigned_dispatch(str(candidate)) == []
+
+
+def test_canary_unsigned_dispatch_raises_when_the_pin_moves(tmp_path):
+    candidate, _, _ = _canary_candidate(tmp_path)
+    pin = candidate / _CANARY_DISPATCH_TEST_REL
+    pin.parent.mkdir(parents=True, exist_ok=True)
+    moved = _CANARY_PIN_TEXT.replace("upload_release=true", "upload_release=yes")
+    pin.write_text(moved, encoding="utf-8")
+
+    with pytest.raises(CanaryUnsignedDispatchError) as excinfo:
+        _reconcile_canary_unsigned_dispatch(str(candidate))
+
+    assert _CANARY_DISPATCH_TEST_REL in str(excinfo.value)
+    assert pin.read_text(encoding="utf-8") == moved
 
 
 def test_canary_unsigned_dispatch_registered_in_reconcile_tree():
