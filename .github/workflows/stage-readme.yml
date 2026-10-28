@@ -1,8 +1,14 @@
 name: stage-readme
 
 # Stage 7: regenerate README.md from the registries (ways, achievements,
-# owned-assets) and fail if the committed copy is stale.  This guarantees
-# the "200 ways" / trophy counts never drift from the code that owns them.
+# owned-assets, CLI verbs and Telegram commands) and fail if the committed
+# copy is stale.  This guarantees the way total, the trophy count and the
+# command inventory in the README never drift from the code that owns them.
+#
+# A second gate then scores the README that ships against the live command
+# surface: a verb or command the engine answers to but the README never
+# describes is a red, so "the README documents the project" stays a measured
+# claim rather than a hoped-for one.
 #
 # The owned-assets registry and achievements state are committed in this
 # repository.  README generation therefore uses the 100Ways checkout itself,
@@ -33,3 +39,7 @@ jobs:
         run: |
           git diff --exit-code -- README.md
           echo "README.md is up to date."
+
+      - name: Fail if README under-documents the command surface
+        run: |
+          100ways --repo "$GITHUB_WORKSPACE" readme --check-coverage --min 0.7

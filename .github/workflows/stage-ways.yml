@@ -1,7 +1,12 @@
 name: stage-ways
 
-# Stage 3: validate the ways registry — every category has exactly 20 ways,
+# Stage 3: validate the ways registry — every category keeps at least its twenty ways,
 # every way id is unique, and the registry count is >= 200.  No network.
+#
+# Twenty per category is a floor, not a shape: a capability that no decade of the
+# catalogued taxonomy named is added as its own row rather than swapped into a row that
+# already describes a different technique.  Shrinking a category below twenty is the
+# failure this catches.
 
 on:
   workflow_call:
@@ -28,6 +33,6 @@ jobs:
           assert r.count >= 200, f"registry count {r.count} < 200"
           for cat, n in sorted(by_cat.items()):
               print(f"  {cat}: {n}")
-              assert n == 20, f"{cat} has {n} ways, expected 20"
+              assert n >= 20, f"{cat} has {n} ways, expected at least 20"
           print(f"ways: {r.count} unique ids OK")
           EOF

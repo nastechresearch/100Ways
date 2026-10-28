@@ -10,13 +10,11 @@ import subprocess
 
 from hundredways.forkcheck import (
     ForkCheckReport,
-    _added_line_violations,
-    _brand_violations,
-    _walk,
     fork_consistency,
     preserve_fork_files,
     scan_brand_violations,
     source_tree_delta,
+    walk_files,
 )
 from hundredways.rules import BrandingRules
 from hundredways.updates import STAGES, UpdateManager, brand_tree
@@ -137,51 +135,6 @@ def test_scan_brand_violations_sweeps_whole_tree(tmp_path):
     assert "package-lock.json" not in by_path
 
 
-# A foreign owner/repo preserved by design: the file names it in URL form,
-# which is what tells branding the bare spelling must stay verbatim.
-_KEPT_FOREIGN_URL = ("repo: https://github.com/electricsheephq/"
-                     "hermes-cloud-file-manager\n")
-_KEPT_FOREIGN_BARE = ('  - "see electricsheephq/hermes-cloud-file-manager#55"\n')
-
-
-def test_brand_violations_read_the_file_the_way_branding_read_it():
-    """A preserved foreign reference is not a brand violation.
-
-    Judged line by line the bare ``owner/repo`` looks brandable (that read
-    never sees the URL form in the same file that decides the spelling is
-    kept), so the check must transform the whole text once -- the brand
-    audit's fixed-point criterion -- or it flags content branding can never
-    change without breaking the foreign reference.
-    """
-    rules = BrandingRules()
-    kept = ("name: cloud-file-manager\n" + _KEPT_FOREIGN_URL
-            + "issues:\n" + _KEPT_FOREIGN_BARE)
-    # the trap: in isolation the bare line really does look brandable
-    assert rules.transform_text(_KEPT_FOREIGN_BARE) != _KEPT_FOREIGN_BARE
-    # with the file in view the brand stage keeps it, and so must the gate
-    assert _brand_violations(kept, rules) == []
-    # an ungrouped brand token in the same file is still reported, by line
-    assert _brand_violations(kept + "title: Hermes Desktop\n", rules) == [5]
-
-
-def test_added_line_violations_keep_a_preserved_foreign_reference():
-    """An upstream line the brand stage preserved verbatim is not a violation.
-
-    The added-line gate judges the inserted line the way branding judged the
-    whole file: the foreign issue reference that survives branding (because
-    the same file carries its URL form) passes, while a genuinely brandable
-    inserted line is still reported at its line number.
-    """
-    rules = BrandingRules()
-    fork = "name: cloud-file-manager\n" + _KEPT_FOREIGN_URL
-    assert _added_line_violations(
-        fork, fork + "issues:\n" + _KEPT_FOREIGN_BARE, "plugin.yaml",
-        rules) == []
-    hits = _added_line_violations(fork, fork + "title: Hermes Desktop\n",
-                                  "plugin.yaml", rules)
-    assert [(v.path, v.line) for v in hits] == [("plugin.yaml", 3)]
-
-
 def test_preserve_fork_files_copies_fork_local_content(tmp_path):
     rules = BrandingRules()
     upstream = _tree(tmp_path / "upstream", {
@@ -217,7 +170,7 @@ def test_collision_safe_contributor_alias_is_relocated_without_duplicate(tmp_pat
     preserved = preserve_fork_files(str(fork), branded, str(upstream), rules)
     report = fork_consistency(str(fork), branded, str(upstream), rules)
 
-    email_files = sorted(_walk(os.path.join(branded, "contributors", "emails")))
+    email_files = sorted(walk_files(os.path.join(branded, "contributors", "emails")))
     assert len(email_files) == 2
     assert all("--case-" in path for path in email_files)
     assert preserved == []
@@ -433,7 +386,7 @@ def test_walk_uses_git_tracked_files_in_a_checkout(tmp_path):
     subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "c"], check=True)
     (repo / "uncommitted.txt").write_text("dirty\n")
-    files = _walk(str(repo))
+    files = walk_files(str(repo))
     assert "tracked.txt" in files
     assert "uncommitted.txt" not in files
     assert "website/node_modules/dep.js" not in files
@@ -445,7 +398,7 @@ def test_walk_skips_node_modules_in_a_plain_tree(tmp_path):
         "web/node_modules/pkg/index.js": "junk\n",
         "web/__pycache__/x.pyc": "junk\n",
     })
-    files = _walk(str(tree))
+    files = walk_files(str(tree))
     assert "a.txt" in files
     assert "web/node_modules/pkg/index.js" not in files
     assert "web/__pycache__/x.pyc" not in files

@@ -97,25 +97,35 @@ def _normalize_test_workers(text: str) -> str:
     return _TEST_WORKERS_RE.sub(_cap, text)
 
 
-# The OS-matrix Windows lane fans out to 16 workers upstream (32-core Windows
-# runners).  The free 4-core ``windows-latest`` starves every nested PowerShell
-# child into its idle deadline, so cap the Windows expression at the runner's
-# core count.  macOS/Linux rows keep their upstream expression untouched.
-_OS_WINDOWS_WORKERS_RE = re.compile(
+# The OS-matrix Windows lane fans out to 16 workers upstream (a 32-core paid
+# Windows image) and its ``||`` arm is ``''``, which the runner reads as unset and
+# defaults to ``os.cpu_count()`` -- 12 cores on upstream's macOS image.  This
+# fork's OS lanes are the free hosted images (4-core Windows, 3-core macOS), and a
+# lane that spawns its own timed children (nested PowerShell trees, the
+# flock/gateway-boot probes in ``tests/nastech_cli/test_browse_schema_drift.py``)
+# starves those children into their deadlines.  Rewrite the whole expression
+# rather than leaving the rows upstream's: the cap has to hold after every sync,
+# and a hand-edit on the fork is regenerated away.  The ``||`` arm is macOS-only --
+# the matrix ``include`` rows carry the ``macos``/``windows`` markers -- and the
+# output matches this same pattern, so the rule is its own fixed point.
+_OS_MARKED_WORKERS_RE = re.compile(
     r"(?m)^(?P<prefix>[ \t]*NASTECH_TEST_WORKERS:[ \t]*)"
-    r"\$\{\{[ \t]*matrix\.marker == 'windows'[ \t]*&&.*?\|\|[ \t]*''[ \t]*\}\}[ \t]*$"
+    r"\$\{\{[ \t]*matrix\.marker == 'windows'[ \t]*&&.*?\|\|[ \t]*'(?P<other>\d*)'"
+    r"[ \t]*\}\}[ \t]*$"
 )
 _OS_WINDOWS_WORKERS = 4
+_OS_MACOS_WORKERS = 2
 
 
 def _normalize_os_test_workers(text: str) -> str:
     def _cap(match_obj: re.Match) -> str:
         return (
             f"{match_obj.group('prefix')}"
-            f"${{{{ matrix.marker == 'windows' && '{_OS_WINDOWS_WORKERS}' || '' }}}}"
+            f"${{{{ matrix.marker == 'windows' && '{_OS_WINDOWS_WORKERS}'"
+            f" || '{_OS_MACOS_WORKERS}' }}}}"
         )
 
-    return _OS_WINDOWS_WORKERS_RE.sub(_cap, text)
+    return _OS_MARKED_WORKERS_RE.sub(_cap, text)
 
 
 # Standard runners need a little more wall-clock allowance for the complete
@@ -157,8 +167,26 @@ def _normalize_test_timeout(text: str) -> str:
 def _normalize_runner(match_obj: re.Match) -> str:
     base, _, arm = match_obj.group(1), match_obj.group(2), match_obj.group(3)
     if arm:
-        # Standard hosted arm64 label; windows/macos have no arm hosted tier.
-        return "ubuntu-24.04-arm" if base.startswith("ubuntu") else base
+        # An arm64 label is an architecture requirement, not a size hint: an
+        # win32-arm64 job on an x64 host builds a win32-x64 payload and the
+        # bundle's own audit rejects the package (``audit-bundle-arch.mjs:
+        # 659 binaries do not match --arch=arm64``, run 39508427430).  Windows
+        # has the standard ``windows-11-arm`` tier for that; macOS does not, so
+        # a macOS arm row keeps its base label and still runs natively.
+        #
+        # Native hardware is necessary but not yet sufficient here: upstream
+        # ships ``dependency_injector`` abi3 wheels for win32 and win_amd64
+        # only, so an arm64 bundle compiles it and the free image's MSVC ARM64
+        # toolset fails (``LNK1104: cannot open file
+        # ...containers.cp314-win_arm64.exp``, run 39539131670) where upstream's
+        # paid ``windows-latest-32-arm-core`` gets through (run 39383704420).
+        # The label is still the honest one -- on x64 the lane cannot produce a
+        # package at all, while on arm64 it fails somewhere a toolchain or a
+        # wheel can fix -- and no fork release is blocked by it, because the
+        # lane table leaves the unsigned ``windows`` lane out of ``DEFAULT``.
+        if base.startswith("ubuntu"):
+            return "ubuntu-24.04-arm"
+        return "windows-11-arm" if base.startswith("windows") else base
     return base
 
 
@@ -193,6 +221,11 @@ def _normalize_blacksmith(match_obj: re.Match) -> str:
     os_name, arm = match_obj.group(2), match_obj.group(4)
     if os_name == "ubuntu":
         return "ubuntu-24.04-arm" if arm else "ubuntu-latest"
+    if os_name == "windows":
+        # Same architecture rule as ``_normalize_runner``: upstream has moved
+        # its ARM rows onto blacksmith labels before, and an arm64 Windows lane
+        # landing on the x64 image fails its own bundle-architecture audit.
+        return "windows-11-arm" if arm else "windows-latest"
     return f"{os_name}-latest"
 
 
@@ -266,17 +299,48 @@ DEFAULT_TOKENS: list[TokenRule] = [
 # :data:`OWNED_GITHUB_ORGS` is therefore preserved verbatim, unless a token rule
 # redirects that path into an organization we do own -- which is how a plugin we
 # host ourselves (``nastechtest/nastech-plugin-holographic``) still gets branded.
+# That fix did not cover the whole catalog: 191 distinct foreign-owner entries
+# also spell their repository as a ``raw.githubusercontent.com`` asset URL, and
+# because that host was not matched the file was re-branded anyway (measured
+# again 8/8: ``Adolanium/nastech-clinepass`` 404, ``Adolanium/hermes-clinepass``
+# 200).
+#
+# Matching the host was still only half the identifier.  A catalog entry or a
+# docs line reaches into somebody else's tree --
+# ``github.com/plastic-labs/honcho/tree/main/hermes-plugin-honcho``, or the
+# screenshot ``raw.githubusercontent.com/cocktailpeanut/hermes-mod/master/hermes.png``
+# -- and the segment after the repository name is exactly as little ours as the
+# name is.  Branding it leaves the owner and branch intact and renames a
+# directory or an image that has never carried our brand, so the link 404s while
+# its inherited spelling returns 200 (measured in the published fork tree: 78
+# distinct URLs of this shape, 76 of them with a live 200 twin).  The tail is
+# therefore part of the matched identifier.
 GITHUB_REPO_RE = re.compile(
-    # A repository identifier in either the web form
-    # (``github.com/<owner>/<repo>``) or the REST form
-    # (``api.github.com/repos/<owner>/<repo>``).  The ``repos/`` segment belongs
-    # to the API path and never to the owner, so it is consumed explicitly; the
-    # leading boundary stops ``api.github.com`` from matching with the owner
-    # read as a literal ``repos``, which silently preserved a first-party URL
-    # (``NousResearch``) that branding must rename, and renamed a foreign one.
+    # A repository identifier in the web form
+    # (``github.com/<owner>/<repo>``), the REST form
+    # (``api.github.com/repos/<owner>/<repo>``) or the raw-asset form
+    # (``raw.githubusercontent.com/<owner>/<repo>/<ref>/<path>``).  The ``repos/``
+    # segment belongs to the API path and never to the owner, so it is consumed
+    # explicitly; the leading boundary stops ``api.github.com`` from matching with
+    # the owner read as a literal ``repos``, which silently preserved a
+    # first-party URL (``NousResearch``) that branding must rename, and renamed a
+    # foreign one.
+    #
+    # The raw host is in this alternation because a catalog entry spells its
+    # repository in both forms at once, and only matching one of them made the
+    # other read as a bare identifier, which re-brands the whole file
+    # (``_bare_also_branded``) and silently defeats the preservation above.
     r"(?<![.\w-])"
-    r"(?:(?:api|uploads)\.github\.com/repos/|(?:[a-z0-9-]+\.)?github\.com/)"
+    r"(?:(?:api|uploads)\.github\.com/repos/|raw\.githubusercontent\.com/"
+    r"|(?:[a-z0-9-]+\.)?github\.com/)"
     r"(?P<owner>[A-Za-z0-9._-]+)/(?P<repo>[A-Za-z0-9._-]+)"
+    # The path after the repository name, segment by segment.  Each segment
+    # stops at whitespace and at the punctuation that ends a URL in prose (a
+    # closing bracket, ``)``, a comma or a sentence mark), at a query or a
+    # fragment, and at the next ``/``.  Stopping at the delimiters matters as
+    # much as matching: an over-greedy tail would swallow a second URL written
+    # right after the first and leave that one un-branded.
+    r"""(?P<tail>(?:/[^/?#\s<>"'`|\\)`,;:!]+)*)"""
 )
 
 # GitHub owners whose repositories we control and may therefore rename.
@@ -310,6 +374,226 @@ def preserved_repo_url_spans(
             continue
         spans.append(match)
     return tuple(spans)
+
+
+# ---------------------------------------------------------------------------
+# External service identifiers.  A name that lives inside a service somebody
+# else runs is as little ours to rename as somebody else's repository: the
+# branded spelling is an object the service has never heard of, so the feature
+# resolves a 404 at runtime instead of failing to build.
+# ---------------------------------------------------------------------------
+
+# DocSearch's index is selected by the ``indexName`` of the app its committed
+# ``appId``/``apiKey`` pair can read, so branding that one word while the pair
+# stays inherited splits the triple.  Both the JS object form the fork actually
+# ships (``indexName: 'hermes docs'``) and the JSON form a crawler config would
+# use (``"indexName": "hermes docs"``) are matched; an unquoted YAML value is
+# not, because there the boundary of the name is ambiguous.
+ALGOLIA_INDEX_NAME_RE = re.compile(
+    r"""(?<![A-Za-z0-9_-])["']?indexName["']?[ \t]*:[ \t]*"""
+    r"""(?P<quote>["'])(?P<value>[^"'\n]+)(?P=quote)"""
+)
+
+# Indices that exist in the app the site's DocSearch credentials point at.
+# Measured 2026-10-21 against ``GET /1/indexes`` for appId ``2JLBVEYZN5``, which
+# answers exactly ``hermes docs`` and ``hermes docs.tmp``; the fork owns nothing
+# there, and the docs-search monitor has been red on every run since the index
+# name was branded.
+PROVISIONED_ALGOLIA_INDICES: frozenset[str] = frozenset({"hermes docs"})
+
+
+def provisioned_algolia_indices() -> frozenset[str]:
+    """Index names the fork may brand *to*, i.e. names that really exist.
+
+    ``HUNDREDWAYS_ALGOLIA_INDICES`` is a comma list an owner fills in once they
+    have created their own Algolia app, indexed the fork's docs domain, and put
+    that app's id and search-only key in the site config.  Until then the only
+    reachable object is the inherited index, so that name has to survive.
+    """
+    raw = os.environ.get("HUNDREDWAYS_ALGOLIA_INDICES", "")
+    extra = {item.strip().lower() for item in raw.split(",") if item.strip()}
+    return {name.lower() for name in PROVISIONED_ALGOLIA_INDICES} | extra
+
+
+def preserved_algolia_index_spans(
+    line: str, rules: "BrandingRules | None" = None
+) -> tuple[re.Match, ...]:
+    """``indexName`` values in ``line`` that branding must leave verbatim.
+
+    A value is preserved when it names an index the configured app really has
+    and branding would move it to a name that app has never heard of -- the
+    same test the repository rule makes of an owner, made here of a service's
+    object list.  An index nobody has provisioned is not protected: branding an
+    unknown string is the ordinary policy.
+    """
+    rules = rules if rules is not None else BrandingRules()
+    provisioned = provisioned_algolia_indices()
+    spans: list[re.Match] = []
+    for match in ALGOLIA_INDEX_NAME_RE.finditer(line):
+        value = match.group("value")
+        if value.lower() not in provisioned:
+            continue
+        if rules.brand_service_name(value).lower() in provisioned:
+            continue
+        spans.append(match)
+    return tuple(spans)
+
+
+# A whole URL whose host somebody else runs is the same object in a bigger
+# namespace: ``docs.honcho.dev/v3/guides/integrations/hermes`` is *their* page
+# about the integration, and the branded spelling is a page that has never
+# existed.  Measured 2026-10-27 by fetching both spellings of every third-party
+# link the published fork tree carries: 20 of 23 sampled pairs answer 200
+# inherited and 4xx branded -- ``botcabinet.com/hermes/manual/`` 200 against
+# ``botcabinet.com/nastech/manual/`` 404, ``vshulcz.github.io/deja-vu/guide/memory-for-hermes.html``
+# 200 against ``.../memory-for-nastech.html`` 404 -- and the two pairs that
+# differ only in their fragment carry the inherited anchor id and not the
+# branded one.  The scheme is required so a bare domain in prose is never
+# mistaken for a link.
+EXTERNAL_URL_RE = re.compile(
+    r"https?://(?P<host>[A-Za-z0-9._-]+)(?P<tail>[/?#][^\s\"'<>()\[\]{}|`]*)?"
+)
+
+# Hosts the fork runs, so a path under them is ours to brand.  Inherited hosts
+# are not listed: a URL the rules move *into* one of these is a first-party
+# link, which is why the test is made of both spellings.
+OWNED_URL_HOSTS: frozenset[str] = frozenset(
+    {"nastechresearch.github.io", "nastechresearch.com", "nastechresearch.workers.dev"}
+)
+
+# Third-party hosts whose path, query or fragment names an object on *their*
+# service, measured live on 2026-10-27 (inherited 200, branded 4xx or an absent
+# anchor).  A GitHub Pages host needs no entry here: ``<user>.github.io`` is
+# provably that user's site, so it is covered by the shape rule below.
+#
+# The test for this set is whether the fork CAN create the branded object, not
+# whether the branded link happens to 404.  ``discord.gg`` is deliberately
+# absent: ``https://discord.com/api/v10/invites/NousResearch`` answers the guild
+# "Nous Research" while ``.../invites/NastechResearch`` answers
+# ``{"message": "Unknown Invite", "code": 10006}``, and the code
+# ``nastechresearch`` is unclaimed.  So 32 links across 19 files of the
+# published fork tree -- the new-issue contact form, every README badge, the
+# desktop crash overlay and its send-diagnostics dialog, ``nastech debug`` --
+# point at an invite nobody has made yet, and the fix is five minutes of owner
+# action, not a permanent rule that sends Nastech's users to the upstream
+# community.  Preserving it would also have taken 10 birth-tree files against
+# the 8 of reviewed drift this engine's parity floor has room for.
+#
+# When the fork creates its own object on one of these -- a Nastech page on
+# Honcho's docs site, say -- delete that host from this set and branding
+# resumes on it.  Do not instead delete the URL from the docs: every row here
+# is a link a human clicks.
+THIRD_PARTY_SERVICE_HOSTS: frozenset[str] = frozenset(
+    {
+        "botcabinet.com",
+        "docs.apify.com",
+        "docs.cortexlayer.net",
+        "docs.honcho.dev",
+        "docs.openmail.sh",
+        "hindsight.vectorize.io",
+        "linchpin.studio",
+        "mybot.farm",
+        "pidgeon.ai",
+    }
+)
+
+
+def owned_url_hosts() -> frozenset[str]:
+    """Hosts the fork runs, including any the owner has since provisioned.
+
+    ``HUNDREDWAYS_OWNED_URL_HOSTS`` is a comma list of hosts the fork now
+    controls, so a branded path under one is a real object rather than a 404.
+    """
+    raw = os.environ.get("HUNDREDWAYS_OWNED_URL_HOSTS", "")
+    extra = {item.strip().lower().removeprefix("*.") for item in raw.split(",") if item.strip()}
+    return {host.lower() for host in OWNED_URL_HOSTS} | extra
+
+
+def third_party_service_hosts() -> frozenset[str]:
+    """Third-party hosts whose branded paths are measured 404s."""
+    return {host.lower() for host in THIRD_PARTY_SERVICE_HOSTS}
+
+
+def _host_under(host: str, roots: frozenset[str]) -> bool:
+    """True when ``host`` is one of ``roots`` or sits under one of them."""
+    return any(host == root or host.endswith(f".{root}") for root in roots)
+
+
+def preserved_external_url_spans(
+    line: str, rules: "BrandingRules | None" = None
+) -> tuple[re.Match, ...]:
+    """URLs in ``line`` whose host branding does not control.
+
+    A host is somebody else's when neither the inherited spelling nor the
+    branded one is a host the fork runs, and it is either a GitHub Pages site
+    (which belongs to the user its subdomain names) or a host on
+    :data:`THIRD_PARTY_SERVICE_HOSTS`.  The scan gates call this the same way
+    they call :func:`preserved_repo_url_spans`: a brand word inside one of
+    these spans is inherited text, not a leak the fork has to fix.
+    """
+    rules = rules if rules is not None else BrandingRules()
+    return tuple(
+        match
+        for match in EXTERNAL_URL_RE.finditer(line)
+        if rules.preserves_external_url(match.group(0))
+    )
+
+
+# ---------------------------------------------------------------------------
+# Plugin catalog directories.  A catalog entry says which repository to clone
+# and which directory inside it holds the plugin, so the directory belongs to
+# whoever runs that repository.  Branding it points the installer at a path
+# that has never existed there.
+# ---------------------------------------------------------------------------
+
+# The catalog's own shape: one entry per file, both keys at column zero.  A
+# value may be quoted, bare, or followed by a YAML comment, and an unquoted
+# value may contain an apostrophe -- all of which are ordinary catalog YAML.
+CATALOG_REPO_KEY_RE = re.compile(
+    r"^repo:[ \t]*(?P<value>\"[^\"\n]*\"|'[^'\n]*'|[^#\n]*?)[ \t]*(?:#[^\n]*)?$", re.M
+)
+CATALOG_SUBDIR_KEY_RE = re.compile(
+    r"^subdir:[ \t]*(?P<value>\"[^\"\n]*\"|'[^'\n]*'|[^#\n]*?)[ \t]*(?:#[^\n]*)?$", re.M
+)
+
+
+def catalog_key_value(match: re.Match) -> str:
+    """The value without its YAML quotes or surrounding space."""
+    value = match.group("value").strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1]
+    return value
+
+
+def catalog_entry_repo_url(text: str) -> str | None:
+    """The ``repo:`` URL of a single plugin catalog entry, or ``None``.
+
+    ``None`` when the text is not shaped like one entry: a file with two or
+    zero top-level ``repo:`` keys is not a catalog document, and guessing which
+    entry an indented ``subdir`` belongs to would protect the wrong repository.
+    """
+    matches = list(CATALOG_REPO_KEY_RE.finditer(text))
+    if len(matches) != 1:
+        return None
+    return catalog_key_value(matches[0])
+
+
+def preserved_catalog_subdir_spans(line: str) -> tuple[re.Match, ...]:
+    """The ``subdir`` key on a catalog line whose value the brand must not carry.
+
+    The scan gates cannot repeat the whole-document test
+    :meth:`BrandingRules.preserves_catalog_subdir` makes, so they pair this with
+    :func:`catalog_entry_repo_url`: the caller passes the document's single
+    ``repo:`` URL, and a surviving inherited word then means that repository is
+    not ours -- an entry we *do* own arrives already branded.  A document with
+    no single ``repo:`` line gets no exemption, exactly as the transform
+    preserves nothing in it.
+    """
+    return tuple(
+        match
+        for match in CATALOG_SUBDIR_KEY_RE.finditer(line)
+        if catalog_key_value(match)
+    )
 
 
 # Placeholder sentinels used to carry a preserved URL through the token pass.
@@ -384,6 +668,10 @@ class BrandingRules:
         """The branded form of a single repository identifier."""
         return self._apply_tokens(path)
 
+    def brand_service_name(self, value: str) -> str:
+        """The branded form of a single external service object name."""
+        return self._apply_tokens(value)
+
     def preserves_repo_path(self, path: str) -> bool:
         """True when branding must leave this repository identifier verbatim.
 
@@ -395,57 +683,206 @@ class BrandingRules:
             self.brand_repo_path(path)
         )
 
+    def preserves_external_url(self, url: str) -> bool:
+        """True when branding must leave this whole URL verbatim.
+
+        The repository rule's test, made of a host instead of an owner: neither
+        the inherited host nor the one the rules would move it into may be a host
+        the fork runs, and the path has to be an object that host serves -- a
+        GitHub Pages site, which belongs to the user its subdomain names, or a
+        host measured on :data:`THIRD_PARTY_SERVICE_HOSTS`.  Anything else stays
+        on the ordinary policy, so a badge label or a display-text parameter on a
+        third-party host still carries our wordmark.
+        """
+        match = EXTERNAL_URL_RE.search(url)
+        if match is None:
+            return False
+        host = match.group("host").lower()
+        roots = owned_url_hosts()
+        if _host_under(host, roots):
+            return False
+        if _host_under(self.brand_service_name(host).lower(), roots):
+            return False
+        return host.endswith(".github.io") or host in third_party_service_hosts()
+
+    def preserves_catalog_subdir(self, repo_url: str, subdir: str) -> bool:
+        """True when a catalog entry's ``subdir`` names a path we do not run.
+
+        The same two-ended test the repository rule makes of an owner, made here
+        of the directory inside it: the entry is preserved only when neither the
+        inherited repository nor the one the rules would move it into is ours.
+        An entry that points at ``NousResearch/hermes-official-plugins`` is not
+        preserved, because the rules re-point it at a repository we do publish,
+        where a branded directory is one we can create.
+        """
+        if not subdir:
+            return False
+        if self.brand_repo_path(subdir) == subdir:
+            return False
+        return self.preserves_repo_path(repo_url)
+
     def transform_text(self, text: str) -> str:
         """Apply all branding tokens to free text.
 
         A ``github.com/<owner>/<repo>`` path that :meth:`preserves_repo_path`
         keeps its inherited spelling -- renaming it yields a URL that 404s --
-        while everything around it is branded normally.
+        while everything around it is branded normally.  One exception: an
+        identifier that the same file also spells bare *as a value* -- a
+        quote-delimited string that is exactly the identifier, the form code
+        stores and compares -- is branded in its URL form too.  The fork's
+        release tests build a URL from a repository string they then assert
+        against a URL literal, so a split spelling fails them on a tree whose
+        only divergence is the brand.
+
+        A bare occurrence embedded in prose is documentation, not a second
+        value, and branding the URL for it renames other people's repositories
+        (measured 2026-10-27, upstream 200 -> fork 404):
+
+        * the markdown label ``[purzbeats/hermes-agent-comfyui-helper](...)`` in
+          ``optional-skills/creative/comfyui/references/template-integrity.md``;
+        * the YAML comment ``# Generated by Pacific-Cloud-Solutions/hermes-plugins``
+          in ``plugin-catalog/aichipmunk.yaml``;
+        * the catalog sentence ``searches electricsheephq/hermes-cloud-file-manager
+          issues`` in the ``description`` of the cloud-file-manager entry, which
+          also dragged seven raw screenshots with it.
+
+        Those three shapes share one property: the occurrence is not a
+        standalone quoted value.  A ``raw.githubusercontent.com`` asset URL
+        never counts either -- :data:`GITHUB_REPO_RE` matches that host, so the
+        occurrence is inside a ``covered`` span.  A catalog entry is where the
+        requirement is enforced -- ``repo:`` is its clone target -- because the
+        last case is a documentation link whose correction moves one
+        birth-parity file, and that is tracked separately.
         """
         return self._transform_text(text, preserve_foreign_repos=True)
+
+    @staticmethod
+    def _is_standalone_value(text: str, start: int, end: int) -> bool:
+        """True when ``text[start:end]`` is exactly one quoted string value."""
+        before = text[start - 1] if start else ""
+        if before not in "\"'":
+            return False
+        after = end + len(".git") if text.startswith(".git", end) else end
+        if after >= len(text):
+            return False
+        return text[after] == before
+
+    def _bare_also_branded(
+        self, text: str, identifier: str, covered: list[tuple[int, int]]
+    ) -> bool:
+        """True when this repository identifier is also spelled bare in *text*.
+
+        ``covered`` holds the spans of the repository identifiers that were
+        masked out, so an occurrence inside one of them does not count: only a
+        bare ``<owner>/<repo>`` outside every identifier the pass protects is a
+        token the pass rewrites in place.
+
+        In a catalog entry -- a document with exactly one top-level ``repo:``
+        line -- that line *is* the clone target, and no prose, comment or label
+        elsewhere in the file may drag it onto a name it does not have.  So a
+        bare occurrence counts there only when it is itself a standalone quoted
+        value, the form code stores and compares (see :meth:`transform_text`
+        for the measurements).  Elsewhere the older rule still holds, because
+        the remaining measured case is one documentation link and changing it
+        moves a birth-parity file; that link is tracked on its own.
+        """
+        core = identifier[: -len(".git")] if identifier.endswith(".git") else identifier
+        if self.brand_repo_path(core) == core:
+            return False
+        catalog = catalog_entry_repo_url(text) is not None
+        start = text.find(core)
+        while start != -1:
+            end = start + len(core)
+            if not any(lo <= start and end <= hi for lo, hi in covered) and (
+                not catalog or self._is_standalone_value(text, start, end)
+            ):
+                return True
+            start = text.find(core, start + 1)
+        return False
 
     def _transform_text(self, text: str, *, preserve_foreign_repos: bool) -> str:
         if not preserve_foreign_repos:
             return self._apply_tokens(text)
         spans: list[str] = []
+        # ``None`` marks a stashed span with no owner to brand into -- an
+        # external service's object name, restored exactly as it was found.
+        identifiers: list[str | None] = []
 
         def _stash(match: re.Match) -> str:
             spans.append(match.group(0))
+            identifiers.append(f"{match.group('owner')}/{match.group('repo')}")
             return _mask(len(spans) - 1)
 
         working = GITHUB_REPO_RE.sub(_stash, text)
-        if spans:
-            keep_pairs: set[tuple[str, str]] = set()
-            for original in spans:
-                if self.preserves_repo_path(original):
-                    m = GITHUB_REPO_RE.search(original)
-                    if m:
-                        repo = m.group("repo")
-                        if repo.endswith(".git"):
-                            repo = repo[: -len(".git")]
-                        keep_pairs.add((m.group("owner"), repo))
-            if keep_pairs:
-                bare_re = re.compile(
-                    r"(?<![A-Za-z0-9._-])(?P<owner>[A-Za-z0-9._-]+)/(?P<repo>[A-Za-z0-9._-]+)(?![A-Za-z0-9._-])"
-                )
+        provisioned = provisioned_algolia_indices()
 
-                def _stash_bare(match: re.Match) -> str:
-                    if (match.group("owner"), match.group("repo")) not in keep_pairs:
-                        return match.group(0)
-                    spans.append(match.group(0))
-                    return _mask(len(spans) - 1)
+        def _stash_index(match: re.Match) -> str:
+            value = match.group("value")
+            if value.lower() not in provisioned:
+                # No evidence this index exists, so there is nothing to protect:
+                # branding it is the ordinary policy for an unknown string.
+                return match.group(0)
+            if self.brand_service_name(value).lower() in provisioned:
+                return match.group(0)
+            spans.append(match.group(0))
+            identifiers.append(None)
+            return _mask(len(spans) - 1)
 
-                working = bare_re.sub(_stash_bare, working)
+        working = ALGOLIA_INDEX_NAME_RE.sub(_stash_index, working)
+
+        def _stash_url(match: re.Match) -> str:
+            url = match.group(0)
+            if not self.preserves_external_url(url):
+                return url
+            if _MASK_OPEN in url:
+                # The span holds a repository identifier an earlier pass already
+                # stashed.  Stashing the whole URL again would re-insert that
+                # placeholder after its own replacement had run, leaving the
+                # sentinel in the published text, so the inner identifier keeps
+                # its own preservation and the URL is not masked a second time.
+                return url
+            if self.brand_service_name(url) == url:
+                # Nothing would rename it, so it needs no protection -- and
+                # stashing it anyway would hide a brand word elsewhere in the
+                # same line from the scan gates.
+                return url
+            spans.append(url)
+            identifiers.append(None)
+            return _mask(len(spans) - 1)
+
+        working = EXTERNAL_URL_RE.sub(_stash_url, working)
+
+        repo_url = catalog_entry_repo_url(text)
+        if repo_url:
+
+            def _stash_subdir(match: re.Match) -> str:
+                if _MASK_OPEN in match.group(0):
+                    # The line already carries a stashed span; masking it whole
+                    # would re-insert that placeholder after its own replacement
+                    # had run.  The inner span keeps its own preservation.
+                    return match.group(0)
+                if not self.preserves_catalog_subdir(repo_url, catalog_key_value(match)):
+                    return match.group(0)
+                spans.append(match.group(0))
+                identifiers.append(None)
+                return _mask(len(spans) - 1)
+
+            working = CATALOG_SUBDIR_KEY_RE.sub(_stash_subdir, working)
 
         if not spans:
             return self._apply_tokens(working)
         branded = self._apply_tokens(working)
+        covered = [(m.start(), m.end()) for m in GITHUB_REPO_RE.finditer(text)]
         for index, original in enumerate(spans):
-            keep = (
-                original
-                if self.preserves_repo_path(original)
-                else self.brand_repo_path(original)
-            )
+            identifier = identifiers[index]
+            if identifier is None:
+                keep = original
+            elif self.preserves_repo_path(original) and not self._bare_also_branded(
+                text, identifier, covered
+            ):
+                keep = original
+            else:
+                keep = self.brand_repo_path(original)
             branded = branded.replace(_mask(index), keep)
         return branded
 

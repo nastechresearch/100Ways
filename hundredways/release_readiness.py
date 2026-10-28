@@ -7,7 +7,16 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 
-_RELEASE_TAG = re.compile(r"^v20\d{2}\.\d{1,2}\.\d{1,2}(?:\.\d+)?$")
+# Upstream ran the calendar line up to ``v2026.9.24`` and then moved it to
+# semantic versions -- ``scripts/releases/versioning.py`` seeds the new line at
+# ``SEED = "0.21.5"`` and the first release on it was ``v0.21.6``.  Accepting
+# only the calendar shape reports every current upstream release as
+# ``release-tag-format`` and so blocks the readiness gate for the only versions
+# upstream still publishes.  What must stay out is anything that is not a final
+# release tag: an attempt ref (``rc.<N>-vX.Y.Z``) numbers an attempt within a
+# version that was never spent, a canary identity carries ``+canary.<stamp>``,
+# and a receipt namespace has no leading ``v``.
+_RELEASE_TAG = re.compile(r"^v\d+(?:\.\d+){2,3}$")
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -67,7 +76,7 @@ def assess_release_readiness(
     provenance = provenance if isinstance(provenance, dict) else {}
 
     if not _RELEASE_TAG.fullmatch(upstream_tag):
-        issues.append(ReleaseReadinessIssue("release-tag-format", "upstream tag is not a supported calendar version"))
+        issues.append(ReleaseReadinessIssue("release-tag-format", "upstream tag is not a final release version"))
     if not _SHA.fullmatch(upstream_tag_sha):
         issues.append(ReleaseReadinessIssue("release-tag-sha", "upstream tag target must be a full commit SHA"))
     if candidate_upstream_sha != upstream_tag_sha:

@@ -34,6 +34,7 @@ import json
 import os
 import shutil
 import subprocess
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from .rules import (
@@ -162,9 +163,28 @@ class SourceDeltaReport:
 
 
 _JUNK_DIRS = {"node_modules", "__pycache__", ".git", ".venv", "venv"}
+OWNED_ASSETS_PREFIX = "config/owned-assets/"
 
 
-def _walk(root: str) -> list[str]:
+def is_explicitly_owned(rel: str, owned_paths: Iterable[str] = ()) -> bool:
+    """True when a fork path is ours by right rather than derived from upstream.
+
+    Three kinds qualify: the operator's ownership set, the
+    ``config/owned-assets/`` registry the engine publishes itself, and
+    contributor identity metadata (:func:`is_immutable_path`), where a brand
+    token is a real name rather than stale branding.  Both the preserve/consistency
+    stages and surface orphan reporting ask this same question, so they ask it of
+    one function: an orphan classified by a different ownership rule than the one
+    that decided to preserve the file is a contradiction, not a second opinion.
+    """
+    return (
+        rel in owned_paths
+        or rel.startswith(OWNED_ASSETS_PREFIX)
+        or is_immutable_path(rel)
+    )
+
+
+def walk_files(root: str) -> list[str]:
     """All files under ``root``, skipping dependency/build junk.
 
     When ``root`` is a git checkout, the git-tracked file set is authoritative
@@ -215,7 +235,7 @@ def scan_brand_violations(root: str, rules: BrandingRules | None = None,
     """
     rules = rules or BrandingRules()
     hits: list[ForkViolation] = []
-    for rel in _walk(root):
+    for rel in walk_files(root):
         if is_locked_path(rel):
             continue
         if skip_immutable and is_immutable_path(rel):
@@ -409,23 +429,19 @@ def preserve_fork_files(
     rules = rules or BrandingRules()
     obsolete_upstream_paths = obsolete_upstream_paths or set()
     owned_paths = owned_paths or set()
-    upstream = _walk(upstream_root)
+    upstream = walk_files(upstream_root)
     upstream_path_map = collision_safe_path_map(upstream, rules)
     upstream_mapped = set(upstream_path_map.values())
     engine_registry = os.path.isfile(
         os.path.join(branded_root, "config", "owned-assets", "manifest.json")
     )
     preserved: list[str] = []
-    for rel in _walk(fork_root):
+    for rel in walk_files(fork_root):
         if rel in upstream_mapped:
             continue  # upstream provides it
         if _is_relocated_collision_alias(rel, upstream_path_map, fork_root, branded_root, rules):
             continue  # exact contributor bytes already exist at their safe destination
-        explicitly_owned = (
-            rel in owned_paths
-            or rel.startswith("config/owned-assets/")
-            or is_immutable_path(rel)
-        )
+        explicitly_owned = is_explicitly_owned(rel, owned_paths)
         if rel in obsolete_upstream_paths and not explicitly_owned:
             continue  # direct source evidence proves this is stale upstream code
         if not allow_unclassified_fork_files and not explicitly_owned:
@@ -439,7 +455,7 @@ def preserve_fork_files(
         # owned assets. The fallback below still preserves explicit assets when
         # no engine-owned registry is available.
         if engine_registry and (
-            rel in owned_paths or rel.startswith("config/owned-assets/")
+            rel in owned_paths or rel.startswith(OWNED_ASSETS_PREFIX)
         ):
             continue
         if os.path.abspath(dst) == os.path.abspath(src):
@@ -485,9 +501,9 @@ def fork_consistency(
     report.features_fork = _feature_docs(fork_root)
     report.features_branded = _feature_docs(branded_root)
 
-    fork_files = set(_walk(fork_root))
-    branded_files = set(_walk(branded_root))
-    upstream = set(_walk(upstream_root))
+    fork_files = set(walk_files(fork_root))
+    branded_files = set(walk_files(branded_root))
+    upstream = set(walk_files(upstream_root))
     upstream_path_map = collision_safe_path_map(list(upstream), rules)
     upstream_mapped = set(upstream_path_map.values())
 
@@ -516,19 +532,15 @@ def fork_consistency(
             entry.status = "relocated"
             report.entries.append(entry)
             continue
-        explicitly_owned = (
-            rel in owned_paths
-            or rel.startswith("config/owned-assets/")
-            or is_immutable_path(rel)
-        )
+        explicitly_owned = is_explicitly_owned(rel, owned_paths)
         if rel in obsolete_upstream_paths and not explicitly_owned:
             entry.status = "stale_upstream" if rel in branded_files else "upstream_deleted"
             report.entries.append(entry)
             continue
         if rel not in branded_files:
             registry_rel = (
-                rel[len("config/owned-assets/"):]
-                if rel.startswith("config/owned-assets/")
+                rel[len(OWNED_ASSETS_PREFIX):]
+                if rel.startswith(OWNED_ASSETS_PREFIX)
                 else None
             )
             if (
@@ -572,11 +584,7 @@ def fork_consistency(
         report.entries.append(entry)
 
     for rel in sorted(branded_files - fork_files):
-        explicitly_owned = (
-            rel in owned_paths
-            or rel.startswith("config/owned-assets/")
-            or is_immutable_path(rel)
-        )
+        explicitly_owned = is_explicitly_owned(rel, owned_paths)
         if rel in obsolete_upstream_paths and not explicitly_owned:
             report.entries.append(ForkEntry(path=rel, status="stale_upstream"))
             continue

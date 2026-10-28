@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Sequence
 
+from .forklint import run_fork_lint
 from .integrity import audit_candidate_tree, audit_manifest_provenance, tree_digest
 from .rules import BrandingRules
 
@@ -20,12 +21,38 @@ _SECRET_PATTERNS = (
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
 )
 
+# The fork re-lints the candidate itself (``.github/workflows/lint.yml``), and the same
+# three classes of red keep landing there after this gate went green: a fork checker
+# the engine never ran, a char-count cap the brand transform alone pushes past, and a
+# ``subprocess.run`` block the engine generates into fork code.  ``forklint`` runs the
+# fork's rules over the candidate, and its blocking findings are blocking issues here;
+# what the fork itself declares ``continue-on-error`` lands as an advisory issue, which
+# the report shows and the gate does not fail on -- the fork's own contract, not a
+# judgement made here.
+_FORK_LINT_CODE = "fork-lint"
+_FORK_LINT_ADVISORY_CODE = "fork-lint-advisory"
+
+BLOCKER = "blocker"
+ADVISORY = "advisory"
+
 
 @dataclass(frozen=True)
 class ReadinessIssue:
     code: str
     path: str
     detail: str
+
+
+def is_blocking(issue: ReadinessIssue) -> bool:
+    """Advisory is only ever advisory because the FORK says so.
+
+    ``fork-lint-advisory`` is the single code this gate does not fail on: it is the
+    outcome of a ``lint.yml`` step that carries ``continue-on-error: true``, so the
+    fork declared it non-fatal and this gate has no authority to promote it.
+    Everything else blocks -- including every ``unavailable`` forklint outcome, since
+    a check that did not run is not a check that passed.
+    """
+    return issue.code != _FORK_LINT_ADVISORY_CODE
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -121,11 +148,37 @@ def _credential_signals(root: Path) -> list[ReadinessIssue]:
     return issues
 
 
+def _fork_lint_issues(snapshot: Path, upstream: Path, fork_root: str) -> list[ReadinessIssue]:
+    """The fork's own static checks, run over the candidate before it is shipped.
+
+    An empty ``fork_root`` skips the simulation entirely, and that path exists only for
+    tests: :func:`main` requires ``--fork-root``, so the scan CI runs cannot publish an
+    un-simulated tree.  A wrong ``fork_root`` is not skipped -- :func:`run_fork_lint`
+    reports it as unavailable, which is blocking.
+    """
+    if not fork_root:
+        return []
+    return [
+        ReadinessIssue(
+            _FORK_LINT_CODE if issue.blocking else _FORK_LINT_ADVISORY_CODE,
+            issue.path or issue.script,
+            f"{issue.script}: {issue.detail}",
+        )
+        for issue in run_fork_lint(fork_root, str(snapshot), str(upstream))
+    ]
+
+
 def scan_snapshot(
     snapshot: str | Path,
     upstream: str | Path,
     expected_upstream_sha: str,
+    fork_root: str = "",
 ) -> list[ReadinessIssue]:
+    """Everything that must be true before this candidate becomes a PR.
+
+    ``fork_root`` is a checkout of the fork at its current ``main``: the candidate is
+    linted by the fork's own checkers and ruff rules, not by an engine copy of them.
+    """
     snapshot_path = Path(snapshot)
     upstream_path = Path(upstream)
     issues: list[ReadinessIssue] = []
@@ -187,25 +240,37 @@ def scan_snapshot(
     for issue in _credential_signals(snapshot_path):
         if issue.path not in source_credential_paths:
             issues.append(issue)
+    issues.extend(_fork_lint_issues(snapshot_path, upstream_path, fork_root))
     return issues
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--snapshot", required=True)
     parser.add_argument("--upstream", required=True)
     parser.add_argument("--expected-upstream-sha", required=True)
+    parser.add_argument("--fork-root", required=True)
     parser.add_argument("--output", required=True)
-    args = parser.parse_args(argv)
-    issues = scan_snapshot(args.snapshot, args.upstream, args.expected_upstream_sha)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    issues = scan_snapshot(
+        args.snapshot, args.upstream, args.expected_upstream_sha, args.fork_root
+    )
+    blockers = [issue for issue in issues if is_blocking(issue)]
     body = {
-        "gate": "PASS" if not issues else "FAIL",
-        "issues": [asdict(issue) for issue in issues],
+        "gate": "PASS" if not blockers else "FAIL",
+        "issues": [
+            {**asdict(issue), "severity": BLOCKER if is_blocking(issue) else ADVISORY}
+            for issue in issues
+        ],
         "candidate_tree_sha256": tree_digest(args.snapshot),
     }
     Path(args.output).write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(body, indent=2))
-    return 0 if not issues else 1
+    return 0 if not blockers else 1
 
 
 if __name__ == "__main__":

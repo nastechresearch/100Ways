@@ -148,6 +148,211 @@ def test_rest_api_repository_paths_read_the_owner_not_the_repos_segment():
     assert rules.transform_text(once) == once
 
 
+def test_raw_asset_urls_are_repository_identifiers_too():
+    """``raw.githubusercontent.com`` names a repository, so it is protected.
+
+    Measured on the published fork catalog: 191 distinct foreign-owner plugin
+    entries spell their repository twice -- once as
+    ``github.com/<owner>/hermes-x`` (matched, so preserved) and once as
+    ``raw.githubusercontent.com/<owner>/hermes-x/<sha>/docs/hero.png`` (not
+    matched).  The unmatched spelling read as a *bare* identifier, which is the
+    condition :meth:`BrandingRules._bare_also_branded` uses to rebrand the whole
+    file, so the preservation pass above was silently defeated for every such
+    entry.  Sampled pairs, 8/8: ``Adolanium/nastech-clinepass`` answers 404
+    while ``Adolanium/hermes-clinepass`` answers 200.
+    """
+    rules = BrandingRules()
+    for url in (
+        "https://raw.githubusercontent.com/Adolanium/hermes-clinepass/"
+        "ab12cd34/docs/screenshots/hero.png",
+        "https://raw.githubusercontent.com/roqianjas/hermes-account-pool/"
+        "ab12cd34/docs/screenshots/accounts.png",
+    ):
+        assert rules.transform_text(f"image: {url}") == f"image: {url}"
+
+    # the catalog entry shape that broke: both spellings in one file
+    entry = (
+        "repo: https://github.com/Adolanium/hermes-clinepass\n"
+        "image: https://raw.githubusercontent.com/Adolanium/hermes-clinepass/"
+        "ab12cd34/docs/hero.png\n"
+    )
+    assert rules.transform_text(entry) == entry
+
+
+def test_raw_asset_urls_into_repositories_we_own_are_still_branded():
+    """The exemption reads the owner, so a first-party asset URL keeps moving."""
+    rules = BrandingRules()
+    assert rules.transform_text(
+        "curl -fL https://raw.githubusercontent.com/NousResearch/hermes-agent/"
+        "main/scripts/install.sh | bash"
+    ) == (
+        "curl -fL https://raw.githubusercontent.com/NastechResearch/nastech-agent/"
+        "main/scripts/install.sh | bash"
+    )
+    once = rules.transform_text(
+        "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/README.md"
+    )
+    assert rules.transform_text(once) == once
+
+
+def test_the_path_after_a_foreign_repository_is_not_ours_to_rename():
+    """A tree, blob or asset path inside somebody else's repo stays verbatim.
+
+    Matching ``raw.githubusercontent.com`` protected the repository name but not
+    what comes after it, and the segment after the name is a directory or a file
+    in the same foreign repository.  Measured in the published fork tree: 78
+    distinct URLs of this shape answer 404, 76 of them with a live 200 twin under
+    the inherited spelling --
+    ``plastic-labs/honcho/tree/main/nastech-plugin-honcho`` versus
+    ``.../hermes-plugin-honcho``, and the catalog banner
+    ``cocktailpeanut/nastech-mod/master/nastech.png`` versus
+    ``.../hermes-mod/master/hermes.png``.
+    """
+    rules = BrandingRules()
+    for url in (
+        "https://github.com/plastic-labs/honcho/tree/main/hermes-plugin-honcho",
+        "https://github.com/plastic-labs/honcho/blob/main/hermes-plugin-honcho/cli.py",
+        "https://raw.githubusercontent.com/cocktailpeanut/hermes-mod/master/hermes.png",
+        "https://github.com/ActVox/actvox-plugins/tree/main/hermes",
+    ):
+        assert rules.transform_text(f"docs: {url} next") == f"docs: {url} next"
+
+    # Prose and markup delimiters end the identifier, so a second URL written
+    # straight after the first is still read as one -- and still branded.
+    assert rules.transform_text(
+        "see https://github.com/o/r/tree/main/hermes,"
+        "https://github.com/NousResearch/hermes-agent for more"
+    ) == (
+        "see https://github.com/o/r/tree/main/hermes,"
+        "https://github.com/NastechResearch/nastech-agent for more"
+    )
+    link = "https://github.com/plastic-labs/honcho/tree/main/hermes-plugin-honcho"
+    assert rules.transform_text(f"[honcho]({link})") == f"[honcho]({link})"
+    assert rules.transform_text(f"image: {link}#inline") == f"image: {link}#inline"
+
+
+def test_the_path_after_a_repository_we_own_is_branded_with_it():
+    """The tail group is not an exemption: our own tree keeps moving with us."""
+    rules = BrandingRules()
+    assert rules.transform_text(
+        "https://api.github.com/repos/NousResearch/hermes-agent/contents/hermes_cli"
+    ) == "https://api.github.com/repos/NastechResearch/nastech-agent/contents/nastech_cli"
+    once = rules.transform_text(
+        "https://github.com/NousResearch/hermes-agent/blob/main/hermes_cli/pm/__init__.py"
+    )
+    assert "nastech_cli" in once
+    assert rules.transform_text(once) == once
+
+
+def test_a_path_on_a_host_the_fork_does_not_run_stays_whole():
+    """A URL into somebody else's site is their object, one level above a repo.
+
+    ``GITHUB_REPO_RE`` stops the brand at a foreign repository; the same
+    reasoning applies to a whole URL whose host the fork does not run, because
+    the path is a page on *their* service.  Measured 2026-10-27 by fetching both
+    spellings of every third-party link the published fork tree carries: 20 of
+    23 sampled pairs answer 200 inherited and 4xx branded, e.g.
+    ``botcabinet.com/hermes/manual/`` 200 against ``botcabinet.com/nastech/manual/``
+    404, ``vshulcz.github.io/deja-vu/guide/memory-for-hermes.html`` 200 against
+    the branded 404.  The two pairs differing only in their fragment carry the
+    inherited anchor id and not the branded one.
+    """
+    rules = BrandingRules()
+    for url in (
+        "https://docs.honcho.dev/v3/guides/integrations/hermes",
+        "https://docs.honcho.dev/v3/guides/integrations/hermes"
+        "#running-honcho-locally-with-hermes",
+        "https://hindsight.vectorize.io/sdks/integrations/hermes",
+        "https://docs.apify.com/integrations/hermes-agent",
+        "https://docs.cortexlayer.net/docs/agents/hermes",
+        "https://docs.openmail.sh/integrations/hermes",
+        "https://pidgeon.ai/docs/hermes",
+        "https://mybot.farm/install/hermes",
+        "https://botcabinet.com/hermes/manual/",
+        "https://linchpin.studio/school-of-hermes/manual/",
+        "https://patrykkopycinski.github.io/hermes-plugin-agent-memory-es/",
+        "https://adolanium.github.io/hermes-gadget-sdk/docs/connect-hermes.html",
+        "https://briancaffey.github.io/hermes-otel/",
+    ):
+        once = rules.transform_text(f"docs: {url} next")
+        assert once == f"docs: {url} next", url
+        assert rules.transform_text(once) == once, url
+
+    # Only the URL is preserved; the sentence around it still brands.
+    assert rules.transform_text(
+        "run `hermes plugin install`, then read https://mybot.farm/install/hermes"
+    ) == "run `nastech plugin install`, then read https://mybot.farm/install/hermes"
+    # A markdown link's closing bracket ends the URL instead of swallowing it.
+    assert rules.transform_text("[manual](https://botcabinet.com/hermes/manual/)") == (
+        "[manual](https://botcabinet.com/hermes/manual/)"
+    )
+
+
+def test_a_third_party_object_the_fork_can_claim_itself_still_brands():
+    """Preserving a link is for pages we cannot publish, not for ones we haven't yet.
+
+    ``discord.gg`` is the measured case: the invite API answers the guild "Nous
+    Research" for ``NousResearch`` and ``{"message": "Unknown Invite", "code":
+    10006}`` for ``NastechResearch``, and the code ``nastechresearch`` is
+    unclaimed.  Keeping the upstream community in our docs would send Nastech's
+    users to somebody else's server forever, and would cost 10 of the 8 files
+    of reviewed drift the rules gate leaves under its parity floor, so the
+    engine brands it and the owner creates the invite.
+    """
+    rules = BrandingRules()
+    assert rules.transform_text("join https://discord.gg/NousResearch") == (
+        "join https://discord.gg/NastechResearch"
+    )
+    assert not rules.preserves_external_url("https://discord.gg/NousResearch")
+    # Once the fork runs its own object on a host, saying so resumes branding
+    # without a code change: the same escape hatch the Algolia rule uses.
+    assert rules.preserves_external_url("https://docs.honcho.dev/v3/guides/integrations/hermes")
+
+
+def test_display_text_on_a_third_party_host_is_still_ours_to_brand():
+    """Preserving somebody's page is not preserving a label that names us.
+
+    The rule is about objects a host serves, so a badge caption or a free-text
+    parameter keeps the brand: ``img.shields.io`` renders whatever the path
+    says, and the ascii skill asks the service to draw our wordmark.
+    """
+    rules = BrandingRules()
+    assert rules.transform_text("https://img.shields.io/badge/discord-hermes-blue") == (
+        "https://img.shields.io/badge/discord-nastech-blue"
+    )
+    assert rules.transform_text(
+        "https://asciified.thelicato.io/api/v2/ascii?text=HERMES&font=Slant"
+    ) == "https://asciified.thelicato.io/api/v2/ascii?text=NASTECH&font=Slant"
+
+
+def test_a_host_the_rules_move_onto_a_host_we_run_is_never_preserved():
+    """The ``*.github.io`` shape ends where our own Pages origin begins."""
+    rules = BrandingRules()
+    assert rules.transform_text("https://nousresearch.github.io/hermes-agent/docs") == (
+        "https://nastechresearch.github.io/nastech-agent/docs"
+    )
+    assert rules.transform_text("https://nousresearch.com") == "https://nastechresearch.com"
+
+
+def test_a_preserved_url_carrying_a_repository_identifier_keeps_both_rules():
+    """A nested identifier is not masked twice, so no sentinel reaches output.
+
+    The repository pass runs first, so a URL that embeds one arrives here with a
+    placeholder inside it.  Masking the whole span again would restore that
+    placeholder after its own substitution had already run and publish it.
+    """
+    rules = BrandingRules()
+    out = rules.transform_text(
+        "https://docs.honcho.dev/redirect?to=https://github.com/Adolanium/hermes-clinepass"
+        " plus https://github.com/NousResearch/hermes-agent"
+    )
+    assert "\ue000" not in out
+    assert out == (
+        "https://docs.honcho.dev/redirect?to=https://github.com/Adolanium/hermes-clinepass"
+        " plus https://github.com/NastechResearch/nastech-agent"
+    )
+
+
 def test_preserved_repository_path_is_a_branding_fixed_point():
     """The audit defines clean as ``transform_text(text) == text``.
 
@@ -206,6 +411,128 @@ def test_hosted_community_plugin_maps_to_our_own_fork():
     assert "itpartypattaya" not in transform_strict_metadata_text(
         "https://github.com/itpartypattaya/hermes-plugin-holographic"
     )
+
+
+def test_one_identifier_is_branded_under_every_spelling_it_uses():
+    """A file carrying both a bare identifier and its URL must brand both.
+
+    The fork's release tests build a URL *from* a repository string and compare it
+    with a URL literal: ``target_repository="example/hermes-agent"`` is what turns
+    into ``https://github.com/example/hermes-agent/archive/<sha>.zip``.  The bare
+    form is ordinary token-rule text and was branded in place while the URL form
+    was preserved verbatim, so the generated file asserted ``nastech-agent``
+    against ``hermes-agent`` and failed.  A repository identifier is therefore
+    only preserved when the text never spells it bare.
+    """
+    rules = BrandingRules()
+    both = (
+        '    repository = "example/hermes-agent"\n'
+        '    url = "https://github.com/example/hermes-agent/releases/tag/v1"\n'
+    )
+    branded = rules.transform_text(both)
+    assert branded == (
+        '    repository = "example/nastech-agent"\n'
+        '    url = "https://github.com/example/nastech-agent/releases/tag/v1"\n'
+    )
+    assert "hermes" not in branded
+    assert rules.transform_text(branded) == branded
+    # a trailing ``.git`` belongs to the identifier, so it must not hide the bare
+    # spelling sitting two lines away (the real shape of the fixture fork in
+    # ``tests/nastech_cli/test_source_release_channels.py``).
+    dotted = (
+        '    url = "https://github.com/Fixture/hermes-agent.git"\n'
+        '    target_repository = "Fixture/hermes-agent"\n'
+    )
+    assert rules.transform_text(dotted) == (
+        '    url = "https://github.com/Fixture/nastech-agent.git"\n'
+        '    target_repository = "Fixture/nastech-agent"\n'
+    )
+
+
+def test_the_bare_spelling_exception_never_widens_preservation():
+    """Preservation still holds for a URL the file does not spell bare.
+
+    The exception is one-way: it can move a would-be-preserved identifier into
+    ``brand_repo_path``, never the other way round.  An occurrence that only
+    exists *inside* repository identifiers is not a bare spelling -- the pass
+    masks those before it looks -- so the 383 catalog entries that started this
+    exemption stay verbatim.
+    """
+    rules = BrandingRules()
+    for text in (
+        "repo: https://github.com/lancedb/hermes-agent-memory\n",
+        # the same identifier twice, both times as part of a URL
+        "a = 'https://github.com/lancedb/hermes-agent-memory'\n"
+        "b = 'https://github.com/lancedb/hermes-agent-memory/issues/1'\n",
+        # already ours, so nothing here is a rename in either direction
+        'url = "https://github.com/NastechResearch/nastech-agent/releases"\n',
+    ):
+        assert rules.transform_text(text) == text
+
+
+def test_yaml_comment_does_not_force_a_foreign_repo_url_to_brand():
+    """A comment is documentation, not a value the code compares.
+
+    ``plugin-catalog/aichipmunk.yaml:2`` credits
+    ``Pacific-Cloud-Solutions/hermes-plugins`` in a comment while the ``repo:``
+    URL and the hero asset point at the same repository.  Branding that
+    repository renamed three live objects into 404s.
+    """
+    rules = BrandingRules()
+    sha = "d565d7698a28f4364f819446e5f7ae2b67c57352"
+    text = (
+        "# Generated by Pacific-Cloud-Solutions/hermes-plugins:scripts/catalog_entry.py.\n"
+        "repo: https://github.com/Pacific-Cloud-Solutions/hermes-plugins\n"
+        "image: https://raw.githubusercontent.com/Pacific-Cloud-Solutions/"
+        f"hermes-plugins/{sha}/plugins/aichipmunk/docs/hero-2x1.webp\n"
+    )
+    branded = rules.transform_text(text)
+    assert "https://github.com/Pacific-Cloud-Solutions/hermes-plugins" in branded
+    assert (
+        "https://raw.githubusercontent.com/Pacific-Cloud-Solutions/"
+        f"hermes-plugins/{sha}/plugins/aichipmunk/docs/hero-2x1.webp"
+    ) in branded
+    assert "Pacific-Cloud-Solutions/nastech-plugins/" not in branded
+    assert rules.transform_text(branded) == branded
+
+
+def test_prose_in_a_yaml_value_does_not_force_foreign_assets_to_brand():
+    """A catalog description naming a repository is prose, not a value.
+
+    The cloud-file-manager entry's ``description`` mentions
+    ``electricsheephq/hermes-cloud-file-manager`` in a sentence, and the entry
+    carries one ``repo:``, one ``docs_url:`` and seven raw screenshots of the
+    same repository.  All nine URLs answered 404 after branding and 200
+    upstream.
+    """
+    rules = BrandingRules()
+    sha = "9678d440f0c1735996d2a0b1a5e97fe58013fddd"
+    repo = "electricsheephq/hermes-cloud-file-manager"
+    assets = [
+        f"https://raw.githubusercontent.com/{repo}/{sha}/docs/media/{name}"
+        for name in (
+            "banner.png",
+            "screenshot-page.png",
+            "screenshot-upload.png",
+            "screenshot-picker.png",
+            "screenshot-drive-page.png",
+            "screenshot-editor-review.png",
+            "screenshot-chat.png",
+        )
+    ]
+    text = (
+        f'description: "searches {repo} issues with gh after approval"\n'
+        f"repo: https://github.com/{repo}\n"
+        f"docs_url: https://github.com/{repo}#readme\n"
+        + "".join(f"  - {asset}\n" for asset in assets)
+    )
+    branded = rules.transform_text(text)
+    assert f"https://github.com/{repo}" in branded
+    assert f"https://github.com/{repo}#readme" in branded
+    for asset in assets:
+        assert asset in branded
+    assert "electricsheephq/nastech-cloud-file-manager/" not in branded
+    assert rules.transform_text(branded) == branded
 
 
 def test_path_transforms():
@@ -323,6 +650,7 @@ def test_runner_labels_normalize_to_standard_hosted():
         "runs-on: ubuntu-latest-32-core\n"
         "runner: windows-latest-32-core\n"
         "runs-on: ubuntu-latest-32-arm-core\n"
+        "runs-on: windows-latest-32-arm-core\n"
         "runs-on: macos-14-xlarge-core\n"  # no digits before core -> untouched
     )
     out = rules.transform_text(text)
@@ -332,6 +660,25 @@ def test_runner_labels_normalize_to_standard_hosted():
     assert "-core" not in out.split("macos")[0]
     # the non-matching line survives verbatim
     assert "macos-14-xlarge-core" in out
+
+
+def test_arm_windows_runner_keeps_arm64():
+    # An arm64 Windows row is an architecture requirement. Landing it on the
+    # x64 image builds a win32-x64 payload inside a win32-arm64 package, which
+    # the bundle's own audit rejects, so it must take the standard arm64 tier.
+    rules = BrandingRules()
+    text = (
+        "runs-on: windows-latest-32-arm-core\n"
+        "runner: windows-latest-32-arm-core\n"
+        "runs-on: ${{ inputs.arch == 'arm64' && 'windows-latest-32-arm-core' "
+        "|| 'blacksmith-32vcpu-windows-2025' }}\n"
+    )
+    out = rules.transform_text(text)
+    assert "runs-on: windows-11-arm\n" in out
+    assert "runner: windows-11-arm\n" in out
+    assert "&& 'windows-11-arm' || 'windows-latest' " in out
+    # idempotent: a branded tree re-brands to itself
+    assert rules.transform_text(out) == out
 
 
 def test_blacksmith_runner_labels_normalize_to_standard_hosted():
@@ -344,6 +691,7 @@ def test_blacksmith_runner_labels_normalize_to_standard_hosted():
         "runs-on: blacksmith-4vcpu-ubuntu-2404-arm\n"
         "runner: blacksmith-32vcpu-windows-2025\n"
         "runner: blacksmith-2vcpu-windows-2025\n"
+        "runner: blacksmith-32vcpu-windows-2025-arm\n"
         "runs-on: blacksmith-12vcpu-macos-latest\n"
         "runs-on: blacksmith-6vcpu-macos-latest\n"
     )
@@ -356,6 +704,7 @@ def test_blacksmith_runner_labels_normalize_to_standard_hosted():
         "runs-on: ubuntu-24.04-arm\n"
         "runner: windows-latest\n"
         "runner: windows-latest\n"
+        "runner: windows-11-arm\n"
         "runs-on: macos-latest\n"
         "runs-on: macos-latest\n"
     )
@@ -447,7 +796,7 @@ def test_full_python_test_timeout_normalizes_to_40_minutes_only():
     assert "name: e2e\n    timeout-minutes: 30" in out
 
 
-def test_os_matrix_windows_workers_cap_to_runner_cores():
+def test_os_matrix_workers_cap_to_the_free_runner_cores():
     rules = BrandingRules()
     line = (
         "          NASTECH_TEST_WORKERS: ${{ matrix.marker == 'windows' "
@@ -456,9 +805,19 @@ def test_os_matrix_windows_workers_cap_to_runner_cores():
     out = rules.transform_text(line)
     assert out == (
         "          NASTECH_TEST_WORKERS: "
-        "${{ matrix.marker == 'windows' && '4' || '' }}\n"
+        "${{ matrix.marker == 'windows' && '4' || '2' }}\n"
     )
     assert rules.transform_text(out) == out
+
+
+def test_os_matrix_workers_rewrites_a_quoted_fallback_too():
+    rules = BrandingRules()
+    # Upstream narrowing the ``||`` arm to a literal must not turn the rule into
+    # a silent no-op: the macOS rows still get this fork's cap.
+    line = "          NASTECH_TEST_WORKERS: ${{ matrix.marker == 'windows' && '16' || '9' }}\n"
+    assert rules.transform_text(line) == (
+        "          NASTECH_TEST_WORKERS: ${{ matrix.marker == 'windows' && '4' || '2' }}\n"
+    )
 
 
 def test_runner_normalization_is_idempotent_and_analyzer_stable():
