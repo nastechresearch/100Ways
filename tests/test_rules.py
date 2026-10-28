@@ -413,39 +413,44 @@ def test_hosted_community_plugin_maps_to_our_own_fork():
     )
 
 
-def test_one_identifier_is_branded_under_every_spelling_it_uses():
-    """A file carrying both a bare identifier and its URL must brand both.
+def test_one_identifier_keeps_every_spelling_when_we_do_not_own_it():
+    """A file carrying a bare identifier and its URL keeps both inherited.
 
-    The fork's release tests build a URL *from* a repository string and compare it
-    with a URL literal: ``target_repository="example/hermes-agent"`` is what turns
-    into ``https://github.com/example/hermes-agent/archive/<sha>.zip``.  The bare
-    form is ordinary token-rule text and was branded in place while the URL form
-    was preserved verbatim, so the generated file asserted ``nastech-agent``
-    against ``hermes-agent`` and failed.  A repository identifier is therefore
-    only preserved when the text never spells it bare.
+    The fork's release tests build a URL *from* a repository string and compare
+    it with a URL literal: ``target_repository="roqianjas/hermes-account-pool"``
+    is what turns into ``https://github.com/roqianjas/hermes-account-pool/...``.
+    Branding the bare half while the URL stayed verbatim produced a file that
+    asserted ``nastech-account-pool`` against ``hermes-account-pool``, and
+    branding both halves renamed the repository to one that does not exist
+    (measured 2026-10-28: upstream 200, fork 404).  Consistency is kept the
+    only way that also keeps the link alive: both halves stay inherited.
     """
     rules = BrandingRules()
     both = (
-        '    repository = "example/hermes-agent"\n'
-        '    url = "https://github.com/example/hermes-agent/releases/tag/v1"\n'
+        '    repository = "roqianjas/hermes-account-pool"\n'
+        '    url = "https://github.com/roqianjas/hermes-account-pool/releases/tag/v1"\n'
     )
-    branded = rules.transform_text(both)
-    assert branded == (
-        '    repository = "example/nastech-agent"\n'
-        '    url = "https://github.com/example/nastech-agent/releases/tag/v1"\n'
-    )
-    assert "hermes" not in branded
-    assert rules.transform_text(branded) == branded
-    # a trailing ``.git`` belongs to the identifier, so it must not hide the bare
-    # spelling sitting two lines away (the real shape of the fixture fork in
-    # ``tests/nastech_cli/test_source_release_channels.py``).
+    assert rules.transform_text(both) == both
+    assert rules.transform_text(rules.transform_text(both)) == both
+
+    # the real shape of the fixture fork in
+    # ``tests/nastech_cli/test_source_release_channels.py``: a trailing ``.git``
+    # belongs to the identifier, so it must not hide the bare spelling beside it
     dotted = (
-        '    url = "https://github.com/Fixture/hermes-agent.git"\n'
-        '    target_repository = "Fixture/hermes-agent"\n'
+        '    url = "https://github.com/roqianjas/hermes-account-pool.git"\n'
+        '    target_repository = "roqianjas/hermes-account-pool"\n'
     )
-    assert rules.transform_text(dotted) == (
-        '    url = "https://github.com/Fixture/nastech-agent.git"\n'
-        '    target_repository = "Fixture/nastech-agent"\n'
+    assert rules.transform_text(dotted) == dotted
+
+    # a repository we do own is still branded under every spelling it uses
+    ours = (
+        '    repository = "NousResearch/hermes-agent"\n'
+        '    url = "https://github.com/NousResearch/hermes-agent/releases/tag/v1"\n'
+    )
+    branded = rules.transform_text(ours)
+    assert branded == (
+        '    repository = "NastechResearch/nastech-agent"\n'
+        '    url = "https://github.com/NastechResearch/nastech-agent/releases/tag/v1"\n'
     )
 
 

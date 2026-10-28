@@ -219,9 +219,23 @@ def _read(path: str) -> bytes:
 
 
 def _brand_violations(text: str, rules: BrandingRules) -> list[int]:
-    """Line numbers (1-based) whose line would change under the rules."""
+    """Line numbers (1-based) whose line would change under the rules.
+
+    Judged with the file in view: the transform decides several lines by what
+    the rest of the file says -- a foreign repository is preserved, and the
+    same file's bare spelling of it is preserved with it -- so a per-line read
+    reports text branding is required to keep.  Measured: 744 such lines on the
+    merged fork tree (``subdir: hermes``, ``docs.honcho.dev/.../hermes``,
+    ``target = "roqianjas/hermes-account-pool"`` beside its URL), every one a
+    fixed point of the whole-file transform.
+    """
     lines = text.splitlines()
-    return [i + 1 for i, line in enumerate(lines) if rules.transform_text(line) != line]
+    rewritten = rules.transform_text(text).splitlines()
+    if len(rewritten) != len(lines):
+        # A rule changed the line count, so pairwise comparison would misalign
+        # and blame the wrong line; fall back to the per-line read.
+        return [i + 1 for i, line in enumerate(lines) if rules.transform_text(line) != line]
+    return [i + 1 for i, (before, after) in enumerate(zip(lines, rewritten)) if before != after]
 
 
 def scan_brand_violations(root: str, rules: BrandingRules | None = None,
