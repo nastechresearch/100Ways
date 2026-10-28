@@ -13,17 +13,11 @@ def test_unique_way_ids():
     assert len(ids) == len(set(ids))
 
 
-def test_ten_categories_each_with_at_least_twenty():
-    """Ten categories, none of them starved: twenty rows each is the floor.
-
-    The floor is the promise. A shipped capability that no decade catalogued is added
-    as a row rather than swapped into a row that already names a different technique --
-    so a category may grow past twenty and the registry count only ever rises.
-    """
+def test_ten_categories_each_with_twenty():
     registry = build_registry()
     assert len(registry.categories()) == 10
     for category in registry.categories():
-        assert len(registry.by_category(category)) >= 20
+        assert len(registry.by_category(category)) == 20
 
 
 def test_defaults_one_per_category():

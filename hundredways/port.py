@@ -20,7 +20,7 @@ import tempfile
 from dataclasses import dataclass, field
 
 from .rules import BrandingRules, is_locked_path
-from .verify import BlobError, VerifyReport, read_blobs, verify_port
+from .verify import VerifyReport, verify_port
 
 
 class SyncError(Exception):
@@ -156,22 +156,12 @@ def port_commits(
     return results
 
 
-def _rebrand_blob(data: bytes, rules: BrandingRules) -> bytes:
-    """Rebrand blob bytes; anything that is not UTF-8 text is shipped untouched."""
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError:
-        return data
-    return rules.transform_text(text).encode("utf-8")
-
-
 def _port_one(
     wt: str, repo: str, sha: str, rules: BrandingRules,
     threshold: float, res: PortResult, last_good: str,
 ) -> None:
     parent = _git_ok(repo, "rev-parse", f"{sha}^1").strip()
     changes = _git_ok(repo, "diff", "--name-status", "--find-renames", parent, sha).splitlines()
-    writes: list[tuple[str, str]] = []
     for change in changes:
         parts = change.split("\t")
         status = parts[0][0]
@@ -182,16 +172,16 @@ def _port_one(
             if os.path.exists(target):
                 os.remove(target)
             continue
-        writes.append((new_path, os.path.join(wt, rules.transform_path(new_path))))
-
-    # One cat-file session carries the whole commit: reading each entry with its
-    # own ``git show`` was the port stage's dominant subprocess cost.
-    for (source_path, target), data in zip(
-        writes, read_blobs(repo, [(sha, path) for path, _ in writes])
-    ):
-        if data is None:
-            raise BlobError(f"git has no blob for {sha}:{source_path}, which its own diff listed")
-        rendered = _rebrand_blob(data, rules)
+        source_path = new_path
+        target_rel = rules.transform_path(new_path)
+        target = os.path.join(wt, target_rel)
+        data = subprocess.check_output(["git", "-C", repo, "show", f"{sha}:{source_path}"], stderr=subprocess.PIPE)
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            rendered = data
+        else:
+            rendered = rules.transform_text(text).encode("utf-8")
         os.makedirs(os.path.dirname(target), exist_ok=True)
         with open(target, "wb") as fh:
             fh.write(rendered)

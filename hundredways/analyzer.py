@@ -13,21 +13,13 @@ Scans both trees file-by-file and produces a report of:
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass, field
 
-from .codes import EXTRA, file_code
 from .rules import BrandingRules, is_locked_path
 from .scanner import classify_path, is_text
-from .verify import (
-    _PATHS_PER_BATCH,
-    _char_delta,
-    _git,
-    _numstat,  # noqa: F401 -- the ways catalog resolves diff.git-diff to analyzer._numstat
-    _tree_files,
-    numstat_for,
-    read_blobs,
-    tree_numstat,
-)
+from .verify import _git, _tree_files, BlobReader
+from .codes import EXTRA, file_code
 
 
 @dataclass
@@ -110,17 +102,6 @@ _VIOLATION_TOKENS = (
 )
 
 
-def _tree_blobs(repo: str, commit: str, paths: list[str]) -> dict[str, bytes]:
-    """Read a tree in path groups so one group's bytes, not the whole tree's,
-    are resident while the batch is being parsed."""
-    blobs: dict[str, bytes] = {}
-    for start in range(0, len(paths), _PATHS_PER_BATCH):
-        group = paths[start:start + _PATHS_PER_BATCH]
-        for path, blob in zip(group, read_blobs(repo, [(commit, p) for p in group])):
-            blobs[path] = blob or b""
-    return blobs
-
-
 def analyze(
     upstream_commit: str,
     nastech_commit: str,
@@ -134,14 +115,15 @@ def analyze(
 
     up_paths = _tree_files(repo, upstream_commit)
     na_paths = _tree_files(repo, nastech_commit)
-    up_files = _tree_blobs(repo, upstream_commit, up_paths)
-    na_files = _tree_blobs(repo, nastech_commit, na_paths)
+    reader = BlobReader(repo)
+    up_files = {p: reader.read(upstream_commit, p) for p in up_paths}
+    na_files = {p: reader.read(nastech_commit, p) for p in na_paths}
+    reader.close()
 
     # map upstream paths through branding to the expected Nastech path
     all_paths = sorted(set(up_files) | set(na_files))
     na_only = [p for p in na_files if p not in set(rules.transform_path(q) for q in up_files)]
     added_by = _added_by_commit(repo, nastech_commit, na_only) if na_only else {}
-    stats: dict[str, tuple[str, str]] | None = None
     for path in all_paths:
         mapped = rules.transform_path(path)
         up = up_files.get(path)
@@ -166,11 +148,7 @@ def analyze(
                 entry.status = "identical"
             else:
                 entry.status = "changed"
-                if stats is None:
-                    stats = tree_numstat(repo, upstream_commit, nastech_commit)
-                entry.added_lines, entry.deleted_lines = numstat_for(
-                    stats, repo, upstream_commit, nastech_commit, mapped
-                )
+                entry.added_lines, entry.deleted_lines = _numstat(repo, upstream_commit, nastech_commit, mapped)
                 entry.added_chars, entry.deleted_chars = _char_delta(transformed, na)
 
         if entry.status != "identical" and is_text(up or na or b""):
@@ -185,6 +163,17 @@ def analyze(
         report.entries.append(entry)
 
     return report
+
+
+def _blob(repo: str, commit: str, path: str) -> bytes:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", repo, "show", f"{commit}:{path}"],
+            capture_output=True,
+        )
+        return proc.stdout
+    except Exception:
+        return b""
 
 
 def _find_violations(data: bytes, path: str) -> list[str]:
@@ -255,3 +244,18 @@ def _similarity(a: bytes, b: bytes) -> float:
         return 1.0
     sm = __import__("difflib").SequenceMatcher(None, a.decode("utf-8", "replace"), b.decode("utf-8", "replace"))
     return sm.ratio()
+
+
+def _numstat(repo: str, a: str, b: str, path: str) -> tuple[int, int]:
+    out = _git(repo, "diff", "--numstat", a, b, "--", path).strip()
+    if not out:
+        return 0, 0
+    added, deleted, _ = out.split("\t", 2)
+    return int(added), int(deleted)
+
+
+def _char_delta(a: bytes, b: bytes) -> tuple[int, int]:
+    sm = __import__("difflib").SequenceMatcher(None, a.decode("utf-8", "replace"), b.decode("utf-8", "replace"))
+    added = sum((op[2] - op[1]) for op in sm.get_opcodes() if op[0] == "insert")
+    deleted = sum((op[4] - op[3]) for op in sm.get_opcodes() if op[0] == "delete")
+    return added, deleted

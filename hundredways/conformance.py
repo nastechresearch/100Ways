@@ -21,14 +21,12 @@ from .assets import OwnedAssets
 from .forkcheck import SourceDeltaReport, preserve_fork_files, source_tree_delta
 from .integrity import audit_candidate_tree, tree_digest
 from .rules import BrandingRules
-from .tree_index import FileIndex
 from .updates import (
     _reconcile_assets_worker_config,
     _reconcile_assets_worker_index,
     _reconcile_docs_posix_separators,
     _reconcile_fork_skill_catalogs,
     _reconcile_fork_skill_sidebars,
-    _reconcile_orphan_picker_fake,
     _reconcile_skill_docs_order,
     apply_owned_assets,
     brand_tree,
@@ -37,15 +35,7 @@ from .updates import (
     verify_branded,
 )
 
-# Files the pipeline writes beside the branded tree; they are accounted for, not
-# expected to match a branded source path.  commit-subjects.jsonl holds the receipt's
-# prose (see updates.COMMIT_SUBJECTS_FILE).
-_REPORT_PATHS = {
-    "GATE-REPORT.md",
-    "UPDATE-REPORT.md",
-    "manifest.json",
-    "commit-subjects.jsonl",
-}
+_REPORT_PATHS = {"GATE-REPORT.md", "UPDATE-REPORT.md", "manifest.json"}
 
 
 @dataclass(frozen=True)
@@ -194,10 +184,6 @@ def verify_final_candidate(
             expected_path = expected / relative
             if expected_path.is_file():
                 reconciled_bytes[relative] = expected_path.read_bytes()
-        for relative in _reconcile_orphan_picker_fake(str(expected), preserved):
-            expected_path = expected / relative
-            if expected_path.is_file():
-                reconciled_bytes[relative] = expected_path.read_bytes()
         for relative in _reconcile_fork_skill_catalogs(str(expected), preserved):
             expected_path = expected / relative
             if expected_path.is_file():
@@ -229,14 +215,19 @@ def verify_final_candidate(
             owned,
             reconciled_bytes,
         )
-        # A FileIndex is a snapshot, so it is built only now that every write to
-        # the rebuilt expected tree has landed.
-        expected_paths = {entry.rel for entry in FileIndex(expected).entries}
+        expected_paths = {
+            path.relative_to(expected).as_posix()
+            for path in expected.rglob("*")
+            if path.is_file()
+        }
 
     for result in verified.failed:
         issues.append(ConformanceIssue("source-parity", result.mapped_path, result.note))
-    candidate_index = FileIndex(candidate_path)
-    candidate_paths = {entry.rel for entry in candidate_index.entries}
+    candidate_paths = {
+        path.relative_to(candidate_path).as_posix()
+        for path in candidate_path.rglob("*")
+        if path.is_file()
+    }
     allowed = set(allowed_extra_paths) | _REPORT_PATHS
     for path in sorted(candidate_paths - expected_paths):
         if path in allowed or path.startswith("config/owned-assets/"):
@@ -260,24 +251,19 @@ def verify_final_candidate(
         verified.total,
         verified.passed,
         tuple(sorted(reconciled_bytes)),
-        candidate_index.digest(),
+        tree_digest(candidate_path),
         tuple(issues),
     )
 
 
-def build_parser() -> argparse.ArgumentParser:
+def main(argv: Sequence[str] | None = None) -> int:
+    """Write final candidate conformance evidence and exit nonzero on mismatch."""
     parser = argparse.ArgumentParser(description="Verify final branded candidate conformance")
     parser.add_argument("--source", required=True)
     parser.add_argument("--candidate", required=True)
     parser.add_argument("--owned-assets-root", default="")
     parser.add_argument("--fork-root", default="")
     parser.add_argument("--output", required=True)
-    return parser
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    """Write final candidate conformance evidence and exit nonzero on mismatch."""
-    parser = build_parser()
     args = parser.parse_args(argv)
     allowed_extra_paths: tuple[str, ...] = ()
     manifest_path = Path(args.candidate) / "manifest.json"

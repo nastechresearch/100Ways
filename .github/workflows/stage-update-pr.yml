@@ -154,17 +154,8 @@ jobs:
           git push --force "$REMOTE" "$TEST"
 
           # open or update the PR test -> main on the fork
-          # The pipeline derived this headline from the verified delta.  The
-          # sha-only title stays as the fallback for a run whose artifact did
-          # not carry one, so #344 never opens an untitled PR.
           PR_TITLE="Update ${SHA:+(${SHA:0:8})}"
-          if [ -s artifact/SYNC-TITLE.md ]; then
-            PR_TITLE=$(head -n 1 artifact/SYNC-TITLE.md)
-          fi
           BODY_FILE="reports/SYNC-SUMMARY.md"
-          if [ -s artifact/SYNC-PR-BODY.md ]; then
-            BODY_FILE="artifact/SYNC-PR-BODY.md"
-          fi
           PR_URL=$(gh pr list --repo "$FORK" --head "$TEST" --base "$BASE" --json url --jq '.[0].url' 2>/dev/null) || true
           if [ -n "$PR_URL" ]; then
             gh pr edit "$PR_URL" --title "$PR_TITLE" --body-file "$BODY_FILE"

@@ -99,11 +99,7 @@ def unreferenced_sources(assets_root: str) -> dict[str, str]:
     }
 
 
-def severity_for_role(role: str) -> str:
-    """Identity art blocks a release; art the classifier cannot name is only a review.
-
-    Public so that a second reader of the same registry measures the same seriousness.
-    """
+def _severity_for(role: str) -> str:
     return "block" if role in _IDENTITY_ROLES else "review"
 
 
@@ -125,7 +121,7 @@ def audit_brand_assets(assets_root: str, candidate_root: str = "") -> list[Asset
                 path=rel,
                 role=role,
                 detail="owned source is not in manifest.json, so upstream bytes win",
-                severity=severity_for_role(role),
+                severity=_severity_for(role),
             )
         )
 

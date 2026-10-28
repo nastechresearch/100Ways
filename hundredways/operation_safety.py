@@ -25,16 +25,6 @@ def redact_telegram_text(text: str) -> str:
     return redacted
 
 
-def secret_shaped(text: str) -> bool:
-    """True when credential-shaped text appears anywhere in ``text``.
-
-    Redaction is the right answer for a message that is already on its way out, but
-    a *write* has nothing to redact: a token in a proposed edit means the change is
-    refused outright, because redacting it would silently corrupt the code.
-    """
-    return any(pattern.search(text) for pattern in _SECRET_PATTERNS)
-
-
 def bound_telegram_text(text: str, *, limit: int = TELEGRAM_MAX_CHARS) -> str:
     """Return a redacted message bounded to Telegram's documented size limit."""
     if limit < len(TELEGRAM_SAFETY_FOOTER) + 32:

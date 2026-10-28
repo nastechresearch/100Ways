@@ -57,10 +57,9 @@ def test_state_persisted_between_cycles(git_repo, tmp_path):
     assert state["last_upstream_head"] == git(git_repo, "rev-parse", "upstream/main")
 
 
-def test_notifier_renders_plain_text_a_starred_subject_cannot_break():
-    n = Notification("New commits", "fix: *parse* _mode_ crash", level="warn", kind="watch")
+def test_notifier_renders_markdown():
+    n = Notification("New commits", "body here", level="warn", kind="watch")
     rendered = n.render()
     assert "New commits" in rendered
-    assert "fix: *parse* _mode_ crash" in rendered
-    assert "*New commits*" not in rendered
-    assert rendered.startswith("⚠️")
+    assert "body here" in rendered
+    assert "*New commits*" in rendered

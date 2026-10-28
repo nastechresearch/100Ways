@@ -13,71 +13,30 @@ import sys
 import threading
 import types
 import zipfile
-from pathlib import Path
 
 import pytest
 
-from hundredways import conformance, updates
 from hundredways.assets import OwnedAssets
 from hundredways.integrity import audit_candidate_tree
 from hundredways.updates import (
     STAGES,
-    STORE_CREDENTIALS,
-    STORE_REST_CREDENTIALS,
-    AgentsChainCapError,
     AssetsWorkerIndexError,
-    BrowseBudgetDdlError,
-    BrowseBudgetFlockTestError,
     ChannelReaderUserAgentError,
-    DocsSearchHydrationGateError,
-    ForkLaneReleaseEditError,
-    FreeRunnerParallelismError,
     GatewayAllowlistReloadError,
     GatewayPluginGateError,
-    NastechSuitePinError,
-    PluginCatalogAdmissionError,
-    SetThemeCatalogLineError,
-    StoreLaneGateError,
     TermuxAptKeyDocError,
     UpdateManager,
-    UnsignedDarwinBuildEnvError,
     WindowsRealGitLocateError,
-    _BROWSE_BUDGET_EDITS,
-    _BROWSE_OVERSLEEP_SKIP,
-    _BROWSE_STARTUP_SKIP,
-    _BROWSE_BUDGET_TEST_REL,
-    _CONFTEST,
     _DOCS_PUBLIC_ORIGIN,
-    _ENDPOINT_PIN_MARK,
-    _GUEST_IDENTITY_TESTS,
     _HARDENED_PREPARE_SCRIPT,
-    _LANES_DEFAULT_FORK,
-    _RELEASE_CHANNELS_TESTS,
-    _RELEASE_CHANNELS_TESTS_EDITS,
-    _RELEASE_ENTRYPOINT,
-    _RELEASE_ENTRYPOINT_EDITS,
-    _RELEASE_ENTRYPOINT_TESTS,
-    _RELEASE_ENTRYPOINT_TESTS_EDITS,
-    _RELEASE_LANES_TESTS,
-    _RELEASE_LANES_TESTS_EDITS,
-    _STABLE_RELEASE_TESTS,
-    _STABLE_RELEASE_TESTS_EDITS,
     _SKILL_DESC_FULL_NEW,
     _SKILL_DESC_FULL_OLD,
     _PROMPT_SURFACE_CHARS_PER_TOKEN,
     _UPSTREAM_PREPARE_SCRIPT,
-    _BROWSE_DDL_GUARDED,
-    _BROWSE_DDL_UNGUARDED,
-    _BROWSE_RECONCILE_REL,
-    _DEV_GUIDE_DIR,
-    _agents_chain,
-    _reconcile_agents_md_chain_cap,
     _reconcile_assets_worker_config,
     _reconcile_assets_worker_index,
     _reconcile_anon_surface_copy,
     _reconcile_apt_pool_first_char,
-    _reconcile_browse_budget_flock_tests,
-    _reconcile_browse_ddl_budget_guard,
     _reconcile_channel_reader_user_agent,
     _reconcile_ci_runner_budgets,
     _reconcile_connector_test_guest_offline,
@@ -97,23 +56,16 @@ from hundredways.updates import (
     _reconcile_windows_boot_lifecycle_race,
     _reconcile_windows_real_git_locate,
     _reconcile_docs_posix_separators,
-    _reconcile_docs_search_hydration_gate,
     _reconcile_drop_vercel_deploy_job,
     _reconcile_fork_skill_catalogs,
     _reconcile_fork_skill_sidebars,
-    _reconcile_fork_lane_release_surface,
-    _reconcile_free_runner_js_lane,
-    _reconcile_free_runner_parallelism,
     _reconcile_gateway_allowlist_live_reload,
     _reconcile_gateway_plugin_gate_native_ticket,
-    _reconcile_guest_identity_stub,
     _reconcile_install_ps1_store_guard_test,
     _reconcile_locale_key_order,
-    _reconcile_lock_record,
     _reconcile_managed_gateway_wire_headers,
-    _reconcile_nastech_home_env_prefix,
     _reconcile_pinned_source_clones,
-    _reconcile_plugin_catalog_admission,
+    _reconcile_plugin_catalog_sync_exemption,
     _reconcile_plugin_guard_trusted_installer_hosts,
     _reconcile_portable_shebang,
     _reconcile_portal_override_test_collision,
@@ -121,75 +73,31 @@ from hundredways.updates import (
     _reconcile_prompt_surface_snapshot,
     _reconcile_python_test_timeout,
     _reconcile_reasoning_effort_selection,
-    _reconcile_set_theme_catalog_line,
     _reconcile_sigv4_vectors,
     _reconcile_skill_description_hardline,
     _reconcile_skill_docs_order,
-    _reconcile_store_gate_covers_the_lane,
     _reconcile_telegram_mention_context_lengths,
     _reconcile_dead_api_defaults,
+    _reconcile_dead_default_allowlists,
+    _reconcile_dead_default_test_literals,
+    _dead_default_markers,
+    _reconcile_signing_gated_lane_tests,
+    _LANE_TEST_REWRITES,
+    _DEAD_DEFAULT_TEST_LITERALS,
     _reconcile_domains,
     _reconcile_security_contact,
     _reconcile_termux_apt_signing_key,
-    _reconcile_test_endpoint_defaults,
     _reconcile_ui_scope_pins,
     _reconcile_uv_lock_file,
-    _reconcile_unsigned_darwin_build_env,
     _reconcile_vercel_prepare,
     _reconcile_windows_boot_lifecycle_race,
-    _reconcile_windows_suspend_observation,
-    _reconcile_fifo_compaction_trigger_margin,
-    _FIFO_COMPACTION_EDITS,
-    _FIFO_COMPACTION_TEST_REL,
-    FifoCompactionTriggerMarginError,
-    _reconcile_termux_build_toolchain,
-    _TERMUX_BUILD_TOOLCHAIN_AFTER,
-    _TERMUX_BUILD_TOOLCHAIN_BEFORE,
-    _TERMUX_BUILD_TOOLCHAIN_REL,
-    TermuxBuildToolchainError,
-    _reconcile_termux_tui_setup_gate,
-    _TERMUX_TUI_SETUP_GATE_STUBS,
-    _TERMUX_TUI_STUB_BEFORE,
-    _TERMUX_TUI_STUB_AFTER,
-    _TERMUX_TUI_SETUP_GATE_EDITS,
-    _TERMUX_TUI_SETUP_GATE_REL,
-    _TERMUX_TUI_GATE_FAKE_EDITS,
-    TermuxTuiSetupGateError,
-    _reconcile_canary_unsigned_dispatch,
-    _CANARY_DISPATCH_INPUT_BEFORE,
-    _CANARY_DISPATCH_INPUT_AFTER,
-    _CANARY_RELEASE_PY_BEFORE,
-    _CANARY_RELEASE_PY_AFTER,
-    _CANARY_DISPATCH_TEST_BEFORE,
-    _CANARY_DISPATCH_TEST_AFTER,
-    _CANARY_DISPATCH_TEST_REL,
-    CanaryUnsignedDispatchError,
-    _WINDOWS_SUSPEND_BUDGET_S,
-    _WINDOWS_SUSPEND_ONE_SHOT,
-    _WINDOWS_SUSPEND_TEST_REL,
-    _WINDOWS_SUSPEND_WAIT,
-    WindowsSuspendObservationError,
-    _reconcile_orphan_picker_fake,
-    _ORPHAN_PICKER_TEST_MIRRORED,
-    _ORPHAN_PICKER_TEST_REL,
-    OrphanPickerFakeError,
-    _STABLE_RELEASE_GRAPH_TESTS,
-    _STABLE_RELEASE_GRAPH_TESTS_EDITS,
-    _STABLE_RELEASE_GRAPH_TESTS_MARK,
     _NASTECH_UI_INTEGRITY,
-    _SET_THEME_CATALOG_BUDGET,
-    _SET_THEME_LONG,
-    _SET_THEME_SHORT,
-    _SET_THEME_SOURCE_REL,
     _UI_SCOPE_ASSET_EVIDENCE,
-    UiRegistryLookupError,
     UiScopePinError,
     _sigv4_vector_signature,
     _split_prompt_surface_tiers,
     brand_tree,
     compare_trees,
-    read_manifest_with_subjects,
-    split_manifest_subjects,
     fork_manifest_upstream_sha,
     next_update_number,
     package_zip,
@@ -405,11 +313,10 @@ def test_ci_runner_budgets_normalize_free_runner_timeouts(tmp_path):
         "          - name: Windows-only tests\n"
         "            runner: windows-latest\n"
         "            marker: windows\n"
-        "          - name: Windows-only tests (arm64, 1/2)\n"
-        "            runner: windows-11-arm\n"
+        "          - name: Windows-only tests (arm64)\n"
+        "            runner: windows-latest\n"
         "            marker: windows\n"
-        "            timeout: 60\n"
-        "            slice: 1/2\n",
+        "            timeout: 60\n",
         encoding="utf-8",
     )
     (wf / "windows-install-update-e2e.yml").write_text(
@@ -442,8 +349,7 @@ def test_ci_runner_budgets_normalize_free_runner_timeouts(tmp_path):
         "tests/e2e/core/windows_update/_machine.py",
     }
     os_yml = (wf / "tests-os.yml").read_text(encoding="utf-8")
-    # The Windows rows keep upstream's own budgets; only the per-file cap grows.
-    assert "            timeout: 45\n" not in os_yml
+    assert "            timeout: 45\n" in os_yml
     assert "            timeout: 60\n" in os_yml  # arm64 row untouched
     assert "          NASTECH_TEST_FILE_TIMEOUT: '900'\n" in os_yml
     install = (wf / "windows-install-update-e2e.yml").read_text(encoding="utf-8")
@@ -488,7 +394,7 @@ def test_ci_runner_budgets_inserts_file_timeout_when_e2e_job_already_sets_it(tmp
         "      - name: Run ${{ matrix.marker }} tests\n"
         "        run: scripts/run_tests.sh\n"
         "        env:\n"
-        "          NASTECH_TEST_WORKERS: ${{ matrix.marker == 'windows' && '4' || '2' }}\n"
+        "          NASTECH_TEST_WORKERS: ${{ matrix.marker == 'windows' && '4' || '' }}\n"
         "          NASTECH_TEST_SLICE: ${{ matrix.slice || '' }}\n"
         "  e2e-windows:\n"
         "    steps:\n"
@@ -522,658 +428,6 @@ def test_ci_runner_budgets_inserts_file_timeout_when_e2e_job_already_sets_it(tmp
     # Fixed point, and brand-clean for the first-party audit.
     assert _reconcile_ci_runner_budgets(str(candidate)) == []
     assert BrandingRules().transform_text(text) == text
-
-
-def _free_runner_workflow_tree(tmp_path):
-    candidate = tmp_path / "candidate"
-    wf = candidate / ".github" / "workflows"
-    wf.mkdir(parents=True)
-    (wf / "tests.yml").write_text(
-        "jobs:\n"
-        "  test:\n"
-        "    name: Run tests (${{ matrix.slice }}/2)\n"
-        "    strategy:\n"
-        "      matrix:\n"
-        "        slice: [1, 2]\n"
-        "    steps:\n"
-        "      - name: Run tests\n"
-        "        env:\n"
-        "          NASTECH_TEST_SLICE: ${{ matrix.slice }}/2\n"
-        "          NASTECH_TEST_WORKERS: 8\n",
-        encoding="utf-8",
-    )
-    (wf / "tests-os.yml").write_text(
-        "jobs:\n"
-        "  os-tests:\n"
-        "    strategy:\n"
-        "      matrix:\n"
-        "        include:\n"
-        "          - name: Windows-only tests\n"
-        "            runner: windows-latest\n"
-        "            marker: windows\n"
-        "          - name: Windows-only tests (arm64, 1/2)\n"
-        "            runner: windows-11-arm\n"
-        "            marker: windows\n"
-        "            timeout: 60\n"
-        "            slice: 1/2\n"
-        "          - name: Windows-only tests (arm64, 2/2)\n"
-        "            runner: windows-11-arm\n"
-        "            marker: windows\n"
-        "            timeout: 60\n"
-        "            slice: 2/2\n",
-        encoding="utf-8",
-    )
-    return candidate, wf
-
-
-def test_free_runner_parallelism_uses_one_worker_per_core(tmp_path):
-    """Eight 4-core slices replace two oversubscribed 8-worker slices."""
-    candidate, wf = _free_runner_workflow_tree(tmp_path)
-    changed = _reconcile_free_runner_parallelism(str(candidate))
-    assert set(changed) == {".github/workflows/tests.yml"}
-    tests_yml = (wf / "tests.yml").read_text(encoding="utf-8")
-    assert "    name: Run tests (${{ matrix.slice }}/8)\n" in tests_yml
-    assert "        slice: [1, 2, 3, 4, 5, 6, 7, 8]\n" in tests_yml
-    assert "          NASTECH_TEST_SLICE: ${{ matrix.slice }}/8\n" in tests_yml
-    assert "          NASTECH_TEST_WORKERS: 4\n" in tests_yml
-    os_yml = (wf / "tests-os.yml").read_text(encoding="utf-8")
-    # The arm64 rows run on the native windows-11-arm image, so they are real
-    # coverage and the rule must leave upstream's matrix alone.
-    assert os_yml.count("runner: windows-11-arm") == 2
-    assert "          - name: Windows-only tests\n" in os_yml
-    assert _reconcile_free_runner_parallelism(str(candidate)) == []
-
-
-def test_free_runner_parallelism_stops_when_arm_rows_land_on_x64(tmp_path):
-    """The label must not fall back to the x64 image.
-
-    There it re-ran the plain row's tests, and the rule that used to delete the
-    duplicate quietly dropped arm64 Windows coverage instead.
-    """
-    candidate, wf = _free_runner_workflow_tree(tmp_path)
-    path = wf / "tests-os.yml"
-    path.write_text(
-        path.read_text(encoding="utf-8").replace(
-            "runner: windows-11-arm", "runner: windows-latest"),
-        encoding="utf-8",
-    )
-    with pytest.raises(FreeRunnerParallelismError, match="arm64"):
-        _reconcile_free_runner_parallelism(str(candidate))
-
-
-def test_free_runner_parallelism_stops_when_the_python_matrix_moves(tmp_path):
-    candidate, wf = _free_runner_workflow_tree(tmp_path)
-    path = wf / "tests.yml"
-    path.write_text(
-        path.read_text(encoding="utf-8").replace("slice: [1, 2]", "slice: [1, 2, 3]"),
-        encoding="utf-8",
-    )
-    with pytest.raises(FreeRunnerParallelismError, match="neither"):
-        _reconcile_free_runner_parallelism(str(candidate))
-
-
-def test_free_runner_parallelism_stops_when_the_windows_rows_move(tmp_path):
-    candidate, wf = _free_runner_workflow_tree(tmp_path)
-    path = wf / "tests-os.yml"
-    path.write_text(
-        path.read_text(encoding="utf-8").replace("(arm64, 1/2)", "(arm64, 1/3)"),
-        encoding="utf-8",
-    )
-    with pytest.raises(FreeRunnerParallelismError, match="arm64"):
-        _reconcile_free_runner_parallelism(str(candidate))
-
-
-def _free_runner_js_lane_tree(tmp_path):
-    """A branded candidate tree carrying upstream's JS lane job and script."""
-    candidate = tmp_path / "candidate"
-    scripts = candidate / ".github" / "scripts"
-    workflows = candidate / ".github" / "workflows"
-    scripts.mkdir(parents=True)
-    workflows.mkdir(parents=True)
-    (workflows / "js-tests.yml").write_text(
-        "jobs:\n"
-        "  check:\n"
-        "    name: JS & TS checks\n"
-        "    runs-on: ubuntu-latest\n"
-        "    timeout-minutes: 30\n"
-        "    steps:\n"
-        "      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a\n"
-        "      - name: Run all workspace checks\n"
-        "        run: node .github/scripts/run-workspace-checks.mjs\n"
-        "      - name: Check the checkout is clean\n"
-        "        uses: ./.github/actions/check-clean-worktree\n",
-        encoding="utf-8",
-    )
-    (scripts / "run-workspace-checks.mjs").write_text(
-        "/** @returns {{pkg: string, script: string}[]} */\n"
-        "function discoverUnits() {\n"
-        "  const units = []\n"
-        "  return units\n"
-        "}\n",
-        encoding="utf-8",
-    )
-    return candidate, workflows, scripts
-
-
-def test_free_runner_js_lane_shards_the_one_long_unit(tmp_path):
-    """The UI suite spreads over legs; the job's 30-minute cap does not move.
-
-    Measured on PR #172 job 122163805252: ``apps/desktop :: check:test:ui`` ran
-    1,684.3 s of a 1,682.5 s job, every one of its 12,189 tests passing, and the
-    job was still cancelled at the cap.  Splitting that unit is the only edit
-    that fits it, because the other nine units finish inside its shadow.
-    """
-    candidate, workflows, scripts = _free_runner_js_lane_tree(tmp_path)
-    changed = _reconcile_free_runner_js_lane(str(candidate))
-    assert set(changed) == {
-        ".github/scripts/run-workspace-checks.mjs",
-        ".github/workflows/js-tests.yml",
-    }
-    text = (workflows / "js-tests.yml").read_text(encoding="utf-8")
-    assert "    timeout-minutes: 30\n" in text
-    assert "        include:\n          - leg: workspace\n" in text
-    for leg in range(1, 5):
-        assert f"            ui_shard: {leg}/4\n" in text
-    assert "          JS_CHECK_SKIP: apps/desktop::check:test:ui\n" in text
-    assert "        run: npm run --prefix apps/desktop test:ui -- " \
-           "--shard=${{ matrix.ui_shard }}\n" in text
-    # The lane contract: the cleanliness step stays the last step of the job.
-    assert text.rstrip().endswith("uses: ./.github/actions/check-clean-worktree")
-    seam = (scripts / "run-workspace-checks.mjs").read_text(encoding="utf-8")
-    assert "  return units\n" not in seam
-    assert "JS_CHECK_SKIP" in seam
-    assert _reconcile_free_runner_js_lane(str(candidate)) == []
-
-
-def test_free_runner_js_lane_stops_when_the_skip_seam_is_missing(tmp_path):
-    """Legs without the seam re-run every unit, which is the original timeout."""
-    candidate, workflows, scripts = _free_runner_js_lane_tree(tmp_path)
-    _reconcile_free_runner_js_lane(str(candidate))
-    (scripts / "run-workspace-checks.mjs").write_text(
-        "function discoverUnits() {\n  const units = []\n  return units\n}\n",
-        encoding="utf-8",
-    )
-    with pytest.raises(FreeRunnerParallelismError, match="JS_CHECK_SKIP"):
-        _reconcile_free_runner_js_lane(str(candidate))
-
-
-def test_free_runner_js_lane_stops_when_the_workflow_is_not_sharded(tmp_path):
-    """A seam nobody calls means the fork reverted to the single long-pole job."""
-    candidate, workflows, _scripts = _free_runner_js_lane_tree(tmp_path)
-    _reconcile_free_runner_js_lane(str(candidate))
-    (workflows / "js-tests.yml").write_text(
-        "jobs:\n"
-        "  check:\n"
-        "    name: JS & TS checks\n"
-        "    runs-on: ubuntu-latest\n"
-        "    timeout-minutes: 30\n",
-        encoding="utf-8",
-    )
-    with pytest.raises(FreeRunnerParallelismError, match="dead code"):
-        _reconcile_free_runner_js_lane(str(candidate))
-
-
-def test_free_runner_js_lane_stops_when_the_step_anchor_moves(tmp_path):
-    candidate, workflows, scripts = _free_runner_js_lane_tree(tmp_path)
-    path = scripts / "run-workspace-checks.mjs"
-    path.write_text(
-        path.read_text(encoding="utf-8").replace("  return units\n", "  return []\n"),
-        encoding="utf-8",
-    )
-    with pytest.raises(FreeRunnerParallelismError, match="anchor|return units"):
-        _reconcile_free_runner_js_lane(str(candidate))
-
-
-def _browse_budget_tree(tmp_path, text):
-    """A branded candidate tree carrying ``text`` as the drift-test file."""
-    candidate = tmp_path / "candidate"
-    path = candidate / _BROWSE_BUDGET_TEST_REL
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-    return candidate, path
-
-
-#: Upstream's own pin of the browse budget, which no rewrite pair touches.  It rides along in the
-#: fixture so a test can prove the rule leaves the budget value alone instead of trusting that it
-#: did: ``3.0`` is the number the red lane was measured against.
-_BROWSE_BUDGET_PIN = (
-    "    assert reconcile.BROWSE_INTEGRITY_BUDGET_S == reconcile.BROWSE_RECONCILE_BUDGET_S == 3.0\n"
-)
-
-
-def _browse_budget_pre():
-    """The pre-rewrite file: every pair's pre-image, in order, plus the untouched budget pin."""
-    return "".join(before for before, _ in _BROWSE_BUDGET_EDITS) + _BROWSE_BUDGET_PIN
-
-
-def _browse_budget_rewritten(tmp_path):
-    """Run the rule on the real pre-image and hand back the produced file text."""
-    candidate, path = _browse_budget_tree(tmp_path, _browse_budget_pre())
-    assert _reconcile_browse_budget_flock_tests(str(candidate)) is True
-    return path.read_text(encoding="utf-8")
-
-
-class _BudgetSkip(Exception):
-    """Raised by the stubbed ``pytest.skip`` so the executed block can report a skip."""
-
-
-def _budget_block(text):
-    """The produced file's parse-and-bound block, dedented, ready to exec.
-
-    The tests below execute the injected source against frames the child itself would print,
-    instead of restating its arithmetic here -- a re-implementation would pass when the rewrite
-    does not.
-    """
-    lines = text.splitlines()
-    start = next(i for i, line in enumerate(lines) if 'result.split(" ", 7)' in line)
-    end = next(i for i, line in enumerate(lines) if line == "    assert charge < budget_s + 2, out")
-    picked = [line[4:] if line.startswith("    ") else line for line in lines[start : end + 1]]
-    return "\n".join(picked)
-
-
-def _budget_child_report(text):
-    """The produced child's own frame-print, as source, from its end stamp onwards."""
-    lines = text.splitlines()
-    start = next(i for i, line in enumerate(lines) if line == "    ended = time.monotonic()")
-    tail = "exc.detail, flush=True)"
-    end = next(i for i, line in enumerate(lines[start:], start) if line.rstrip().endswith(tail))
-    picked = [line[4:] if line.startswith("    ") else line for line in lines[start : end + 1]]
-    return "\n".join(picked) + "\n"
-
-
-def _budget_child_slow(text):
-    """The produced child's ``slow()`` body, dedented to module level."""
-    lines = text.splitlines()
-    start = next(i for i, line in enumerate(lines) if line == "        def slow():")
-    body = []
-    for line in lines[start + 1 :]:
-        if not line.startswith("            "):
-            break
-        body.append(line[8:])
-    return "def slow():\n" + "\n".join(body) + "\n"
-
-
-def _budget_child_stamp(text):
-    """The produced child's stamp block, dedented: where the window begins and late is snapshot."""
-    lines = text.splitlines()
-    start = next(
-        i
-        for i, line in enumerate(lines)
-        if line == '    if holding_lock() and (phase == "integrity") == read_only:'
-    )
-    end = next(i for i, line in enumerate(lines[start:], start) if 'print("slowed"' in line)
-    picked = [line[4:] if line.startswith("    ") else line for line in lines[start : end + 1]]
-    return "\n".join(picked) + "\n"
-
-
-class _DrivenClock:
-    """A monotonic clock we advance ourselves: its ``sleep`` arrives ``late_by`` seconds late.
-
-    No real sleeping, and no literal delay added to the suite -- the host's lateness is the datum,
-    so the test supplies it directly.
-    """
-
-    def __init__(self, late_by=0.0):
-        self.now = 0.0
-        self.late_by = late_by
-
-    def monotonic(self):
-        return self.now
-
-    def sleep(self, seconds):
-        self.now += seconds + self.late_by
-
-
-def _run_budget_block(text, frame, budget_s=3.0, wait_s=20.0):
-    """Exec the produced bound block against one child frame; returns its namespace or raises.
-
-    ``wait_s`` is deliberately far above the boot value the parent reads in production: these
-    callers drive the charge arithmetic, and the host escapes in front of it are pinned by their own
-    tests. A frame replaying a real red (2.9 s of oversleep against a 2 s margin) would otherwise be
-    skipped as starved before the bound under test ever runs.
-    """
-
-    def _skip(message):
-        raise _BudgetSkip(message)
-
-    namespace = {
-        "result": frame,
-        "out": frame,
-        "budget_s": budget_s,
-        "wait_s": wait_s,
-        "pytest": types.SimpleNamespace(skip=_skip),
-    }
-    exec(compile(_budget_block(text), "<budget bound>", "exec"), namespace)
-    return namespace
-
-
-def test_browse_budget_flock_tests_rebuild_the_host_aware_bounds(tmp_path):
-    """Every rewrite pair applies, in order, and the result is a fixed point.
-
-    The fixture is the rule's own pre-image stitched together, so a pair that no longer matches
-    upstream -- or one that overlaps its neighbour's context -- fails here instead of on the
-    fork's macOS lane.
-    """
-    pre = _browse_budget_pre()
-    expected = (
-        "".join(after for _, after in _BROWSE_BUDGET_EDITS) + _BROWSE_BUDGET_PIN
-    ).replace(_BROWSE_STARTUP_SKIP, _BROWSE_OVERSLEEP_SKIP, 1)
-    candidate, path = _browse_budget_tree(tmp_path, pre)
-
-    assert _reconcile_browse_budget_flock_tests(str(candidate)) is True
-    text = path.read_text(encoding="utf-8")
-    assert text == expected
-    assert _reconcile_browse_budget_flock_tests(str(candidate)) is False
-    assert path.read_text(encoding="utf-8") == expected
-    # The rewritten file must charge the budgeted window, not the child's whole wall time.
-    assert "assert charge < budget_s + 2, out" in text
-    assert 'result.split(" ", 7)' in text
-    assert "assert float(elapsed) < budget_s + 2" not in text
-
-
-@pytest.mark.parametrize("drop", [0, 3, 4, 5, 7, 11, 13])
-def test_browse_budget_flock_tests_fail_loudly_when_upstream_moved(tmp_path, drop):
-    """A rewrite that stopped matching raises; it never no-ops into a silent red lane."""
-    pairs = list(_BROWSE_BUDGET_EDITS)
-    pairs.pop(drop)
-    candidate, _ = _browse_budget_tree(
-        tmp_path, "".join(before for before, _ in pairs) + "\ndef _unrelated():\n    return 1\n"
-    )
-
-    with pytest.raises(BrowseBudgetFlockTestError) as excinfo:
-        _reconcile_browse_budget_flock_tests(str(candidate))
-    message = str(excinfo.value)
-    assert f"rewrite #{drop + 1}" in message
-    assert "_reconcile_browse_budget_flock_tests" in message
-    assert "macOS" in message
-    # The raise carries the red it is guarding, measured on the lane, so the sync failure is
-    # self-explaining: the assertion that crossed and the budget it crossed.
-    assert "assert 5.773591583999973 < (3.0 + 2)" in message
-
-
-def test_browse_budget_child_and_parent_share_one_report(tmp_path):
-    """The bound is fed by the child's own account: exec the child's print, exec the parent's read.
-
-    Nothing here restates the arithmetic -- the two snippets come out of the rewritten file and run
-    against a clock the test drives, so the frame the child writes is literally the frame the parent
-    parses.
-    """
-    text = _browse_budget_rewritten(tmp_path)
-    clock = _DrivenClock()
-    clock.now = 6.77  # the instant the child's budgeted phase ends, on the host's own clock
-    written = []
-    namespace = {
-        "time": clock,
-        "started": 0.4,
-        "slowed_at": 1.0,
-        "late_at": 1.2,  # the lateness already accrued when this window was stamped
-        "callbacks": 302,
-        "late": 2.9,
-        "exc": types.SimpleNamespace(status_code=503, detail="nothing was changed here"),
-        "print": lambda *a, **kw: written.append(" ".join(str(part) for part in a)),
-    }
-    exec(compile(_budget_child_report(text), "<child frame>", "exec"), namespace)
-    frame = written[0]
-
-    # The same frame, read back by the parent block the rule produced: the window the child stamped,
-    # the lateness it counted and the snapshot taken at the stamp are what the bound is compared to.
-    env = _run_budget_block(text, frame)
-    assert env["window"] == pytest.approx(5.77)
-    assert env["callbacks"] == 302 and env["late"] == pytest.approx(2.9)
-    assert env["late_at"] == pytest.approx(1.2)
-    assert env["status"] == "503"
-    assert env["charge"] == pytest.approx(5.77 - (2.9 - 1.2))
-
-
-def test_browse_budget_bound_charges_the_reported_evidence(tmp_path):
-    """A phase that ran its callbacks and arrived late inside its own window passes on that proof.
-
-    These are job 120651211235's numbers: ``window`` 5.77 s against ``3.0 + 2``, with
-    ``assert status == "503"`` already passed in front of it. The ``late_at`` field says almost
-    all of that lateness accrued after the window's stamp, so the credit is real.
-    """
-    text = _browse_budget_rewritten(tmp_path)
-    frame = "RESULT 503 6.121000250000009 5.773591584 302 2.91 0.01 nothing was changed"
-
-    env = _run_budget_block(text, frame)
-    assert env["charge"] == pytest.approx(5.773591584 - (2.91 - 0.01))
-    assert env["charge"] < 3.0 + 2  # the untouched bound, fed by the child's own account
-    # The raw window on its own was over the bound -- that is the red this closes.
-    assert env["window"] > 3.0 + 2
-
-
-def test_browse_budget_bound_still_fails_a_real_overshoot(tmp_path):
-    """A browse that genuinely runs past its budget is still red, lateness or no lateness.
-
-    Measured on a doctored product that ignores its own abort until 8 s: ``window`` 8.14 s, 796
-    callbacks, within-window lateness only 0.14 s -- the injected disk time it accrued stays
-    charged.
-    """
-    text = _browse_budget_rewritten(tmp_path)
-    frame = "RESULT 503 9.001 8.142554323 796 0.139849165 0.0 nothing was changed"
-
-    with pytest.raises(AssertionError):
-        _run_budget_block(text, frame)
-
-
-@pytest.mark.parametrize(
-    ("window", "callbacks", "late", "late_at"),
-    [
-        # No callback ran, so there is no account to credit: charge the whole wall time.
-        (5.77, 0, 2.9, 0.0),
-        # The within-window excess cannot exceed the window it lives in: an incoherent report
-        # earns nothing.
-        (5.77, 302, 9.9, 0.0),
-        # A negative lateness is not a subtraction the bound may make.
-        (5.77, 302, -1.0, 0.0),
-        # The hole this closes: late == the whole window, but ALL of it accrued before this
-        # window's stamp (late_at == late), so the credit is zero and the raw window is charged.
-        # The branch as pushed credited 5.77 - 5.77 = 0 here and passed a phase that overslept.
-        (5.77, 302, 5.77, 5.77),
-        # A snapshot ahead of the counter it snapshots is not an account: charge the whole wall
-        # time.
-        (5.77, 302, 2.9, 9.9),
-        # The child stamped no phase at all, so its window is the -1.0 sentinel: an unmeasured
-        # window must read as "unproven", never as "cost nothing". The real child cannot reach
-        # the bound like this (it asserts the "slowed" line first), but the bound may not depend
-        # on that -- this is the frame that would have gone green on -1.0 < 5.
-        (-1.0, 0, 0.0, -1.0),
-    ],
-)
-def test_browse_budget_bound_only_credit_a_coherent_account(
-    tmp_path, window, callbacks, late, late_at
-):
-    """The credit is withheld unless the report proves the lateness is inside the window charged.
-
-    A window the child never stamped is the same class of unproven claim, so the fallback charges
-    the whole wall time rather than the sentinel.
-    """
-    text = _browse_budget_rewritten(tmp_path)
-    frame = f"RESULT 503 6.121 {window} {callbacks} {late} {late_at} nothing was changed"
-
-    with pytest.raises(AssertionError):
-        _run_budget_block(text, frame)
-
-
-def test_browse_budget_child_counts_lateness_not_its_own_injected_delay(tmp_path):
-    """The child's counter charges the simulated disk fully and credits only the scheduler.
-
-    ``late_by=0`` is a host that wakes exactly when told: the delay it slept is the fixture's work,
-    so nothing is credited. ``late_by=0.05`` is a host that oversleeps: that, and only that, is.
-    """
-    text = _browse_budget_rewritten(tmp_path)
-    source = compile(_budget_child_slow(text), "<child slow>", "exec")
-
-    def run(late_by, times):
-        clock = _DrivenClock(late_by=late_by)
-        namespace = {
-            "time": clock,
-            "handler": lambda: 0,
-            "_STEP_S": 0.01,
-            "callbacks": 0,
-            "late": 0.0,
-        }
-        exec(source, namespace)
-        for _ in range(times):
-            namespace["slow"]()
-        return namespace
-
-    on_time = run(0.0, 4)
-    assert on_time["callbacks"] == 4
-    assert on_time["late"] == pytest.approx(0.0)
-
-    oversleeping = run(0.05, 4)
-    assert oversleeping["callbacks"] == 4
-    assert oversleeping["late"] == pytest.approx(0.2)
-
-
-def test_browse_budget_second_stamp_credits_only_its_own_window(tmp_path):
-    """A re-stamped window cannot be excused by lateness an earlier phase accrued.
-
-    This drives the produced child itself -- its stamp block, its ``slow()`` and its frame print,
-    all extracted from the rewritten file and exec'd against a driven clock -- across TWO slowed
-    phases: the first oversleeps its injected delay by 2.0 s in total, the second does the
-    budgeted phase's own work slowly but sleeps exactly when told. The child's own print therefore
-    reports ``late == late_at == 2.0`` with ``window == 6.0``, and the parent bound, exec'd on
-    those bytes, must charge the full 6.0 s and go red. The branch as pushed credited the whole
-    2.0 s (``0.0 <= late <= window``), charged 4.0 s against ``3.0 + 2`` and passed -- the green
-    test that asserted nothing this closes.
-    """
-    text = _browse_budget_rewritten(tmp_path)
-    slow_src = compile(_budget_child_slow(text), "<child slow>", "exec")
-    stamp_src = compile(_budget_child_stamp(text), "<child stamp>", "exec")
-    report_src = compile(_budget_child_report(text), "<child frame>", "exec")
-    clock = _DrivenClock(late_by=0.0)
-    written = []
-    namespace = {
-        "time": clock,
-        "handler": lambda: 0,
-        "_STEP_S": 0.01,
-        "callbacks": 0,
-        "late": 0.0,
-        "holding_lock": lambda: True,
-        "phase": "browse",
-        "read_only": False,
-        "slowed_at": None,
-        "late_at": None,
-        "started": 1.0,
-        "exc": types.SimpleNamespace(status_code=503, detail="nothing was changed here"),
-        "print": lambda *a, **kw: written.append(" ".join(str(part) for part in a)),
-    }
-    exec(slow_src, namespace)
-
-    # Phase one: the lock is ours, the window is stamped, and the host oversleeps every injected
-    # delay by half a second.
-    clock.now = 1.0
-    exec(stamp_src, namespace)
-    clock.late_by = 0.5
-    for _ in range(4):
-        namespace["slow"]()
-    assert namespace["late"] == pytest.approx(2.0)
-    assert written[0] == "slowed"
-
-    # The child re-stamps: a second budgeted connect qualifies, so `window` will now measure only
-    # what follows this stamp -- and everything the first phase overslept is outside it.
-    clock.late_by = 0.0
-    exec(stamp_src, namespace)
-    assert namespace["late_at"] == pytest.approx(2.0)
-
-    # Phase two: six seconds of budgeted work, run on time (the advance beyond the four callbacks
-    # stands for the slow product, not a slow scheduler).
-    stamp_now = clock.now
-    clock.now += 6.0 - 4 * 0.01
-    for _ in range(4):
-        namespace["slow"]()
-    exec(report_src, namespace)
-    frame = written[-1]
-
-    # The bytes are the child's own proof: window six, lateness two, snapshot two -- all of the
-    # credited quantity accrued before the window being charged.
-    parts = frame.split(" ")
-    assert parts[0] == "RESULT" and parts[1] == "503"
-    assert float(parts[3]) == pytest.approx(6.0)  # window
-    assert float(parts[5]) == pytest.approx(2.0)  # late (process-wide)
-    assert float(parts[6]) == pytest.approx(2.0)  # late_at (snapshot at the stamp)
-    assert " ".join(parts[7:]) == "nothing was changed here"
-    assert namespace["slowed_at"] == pytest.approx(stamp_now)
-
-    # wait_s 6.0 keeps the startup skip's margin (3.0 s) wider than the 2.0 s the first phase
-    # spent before the final stamp, so the skip predicate -- which this bound must not borrow --
-    # stays silent and the full window reaches the assertion.
-    with pytest.raises(AssertionError):
-        _run_budget_block(text, frame, wait_s=6.0)
-
-
-def test_browse_budget_bound_and_constants_survive_the_rewrite(tmp_path):
-    """Neither the margin nor the budget is edited: the produced file still says what upstream did.
-
-    The pin upstream writes for the budget value itself rides through the fixture untouched, so a
-    rule that quietly moved ``3.0`` or padded ``+ 2`` would fail here rather than in the lane.
-    """
-    text = _browse_budget_rewritten(tmp_path)
-    assert text.count("budget_s + 2") == 1
-    assert "assert charge < budget_s + 2, out" in text
-    assert 'getattr(reconcile, "BROWSE_RECONCILE_BUDGET_S", 2.0)' in text
-    assert _BROWSE_BUDGET_PIN in text  # the == 3.0 pin, verbatim
-    for widened in ("budget_s + 3", "budget_s + 2.5", "budget_s * 2", "BUDGET_S = 4"):
-        assert widened not in text
-
-
-def test_browse_budget_host_skip_did_not_get_broader(tmp_path):
-    """Every skip is a measured one: no unconditional escape, no skipif, no xfail.
-
-    A lane that skips by asserting nothing is worse than a red one. The three escapes are keyed on
-    measurements the child itself reports -- hand-off latency, startup outside the budgeted phase,
-    and scheduler oversleep accrued *inside* the window (``late - late_at``, never the whole
-    ``late``) -- and each fires only against ``margin``, the seconds between the browse budget and
-    boot's wait.
-    """
-    text = _browse_budget_rewritten(tmp_path)
-    assert text.count("pytest.skip(") == 3
-    assert "pytest.skip_if" not in text and "skipif" not in text and "xfail" not in text
-    guards = [line.strip() for line in text.splitlines() if line.rstrip().endswith("> margin:")]
-    assert guards == [
-        "if window >= 0 and startup > margin:",
-        "if window >= 0 and late - late_at > margin:",
-    ]
-    assert "if latency > _SLOW_HANDOFF_SKIP_S:" in text
-    assert "    margin = wait_s - budget_s" in text
-    # The oversleep credit is window-scoped: the process-wide counter alone would zero the charge.
-    assert "late - late_at > margin" in text
-    assert "late > margin" not in text
-
-
-def test_browse_budget_oversleep_skip_reaches_an_already_rewritten_tree(tmp_path):
-    """A tree carrying the older rewrite gains the skip; the next pass is a no-op."""
-    legacy = "".join(after for _, after in _BROWSE_BUDGET_EDITS) + _BROWSE_BUDGET_PIN
-    candidate, path = _browse_budget_tree(tmp_path, legacy)
-
-    assert _reconcile_browse_budget_flock_tests(str(candidate)) is True
-    text = path.read_text(encoding="utf-8")
-    assert "if window >= 0 and late - late_at > margin:" in text
-    assert text.count("pytest.skip(") == 3
-    assert _reconcile_browse_budget_flock_tests(str(candidate)) is False
-    assert path.read_text(encoding="utf-8") == text
-
-
-def test_browse_budget_flock_reconcile_is_registered_in_reconcile_tree(tmp_path):
-    """``reconcile_tree`` must dispatch the new rule, or the fork never receives it."""
-    root = tmp_path / "candidate"
-    path = root / _BROWSE_BUDGET_TEST_REL
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_browse_budget_pre(), encoding="utf-8")
-
-    result = reconcile_tree(str(root))
-    assert _BROWSE_BUDGET_TEST_REL in result.fixed
-    assert "def _hold_release_latency(" in path.read_text(encoding="utf-8")
-    # What the pipeline delivers is byte-for-byte what the rule alone produces -- and the two
-    # blocks it injected compile as real source (the stitched fixture is fragments, so the whole
-    # file is compiled on the branded tree instead, where it is one).
-    delivered = path.read_text(encoding="utf-8")
-    assert delivered == _browse_budget_rewritten(tmp_path / "direct")
-    compile(_budget_child_report(delivered), "<child frame>", "exec")
-    compile(_budget_block(delivered), "<budget bound>", "exec")
-    compile(_budget_child_slow(delivered), "<child slow>", "exec")
 
 
 def test_new_timeout_reconciles_are_registered_in_reconcile_tree(tmp_path):
@@ -1428,791 +682,6 @@ def test_windows_boot_lifecycle_accepts_already_gone_taskkill(tmp_path):
     assert "def _kill_raced_its_target(" in text
     assert "killed.returncode == 0 or _kill_raced_its_target(killed)" in text
     assert _reconcile_windows_boot_lifecycle_race(str(candidate)) is False
-
-
-_WINDOWS_SUSPEND_TEST_TEXT = (
-    "import time\n"
-    "\n\n"
-    "def _wait(predicate, timeout=10):\n"
-    "    deadline = time.monotonic() + timeout\n"
-    "    while time.monotonic() < deadline:\n"
-    "        if predicate():\n"
-    "            return True\n"
-    "        time.sleep(.03)\n"
-    "    return bool(predicate())\n"
-    "\n\n"
-    "def test_failed_setup_never_runs_child_and_releases_handles(tmp_path, monkeypatch):\n"
-    "    marker = tmp_path / 'child executed'\n"
-    "\n"
-    "    def assign(job, proc):\n"
-    "        children.append(proc)\n"
-    "        assert psutil.Process(proc.pid).status() == psutil.STATUS_STOPPED\n"
-    "        assert not marker.exists()\n"
-    "        real_assign(job, proc)\n"
-)
-
-
-def _windows_suspend_candidate(tmp_path, *, text=None):
-    """A candidate carrying the upstream-owned Windows test the rule patches."""
-    candidate = tmp_path / "candidate"
-    path = candidate / _WINDOWS_SUSPEND_TEST_REL
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_WINDOWS_SUSPEND_TEST_TEXT if text is None else text, encoding="utf-8")
-    return candidate, path
-
-
-def test_windows_suspend_observation_polls_for_the_suspended_child(tmp_path):
-    candidate, path = _windows_suspend_candidate(tmp_path)
-
-    assert _reconcile_windows_suspend_observation(str(candidate)) is True
-
-    text = path.read_text(encoding="utf-8")
-    assert _WINDOWS_SUSPEND_ONE_SHOT not in text
-    assert "assert _wait(\n" in text
-    assert "child never observed suspended" in text
-    # The same claim, just given the kernel time to make it observable.
-    assert text.count("psutil.STATUS_STOPPED") == 1
-    assert "lambda: psutil.Process(proc.pid).status() == psutil.STATUS_STOPPED," in text
-    # The product guard under it stays upstream's, untouched.
-    assert "        assert not marker.exists()\n" in text
-    compile(text, path.name, "exec")
-
-
-def test_windows_suspend_observation_bounds_the_poll_it_adds(tmp_path):
-    """A timeout is what separates a poll from a hang, so pin that it is passed."""
-    candidate, path = _windows_suspend_candidate(tmp_path)
-    assert _reconcile_windows_suspend_observation(str(candidate)) is True
-    text = path.read_text(encoding="utf-8")
-    assert f"timeout={_WINDOWS_SUSPEND_BUDGET_S},\n" in text
-    assert "while True" not in text
-
-
-def test_windows_suspend_observation_adds_no_wall_clock_sleep():
-    """The fork's HX013 ratchet: a test waits on a condition, never on the clock.
-
-    ``_WINDOWS_SUSPEND_WAIT`` is text the fork receives as its own source, so the fork
-    measures it in its next PR: a new literal sleep is a blocking finding there, and a
-    slower race here.  The 88-char bound is ruff's default; the fork does not select
-    E501, but injected source should still read like its neighbours.
-    """
-    assert "time.sleep" not in _WINDOWS_SUSPEND_WAIT
-    assert f"timeout={_WINDOWS_SUSPEND_BUDGET_S}," in _WINDOWS_SUSPEND_WAIT
-    assert all(len(line) <= 88 for line in _WINDOWS_SUSPEND_WAIT.splitlines())
-
-
-def test_windows_suspend_observation_is_a_fixed_point(tmp_path):
-    candidate, path = _windows_suspend_candidate(tmp_path)
-    assert _reconcile_windows_suspend_observation(str(candidate)) is True
-    once = path.read_text(encoding="utf-8")
-    assert _reconcile_windows_suspend_observation(str(candidate)) is False
-    assert path.read_text(encoding="utf-8") == once
-
-
-def test_windows_suspend_observation_raises_when_the_assert_is_reworded(tmp_path):
-    """A moved anchor stops the sync; it does not ship the racy one-shot read."""
-    text = _WINDOWS_SUSPEND_TEST_TEXT.replace(
-        _WINDOWS_SUSPEND_ONE_SHOT,
-        '        assert str(psutil.Process(proc.pid).status()) == "stopped"\n',
-    )
-    candidate, path = _windows_suspend_candidate(tmp_path, text=text)
-
-    with pytest.raises(WindowsSuspendObservationError) as excinfo:
-        _reconcile_windows_suspend_observation(str(candidate))
-
-    message = str(excinfo.value)
-    assert _WINDOWS_SUSPEND_TEST_REL in message
-    assert "_WINDOWS_SUSPEND_ONE_SHOT" in message
-    assert "Windows-only tests (arm64)" in message
-    assert _WINDOWS_SUSPEND_ONE_SHOT not in path.read_text(encoding="utf-8")
-
-
-def test_windows_suspend_observation_requires_the_wait_helper_it_calls(tmp_path):
-    """Injecting a ``_wait`` call into a file without that helper is a NameError."""
-    text = _WINDOWS_SUSPEND_TEST_TEXT.replace(
-        "def _wait(predicate, timeout=10):\n", "def _settled(predicate, timeout=10):\n"
-    )
-    candidate, _ = _windows_suspend_candidate(tmp_path, text=text)
-
-    with pytest.raises(WindowsSuspendObservationError) as excinfo:
-        _reconcile_windows_suspend_observation(str(candidate))
-    assert "_wait" in str(excinfo.value)
-
-
-def test_windows_suspend_observation_stands_down_when_upstream_drops_the_test(tmp_path):
-    """Upstream deleting the test says nothing about the race, so it is not a red gate."""
-    candidate, path = _windows_suspend_candidate(tmp_path, text="import psutil\n")
-    assert _reconcile_windows_suspend_observation(str(candidate)) is False
-    assert path.read_text(encoding="utf-8") == "import psutil\n"
-
-
-def test_windows_suspend_observation_absent_file_is_a_no_op(tmp_path):
-    candidate = tmp_path / "candidate"
-    candidate.mkdir()
-    assert _reconcile_windows_suspend_observation(str(candidate)) is False
-
-
-def test_windows_suspend_observation_registered_in_reconcile_tree(tmp_path):
-    """``reconcile_tree`` must dispatch the rule, or the fork never receives it."""
-    candidate, path = _windows_suspend_candidate(tmp_path)
-    result = reconcile_tree(str(candidate))
-    assert _WINDOWS_SUSPEND_TEST_REL in result.fixed
-    assert "child never observed suspended" in path.read_text(encoding="utf-8")
-
-
-_FIFO_COMPACTION_TEST_TEXT = (
-    "import json\n"
-    "\n"
-    "\n"
-    "class CompactingModel:\n"
-    "\n"
-    "    def do_POST(self):\n"
-    "        body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))\n"
-    "        messages = body.get('messages', [])\n"
-    "        wire = json.dumps(messages)\n"
-    "        if body.get('model') == 'original' and len(wire) > 50000:\n"
-    "            return self._send(400, b'', 'application/json')\n"
-    "\n"
-    "\n"
-    "def test_followers_survive_compression(tmp_path):\n"
-    "    assert FOLLOWERS == ('FOLLOWER_1',)\n"
-    "    (home / 'config.yaml').write_text(json.dumps({\n"
-    "        'compression': {'protect_first_n': 1, 'protect_last_n': 2, "
-    "'threshold_tokens': 12000,\n"
-    "                        'threshold': 0.5, 'in_place': False},\n"
-    "    }))\n"
-)
-
-
-def _fifo_compaction_candidate(tmp_path, *, text=None):
-    """A candidate carrying the upstream-owned compression journey test."""
-    candidate = tmp_path / "candidate"
-    path = candidate / _FIFO_COMPACTION_TEST_REL
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_FIFO_COMPACTION_TEST_TEXT if text is None else text, encoding="utf-8")
-    return candidate, path
-
-
-def test_fifo_compaction_margin_moves_both_triggers_together(tmp_path):
-    """The overflow cliff and the product threshold must leave the retained tail behind.
-
-    The test's fake model 400s an ``original`` request once the wire passes its cliff, and
-    the compaction that follows keeps the most recent turns verbatim.  The journey's last
-    assertion expects ``PRESSURE_1`` to exist only inside the summary, which is true only
-    while compaction fires late enough that the retained tail cannot reach back to it.
-    """
-    candidate, path = _fifo_compaction_candidate(tmp_path)
-
-    assert _reconcile_fifo_compaction_trigger_margin(str(candidate)) is True
-
-    text = path.read_text(encoding="utf-8")
-    assert "and len(wire) > 90000:" in text
-    assert "'threshold_tokens': 24000," in text
-    assert "and len(wire) > 50000:" not in text
-    assert "'threshold_tokens': 12000," not in text
-    compile(text, path.name, "exec")
-
-
-def test_fifo_compaction_margin_leaves_every_other_byte_alone(tmp_path):
-    candidate, path = _fifo_compaction_candidate(tmp_path)
-    assert _reconcile_fifo_compaction_trigger_margin(str(candidate)) is True
-
-    text = path.read_text(encoding="utf-8")
-    assert text != _FIFO_COMPACTION_TEST_TEXT
-    for before, after in _FIFO_COMPACTION_EDITS:
-        text = text.replace(after, before, 1)
-    assert text == _FIFO_COMPACTION_TEST_TEXT
-
-
-def test_fifo_compaction_margin_is_a_fixed_point(tmp_path):
-    candidate, path = _fifo_compaction_candidate(tmp_path)
-    assert _reconcile_fifo_compaction_trigger_margin(str(candidate)) is True
-    once = path.read_text(encoding="utf-8")
-    assert _reconcile_fifo_compaction_trigger_margin(str(candidate)) is False
-    assert path.read_text(encoding="utf-8") == once
-
-
-def test_fifo_compaction_margin_finishes_a_half_applied_rewrite(tmp_path):
-    """A tree that already carries one edit keeps it and receives the other."""
-    text = _FIFO_COMPACTION_TEST_TEXT.replace(
-        _FIFO_COMPACTION_EDITS[0][0], _FIFO_COMPACTION_EDITS[0][1], 1
-    )
-    candidate, path = _fifo_compaction_candidate(tmp_path, text=text)
-
-    assert _reconcile_fifo_compaction_trigger_margin(str(candidate)) is True
-
-    rewritten = path.read_text(encoding="utf-8")
-    assert "and len(wire) > 90000:" in rewritten
-    assert "'threshold_tokens': 24000," in rewritten
-    assert rewritten.count("> 90000") == 1
-
-
-def test_fifo_compaction_margin_raises_when_the_cliff_moves(tmp_path):
-    """A moved cliff stops the sync instead of shipping the 1.6 KB margin."""
-    text = _FIFO_COMPACTION_TEST_TEXT.replace("> 50000:", "> 50001:")
-    candidate, path = _fifo_compaction_candidate(tmp_path, text=text)
-
-    with pytest.raises(FifoCompactionTriggerMarginError) as excinfo:
-        _reconcile_fifo_compaction_trigger_margin(str(candidate))
-
-    message = str(excinfo.value)
-    assert _FIFO_COMPACTION_TEST_REL in message
-    assert "50000" in message
-    assert path.read_text(encoding="utf-8") == text
-
-
-def test_fifo_compaction_margin_raises_when_the_threshold_moves_alone(tmp_path):
-    """Raising the cliff without the threshold leaves the product's own trigger at the cliff."""
-    text = _FIFO_COMPACTION_TEST_TEXT.replace(
-        "'threshold_tokens': 12000", "'threshold_tokens': 13000"
-    )
-    candidate, path = _fifo_compaction_candidate(tmp_path, text=text)
-
-    with pytest.raises(FifoCompactionTriggerMarginError) as excinfo:
-        _reconcile_fifo_compaction_trigger_margin(str(candidate))
-
-    assert "threshold_tokens" in str(excinfo.value)
-    assert path.read_text(encoding="utf-8") == text
-
-
-def test_fifo_compaction_margin_stands_down_when_upstream_drops_the_journey(tmp_path):
-    candidate, path = _fifo_compaction_candidate(tmp_path, text="import json\n")
-    assert _reconcile_fifo_compaction_trigger_margin(str(candidate)) is False
-    assert path.read_text(encoding="utf-8") == "import json\n"
-
-
-def test_fifo_compaction_margin_absent_file_is_a_no_op(tmp_path):
-    candidate = tmp_path / "candidate"
-    candidate.mkdir()
-    assert _reconcile_fifo_compaction_trigger_margin(str(candidate)) is False
-
-
-def test_fifo_compaction_margin_registered_in_reconcile_tree(tmp_path):
-    """``reconcile_tree`` must dispatch the rule, or the candidate keeps the 1.6 KB margin."""
-    candidate, path = _fifo_compaction_candidate(tmp_path)
-    result = reconcile_tree(str(candidate))
-    assert _FIFO_COMPACTION_TEST_REL in result.fixed
-    assert "and len(wire) > 90000:" in path.read_text(encoding="utf-8")
-
-
-_TERMUX_TOOLCHAIN_TEXT = (
-    "jobs:\n"
-    "  termux-deb:\n"
-    "    runs-on: ubuntu-24.04-arm\n"
-    "    steps:\n"
-    "      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1\n"
-    "\n"
-    "      - name: Set up the locked build toolchain\n"
-    "        id: pm\n"
-    "        uses: ./.github/actions/setup-pm\n"
-    "        with:\n"
-    "          toolchain: python\n"
-    "          archive-inputs: true\n"
-    "          cache-python: false\n"
-    "\n"
-    "      - name: Derive the channel from the tag\n"
-    "        run: echo ok\n"
-)
-
-
-def _termux_toolchain_candidate(tmp_path, *, text=None):
-    candidate = tmp_path / "candidate"
-    path = candidate / _TERMUX_BUILD_TOOLCHAIN_REL
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_TERMUX_TOOLCHAIN_TEXT if text is None else text, encoding="utf-8")
-    return candidate, path
-
-
-def test_termux_build_toolchain_installs_the_locked_node(tmp_path):
-    """The TUI build runs bare ``node``; without the locked Node it is the runner's 22."""
-    candidate, path = _termux_toolchain_candidate(tmp_path)
-
-    assert _reconcile_termux_build_toolchain(str(candidate)) is True
-
-    text = path.read_text(encoding="utf-8")
-    assert "          toolchain: all\n" in text
-    assert "          toolchain: python\n" not in text
-    assert "cache-python: false\n" in text  # the rest of the block is untouched
-
-
-def test_termux_build_toolchain_leaves_every_other_byte_alone(tmp_path):
-    candidate, path = _termux_toolchain_candidate(tmp_path)
-    assert _reconcile_termux_build_toolchain(str(candidate)) is True
-
-    text = path.read_text(encoding="utf-8")
-    restored = text.replace(_TERMUX_BUILD_TOOLCHAIN_AFTER, _TERMUX_BUILD_TOOLCHAIN_BEFORE, 1)
-    assert restored == _TERMUX_TOOLCHAIN_TEXT
-
-
-def test_termux_build_toolchain_is_a_fixed_point(tmp_path):
-    candidate, path = _termux_toolchain_candidate(tmp_path)
-    assert _reconcile_termux_build_toolchain(str(candidate)) is True
-    once = path.read_text(encoding="utf-8")
-    assert _reconcile_termux_build_toolchain(str(candidate)) is False
-    assert path.read_text(encoding="utf-8") == once
-
-
-def test_termux_build_toolchain_raises_when_the_step_moves(tmp_path):
-    """A moved anchor stops the sync instead of shipping a build that cannot resolve Node."""
-    text = _TERMUX_TOOLCHAIN_TEXT.replace(
-        "          toolchain: python\n", "          toolchain: python3\n"
-    )
-    candidate, path = _termux_toolchain_candidate(tmp_path, text=text)
-
-    with pytest.raises(TermuxBuildToolchainError) as excinfo:
-        _reconcile_termux_build_toolchain(str(candidate))
-
-    message = str(excinfo.value)
-    assert _TERMUX_BUILD_TOOLCHAIN_REL in message
-    assert "node 22.23.3" in message
-    assert path.read_text(encoding="utf-8") == text
-
-
-def test_termux_build_toolchain_stands_down_when_the_job_is_gone(tmp_path):
-    bare = "jobs:\n  lint:\n    runs-on: ubuntu-latest\n"
-    candidate, path = _termux_toolchain_candidate(tmp_path, text=bare)
-    assert _reconcile_termux_build_toolchain(str(candidate)) is False
-    assert path.read_text(encoding="utf-8") == bare
-
-
-def test_termux_build_toolchain_absent_file_is_a_no_op(tmp_path):
-    candidate = tmp_path / "candidate"
-    candidate.mkdir()
-    assert _reconcile_termux_build_toolchain(str(candidate)) is False
-
-
-def test_termux_build_toolchain_registered_in_reconcile_tree():
-    """``reconcile_tree`` must dispatch it; the real workflow carries other rules' anchors."""
-    assert _reconcile_termux_build_toolchain.__name__ in _names_called_inside(
-        updates, "reconcile_tree"
-    )
-
-
-_TERMUX_TUI_TEXT = (
-    "import type { SetupStatusResponse } from './types'\n"
-    "\n"
-    "export function useSessionLifecycle(gw: Gateway, rpc: Rpc) {\n"
-    "  const create = async () => {\n"
-    "    try {\n"
-    "        const setup = gw.isCanonical ? null : "
-    "await rpc<SetupStatusResponse>('setup.status', {})\n"
-    "      if (setup?.provider_configured === false) {\n"
-    "        return null\n"
-    "      }\n"
-    "    } catch {\n"
-    "      return null\n"
-    "    }\n"
-    "  }\n"
-    "  const resume = async (id: string) => {\n"
-    "      return (gw.isCanonical ? Promise.resolve(null) : "
-    "rpc<SetupStatusResponse>('setup.status', {}))\n"
-    "      .then(setup => setup)\n"
-    "  }\n"
-    "  return { create, resume }\n"
-    "}\n"
-)
-
-
-def _termux_tui_candidate(tmp_path, *, text=None):
-    candidate = tmp_path / "candidate"
-    path = candidate / _TERMUX_TUI_SETUP_GATE_REL
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_TERMUX_TUI_TEXT if text is None else text, encoding="utf-8")
-    return candidate, path
-
-
-def test_termux_tui_setup_gate_asks_every_transport(tmp_path):
-    """A canonical TUI that skips ``setup.status`` creates a session with no model."""
-    candidate, path = _termux_tui_candidate(tmp_path)
-
-    assert _reconcile_termux_tui_setup_gate(str(candidate)) != []
-
-    text = path.read_text(encoding="utf-8")
-    for before, after in _TERMUX_TUI_SETUP_GATE_EDITS:
-        assert before not in text
-        assert after in text or after.strip() in text
-
-
-def test_termux_tui_setup_gate_leaves_every_other_byte_alone(tmp_path):
-    candidate, path = _termux_tui_candidate(tmp_path)
-    assert _reconcile_termux_tui_setup_gate(str(candidate)) != []
-
-    text = path.read_text(encoding="utf-8")
-    for before, after in _TERMUX_TUI_SETUP_GATE_EDITS:
-        text = text.replace(after, before, 1)
-    assert text == _TERMUX_TUI_TEXT
-
-
-def test_termux_tui_setup_gate_is_a_fixed_point(tmp_path):
-    candidate, path = _termux_tui_candidate(tmp_path)
-    assert _reconcile_termux_tui_setup_gate(str(candidate)) != []
-    once = path.read_text(encoding="utf-8")
-    assert _reconcile_termux_tui_setup_gate(str(candidate)) == []
-    assert path.read_text(encoding="utf-8") == once
-
-
-def test_termux_tui_setup_gate_raises_when_one_site_moves(tmp_path):
-    """Half a gate is worse than none: a moved site stops the sync."""
-    text = _TERMUX_TUI_TEXT.replace(
-        "      return (gw.isCanonical ? Promise.resolve(null) : "
-        "rpc<SetupStatusResponse>('setup.status', {}))\n",
-        "      return lookupSetup()\n",
-    )
-    candidate, path = _termux_tui_candidate(tmp_path, text=text)
-
-    with pytest.raises(TermuxTuiSetupGateError) as excinfo:
-        _reconcile_termux_tui_setup_gate(str(candidate))
-
-    assert _TERMUX_TUI_SETUP_GATE_REL in str(excinfo.value)
-    assert "storage_unavailable" in str(excinfo.value)
-    assert path.read_text(encoding="utf-8") == text
-
-
-def test_termux_tui_setup_gate_raises_when_one_call_is_rewritten(tmp_path):
-    """A half-applied gate is worse than none: it stops the sync."""
-    text = _TERMUX_TUI_TEXT.replace(
-        "        const setup = gw.isCanonical ? null : "
-        "await rpc<SetupStatusResponse>('setup.status', {})\n",
-        "        const setup = await lookupSetup()\n",
-    )
-    candidate, path = _termux_tui_candidate(tmp_path, text=text)
-    assert "gw.isCanonical ? null" not in text
-    assert "gw.isCanonical ? Promise.resolve(null)" in text
-    with pytest.raises(TermuxTuiSetupGateError):
-        _reconcile_termux_tui_setup_gate(str(candidate))
-
-
-def test_termux_tui_setup_gate_stands_down_when_upstream_dropped_the_skip(tmp_path):
-    """Neither guarded call left: upstream owns the gate again."""
-    bare = (
-        "export function useSessionLifecycle(gw: Gateway, rpc: Rpc) {\n"
-        "  const setup = await rpc<SetupStatusResponse>('setup.status', {})\n"
-        "  return setup\n"
-        "}\n"
-    )
-    candidate, path = _termux_tui_candidate(tmp_path, text=bare)
-    assert _reconcile_termux_tui_setup_gate(str(candidate)) == []
-    assert path.read_text(encoding="utf-8") == bare
-
-
-def test_termux_tui_setup_gate_absent_file_is_a_no_op(tmp_path):
-    candidate = tmp_path / "candidate"
-    candidate.mkdir()
-    assert _reconcile_termux_tui_setup_gate(str(candidate)) == []
-
-
-_CANONICAL_STUB_TEXT = (
-    "  const request = vi.fn((method: string) => {\n"
-    "    if (method === 'session.detach') {\n"
-    "      return Promise.resolve({ detached: true })\n"
-    "    }\n"
-    "\n"
-    "    throw new Error(`unexpected viewer operation: ${wire.method}`)\n"
-    "  })\n"
-)
-
-
-def test_termux_tui_setup_gate_teaches_the_canonical_viewer_fakes(tmp_path):
-    """The canonical suites' fake viewer rejects unknown operations; setup.status is now one."""
-    candidate, path = _termux_tui_candidate(tmp_path)
-    stub_rel = _TERMUX_TUI_SETUP_GATE_STUBS[0]
-    stub = candidate / stub_rel
-    stub.parent.mkdir(parents=True, exist_ok=True)
-    stub.write_text(_CANONICAL_STUB_TEXT, encoding="utf-8")
-
-    changed = _reconcile_termux_tui_setup_gate(str(candidate))
-    # Every file the rule writes must be reported: one missing from result.fixed is an
-    # unexplained rewrite, and the pipeline gate fails on exactly that (3 files, #162).
-    assert sorted(changed) == sorted([_TERMUX_TUI_SETUP_GATE_REL, stub_rel])
-
-    text = stub.read_text(encoding="utf-8")
-    assert "wire.method === 'setup.status'" in text
-    assert "provider_configured: true" in text
-    assert _TERMUX_TUI_STUB_AFTER in text
-    assert text.count(_TERMUX_TUI_STUB_BEFORE) == 1  # the throw still guards everything else
-    assert _reconcile_termux_tui_setup_gate(str(candidate)) == []
-    assert stub.read_text(encoding="utf-8") == text
-
-
-def test_termux_tui_setup_gate_raises_when_a_viewer_stub_moves(tmp_path):
-    candidate, _ = _termux_tui_candidate(tmp_path)
-    stub = candidate / _TERMUX_TUI_SETUP_GATE_STUBS[1]
-    stub.parent.mkdir(parents=True, exist_ok=True)
-    moved = _CANONICAL_STUB_TEXT.replace("unexpected viewer operation", "unknown viewer operation")
-    stub.write_text(moved, encoding="utf-8")
-
-    with pytest.raises(TermuxTuiSetupGateError) as excinfo:
-        _reconcile_termux_tui_setup_gate(str(candidate))
-
-    assert _TERMUX_TUI_SETUP_GATE_STUBS[1] in str(excinfo.value)
-    assert stub.read_text(encoding="utf-8") == moved
-
-
-#: The two resume-path fakes exactly as upstream writes them -- ``inkResumeSnapshotFence`` hands
-#: the lifecycle a bare ``vi.fn()`` and ``resumeEpochRenderer`` queues every viewer call into a
-#: ledger it resolves by hand.  Both are copied from the upstream file's own bytes, because the
-#: proof these tests are worth is that the rule fires on what upstream actually says.
-_TERMUX_TUI_FENCE_TEXT = (
-    "  function Harness() {\n"
-    "    lifecycle = useSessionLifecycle({ colsRef: { current: 80 }, "
-    "composerActions: { setComposerTokens: vi.fn() }, gw, rpc: vi.fn(),\n"
-    "      scrollRef: { current: null }, panel: vi.fn(), sys: vi.fn() } as any)\n"
-    "    return <Text>session</Text>\n"
-    "  }\n"
-)
-_TERMUX_TUI_LEDGER_TEXT = (
-    "  const pending: Array<{ method: string; params: any; resolve: (value: any) => void }> = []\n"
-    "\n"
-    "  const request = vi.fn((method: string, params: any) =>\n"
-    "    new Promise(resolve => pending.push({ method, params, resolve })))\n"
-    "\n"
-    "  lifecycle.resumeById('a')\n"
-    "  await vi.waitFor(() => expect(pending).toHaveLength(1))\n"
-    "  pending.shift()!.resolve(result('a', 'sub-a'))\n"
-)
-
-
-def _termux_tui_resume_candidate(tmp_path, *, skip=()):
-    """A gated lifecycle plus the two resume-path fakes, minus any path named in ``skip``."""
-    candidate, _ = _termux_tui_candidate(tmp_path)
-    for rel, _, _ in _TERMUX_TUI_GATE_FAKE_EDITS:
-        if rel in skip:
-            continue
-        path = candidate / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        text = _TERMUX_TUI_FENCE_TEXT if "SnapshotFence" in rel else _TERMUX_TUI_LEDGER_TEXT
-        path.write_text(text, encoding="utf-8")
-    return candidate
-
-
-def test_termux_tui_setup_gate_teaches_the_resume_path_fakes(tmp_path):
-    """The gate opens on the canonical resume, so both fakes have to answer ``setup.status``."""
-    candidate = _termux_tui_resume_candidate(tmp_path)
-    fence_rel, fence_before, fence_after = _TERMUX_TUI_GATE_FAKE_EDITS[0]
-    ledger_rel, ledger_before, ledger_after = _TERMUX_TUI_GATE_FAKE_EDITS[1]
-
-    changed = _reconcile_termux_tui_setup_gate(str(candidate))
-    assert sorted(changed) == sorted([_TERMUX_TUI_SETUP_GATE_REL, fence_rel, ledger_rel])
-
-    fence = (candidate / fence_rel).read_text(encoding="utf-8")
-    ledger = (candidate / ledger_rel).read_text(encoding="utf-8")
-    for before, after, text in (
-        (fence_before, fence_after, fence),
-        (ledger_before, ledger_after, ledger),
-    ):
-        assert before not in text
-        assert after in text
-
-    # A second pass changes nothing: the marker is the after-image itself.
-    assert _reconcile_termux_tui_setup_gate(str(candidate)) == []
-    assert (candidate / fence_rel).read_text(encoding="utf-8") == fence
-    assert (candidate / ledger_rel).read_text(encoding="utf-8") == ledger
-
-
-def test_termux_tui_setup_gate_resume_edits_leave_every_other_byte_alone(tmp_path):
-    candidate = _termux_tui_resume_candidate(tmp_path)
-
-    assert _reconcile_termux_tui_setup_gate(str(candidate)) != []
-
-    for rel, before, after in _TERMUX_TUI_GATE_FAKE_EDITS:
-        pre = _TERMUX_TUI_FENCE_TEXT if "SnapshotFence" in rel else _TERMUX_TUI_LEDGER_TEXT
-        assert (candidate / rel).read_text(encoding="utf-8") == pre.replace(before, after, 1)
-
-
-def test_termux_tui_setup_gate_ledger_answers_setup_without_a_queue_slot(tmp_path):
-    """The ledger is how that file proves detach ordering; the setup reply must not enter it."""
-    candidate = _termux_tui_resume_candidate(tmp_path)
-
-    assert _reconcile_termux_tui_setup_gate(str(candidate)) != []
-
-    text = (candidate / _TERMUX_TUI_GATE_FAKE_EDITS[1][0]).read_text(encoding="utf-8")
-    assert text.count("pending.push(") == 1  # one ledger, and only ever for a session RPC
-    assert text.index("'setup.status'") < text.index("pending.push(")
-    assert "return Promise.resolve({ provider_configured: true })" in text
-    assert text.count("toHaveLength(1)") == 1  # the resume count the test asserts is unchanged
-    assert text.startswith("  const pending: Array<")  # the ledger's own shape is untouched
-
-
-def test_termux_tui_setup_gate_fence_fake_still_answers_like_a_viewer(tmp_path):
-    """The bare ``vi.fn()`` becomes an answering one, so ``.mock`` and the gate's read both hold."""
-    candidate = _termux_tui_resume_candidate(tmp_path)
-
-    assert _reconcile_termux_tui_setup_gate(str(candidate)) != []
-
-    text = (candidate / _TERMUX_TUI_GATE_FAKE_EDITS[0][0]).read_text(encoding="utf-8")
-    assert "rpc: vi.fn(async () => ({ provider_configured: true }))," in text
-    assert "rpc: vi.fn()," not in text
-    assert "provider_configured: false" not in text  # the fake must not trip the Setup Required arm
-    assert "scrollRef: { current: null }, panel: vi.fn(), sys: vi.fn() } as any)" in text
-
-
-def test_termux_tui_setup_gate_raises_when_a_resume_fake_moves(tmp_path):
-    candidate = _termux_tui_resume_candidate(tmp_path)
-    fence_rel = _TERMUX_TUI_GATE_FAKE_EDITS[0][0]
-    path = candidate / fence_rel
-    drift = _TERMUX_TUI_FENCE_TEXT.replace(", gw, rpc: vi.fn(),", ", gw, rpc: viewer,")
-    path.write_text(drift, encoding="utf-8")
-
-    with pytest.raises(TermuxTuiSetupGateError) as excinfo:
-        _reconcile_termux_tui_setup_gate(str(candidate))
-
-    assert fence_rel in str(excinfo.value)
-    assert "885f30b6" in str(excinfo.value)  # the run that showed what this miss costs
-    assert path.read_text(encoding="utf-8") == drift
-
-
-@pytest.mark.parametrize(
-    "missing", [fake_rel for fake_rel, _, _ in _TERMUX_TUI_GATE_FAKE_EDITS]
-)
-def test_termux_tui_setup_gate_still_gates_when_one_resume_fake_is_gone(tmp_path, missing):
-    """Upstream owns these files: if it deletes one, the gate and the other fake still move."""
-    candidate = _termux_tui_resume_candidate(tmp_path, skip=(missing,))
-
-    changed = _reconcile_termux_tui_setup_gate(str(candidate))
-
-    assert missing not in changed
-    assert _TERMUX_TUI_SETUP_GATE_REL in changed
-    assert not (candidate / missing).exists()
-
-
-def test_termux_tui_setup_gate_registered_in_reconcile_tree():
-    assert _reconcile_termux_tui_setup_gate.__name__ in _names_called_inside(
-        updates, "reconcile_tree"
-    )
-
-
-_CANARY_WORKFLOW_TEXT = (
-    "on:\n"
-    "  workflow_dispatch:\n"
-    "    inputs:\n"
-    "      tag:\n"
-    "        type: string\n"
-    "      upload_release:\n"
-    "        description: 'Upload artifacts to the R2 release bucket (staging + feeds)'\n"
-    "        required: false\n"
-    "        type: boolean\n"
-    "        default: false\n"
-    "\n"
-    "permissions:\n"
-    "  contents: write\n"
-)
-_CANARY_RELEASE_TEXT = (
-    "def dispatch(tag, canary):\n"
-    "    cmd = ['gh', 'workflow', 'run', 'desktop-bundled-release.yml', '--ref', 'main']\n"
-    "    if canary:\n"
-    "        cmd += [\"-f\", \"upload_release=true\"]\n"
-    "    return cmd\n"
-)
-
-
-def _canary_candidate(tmp_path, *, workflow=None, release_py=None):
-    candidate = tmp_path / "candidate"
-    wf = candidate / ".github/workflows/desktop-bundled-release.yml"
-    rp = candidate / "scripts/release.py"
-    wf.parent.mkdir(parents=True, exist_ok=True)
-    rp.parent.mkdir(parents=True, exist_ok=True)
-    wf.write_text(_CANARY_WORKFLOW_TEXT if workflow is None else workflow, encoding="utf-8")
-    rp.write_text(_CANARY_RELEASE_TEXT if release_py is None else release_py, encoding="utf-8")
-    return candidate, wf, rp
-
-
-def test_canary_unsigned_dispatch_exposes_skip_signed_and_passes_it(tmp_path):
-    """A dispatched unsigned fork must be able to say so, or it stops at the credential gates."""
-    candidate, wf, rp = _canary_candidate(tmp_path)
-
-    changed = _reconcile_canary_unsigned_dispatch(str(candidate))
-
-    assert sorted(changed) == [
-        ".github/workflows/desktop-bundled-release.yml",
-        "scripts/release.py",
-    ]
-    assert _CANARY_DISPATCH_INPUT_AFTER.strip() in wf.read_text(encoding="utf-8")
-    assert _CANARY_RELEASE_PY_AFTER.strip() in rp.read_text(encoding="utf-8")
-
-
-def test_canary_unsigned_dispatch_leaves_every_other_byte_alone(tmp_path):
-    candidate, wf, rp = _canary_candidate(tmp_path)
-    _reconcile_canary_unsigned_dispatch(str(candidate))
-    assert wf.read_text(encoding="utf-8").replace(
-        _CANARY_DISPATCH_INPUT_AFTER, _CANARY_DISPATCH_INPUT_BEFORE, 1
-    ) == _CANARY_WORKFLOW_TEXT
-    assert rp.read_text(encoding="utf-8").replace(
-        _CANARY_RELEASE_PY_AFTER, _CANARY_RELEASE_PY_BEFORE, 1
-    ) == _CANARY_RELEASE_TEXT
-
-
-def test_canary_unsigned_dispatch_is_a_fixed_point(tmp_path):
-    candidate, wf, rp = _canary_candidate(tmp_path)
-    assert _reconcile_canary_unsigned_dispatch(str(candidate)) != []
-    once = (wf.read_text(encoding="utf-8"), rp.read_text(encoding="utf-8"))
-    assert _reconcile_canary_unsigned_dispatch(str(candidate)) == []
-    assert (wf.read_text(encoding="utf-8"), rp.read_text(encoding="utf-8")) == once
-
-
-def test_canary_unsigned_dispatch_raises_when_the_dispatch_moves(tmp_path):
-    text = _CANARY_RELEASE_TEXT.replace("upload_release=true", "upload_release=false")
-    candidate, wf, rp = _canary_candidate(tmp_path, release_py=text)
-
-    with pytest.raises(CanaryUnsignedDispatchError) as excinfo:
-        _reconcile_canary_unsigned_dispatch(str(candidate))
-
-    assert "release.py" in str(excinfo.value)
-    assert "CSC_LINK" in str(excinfo.value) or "AZURE_SIGN" in str(excinfo.value)
-    assert rp.read_text(encoding="utf-8") == text
-
-
-def test_canary_unsigned_dispatch_absent_files_are_a_no_op(tmp_path):
-    candidate = tmp_path / "candidate"
-    candidate.mkdir()
-    assert _reconcile_canary_unsigned_dispatch(str(candidate)) == []
-
-
-_CANARY_PIN_TEXT = (
-    "    assert dispatch == [\n"
-    '        "gh", "workflow", "run", "desktop-bundled-release.yml", "--ref", "main",\n'
-    '        "-f", f"tag={tag}", "-f", "upload_release=true", "--repo", "fixture/release",\n'
-    "    ]\n"
-)
-
-
-def test_canary_unsigned_dispatch_aligns_the_test_that_pins_the_argv(tmp_path):
-    """The canary test asserts the exact argv; the flag and its pin move together."""
-    candidate, _, _ = _canary_candidate(tmp_path)
-    pin = candidate / _CANARY_DISPATCH_TEST_REL
-    pin.parent.mkdir(parents=True, exist_ok=True)
-    pin.write_text(_CANARY_PIN_TEXT, encoding="utf-8")
-
-    changed = _reconcile_canary_unsigned_dispatch(str(candidate))
-
-    assert sorted(changed) == [
-        ".github/workflows/desktop-bundled-release.yml",
-        "scripts/release.py",
-        _CANARY_DISPATCH_TEST_REL,
-    ]
-    text = pin.read_text(encoding="utf-8")
-    assert '"-f", "skip-signed=true",' in text
-    assert _CANARY_DISPATCH_TEST_AFTER in text
-    assert _CANARY_DISPATCH_TEST_BEFORE not in text
-    assert _reconcile_canary_unsigned_dispatch(str(candidate)) == []
-
-
-def test_canary_unsigned_dispatch_raises_when_the_pin_moves(tmp_path):
-    candidate, _, _ = _canary_candidate(tmp_path)
-    pin = candidate / _CANARY_DISPATCH_TEST_REL
-    pin.parent.mkdir(parents=True, exist_ok=True)
-    moved = _CANARY_PIN_TEXT.replace("upload_release=true", "upload_release=yes")
-    pin.write_text(moved, encoding="utf-8")
-
-    with pytest.raises(CanaryUnsignedDispatchError) as excinfo:
-        _reconcile_canary_unsigned_dispatch(str(candidate))
-
-    assert _CANARY_DISPATCH_TEST_REL in str(excinfo.value)
-    assert pin.read_text(encoding="utf-8") == moved
-
-
-def test_canary_unsigned_dispatch_registered_in_reconcile_tree():
-    assert _reconcile_canary_unsigned_dispatch.__name__ in _names_called_inside(
-        updates, "reconcile_tree"
-    )
 
 
 def test_windows_real_git_locate_picks_every_git_for_windows_layout(tmp_path):
@@ -2623,9 +1092,7 @@ def test_manifest_records_pipeline(tmp_path):
     assert manifest["source_provenance"]["acquisition"] == "fresh-direct-clone"
     assert manifest["source_provenance"]["remote_url"] == str(hermes).replace("hermes", "nastech")
     assert manifest["source_provenance"]["fetched_at"].endswith("+00:00")
-    assert manifest["commit_subjects_file"] == "commit-subjects.jsonl"
-    assert manifest["commit_subject_count"] >= 0
-    assert isinstance(read_manifest_with_subjects(res.manifest_path)["commit_subjects"], list)
+    assert isinstance(manifest["commit_subjects"], list)
     assert isinstance(manifest["changed_areas"], dict)
     assert manifest["reconciliation_actions"] == []
 
@@ -2743,11 +1210,7 @@ def test_cli_banner_reconciliation_handles_getattr_skin_logo_form(tmp_path):
     assert fixed == ["nastech_cli/banner.py"]
     assert "_logo = NASTECH_AGENT_LOGO" in banner
     assert 'getattr(_bskin, "banner_logo"' not in banner
-    # The print has to be a statement of its own, not text swallowed by the
-    # comment above it: a literal ``\n`` here published a banner with no logo.
-    lines = banner.splitlines()
-    assert any(line.strip() == "console.print(_logo)" for line in lines)
-    assert not any("#" in line and "console.print(_logo)" in line for line in lines)
+    assert "console.print(_logo)" in banner
 
 
 def test_cli_defaults_have_no_machine_paths():
@@ -3088,23 +1551,16 @@ def test_reconcile_migrates_com_domains_to_github_io(tmp_path):
     with open(os.path.join(res.dir, "README.md"), encoding="utf-8") as fh:
         text = fh.read()
 
-    # No .com *URL* survives; a mailbox keeps its domain, because an address
-    # is not a website and ``@nastechresearch.github.io`` has no MX record.
-    assert "https://nastechresearch.com" not in text
-    assert "nastechresearch.com/" not in text
-    assert "NastechResearch.com/" not in text
+    assert "nastechresearch.com" not in text
+    assert "NastechResearch.com" not in text
 
     # docs compound (org/repo path style, not a subdomain)
     assert "https://nastechresearch.github.io/nastech-agent/docs" in text
     # subdomain forms keep their prefix on github.io
     assert "https://portal.nastechresearch.github.io" in text
     assert "https://inference-api.nastechresearch.github.io/v1" in text
-    # An address is not a website: ``github.io`` has no MX record, so a
-    # mailbox must not be dragged onto it (this used to be asserted as the
-    # desired migration -- see ``.mailmap`` and the electron-builder author
-    # field, where a dead address silently breaks attribution).
-    assert "nastech@nastechresearch.com" in text
-    assert "nastech@nastechresearch.github.io" not in text
+    # email address follows the same migration
+    assert "nastech@nastechresearch.github.io" in text
     # regex-escaped hostnames follow the same migration as literal URLs.
     assert r"ares-3009\.agents\.nastechresearch\.github\.io" in text
     assert r"ares-3009\.agents\.nastechresearch\.com" not in text
@@ -3203,22 +1659,18 @@ def test_reconcile_trims_skill_description_to_fork_bytes(tmp_path):
 
 
 
-def _pages_workflow_fixture(root, staging=True):
-    workflow = root / ".github" / "workflows" / "deploy-site.yml"
-    workflow.parent.mkdir(parents=True)
-    (root / "scripts").mkdir(parents=True, exist_ok=True)
-    (root / "scripts" / "install.sh").write_text("#!/usr/bin/env bash\n")
-    body = "      - name: Stage deployment\n        run: |\n"
-    if staging:
-        body += "          mkdir -p _site/docs\n          cp -r website/build/* _site/docs/\n"
-    workflow.write_text(body)
-    return workflow
-
-
 def test_reconcile_pages_workflow_publishes_installer_and_root_redirect(tmp_path):
     root = tmp_path / "branded"
-    workflow = _pages_workflow_fixture(root)
-    (root / "scripts" / "install.ps1").write_text("# PowerShell\n")
+    workflow = root / ".github" / "workflows" / "deploy-site.yml"
+    workflow.parent.mkdir(parents=True)
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "install.sh").write_text("#!/usr/bin/env bash\n")
+    workflow.write_text(
+        "      - name: Stage deployment\n"
+        "        run: |\n"
+        "          mkdir -p _site/docs\n"
+        "          cp -r website/build/* _site/docs/\n"
+    )
 
     result = reconcile_tree(str(root))
     text = workflow.read_text()
@@ -3227,81 +1679,6 @@ def test_reconcile_pages_workflow_publishes_installer_and_root_redirect(tmp_path
     assert "cp scripts/install.sh _site/install.sh" in text
     assert "cat > _site/index.html <<'HTML'" in text
     assert "url=./docs/" in text
-
-
-def test_reconcile_pages_workflow_stages_the_windows_installer_readme_documents(tmp_path):
-    """Every README locale tells Windows users to fetch ``.../install.ps1``.
-
-    A staged artifact without that file is a documented 404, so the staging
-    step has to copy it beside ``install.sh`` -- and a second pass must not
-    copy it twice.
-    """
-    root = tmp_path / "branded"
-    workflow = _pages_workflow_fixture(root)
-    (root / "scripts" / "install.ps1").write_text("# PowerShell\n")
-
-    assert reconcile_tree(str(root)).fixed.count(
-        ".github/workflows/deploy-site.yml"
-    ) == 1
-    text = workflow.read_text()
-    assert text.count("cp scripts/install.ps1 _site/install.ps1") == 1
-    assert text.index("cp scripts/install.sh") < text.index("cp scripts/install.ps1")
-
-    again = reconcile_tree(str(root))
-    assert ".github/workflows/deploy-site.yml" not in again.fixed
-    assert workflow.read_text() == text
-
-
-def test_reconcile_pages_workflow_upgrades_a_tree_staged_before_the_windows_copy(
-    tmp_path,
-):
-    """The legacy injection staged only the POSIX installer.
-
-    Re-running the sync on a fork already carrying that block must add the
-    Windows copy rather than insert a second whole block.
-    """
-    root = tmp_path / "branded"
-    workflow = _pages_workflow_fixture(root)
-    workflow.write_text(
-        workflow.read_text()
-        + "          cp scripts/install.sh _site/install.sh\n"
-        + "          cat > _site/index.html <<'HTML'\n          HTML\n"
-    )
-    (root / "scripts" / "install.ps1").write_text("# PowerShell\n")
-
-    assert reconcile_tree(str(root)).fixed.count(
-        ".github/workflows/deploy-site.yml"
-    ) == 1
-    text = workflow.read_text()
-    assert text.count("cp scripts/install.sh _site/install.sh") == 1
-    assert text.count("cp scripts/install.ps1 _site/install.ps1") == 1
-
-
-def test_reconcile_pages_workflow_skips_a_missing_windows_installer(tmp_path):
-    """``cp`` of a file upstream stopped shipping would red the docs deploy.
-
-    The step runs under ``set -euo pipefail``, so the copy is only staged when
-    the branded tree really carries the script.
-    """
-    root = tmp_path / "branded"
-    workflow = _pages_workflow_fixture(root)
-
-    assert reconcile_tree(str(root)).fixed.count(
-        ".github/workflows/deploy-site.yml"
-    ) == 1
-    text = workflow.read_text()
-    assert "cp scripts/install.sh _site/install.sh" in text
-    assert "install.ps1" not in text
-
-
-def test_reconcile_pages_workflow_stand_down_when_upstream_rewrites_staging(tmp_path):
-    root = tmp_path / "branded"
-    workflow = _pages_workflow_fixture(root, staging=False)
-    (root / "scripts" / "install.ps1").write_text("# PowerShell\n")
-
-    result = reconcile_tree(str(root))
-    assert ".github/workflows/deploy-site.yml" not in result.fixed
-    assert "install.ps1" not in workflow.read_text()
 
 
 def test_reconcile_quickstart_hardware_fixture(tmp_path):
@@ -3433,239 +1810,6 @@ def test_reconcile_docusaurus_site_config_subpath_url_collapses(tmp_path):
     assert _reconcile_docusaurus_site_config(str(root)) == 0
 
 
-# The Docs Search Monitor's live probe, as the branded tree carries it today.
-# The fixture is byte-identical to the fork's website/scripts/
-# check-live-search.mjs (its lines 145-172 are byte-identical to upstream), so
-# the anchors pinned below are the ones the reconcile reads on a real sync.
-_DOCS_SEARCH_FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "docs_search")
-_DOCS_SEARCH_REL = "website/scripts/check-live-search.mjs"
-_DOCS_SEARCH_URL = "https://nastechresearch.github.io/nastech-agent/docs"
-
-# Pre-image: the probe clicks the server-rendered button the moment
-# ``domcontentloaded`` fired, with no mount gate between the two lines.
-_DOCS_SEARCH_PRE_ANCHOR = (
-    "    await page.goto(`${DOCS_URL}/`, "
-    "{ waitUntil: 'domcontentloaded', timeout: 30_000 });\n"
-    "    await page.locator('.DocSearch-Button').first()"
-    ".click({ timeout: 20_000 });\n"
-)
-
-# Post-image: the same click, now behind a wait for the mounted render's
-# ``<kbd>`` hint, bounded by the file's own REQUEST_TIMEOUT_MS.  Every timeout
-# in it is the one upstream wrote -- the gate only adds a line.
-_DOCS_SEARCH_POST_ANCHOR = (
-    "    await page.goto(`${DOCS_URL}/`, "
-    "{ waitUntil: 'domcontentloaded', timeout: 30_000 });\n"
-    "    // The server render carries this button, but on a cold Pages CDN\n"
-    "    // DocSearch mounts its handler seconds later, and a click before\n"
-    "    // that is dropped: .DocSearch-Input is then never created and the\n"
-    "    // fill below times out.  The <kbd> hints inside\n"
-    "    // .DocSearch-Button-Keys exist only in the mounted render, so\n"
-    "    // waiting for one is the readiness a visitor already has.  A site\n"
-    "    // that never hydrates still fails here, red.\n"
-    "    await page.locator('.DocSearch-Button-Keys kbd').first()"
-    ".waitFor({ timeout: REQUEST_TIMEOUT_MS });\n"
-    "    await page.locator('.DocSearch-Button').first()"
-    ".click({ timeout: 20_000 });\n"
-)
-
-
-def _live_search_probe_source():
-    with open(
-        os.path.join(_DOCS_SEARCH_FIXTURE, "check-live-search.pre.mjs"), encoding="utf-8"
-    ) as fh:
-        return fh.read()
-
-
-def _write_live_search_probe(root, text):
-    scripts = root / "website" / "scripts"
-    scripts.mkdir(parents=True)
-    probe = scripts / "check-live-search.mjs"
-    probe.write_text(text, encoding="utf-8")
-    return probe
-
-
-def test_reconcile_docs_search_hydration_gate(tmp_path):
-    """The probe must not click the docs search button before it is mounted."""
-    pre = _live_search_probe_source()
-    assert pre.count(_DOCS_SEARCH_PRE_ANCHOR) == 1, "the anchor is one exact place"
-
-    root = tmp_path / "branded"
-    probe = _write_live_search_probe(root, pre)
-    assert _reconcile_docs_search_hydration_gate(str(root)) is True
-
-    text = probe.read_text(encoding="utf-8")
-    expected = pre.replace(_DOCS_SEARCH_PRE_ANCHOR, _DOCS_SEARCH_POST_ANCHOR, 1)
-    # Byte-for-byte: the gate is the only change the rule makes to the probe.
-    assert text == expected
-    assert text.count(_DOCS_SEARCH_POST_ANCHOR) == 1, "the replacement is one place"
-    assert _DOCS_SEARCH_PRE_ANCHOR not in text
-    # No guard moved: the click, the fill, the hit wait and the goto budgets.
-    assert ".click({ timeout: 20_000 });" in text
-    assert ".fill(QUERIES[0], { timeout: 10_000 });" in text
-    assert ".waitFor({ timeout: 15_000 });" in text
-    assert "timeout: 30_000 });" in text
-    assert "PROBE_DEADLINE_MS = 240_000;" in text
-
-    # Fixed point: the gate line marks the patched file, so a second pass is a
-    # no-op rather than a second wait.
-    assert _reconcile_docs_search_hydration_gate(str(root)) is False
-    assert probe.read_text(encoding="utf-8") == text
-
-
-def test_reconcile_docs_search_hydration_gate_skips_missing_file(tmp_path):
-    assert _reconcile_docs_search_hydration_gate(str(tmp_path)) is False
-
-
-def test_reconcile_docs_search_hydration_gate_flags_a_moved_anchor(tmp_path):
-    """A probe that no longer clicks straight after the goto must stop the sync.
-
-    Returning ``False`` here would be the same return as "already gated", so the
-    fork would ship an ungated monitor and the only sign would be the next red
-    Docs Search run -- the failure mode this rule exists to prevent.
-    """
-    pre = _live_search_probe_source()
-    mutated = pre.replace(
-        "{ waitUntil: 'domcontentloaded', timeout: 30_000 }",
-        "{ waitUntil: 'networkidle', timeout: 60_000 }",
-    )
-    root = tmp_path / "branded"
-    probe = _write_live_search_probe(root, mutated)
-
-    with pytest.raises(DocsSearchHydrationGateError) as excinfo:
-        _reconcile_docs_search_hydration_gate(str(root))
-    # The raise carries the evidence, so the stop is arguable at sync time.
-    assert "run 40211574851" in str(excinfo.value)
-    assert "locator.fill: Timeout 10000ms exceeded" in str(excinfo.value)
-    assert probe.read_text(encoding="utf-8") == mutated
-
-    with pytest.raises(DocsSearchHydrationGateError):
-        reconcile_tree(str(root))
-
-
-def test_reconcile_tree_gates_the_probe_after_the_domain_rewrite(tmp_path):
-    """The gate runs after branding, and is recorded as a reconciled path."""
-    root = tmp_path / "branded"
-    probe = _write_live_search_probe(root, _live_search_probe_source())
-
-    result = reconcile_tree(str(root))
-    assert _DOCS_SEARCH_REL in result.fixed
-    text = probe.read_text(encoding="utf-8")
-    assert _DOCS_SEARCH_POST_ANCHOR in text
-
-    source = open(
-        sys.modules[_reconcile_docs_search_hydration_gate.__module__].__file__,
-        encoding="utf-8",
-    ).read()
-    dispatch = source.split("def reconcile_tree", 1)[1].split("\ndef ", 1)[0]
-    # ``_reconcile_domains`` is what gives this file its Pages ``DOCS_URL``; the
-    # gate is a site-specific reference a global brand rule cannot decide, so it
-    # has to be derived from the text that rewrite produced.
-    assert dispatch.index("_reconcile_domains(") < dispatch.index(
-        "_reconcile_docs_search_hydration_gate("
-    )
-
-
-def _run_live_search_probe(tmp_path, *, gated, hydrated):
-    """Run the generated probe under node, with the world modelled outside it.
-
-    Only two things are stubbed, both outside the script: ``fetch`` (preloaded
-    with ``node --require``, so nothing reaches GitHub Pages or Algolia) and the
-    browser driver (resolved through the probe's own
-    ``createRequire(PLAYWRIGHT_DIR)`` seam, and switched between the measured
-    mounted render and the measured server render).  The script itself is the
-    engine's output, byte for byte, and its exit code, its failure reason and
-    the timeouts it passes to every locator are what these tests read.
-    """
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is not available")
-
-    root = tmp_path / "branded"
-    probe = _write_live_search_probe(root, _live_search_probe_source())
-    if gated:
-        assert _reconcile_docs_search_hydration_gate(str(root)) is True
-
-    calls = tmp_path / "calls.jsonl"
-    calls.write_text("", encoding="utf-8")
-    env = {
-        **os.environ,
-        "DOCS_URL": _DOCS_SEARCH_URL,
-        "PLAYWRIGHT_DIR": os.path.join(_DOCS_SEARCH_FIXTURE, "pw"),
-        "STUB_HYDRATED": "1" if hydrated else "0",
-        "STUB_CALL_LOG": str(calls),
-    }
-    env.pop("GITHUB_ACTIONS", None)
-    env.pop("GITHUB_STEP_SUMMARY", None)
-    proc = subprocess.run(
-        [
-            node,
-            "--require",
-            os.path.join(_DOCS_SEARCH_FIXTURE, "net-stub.cjs"),
-            str(probe),
-        ],
-        cwd=tmp_path,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    return {
-        "code": proc.returncode,
-        "out": proc.stdout,
-        "err": proc.stderr,
-        "calls": [json.loads(line) for line in calls.read_text(encoding="utf-8").splitlines()],
-    }
-
-
-def test_ungated_probe_crashes_on_the_never_hydrating_site(tmp_path):
-    """The harness reproduces run 40211574851 before it proves the fix.
-
-    The click resolves, the fill dies, and the last step of the monitor is red:
-    that is the measured failing state, so a green result on the gated probe
-    below cannot be an artefact of the double.
-    """
-    result = _run_live_search_probe(tmp_path, gated=False, hydrated=False)
-
-    assert result["code"] == 1
-    assert "browser check crashed: locator.fill: Timeout 10000ms exceeded." in result["err"]
-    assert [c["op"] for c in result["calls"]] == ["goto", "click", "fill", "close"]
-
-
-def test_never_hydrating_site_still_crashes_the_probe_red(tmp_path):
-    """The gate is a hard await: a site that never mounts DocSearch still fails.
-
-    Nothing was weakened to make the fork green -- the wait is a plain ``await``
-    inside ``checkBrowser``, so its rejection escapes exactly as the fill's did,
-    the browser is still closed in the ``finally``, and the probe still exits 1
-    with a reason naming the real cause and its own budget.
-    """
-    result = _run_live_search_probe(tmp_path, gated=True, hydrated=False)
-
-    assert result["code"] == 1
-    assert "browser check crashed: locator.waitFor: Timeout 20000ms exceeded." in result["err"]
-    # The gate fires before the click, so the dropped click never happens.
-    assert [c.get("timeout") for c in result["calls"]] == [30_000, 20_000, None]
-    assert [c["op"] for c in result["calls"]] == ["goto", "waitFor", "close"]
-    assert not any(c["sel"] == ".DocSearch-Button" for c in result["calls"])
-
-
-def test_hydrating_site_passes_with_every_budget_untouched(tmp_path):
-    """The mounted render goes green, and each step keeps upstream's timeout."""
-    result = _run_live_search_probe(tmp_path, gated=True, hydrated=True)
-
-    assert result["code"] == 0, result["err"]
-    assert 'ok   browser: search modal lists 5 results for "telegram"' in result["out"]
-    assert [(c["sel"], c["op"], c.get("timeout")) for c in result["calls"]] == [
-        ("page", "goto", 30_000),
-        (".DocSearch-Button-Keys kbd", "waitFor", 20_000),
-        (".DocSearch-Button", "click", 20_000),
-        (".DocSearch-Input", "fill", 10_000),
-        (".DocSearch-Hit", "waitFor", 15_000),
-        ("browser", "close", None),
-    ]
-
-
 def test_reconcile_prompt_surface_snapshot(tmp_path):
     root = tmp_path / "branded"
     snap = root / "tests" / "fixtures" / "prompt_surface"
@@ -3761,196 +1905,6 @@ def test_reconcile_prompt_surface_snapshot(tmp_path):
 
     # Idempotent once the snapshot carries the branded render.
     assert _reconcile_prompt_surface_snapshot(str(root)) == []
-
-
-# ---------------------------------------------------------------------------
-# Brand-length guard on set_theme's catalog line (candidate 7f790c348, upstream
-# 5894e750c3; jobs 120743383196 and 120743383269).
-# ---------------------------------------------------------------------------
-
-# tools/set_theme_tool.py's first sentence as upstream ships it, and the same string after
-# the brand map.  The measured delta is what the rule exists for, so it is pinned here rather
-# than derived from the rule's own needles.
-_UPSTREAM_SET_THEME_SENTENCE = (
-    "Change how the Hermes desktop app looks: accent colour, light/dark mode, layout."
-)
-_BRANDED_SET_THEME_SENTENCE = _UPSTREAM_SET_THEME_SENTENCE.replace("Hermes", "Nastech")
-
-
-def _clip_like_short_desc(text: str, max_chars: int = _SET_THEME_CATALOG_BUDGET) -> str:
-    """``tools/tool_search_catalog._short_desc``'s clip, mirrored on one already-extracted sentence.
-
-    Same arithmetic as upstream: over budget, cut at ``max_chars``, drop the trailing partial
-    word, strip ``,;: `` and append the ellipsis the fork's guard forbids.
-    """
-    if len(text) <= max_chars:
-        return text
-    clipped = text[:max_chars]
-    clipped = clipped.rsplit(" ", 1)[0] if " " in clipped else clipped
-    return clipped.rstrip(",;: ") + "…"
-
-
-def _set_theme_source(*, sentence: str = _BRANDED_SET_THEME_SENTENCE) -> str:
-    return (
-        "SET_THEME_SCHEMA = {\n"
-        '    "name": "set_theme",\n'
-        '    "description": (\n'
-        f'        "{sentence} Pass the values "\n'
-        '        "to apply them now; the result says what was applied."\n'
-        "    ),\n"
-        '    "parameters": {"type": "object", "properties": {}},\n'
-        "}\n"
-    )
-
-
-def _set_theme_tree(tmp_path, *, sentence: str = _BRANDED_SET_THEME_SENTENCE):
-    """A branded tree: the real source file plus a snapshot that quotes the same sentence."""
-    root = tmp_path / "branded"
-    (root / "tools").mkdir(parents=True)
-    source = _set_theme_source(sentence=sentence)
-    (root / "tools" / "set_theme_tool.py").write_text(source, encoding="utf-8")
-    snap_tools = root / "tests" / "fixtures" / "prompt_surface" / "tools"
-    snap_tools.mkdir(parents=True)
-    listing = (
-        "Search the tool catalog.\n"
-        f"- set_theme: {sentence}\n"
-        "- show_tip: Point at one desktop UI element with a small arrow bubble "
-        "(no dimming or tour)."
-    )
-    (snap_tools / "tool_search.desktop.claude.json").write_text(
-        json.dumps(
-            {"name": "tool_search", "description": listing, "parameters": {}},
-            indent=2,
-            sort_keys=True,
-            ensure_ascii=False,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    return root
-
-
-def test_branding_pushes_the_sentence_over_the_catalog_budget():
-    """The whole bug in two numbers: upstream fits, the brand does not."""
-    assert len(_UPSTREAM_SET_THEME_SENTENCE) == _SET_THEME_CATALOG_BUDGET
-    assert len(_BRANDED_SET_THEME_SENTENCE) == _SET_THEME_CATALOG_BUDGET + 1
-    assert not _clip_like_short_desc(_UPSTREAM_SET_THEME_SENTENCE).endswith("…")
-    assert _clip_like_short_desc(_BRANDED_SET_THEME_SENTENCE).endswith("…")
-
-
-def test_reconcile_set_theme_catalog_line(tmp_path):
-    """Shorten the branded sentence so the catalog line stays whole, in both files."""
-    root = _set_theme_tree(tmp_path)
-
-    changed = _reconcile_set_theme_catalog_line(str(root))
-    assert changed == [
-        _SET_THEME_SOURCE_REL,
-        "tests/fixtures/prompt_surface/tools/tool_search.desktop.claude.json",
-    ]
-
-    text = (root / "tools" / "set_theme_tool.py").read_text(encoding="utf-8")
-    assert _SET_THEME_SHORT in text
-    assert _SET_THEME_LONG not in text
-    compile(text, str(root / "tools" / "set_theme_tool.py"), "exec")
-
-    snapshot = (
-        root / "tests" / "fixtures" / "prompt_surface" / "tools" / "tool_search.desktop.claude.json"
-    )
-    listing = json.loads(snapshot.read_text(encoding="utf-8"))["description"]
-    assert _SET_THEME_LONG not in listing
-    line = next(row for row in listing.splitlines() if row.startswith("- set_theme: "))
-    sentence = line[len("- set_theme: ") :]
-    assert sentence == _SET_THEME_SHORT + " accent colour, light/dark mode, layout."
-    assert len(sentence) <= _SET_THEME_CATALOG_BUDGET
-    # The guard that was red: no catalog line may be clipped.
-    assert not _clip_like_short_desc(sentence).endswith("…")
-
-    # Idempotent: the shortened form is what the render now produces.
-    assert _reconcile_set_theme_catalog_line(str(root)) == []
-
-
-def test_reconcile_set_theme_catalog_line_skips_absent_files(tmp_path):
-    assert _reconcile_set_theme_catalog_line(str(tmp_path)) == []
-
-
-def test_reconcile_set_theme_catalog_line_leaves_a_short_line_alone(tmp_path):
-    """Upstream rewording that already fits is a no-op, not a raise."""
-    short = "Change how the Nastech desktop looks: accent colour, light/dark mode, layout."
-    root = _set_theme_tree(tmp_path, sentence=short)
-
-    assert _reconcile_set_theme_catalog_line(str(root)) == []
-
-
-def test_reconcile_set_theme_catalog_line_flags_a_reworded_description(tmp_path):
-    """A sentence this rule cannot see is a sync-time error, not a red fork lane days later."""
-    root = tmp_path / "branded"
-    (root / "tools").mkdir(parents=True)
-    reworded = "Restyle the desktop in Nastech: pick an accent, mode and layout."
-    (root / "tools" / "set_theme_tool.py").write_text(
-        _set_theme_source(sentence=reworded),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(SetThemeCatalogLineError):
-        _reconcile_set_theme_catalog_line(str(root))
-    with pytest.raises(SetThemeCatalogLineError):
-        reconcile_tree(str(root))
-
-
-def test_reconcile_tree_registers_set_theme_catalog_line(tmp_path):
-    """The rule actually runs inside ``reconcile_tree``."""
-    root = _set_theme_tree(tmp_path)
-
-    result = reconcile_tree(str(root))
-    assert _SET_THEME_SOURCE_REL in result.fixed
-    assert "tests/fixtures/prompt_surface/tools/tool_search.desktop.claude.json" in result.fixed
-    assert _SET_THEME_LONG not in (root / "tools" / "set_theme_tool.py").read_text(encoding="utf-8")
-
-
-def test_set_theme_line_is_shortened_before_the_surface_counts(tmp_path):
-    """Ordering: ``surfaces.json`` counts the tool schemas on disk, so the rewrite must precede it.
-
-    The fork's ``test_committed_prompt_surface_is_current`` byte-compares a fresh render against
-    the manifest.  If the manifest is computed before the sentence is shortened it describes the
-    pre-fix text and reports ``stale: surfaces.json`` -- which is the second red this rule clears.
-    """
-    root = _set_theme_tree(tmp_path)
-    snap = root / "tests" / "fixtures" / "prompt_surface"
-    prompts = snap / "prompts"
-    prompts.mkdir(parents=True)
-    stable = "System prompt header.\nBe helpful.\n"
-    (prompts / "desktop.claude.txt").write_text("===== stable =====\n" + stable, encoding="utf-8")
-    tools_dir = snap / "tools"
-    long_schema = json.loads(
-        (tools_dir / "tool_search.desktop.claude.json").read_text(encoding="utf-8")
-    )
-    stale_count = len(json.dumps({"tool_search": long_schema}, sort_keys=True)) // 4
-    (snap / "surfaces.json").write_text(
-        json.dumps(
-            {
-                "desktop.claude": {
-                    "prompt_tokens": {"stable": len(stable) // 4},
-                    "tool_tokens": stale_count,
-                    "tools": ["tool_search"],
-                }
-            },
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    result = reconcile_tree(str(root))
-    assert "tests/fixtures/prompt_surface/surfaces.json" in result.fixed
-    manifest = json.loads((snap / "surfaces.json").read_text(encoding="utf-8"))
-    fixed_schema = json.loads(
-        (tools_dir / "tool_search.desktop.claude.json").read_text(encoding="utf-8")
-    )
-    expected = len(json.dumps({"tool_search": fixed_schema}, sort_keys=True)) // 4
-    assert manifest["desktop.claude"]["tool_tokens"] == expected
-    # Reordering the two rules would leave the manifest describing the clipped-brand text.
-    assert expected != stale_count
 
 
 def test_reconcile_drop_vercel_deploy_job(tmp_path):
@@ -5100,250 +3054,41 @@ def test_reconcile_connector_test_guest_offline_skips_unrelated_tree(tmp_path):
     assert path.read_text(encoding="utf-8") == original
 
 
-# The verbatim upstream step the admission rule anchors on: hermes-agent
-# 86fa9e6ca1 ``.github/workflows/plugin-catalog-ci.yml`` lines 62-118, before
-# branding (branding only renames the word ``hermes`` in one comment line the
-# rewrite never touches).
-_UPSTREAM_CHANGED_ENTRIES_STEP = (
-    "      - name: Find changed catalog entries\n"
-    "        id: changed\n"
-    "        run: |\n"
-    "          set -euo pipefail\n"
-    "          # HEAD is the PR merge commit: diffing it against its first parent is\n"
-    "          # exactly what the PR would land. Refuse anything else rather than\n"
-    "          # silently diffing a single commit.\n"
-    "          if ! git rev-parse -q --verify 'HEAD^2' >/dev/null; then\n"
-    '            echo "::error::expected the pull_request merge commit as HEAD"\n'
-    "            exit 1\n"
-    "          fi\n"
-    "          CHANGED=$(git diff --name-only --diff-filter=AMRT 'HEAD^1' HEAD \\\n"
-    "            -- 'plugin-catalog/*.yaml' 'plugin-catalog/*.yml')\n"
-    "          CHANGED=$(printf '%s' \"$CHANGED\" | grep -v '/removed\\.yaml$' || true)\n"
-    '          if [ -n "$CHANGED" ]; then\n'
-    "            ALL=$(git diff --name-only 'HEAD^1' HEAD)\n"
-    "            OUTSIDE=$(printf '%s' \"$ALL\" | "
-    "grep -vE '^(plugin-catalog|contributors/emails)/' || true)\n"
-    '            if [ -n "$OUTSIDE" ]; then\n'
-    '              echo "::error::catalog entry PRs may only touch '
-    'plugin-catalog/** and contributors/emails/**, found:"\n'
-    "              printf '%s' \"$OUTSIDE\" | tr '\\0\\n' ' '\n"
-    "              echo\n"
-    "              exit 1\n"
-    "            fi\n"
-    "          fi\n"
-    '          echo "Changed catalog entries:"\n'
-    '          echo "${CHANGED:-<none>}"\n'
-    "          {\n"
-    "            echo 'files<<__EOF__'\n"
-    '            echo "$CHANGED"\n'
-    "            echo '__EOF__'\n"
-    '          } >> "$GITHUB_OUTPUT"\n'
-)
-
-_UPSTREAM_PLUGIN_CATALOG_CI = (
-    "name: Plugin Catalog CI\n"
-    "on:\n"
-    "  pull_request:\n"
-    "    paths:\n"
-    '      - "plugin-catalog/**"\n'
-    "jobs:\n"
-    "  pinned-source-validate:\n"
-    "    steps:\n"
-    + _UPSTREAM_CHANGED_ENTRIES_STEP
-    + "      - name: Clone each entry at its pinned sha and validate\n"
-    "        run: echo validated\n"
-)
-
-
-def _write_plugin_catalog_ci(tmp_path, text):
+def test_reconcile_plugin_catalog_sync_exemption(tmp_path):
+    """The engine's 100WAYS sync PR must skip the data-only catalog gate."""
     root = tmp_path / "branded"
     wf = root / ".github" / "workflows"
     wf.mkdir(parents=True)
     target = wf / "plugin-catalog-ci.yml"
-    target.write_text(text, encoding="utf-8")
-    return root, target
-
-
-def _changed_entries_step_body(text):
-    """Extract the reconciled ``Find changed catalog entries`` block scalar."""
-    start = text.index("        run: |\n") + len("        run: |\n")
-    end = text.index("\n      - name: Clone each entry", start)
-    return text[start:end]
-
-
-def _catalog_merge_repo(tmp_path, changed_paths, slug):
-    """A repo whose HEAD is a pull_request-shaped merge commit (HEAD^2 exists).
-
-    ``changed_paths`` arrive on the second parent, exactly like a PR branch:
-    ``HEAD^1..HEAD`` diffs to those files and nothing else.
-    """
-    repo = tmp_path / f"repo-{slug}"
-    repo.mkdir()
-
-    def _git(*args):
-        subprocess.run(
-            ["git", "-c", "user.email=t@t", "-c", "user.name=t", "-C", str(repo), *args],
-            check=True,
-            capture_output=True,
-        )
-
-    _git("init", "-q", "-b", "main")
-    (repo / "README.md").write_text("base\n", encoding="utf-8")
-    _git("add", "README.md")
-    _git("commit", "-q", "-m", "base")
-    _git("checkout", "-q", "-b", "pr")
-    for rel in changed_paths:
-        path = repo / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("entry: 1\n", encoding="utf-8")
-    _git("add", "-A")
-    _git("commit", "-q", "-m", "pr change")
-    _git("checkout", "-q", "main")
-    _git("merge", "-q", "--no-ff", "-m", "merge", "pr")
-    return repo
-
-
-def _changed_entries_script(text):
-    """De-block the reconciled step body into a runnable bash script."""
-    body = _changed_entries_step_body(text)
-    return "\n".join(line[10:] if line.startswith(" " * 10) else line for line in body.splitlines())
-
-
-def _run_changed_entries_step(tmp_path, script, *, head_ref, head_repo, changed_paths):
-    slug = f"{head_ref}-{head_repo}".replace("/", "-")
-    repo = _catalog_merge_repo(tmp_path, changed_paths, slug)
-    out_file = tmp_path / f"output-{slug}"
-    script = script.replace("${{ github.event.pull_request.head.repo.full_name }}", head_repo)
-    env = {
-        "PATH": os.environ.get("PATH", ""),
-        "HOME": os.environ.get("HOME", "/tmp"),
-        "GITHUB_HEAD_REF": head_ref,
-        "GITHUB_OUTPUT": str(out_file),
-    }
-    proc = subprocess.run(
-        ["bash"],
-        input=script,
-        capture_output=True,
-        text=True,
-        cwd=repo,
-        env=env,
+    target.write_text(
+        "name: Plugin Catalog CI\n"
+        "jobs:\n"
+        "  pinned-source-validate:\n"
+        "    steps:\n"
+        "      - name: Find changed catalog entries\n"
+        "        id: changed\n"
+        "        run: |\n"
+        "          set -euo pipefail\n"
+        "          # HEAD is the PR merge commit:\n"
+        "          git diff --name-only HEAD^1 HEAD\n",
+        encoding="utf-8",
     )
-    output = out_file.read_text(encoding="utf-8") if out_file.exists() else ""
-    return proc, output
 
-
-def test_reconcile_plugin_catalog_admission_exempts_sync_head(tmp_path):
-    """The guard block is inserted in front of the untouched data-only body."""
-    root, target = _write_plugin_catalog_ci(tmp_path, _UPSTREAM_PLUGIN_CATALOG_CI)
-
-    assert _reconcile_plugin_catalog_admission(str(root)) is True
+    assert _reconcile_plugin_catalog_sync_exemption(str(root)) is True
     text = target.read_text(encoding="utf-8")
-    # The exemption keys on BOTH clauses: reserved branch AND same-repo head.
-    assert 'if [ "${GITHUB_HEAD_REF:-}" = "100WAYS" ] \\' in text
-    assert (
-        '&& [ "${{ github.event.pull_request.head.repo.full_name }}" = '
-        '"nastechresearch/nastech-agent" ]; then' in text
-    )
-    # Everything the step does for a real admission PR is preserved verbatim.
-    for line in _UPSTREAM_CHANGED_ENTRIES_STEP.splitlines()[3:]:
-        assert line in text
-    # Only the step header was rewritten: the tail after the anchor is intact.
-    anchor = "# HEAD is the PR merge commit:"
-    assert text.count(anchor) == 1
-    assert _UPSTREAM_CHANGED_ENTRIES_STEP.split(anchor)[1] in text
+    assert 'GITHUB_HEAD_REF' in text
+    assert '"100WAYS"' in text
+    assert 'nastechresearch/nastech-agent' in text
+    assert "files<<__EOF__" in text
+    # The original body is preserved after the guarded early exit.
+    assert "          # HEAD is the PR merge commit:\n" in text
+
+    # Idempotent: the marker now sits behind the guard, so the needle is gone.
+    assert _reconcile_plugin_catalog_sync_exemption(str(root)) is False
 
 
-def test_reconcile_plugin_catalog_admission_is_a_fixed_point(tmp_path):
-    root, target = _write_plugin_catalog_ci(tmp_path, _UPSTREAM_PLUGIN_CATALOG_CI)
-    assert _reconcile_plugin_catalog_admission(str(root)) is True
-    once = target.read_bytes()
-    assert _reconcile_plugin_catalog_admission(str(root)) is False
-    assert target.read_bytes() == once
-
-
-def test_reconcile_plugin_catalog_admission_guard_behaviour(tmp_path):
-    """The reconciled step EXEMPTS only same-repo 100WAYS heads and still
-    enforces data-only admission for everyone else -- executed, not asserted
-    about the text: the script body is extracted from the reconciled file and
-    run with bash against a real merge-commit repo."""
-    root, target = _write_plugin_catalog_ci(tmp_path, _UPSTREAM_PLUGIN_CATALOG_CI)
-    assert _reconcile_plugin_catalog_admission(str(root)) is True
-    script = _changed_entries_script(target.read_text(encoding="utf-8"))
-
-    def run(head_ref, head_repo, changed_paths):
-        return _run_changed_entries_step(
-            tmp_path,
-            script,
-            head_ref=head_ref,
-            head_repo=head_repo,
-            changed_paths=changed_paths,
-        )
-
-    # A: the engine's own sync PR -- same repo, reserved branch, PR touches
-    # thousands of non-catalog files. Exempt, with an EMPTY file list so the
-    # downstream per-entry validation steps are skipped by their own gate.
-    proc, output = run(
-        "100WAYS",
-        "nastechresearch/nastech-agent",
-        ["plugin-catalog/timestamp-ref.yaml", "agent/foo.py", "tests/x.py"],
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert "catalog admission gate does not apply" in proc.stdout
-    assert output == "files<<__EOF__\n__EOF__\n"
-
-    # B: a cross-repo PR even with a branch NAMED 100WAYS -- the same-repo
-    # clause blocks the exemption and the data-only rule fires.
-    proc, _ = run(
-        "100WAYS",
-        "evil-totals/nastech-agent",
-        ["plugin-catalog/timestamp-ref.yaml", "agent/foo.py"],
-    )
-    assert proc.returncode == 1
-    assert "may only touch plugin-catalog/**" in proc.stdout
-
-    # C: a same-repo PR from a non-reserved branch (a human shipping an entry
-    # plus tooling) -- the branch clause blocks the exemption and it fires too.
-    proc, _ = run(
-        "add-my-plugin",
-        "nastechresearch/nastech-agent",
-        ["plugin-catalog/timestamp-ref.yaml", "agent/foo.py"],
-    )
-    assert proc.returncode == 1
-    assert "may only touch plugin-catalog/**" in proc.stdout
-
-    # D: a genuine data-only admission PR from outside still runs the FULL
-    # gate: not exempt, entry listed for the pinned-sha validation steps.
-    proc, output = run("add-my-plugin", "somebody/else", ["plugin-catalog/new.yaml"])
-    assert proc.returncode == 0, proc.stderr
-    assert "plugin-catalog/new.yaml" in output
-
-
-def test_reconcile_plugin_catalog_admission_moved_anchor_raises(tmp_path):
-    """A reworded upstream anchor stops the sync instead of silently dropping
-    the exemption -- that silent drop is how the 2026-10-13 red was born."""
-    moved = _UPSTREAM_PLUGIN_CATALOG_CI.replace(
-        "# HEAD is the PR merge commit:", "# HEAD names the PR merge commit:"
-    )
-    root, target = _write_plugin_catalog_ci(tmp_path, moved)
-    with pytest.raises(PluginCatalogAdmissionError, match="plugin-catalog-ci.yml"):
-        _reconcile_plugin_catalog_admission(str(root))
-    # Still untouched: raising must not half-write the file.
-    assert "Fork 100WAYS sync PR" not in target.read_text(encoding="utf-8")
-    assert issubclass(PluginCatalogAdmissionError, ValueError)
-
-
-def test_reconcile_plugin_catalog_admission_skips_missing_workflow(tmp_path):
-    """Absent file (an engine-local tree without the upstream workflow) is a
-    no-op -- the fail-loud contract covers only trees that carry the file."""
-    assert _reconcile_plugin_catalog_admission(str(tmp_path)) is False
-
-
-def test_reconcile_plugin_catalog_admission_registered_in_reconcile_tree(tmp_path):
-    """reconcile_tree must dispatch it, or every sync re-publishes the red."""
-    root, target = _write_plugin_catalog_ci(tmp_path, _UPSTREAM_PLUGIN_CATALOG_CI)
-    result = reconcile_tree(str(root))
-    assert ".github/workflows/plugin-catalog-ci.yml" in result.fixed
-    assert "Fork 100WAYS sync PR" in target.read_text(encoding="utf-8")
+def test_reconcile_plugin_catalog_sync_exemption_skips_missing_workflow(tmp_path):
+    assert _reconcile_plugin_catalog_sync_exemption(str(tmp_path)) is False
 
 
 def test_reconcile_pinned_source_clones_names_every_external_ref(tmp_path):
@@ -6325,24 +4070,27 @@ def test_reconcile_dead_api_defaults_fails_closed(tmp_path):
         ("DEFAULT_NASTECH_WELCOME_URL", "NASTECH_WELCOME_URL"),
     ):
         value = namespace[name]
-        assert not value, f"{name} must read as unconfigured"
-        # Stringifying must NOT raise: consumers -- the dashboard-auth
-        # provider among them -- build their authorize/token/JWKS URLs from
-        # this constant while they register.  A default whose str() raised
-        # took the whole provider down: no auth provider, a fail-closed
-        # non-loopback bind that therefore never happened, and
-        # ConnectionRefused for every request (nastech-agent#157).  The marker
-        # is an RFC 2606 `.invalid` origin instead: no resolver can answer it,
-        # so the branded dead origin is still never used and no credential is
-        # ever sent to a real host.
-        marker = str(value)
-        assert "nastechresearch.github.io" not in marker
-        assert marker.startswith("https://")
-        assert ".invalid" in marker
-        assert env.lower().replace("_", "-") in marker
-        # The shapes the auth code uses while registering must work.
-        assert value.rstrip("/") == marker
-        assert f"{value}/models" == f"{marker}/models"
+        assert value, f"{name} must be a non-empty fail-closed marker"
+    assert not str(value).startswith("http://portal.nastechresearch.github.io")
+    assert not str(value).startswith("https://portal.nastechresearch.github.io")
+    assert ".invalid" in str(value)
+    # Stringifying must NOT raise: consumers -- the dashboard-auth
+    # provider among them -- build their authorize/token/JWKS URLs from
+    # this constant while they register.  A default whose str() raised
+    # took the whole provider down: no auth provider, a fail-closed
+    # non-loopback bind that therefore never happened, and
+    # ConnectionRefused for every request (nastech-agent#157).  The marker
+    # is an RFC 2606 `.invalid` origin instead: no resolver can answer it,
+    # so the branded dead origin is still never used and no credential is
+    # ever sent to a real host.
+    marker = str(value)
+    assert "nastechresearch.github.io" not in marker
+    assert marker.startswith("https://")
+    assert ".invalid" in marker
+    assert env.lower().replace("_", "-") in marker
+    # The shapes the auth code uses while registering must work.
+    assert value.rstrip("/") == marker
+    assert f"{value}/models" == f"{marker}/models"
     # an unrelated constant is untouched
     assert namespace["AUTH_STORE_VERSION"] == 1
     assert namespace["DEFAULT_NASTECH_CLIENT_ID"] == "nastech-cli"
@@ -6393,7 +4141,8 @@ def test_reconcile_dead_api_defaults_honours_configured_env(tmp_path, monkeypatc
     namespace = _exec_module((cli / "auth_constants.py").read_text())
     assert namespace["DEFAULT_NASTECH_PORTAL_URL"] == "https://portal.test.invalid"
     # only the configured variable is replaced; the others stay fail-closed
-    assert not namespace["DEFAULT_NASTECH_INFERENCE_URL"]
+    v = namespace["DEFAULT_NASTECH_INFERENCE_URL"]
+    assert v and ".invalid" in str(v)
 
 
 def test_reconcile_dead_api_defaults_leaves_live_and_apex_hosts(tmp_path):
@@ -6411,372 +4160,358 @@ def test_reconcile_dead_api_defaults_leaves_live_and_apex_hosts(tmp_path):
         (cli / "auth_constants.py").read_text())
 
 
-# --- the suite's half of the fail-closed defaults -------------------------
+def test_reconcile_dead_api_defaults_shares_one_portal_variable(tmp_path):
+    """``_DEFAULT_PORTAL`` must resolve from the registry's portal variable.
 
-_ENDPOINT_SOURCE = '''
-DEFAULT_NASTECH_PORTAL_URL = _nastech_endpoint_default(
-    env="NASTECH_PORTAL_URL",
-    constant="DEFAULT_NASTECH_PORTAL_URL",
-    dead_default="https://portal.nastechresearch.github.io",
+    Upstream keeps the dashboard module's portal default and the auth
+    registry's portal URL as the same literal, and its write condition
+    (``portal_base_url != _DEFAULT_PORTAL``) relies on that: with no flag the
+    resolved default must equal the module default, so nothing is written.  A
+    name-derived ``PORTAL`` env would give the module a second, unequal
+    ``.invalid`` marker, and every flagless registration would store a
+    "custom" portal URL that is really the default
+    (``test_no_flag_default_portal_not_written``).
+    """
+    cli = tmp_path / "nastech_cli"
+    cli.mkdir()
+    (cli / "dashboard_register.py").write_text(
+        '_DEFAULT_PORTAL = "https://portal.nastechresearch.github.io"\n')
+
+    assert _reconcile_dead_api_defaults(str(tmp_path)) == [
+        "nastech_cli/dashboard_register.py"]
+    text = (cli / "dashboard_register.py").read_text()
+    assert "env='NASTECH_PORTAL_URL'" in text
+    namespace = _exec_module(text)
+    assert str(namespace["_DEFAULT_PORTAL"]) == (
+        "https://nastech-portal-url.invalid")
+    # still operator-overridable through the shared variable
+    os.environ["NASTECH_PORTAL_URL"] = "https://operator.example/v1"
+    try:
+        assert str(_exec_module(text)["_DEFAULT_PORTAL"]) == (
+            "https://operator.example/v1")
+    finally:
+        del os.environ["NASTECH_PORTAL_URL"]
+
+
+def test_reconcile_dead_default_allowlists_admits_only_invalid_standins(tmp_path):
+    """The gates of a dead host must admit the markers that replaced it.
+
+    Every marker is an RFC 2606 ``.invalid`` host -- unresolvable, so widening
+    the set admits no origin that can answer.  Without this, a marker portal
+    URL is warned about and replaced, the default inference URL fails
+    ``test_default_inference_url_is_in_allowlist``, and
+    ``route_is_welcome_host`` stops recognising the free-tier marker.
+    """
+    cli = tmp_path / "nastech_cli"
+    cli.mkdir()
+    (cli / "auth_constants.py").write_text(_DEAD_AUTH_CONSTANTS)
+    (cli / "auth.py").write_text(
+        "_NASTECH_PORTAL_ALLOWED_HOSTS: frozenset[str] = frozenset({\n"
+        '    "portal.nastechresearch.github.io", "localhost", "127.0.0.1"})\n')
+    (cli / "auth_nastech.py").write_text(
+        "_ALLOWED_NASTECH_INFERENCE_HOSTS: frozenset[str] = frozenset({\n"
+        '    "inference-api.nastechresearch.github.io",\n'
+        '    "welcome-api.nastechresearch.github.io"})\n')
+    (cli / "anon_auth.py").write_text(
+        'WELCOME_HOSTS = frozenset({"welcome-api.nastechresearch.github.io"})\n')
+
+    # the call sites name the markers, so defaults reconcile first
+    assert _reconcile_dead_api_defaults(str(tmp_path))
+    assert sorted(_reconcile_dead_default_allowlists(str(tmp_path))) == [
+        "nastech_cli/anon_auth.py",
+        "nastech_cli/auth.py",
+        "nastech_cli/auth_nastech.py",
+    ]
+
+    portal = (cli / "auth.py").read_text()
+    assert '"nastech-portal-url.invalid"' in portal
+    # the dead host, the dev hosts and every original entry survive
+    assert '"portal.nastechresearch.github.io"' in portal
+    assert '"localhost"' in portal and '"127.0.0.1"' in portal
+
+    inference = (cli / "auth_nastech.py").read_text()
+    assert '"nastech-inference-url.invalid"' in inference
+    assert '"nastech-welcome-url.invalid"' in inference
+
+    welcome = (cli / "anon_auth.py").read_text()
+    assert '"nastech-welcome-url.invalid"' in welcome
+    # the widened gate is executable and admits the marker
+    hosts = _exec_module(welcome)["WELCOME_HOSTS"]
+    assert "nastech-welcome-url.invalid" in hosts
+    assert all(h in hosts or not h.endswith(".invalid") for h in hosts)
+
+    # idempotent: a second pass finds nothing to add
+    assert _reconcile_dead_default_allowlists(str(tmp_path)) == []
+
+
+def test_reconcile_dead_default_allowlists_skips_missing_anchors(tmp_path):
+    """A moved anchor leaves that set alone instead of guessing a shape."""
+    cli = tmp_path / "nastech_cli"
+    cli.mkdir()
+    (cli / "auth_constants.py").write_text(_DEAD_AUTH_CONSTANTS)
+    (cli / "auth.py").write_text(
+        "_NASTECH_PORTAL_ALLOWED_HOSTS = something_else(1)\n")
+    assert _reconcile_dead_api_defaults(str(tmp_path))
+    assert _reconcile_dead_default_allowlists(str(tmp_path)) == []
+    assert (cli / "auth.py").read_text() == (
+        "_NASTECH_PORTAL_ALLOWED_HOSTS = something_else(1)\n")
+
+
+def _dead_default_literals_tree(tmp_path):
+    """Every branded default-slot literal the engine's table names, plus the
+    custom-portal slots in the same file that must NOT be touched."""
+    tests = tmp_path / "tests"
+    (tests / "nastech_cli").mkdir(parents=True)
+    (tests / "tui_gateway").mkdir()
+    (tests / "gateway").mkdir()
+    (tests / "plugins" / "dashboard_auth").mkdir(parents=True)
+    (tmp_path / "nastech_cli").mkdir()
+
+    (tests / "nastech_cli" / "anon_portal.py").write_text(
+        'WELCOME = "https://welcome-api.nastechresearch.github.io/v1"\n'
+        'PORTAL = "https://portal.example.test"\n')
+    (tests / "plugins" / "dashboard_auth" / "test_nastech_provider.py").write_text(
+        '        assert registered._portal_url == "https://portal.nastechresearch.github.io"\n'
+        '        assert registered._portal_url == "https://portal.nastechresearch.github.io"\n'
+        '        assert registered._portal_url == "https://portal.nastechresearch.github.io"\n')
+    (tests / "nastech_cli" / "test_dashboard_register.py").write_text(
+        '    def _run(self, *, args, portal="https://portal.nastechresearch.github.io",\n'
+        '             other=True):\n'
+        '        pass\n'
+        '            portal="https://portal.nastechresearch.github.io",\n'
+        # custom-portal fixtures: a NON-default URL must still be stored, so
+        # these literals stay branded on purpose.
+        '        monkeypatch.setattr(\n'
+        '            dr, "_resolve_portal_base_url",'
+        ' return_value="https://portal.nastechresearch.github.io")\n'
+        '            url="https://portal.nastechresearch.github.io/api/oauth/self-hosted-client",\n')
+    (tests / "nastech_cli" / "test_reasoning_caps_disk_cache.py").write_text(
+        '    models_pricing.fetch_models_with_pricing(\n'
+        '        base_url="https://inference-api.nastechresearch.github.io"\n'
+        '    )\n')
+    (tests / "tui_gateway" / "test_resume_switched_provider_endpoint.py").write_text(
+        'NASTECH_ROUTE = {"base_url": "https://inference-api.nastechresearch.github.io/v1",'
+        ' "api_mode": "chat_completions"}\n')
+    (tests / "gateway" / "test_session_model_override_persistence.py").write_text(
+        '                                           "base_url":'
+        ' "https://inference-api.nastechresearch.github.io/v1"})\n'
+        '            "base_url": "https://inference-api.nastechresearch.github.io/v1"}\n')
+    (tmp_path / "nastech_cli" / "config_defaults.py").write_text(
+        '        "shared_metrics": {\n'
+        '            "endpoint": "https://telemetry.nastechresearch.github.io/v1/telemetry",\n'
+        '        },\n')
+
+
+def test_reconcile_dead_default_test_literals_points_defaults_at_markers(tmp_path):
+    """The default-value slots name the marker the default resolves to.
+
+    After the defaults move to ``.invalid`` markers the upstream assertions
+    pinning them still name the dead URL and fail, even though the runtime is
+    behaving exactly as designed.  Each default slot becomes the marker its
+    default resolves to; the custom-portal fixtures in the same file keep
+    their branded literals, since they prove a non-default URL is stored.
+    """
+    _dead_default_literals_tree(tmp_path)
+
+    assert sorted(_reconcile_dead_default_test_literals(str(tmp_path))) == [
+        "nastech_cli/config_defaults.py",
+        "tests/gateway/test_session_model_override_persistence.py",
+        "tests/nastech_cli/anon_portal.py",
+        "tests/nastech_cli/test_dashboard_register.py",
+        "tests/nastech_cli/test_reasoning_caps_disk_cache.py",
+        "tests/plugins/dashboard_auth/test_nastech_provider.py",
+        "tests/tui_gateway/test_resume_switched_provider_endpoint.py",
+    ]
+
+    welcome = (tmp_path / "tests" / "nastech_cli" / "anon_portal.py").read_text()
+    assert 'WELCOME = "https://nastech-welcome-url.invalid/v1"' in welcome
+    assert "welcome-api.nastechresearch.github.io" not in welcome
+    # the portal the fake serves is a fixture origin, not a default: untouched
+    assert 'PORTAL = "https://portal.example.test"' in welcome
+
+    plugin = (tmp_path / "tests" / "plugins" / "dashboard_auth"
+              / "test_nastech_provider.py").read_text()
+    assert plugin.count(' == "https://portal-url.invalid"') == 3
+    assert "nastechresearch.github.io" not in plugin
+
+    register = (tmp_path / "tests" / "nastech_cli" / "test_dashboard_register.py").read_text()
+    assert register.count('portal="https://nastech-portal-url.invalid"') == 2
+    # the custom-portal fixtures keep proving a non-default URL is stored
+    assert 'return_value="https://portal.nastechresearch.github.io"' in register
+    assert ('url="https://portal.nastechresearch.github.io/api/oauth/self-hosted-client"'
+            in register)
+
+    caps = (tmp_path / "tests" / "nastech_cli"
+            / "test_reasoning_caps_disk_cache.py").read_text()
+    assert 'base_url="https://nastech-inference-base.invalid"' in caps
+
+    resume = (tmp_path / "tests" / "tui_gateway"
+              / "test_resume_switched_provider_endpoint.py").read_text()
+    assert '"base_url": "https://nastech-inference-url.invalid/v1"' in resume
+
+    override = (tmp_path / "tests" / "gateway"
+                / "test_session_model_override_persistence.py").read_text()
+    assert override.count('"base_url": "https://nastech-inference-url.invalid/v1"') == 2
+
+    config = (tmp_path / "nastech_cli" / "config_defaults.py").read_text()
+    assert ('"endpoint": "https://endpoint.invalid/v1/telemetry",' in config)
+    assert "telemetry.nastechresearch.github.io" not in config
+
+    # idempotent: the branded literals are gone, so a second pass is a no-op
+    assert _reconcile_dead_default_test_literals(str(tmp_path)) == []
+
+
+def test_reconcile_dead_default_test_literals_match_the_markers_the_defaults_resolve(tmp_path):
+    """Every table marker is the value its real ``_nastech_endpoint_default`` computes.
+
+    The table hardcodes marker URLs, so the suite pins them to the engine's
+    own rule (env label, underscores -> dashes, lowercased, plus ``.invalid``;
+    the path is preserved) by reading the markers out of the very call-site
+    shape the pipeline generates -- one site per default the table names.
+    """
+    cli = tmp_path / "nastech_cli"
+    cli.mkdir()
+    (cli / "call_sites.py").write_text(
+        # the three auth defaults, plus the dashboard, plugin, pricing and
+        # shared-metrics defaults the table's test files pin
+        'DEFAULT_NASTECH_PORTAL_URL = _nastech_endpoint_default(\n'
+        "    env='NASTECH_PORTAL_URL', constant='DEFAULT_NASTECH_PORTAL_URL',\n"
+        "    dead_default='https://portal.nastechresearch.github.io',\n)\n"
+        'DEFAULT_NASTECH_INFERENCE_URL = _nastech_endpoint_default(\n'
+        "    env='NASTECH_INFERENCE_URL', constant='DEFAULT_NASTECH_INFERENCE_URL',\n"
+        "    dead_default='https://inference-api.nastechresearch.github.io/v1',\n)\n"
+        'DEFAULT_NASTECH_WELCOME_URL = _nastech_endpoint_default(\n'
+        "    env='NASTECH_WELCOME_URL', constant='DEFAULT_NASTECH_WELCOME_URL',\n"
+        "    dead_default='https://welcome-api.nastechresearch.github.io/v1',\n)\n"
+        '_DEFAULT_PORTAL = _nastech_endpoint_default(\n'
+        "    env='NASTECH_PORTAL_URL', constant='_DEFAULT_PORTAL',\n"
+        "    dead_default='https://portal.nastechresearch.github.io',\n)\n"
+        '_DEFAULT_PORTAL_URL = _nastech_endpoint_default(\n'
+        "    env='PORTAL_URL', constant='_DEFAULT_PORTAL_URL',\n"
+        "    dead_default='https://portal.nastechresearch.github.io',\n)\n"
+        '_DEFAULT_NASTECH_INFERENCE_BASE = _nastech_endpoint_default(\n'
+        "    env='NASTECH_INFERENCE_BASE', constant='_DEFAULT_NASTECH_INFERENCE_BASE',\n"
+        "    dead_default='https://inference-api.nastechresearch.github.io',\n)\n"
+        'DEFAULT_ENDPOINT = _nastech_endpoint_default(\n'
+        "    env='ENDPOINT', constant='DEFAULT_ENDPOINT',\n"
+        "    dead_default='https://telemetry.nastechresearch.github.io/v1/telemetry',\n)\n")
+
+    markers = _dead_default_markers(str(tmp_path))
+    url = re.compile(r'https://[^"]+')
+    for rel, branded, marker in _DEAD_DEFAULT_TEST_LITERALS:
+        branded_url, marker_url = url.findall(branded), url.findall(marker)
+        assert len(branded_url) == len(marker_url) == 1, rel
+        dead = branded_url[0].split("://", 1)[-1].split("/", 1)[0].lower()
+        marked = marker_url[0].split("://", 1)[-1]
+        host, _, path = marked.partition("/")
+        assert host in markers.get(dead, ()), rel
+        # the marker rule preserves the dead default's path
+        assert path == branded_url[0].split("://", 1)[-1].partition("/")[2], rel
+
+
+def test_reconcile_dead_default_test_literals_skips_missing_anchors(tmp_path):
+    """A moved anchor leaves that file alone instead of guessing a shape."""
+    tests = tmp_path / "tests"
+    (tests / "nastech_cli").mkdir(parents=True)
+    (tests / "nastech_cli" / "anon_portal.py").write_text(
+        'WELCOME = "https://elsewhere.invalid/v1"\n')
+    assert _reconcile_dead_default_test_literals(str(tmp_path)) == []
+    assert (tests / "nastech_cli" / "anon_portal.py").read_text() == (
+        'WELCOME = "https://elsewhere.invalid/v1"\n')
+
+
+# The upstream lane-test anchors the signing-gated reconciler rewrites, in one
+# compact tree: every default-derived expectation the fork's default set moves.
+_LANE_TEST_LANES = (
+    'def test_the_default_builds_everything_but_macos_intel_and_termux():\n'
+    '    assert lane_set.DEFAULT == set(lane_set.NAMES) - {"macos-intel", "termux"}\n'
+    '    assert lane_set.select() == lane_set.DEFAULT\n'
+    '\n'
+    '    ({"with_": ["macos-intel", "termux"]}, set(lane_set.NAMES)),\n'
+    '\n'
+    'def test_flags_round_trip_and_refuse_anything_loose():\n'
+    '    assert lane_set.flags(lane_set.DEFAULT)["desktop-channel"] is True\n'
+    '\n'
+    'def test_smokes_run_only_for_a_built_desktop_package():\n'
+    '    assert lane_set.runs_smokes(lane_set.DEFAULT)\n'
+    '\n'
+    'def test_the_desktop_channel_moves_only_for_the_full_desktop_set():\n'
+    '    assert lane_set.advances_desktop(lane_set.DEFAULT)\n'
 )
-TELEGRAM_ONBOARDING_DEFAULT_URL = _nastech_endpoint_default(
-    env="TELEGRAM_ONBOARDING_DEFAULT_URL",
-    constant="TELEGRAM_ONBOARDING_DEFAULT_URL",
-    dead_default="https://setup.nastechresearch.github.io/nastech-agent",
+_LANE_TEST_STABLE = (
+    '        "autopublish": False, "lanes": lane_set.DEFAULT,\n'
+    '    assert parsed == {**old, "lanes": lane_set.DEFAULT}\n'
+    '    off = {"candidates-darwin-x64", "transitions-darwin-x64", "macos-packaged-x64",\n'
+    '           "candidates-termux", "termux-checks"}\n'
+    '    assert {name for name, result in intel.items() if result == "skipped"} == \\\n'
+    '        {"candidates-termux", "termux-checks"}\n'
+    '    monkeypatch.setattr(stable, "stable_context", _fake_stable_context(lanes=lane_set.DEFAULT))\n'
+    '    calls = _calls(lane_set.DEFAULT)\n'
+    '    stable.require_targets_match_claim(manifest, lane_set.DEFAULT)\n'
+    '    lanes = lane_set.select(without=["windows"])\n'
+    '    commit, tag_object = _claim_fixture(tmp_path, tag="rc.1-v1.2.3", version="1.2.3")\n'
+    '        stable.require_smokes_match_claim(manifest, lane_set.DEFAULT)\n'
 )
-'''
-
-_CONFTEST_HEAD = (
-    "import os\n"
-    "\n"
-    '_PRE_SANDBOX_NASTECH_HOME = os.environ.get("NASTECH_HOME", "")\n'
-    "\n"
-    "import json\n"
+_LANE_TEST_CHANNELS = (
+    '        monkeypatch.setattr(channel_releases.stable, "final_context",\n'
+    '                            lambda env: (tag, commit, {"claim_epoch": 1_787_965_323,\n'
+    '                                                       "lanes": lane_set.DEFAULT}))\n'
+    '        assert channel_releases.accepted_stable(pub, candidate_env, attempt, commit,'
+    ' release_epoch,\n'
+    '                                                lanes=lane_set.DEFAULT) == candidate\n'
+    '        faults["stale_public"] = b"{}"\n'
+    '        with pytest.raises(ChannelError):\n'
+    '            channel_releases.accepted_stable(pub, candidate_env, attempt, commit,'
+    ' release_epoch,\n'
+    '                                             lanes=lane_set.DEFAULT)\n'
 )
-
-
-def _suite_tree(tmp_path, source=_ENDPOINT_SOURCE, conftest=_CONFTEST_HEAD):
-    """A branded candidate: fail-closed call sites plus the conftest that must read them."""
-    root = tmp_path / "candidate"
-    (root / "nastech_cli").mkdir(parents=True)
-    (root / "nastech_cli" / "auth_constants.py").write_text(source, encoding="utf-8")
-    (root / "tests").mkdir()
-    (root / "tests" / "conftest.py").write_text(conftest, encoding="utf-8")
-    return root
-
-
-def _pins_of(path):
-    """The ``_NASTECH_TEST_ENDPOINTS`` literal, read back out of a written conftest."""
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    for node in tree.body:
-        if (isinstance(node, ast.Assign)
-                and [t.id for t in node.targets] == ["_NASTECH_TEST_ENDPOINTS"]):
-            return ast.literal_eval(node.value)
-    raise AssertionError("no _NASTECH_TEST_ENDPOINTS assignment")
-
-
-def test_endpoint_pins_are_derived_from_the_generated_call_sites(tmp_path):
-    """The suite asserts the branded origin each default names as its dead_default.
-
-    ``_reconcile_dead_api_defaults`` makes an unconfigured constant read as a
-    ``.invalid`` origin, which is the correct answer for a user and the wrong one
-    for 99 endpoint-asserting test files (nastech-agent#157 / 100Ways#118).  The
-    pins therefore have to be *read out of* the generated call sites: a list typed
-    in beside this file drifts the moment upstream adds, renames or drops an
-    endpoint, and the failure it produces is a wall of red across the suite.
-    """
-    root = _suite_tree(tmp_path)
-
-    assert _reconcile_test_endpoint_defaults(str(root)) is True
-    path = root / _CONFTEST
-    text = path.read_text(encoding="utf-8")
-    assert _pins_of(path) == {
-        "NASTECH_PORTAL_URL": "https://portal.nastechresearch.github.io",
-        "TELEGRAM_ONBOARDING_DEFAULT_URL": (
-            "https://setup.nastechresearch.github.io/nastech-agent"),
-    }
-    # setdefault, so an operator's own configuration still wins.
-    assert "os.environ.setdefault(_env_key, _env_value)" in text
-    # ahead of every later import: a module-level constant captures the
-    # environment at import time, which is the only moment that matters.
-    assert text.index("_NASTECH_TEST_ENDPOINTS") < text.index("import json")
-    # idempotent, and a second sync re-derives the block from the new call sites
-    assert _reconcile_test_endpoint_defaults(str(root)) is False
-    assert root.joinpath("tests", "conftest.py").read_text(encoding="utf-8") == text
-
-
-def test_endpoint_pins_follow_the_constant_that_names_them(tmp_path):
-    """Renaming an endpoint upstream needs no edit here -- that is the whole point."""
-    root = _suite_tree(
-        tmp_path, source=_ENDPOINT_SOURCE.replace("NASTECH_PORTAL_URL", "NAS_PORTAL_URL"))
-
-    assert _reconcile_test_endpoint_defaults(str(root)) is True
-    assert set(_pins_of(root / _CONFTEST)) == {
-        "NAS_PORTAL_URL", "TELEGRAM_ONBOARDING_DEFAULT_URL"}
-
-
-def test_endpoint_pins_need_no_block_without_a_fail_closed_default(tmp_path):
-    """A tree with no reconciled default gets no block, so the mark stays meaningful."""
-    root = _suite_tree(tmp_path, source='PORTAL = "https://portal.example.test"\n')
-
-    assert _reconcile_test_endpoint_defaults(str(root)) is False
-    assert _ENDPOINT_PIN_MARK not in (root / _CONFTEST).read_text(encoding="utf-8")
-
-
-def test_endpoint_pins_fail_loudly_when_conftest_moved_the_anchor(tmp_path):
-    """Upstream relocating its environment capture must fail the sync, not the suite."""
-    root = _suite_tree(
-        tmp_path,
-        conftest='import os\n\n_PRE_SANDBOX_NASTECH_HOME = os.environ["NASTECH_HOME"]\n')
-
-    with pytest.raises(NastechSuitePinError) as excinfo:
-        _reconcile_test_endpoint_defaults(str(root))
-    message = str(excinfo.value)
-    assert _CONFTEST in message
-    assert "_reconcile_test_endpoint_defaults" in message
-    # nothing half-written
-    assert _ENDPOINT_PIN_MARK not in (root / _CONFTEST).read_text(encoding="utf-8")
-
-
-_HOME_PRE = '''
-
-def _processes_with_nastech_home_under(roots) -> list[int]:
-    found = []
-    for pid in os.listdir("/proc"):
-        try:
-            environ = Path("/proc", pid, "environ").read_bytes().split(b"\\0")
-        except OSError:
-            continue
-        home = next((item[12:] for item in environ if item.startswith(b"NASTECH_HOME=")), None)
-        if home:
-            found.append(int(pid))
-    return found
-'''
-
-
-def test_nastech_home_env_prefix_binds_the_slice_to_its_literal(tmp_path):
-    """Branding lengthened ``HERMES_HOME`` to ``NASTECH_HOME`` and left ``[12:]``.
-
-    The guard that keeps pytest off a real ``NASTECH_HOME`` sliced a leading ``=``
-    and matched no path, so it protected nothing and failed by finding nothing --
-    invisible from the suite, which is why it needs a rule rather than a fix once.
-    """
-    root = _suite_tree(tmp_path)
-    path = root / _CONFTEST
-    path.write_text("import os\nfrom pathlib import Path\n" + _HOME_PRE, encoding="utf-8")
-
-    assert _reconcile_nastech_home_env_prefix(str(root)) is True
-    text = path.read_text(encoding="utf-8")
-    assert "item[12:]" not in text
-    assert 'item.startswith(b"NASTECH_HOME=")' not in text
-    assert "item[len(_NASTECH_HOME_PREFIX):]" in text
-    ast.parse(text)
-    assert _reconcile_nastech_home_env_prefix(str(root)) is False
-    assert path.read_text(encoding="utf-8") == text
-
-
-def test_nastech_home_env_prefix_fails_loudly_when_the_slice_moved(tmp_path):
-    root = _suite_tree(tmp_path)
-    (root / _CONFTEST).write_text(
-        "import os\nfrom pathlib import Path\n"
-        + _HOME_PRE.replace('item[12:]', 'item[13:]'),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(NastechSuitePinError) as excinfo:
-        _reconcile_nastech_home_env_prefix(str(root))
-    assert "rewrite #" in str(excinfo.value)
-    assert "_reconcile_nastech_home_env_prefix" in str(excinfo.value)
-
-
-_GUEST_PRE = '''
-
-def _server(tmp_path, monkeypatch):
-    launch = tmp_path / "launch"
-    launch.mkdir()
-    monkeypatch.setattr(server, '_nastech_home', launch)
-    return server, launch, bee
-'''
-
-
-def test_guest_identity_stub_matches_the_sibling_connector_tests(tmp_path):
-    """The connector RPC path mints a hosted guest before answering ``connectors.list``.
-
-    This fork runs no portal, so the mint always fails and the one connector test
-    without the stub that three of its siblings already carries reaches a
-    ``{'charge'}`` answer where ``{'charge', 'list'}`` is expected.
-    """
-    root = tmp_path / "candidate"
-    path = root / _GUEST_IDENTITY_TESTS
-    path.parent.mkdir(parents=True)
-    path.write_text(_GUEST_PRE, encoding="utf-8")
-
-    assert _reconcile_guest_identity_stub(str(root)) is True
-    text = path.read_text(encoding="utf-8")
-    assert "monkeypatch.setattr('tools.connectors.ensure_guest_identity', lambda: None)" in text
-    assert (
-        "monkeypatch.setattr('tools.connectors.managed.ensure_guest_identity', lambda: None)"
-        in text)
-    ast.parse(text)
-    assert _reconcile_guest_identity_stub(str(root)) is False
-    assert path.read_text(encoding="utf-8") == text
-
-
-def test_suite_pin_reconciles_are_registered_in_reconcile_tree(tmp_path):
-    """``reconcile_tree`` must dispatch the suite rules, or the fork never receives them."""
-    root = _suite_tree(tmp_path)
-    conftest = root / _CONFTEST
-    conftest.write_text(
-        "import os\nfrom pathlib import Path\n" + _CONFTEST_HEAD + _HOME_PRE, encoding="utf-8"
-    )
-    guest = root / _GUEST_IDENTITY_TESTS
-    guest.parent.mkdir(parents=True)
-    guest.write_text(_GUEST_PRE, encoding="utf-8")
-
-    result = reconcile_tree(str(root))
-    assert _CONFTEST in result.fixed
-    assert _GUEST_IDENTITY_TESTS in result.fixed
-    text = conftest.read_text(encoding="utf-8")
-    assert _pins_of(conftest)
-    assert "item[len(_NASTECH_HOME_PREFIX):]" in text
-    assert "ensure_guest_identity" in guest.read_text(encoding="utf-8")
-
-
-# --- fork-lane release surface --------------------------------------------
-
-_FORK_LANE_EDITS = (
-    (_RELEASE_ENTRYPOINT, _RELEASE_ENTRYPOINT_EDITS),
-    (_RELEASE_LANES_TESTS, _RELEASE_LANES_TESTS_EDITS),
-    (_RELEASE_CHANNELS_TESTS, _RELEASE_CHANNELS_TESTS_EDITS),
-    (_STABLE_RELEASE_TESTS, _STABLE_RELEASE_TESTS_EDITS),
-    (_RELEASE_ENTRYPOINT_TESTS, _RELEASE_ENTRYPOINT_TESTS_EDITS),
-    (_STABLE_RELEASE_GRAPH_TESTS, _STABLE_RELEASE_GRAPH_TESTS_EDITS),
+_LANE_TEST_ENTRYPOINT = (
+    '    assert "Not built: macos-intel, termux." in text\n'
+    '    assert "partial desktop release" not in text\n'
 )
 
 
-def test_the_edits_under_test_are_the_ones_the_rule_runs():
-    """This mirror may not drift from the table the production rule walks.
+def test_reconcile_signing_gated_lane_tests_rewrites_fork_expectations(tmp_path):
+    """Every default-derived lane expectation asserts this fork's set, same intent.
 
-    The pairs are restated here so each file gets its own parametrised case, which
-    is only honest while the two lists name the same files: #156 added a rewrite
-    to the rule and left this mirror behind, so a whole release-surface file shipped
-    un-patched while the suite stayed green.
+    The default's own shape flips to the signing-gated set, the healthy-full
+    release slots become the exact upstream composition (everything the NAMES
+    table carries but macOS Intel and Termux), the gate expectations enumerate
+    the fork's skipped jobs, and the entrypoint output names the fork's
+    left-out lanes and its partial-desktop warning.
     """
-    assert [(rel, edits) for rel, _, edits in updates._FORK_LANE_RELEASE] == list(_FORK_LANE_EDITS)
+    tests = tmp_path / "tests"
+    (tests / "scripts").mkdir(parents=True)
+    (tests / "scripts" / "test_release_lanes.py").write_text(_LANE_TEST_LANES)
+    (tests / "scripts" / "test_stable_release.py").write_text(_LANE_TEST_STABLE)
+    (tests / "scripts" / "test_release_channels.py").write_text(_LANE_TEST_CHANNELS)
+    (tests / "scripts" / "test_release_entrypoint.py").write_text(_LANE_TEST_ENTRYPOINT)
+
+    assert sorted(_reconcile_signing_gated_lane_tests(str(tmp_path))) == [
+        "tests/scripts/test_release_channels.py",
+        "tests/scripts/test_release_entrypoint.py",
+        "tests/scripts/test_release_lanes.py",
+        "tests/scripts/test_stable_release.py",
+    ]
+
+    for rel, old, new in _LANE_TEST_REWRITES:
+        text = (tmp_path / rel).read_text()
+        assert old not in text, (rel, old)
+        assert new in text, (rel, new)
+
+    # idempotent: no rewritten line still contains its anchor
+    assert _reconcile_signing_gated_lane_tests(str(tmp_path)) == []
 
 
-def _lane_release_tree(tmp_path, rel, edits):
-    """A candidate holding one release file at the exact pre-image of its rewrites."""
-    root = tmp_path / "candidate"
-    path = root / rel
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("".join(before for before, _ in edits), encoding="utf-8")
-    return root, path
-
-
-@pytest.mark.parametrize("rel, edits", _FORK_LANE_EDITS, ids=[rel for rel, _ in _FORK_LANE_EDITS])
-def test_fork_lane_release_pairs_apply_once_and_reach_a_fixed_point(tmp_path, rel, edits):
-    """Every pair matches upstream exactly once, in order, and the result stops there.
-
-    These five files read ``lane_set.DEFAULT``, so on a fork that signs no desktop
-    package each of them asserts upstream's full-lane behaviour and fails: the
-    lane table disagrees with its own test, ``require_smokes_match_claim`` refuses a
-    default that cannot produce desktop smoke results, and the release note calls a
-    Termux-only build a partial desktop release.
-    """
-    root, path = _lane_release_tree(tmp_path, rel, edits)
-
-    assert _reconcile_fork_lane_release_surface(str(root)) == [rel]
-    text = path.read_text(encoding="utf-8")
-    assert text == "".join(after for _, after in edits)
-    assert _reconcile_fork_lane_release_surface(str(root)) == []
-    assert path.read_text(encoding="utf-8") == text
-
-
-def test_fork_lane_release_noops_on_a_tree_without_the_release_files(tmp_path):
-    """A pre-lane tree has nothing to align: absence is a no-op, not an error."""
-    assert _reconcile_fork_lane_release_surface(str(tmp_path / "empty")) == []
-
-
-_UNSIGNED_LEG_LOOP = (
-    r'for name in \(([^)]*)\):\n'
-    r'        assert jobs\[name\]\["with"\]\["skip-signed"\] == "true", name'
-)
-
-
-def test_the_release_graph_contract_names_every_unsigned_desktop_leg(tmp_path):
-    """The graph test reads the workflow the caller-leg rewrite patches.
-
-    ``tests/ci/test_stable_release_graph.py`` checks that each candidate leg's inputs
-    reach the reusable builder, and it hard-codes upstream's inverted Windows
-    expression.  Once every desktop leg declares ``skip-signed: true`` that line is
-    the red the fork ships with, and it is a *contract* red: it only goes green again
-    if the legs go back to signing conditionally -- the opposite of this fork's policy.
-    """
-    root, path = _lane_release_tree(
-        tmp_path, _STABLE_RELEASE_GRAPH_TESTS, _STABLE_RELEASE_GRAPH_TESTS_EDITS
-    )
-
-    assert _reconcile_fork_lane_release_surface(str(root)) == [_STABLE_RELEASE_GRAPH_TESTS]
-
-    text = path.read_text(encoding="utf-8")
-    assert _quoted_in(_UNSIGNED_LEG_LOOP, text) == {
-        "candidates-darwin-arm64",
-        "candidates-darwin-x64",
-        "candidates-win32-arm64",
-        "candidates-win32-x64",
-        "candidates-win32-bundle",
-    }
-    assert '["with"]["skip-signed"] == "${{ !fromJSON' not in text
-    # The Store lane stays lane-gated: this fork still submits nothing to Partner Center.
-    assert 'jobs[name]["with"]["skip-store"] == store_off, name' in text
-    # The marker is what makes the rewrite idempotent, so it must be in the file it guards.
-    assert _STABLE_RELEASE_GRAPH_TESTS_MARK in text
-    assert _reconcile_fork_lane_release_surface(str(root)) == []
-
-
-def _quoted_in(pattern: str, text: str, flags: int = 0) -> set:
-    """The lane names inside ``pattern``'s capture group; a lost match fails the pairing."""
-    found = re.search(pattern, text, flags)
-    assert found, f"{pattern!r} no longer matches, so the lane pairing cannot be read"
-    return set(re.findall(r'"([a-z0-9-]+)"', found.group(1)))
-
-
-def test_fork_lane_release_default_set_and_its_test_agree(tmp_path):
-    """The lane test may not name a lane set the lane table does not exclude.
-
-    ``_reconcile_signing_gated_defaults`` writes the fork's ``DEFAULT`` and this
-    rule writes the test that asserts it; the lists are hand-typed in separate
-    constants, and what the test names is the lane table's own exclusions **plus**
-    whatever upstream already leaves opt-in -- so ``macos-intel`` belongs in the
-    test without appearing in the fork's ``not in`` line.  A lane added to one and
-    not the other goes red in the fork's release suite with nothing pointing at the
-    pairing.
-    """
-    root, path = _lane_release_tree(tmp_path, _RELEASE_LANES_TESTS, _RELEASE_LANES_TESTS_EDITS)
-    assert _reconcile_fork_lane_release_surface(str(root)) == [_RELEASE_LANES_TESTS]
-
-    test_names = _quoted_in(r"OUT_OF_DEFAULT = \{([^}]*)\}", path.read_text(encoding="utf-8"))
-    parts = _LANES_DEFAULT_FORK.split("if lane.default\n")[1]
-    source_names = _quoted_in(r"^    and lane\.name not in \{([^}]*)\}", parts, re.M)
-    added = _quoted_in(r"^\) \| \{([^}]*)\}", parts, re.M)
-    # Upstream's own opt-outs, read off the before-text this pair rewrites.
-    upstream = _RELEASE_LANES_TESTS_EDITS[0][0].split("set(lane_set.NAMES) - ")[1]
-    upstream_opt_in = set(re.findall(r'"([a-z0-9-]+)"', upstream))
-    assert test_names == source_names | (upstream_opt_in - added)
-    # Termux is the one lane both sides put back in: it needs no signing.
-    assert added == {"termux"}
-    assert "termux" not in test_names
-
-
-@pytest.mark.parametrize("drop", [1, 4])
-def test_fork_lane_release_fails_loudly_when_upstream_moved(tmp_path, drop):
-    """A rewrite that stopped matching raises; it never no-ops into a silent red lane."""
-    pairs = list(_RELEASE_LANES_TESTS_EDITS)
-    pairs.pop(drop)
-    root, _ = _lane_release_tree(tmp_path, _RELEASE_LANES_TESTS, pairs)
-
-    with pytest.raises(ForkLaneReleaseEditError) as excinfo:
-        _reconcile_fork_lane_release_surface(str(root))
-    message = str(excinfo.value)
-    assert f"rewrite #{drop + 1}" in message
-    assert _RELEASE_LANES_TESTS in message
-    assert "_reconcile_fork_lane_release_surface" in message
-
-
-def test_fork_lane_release_runs_from_reconcile_tree(tmp_path):
-    """``reconcile_tree`` must dispatch it, or the fork receives none of the five."""
-    root = tmp_path / "candidate"
-    for rel, edits in _FORK_LANE_EDITS:
-        path = root / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("".join(before for before, _ in edits), encoding="utf-8")
-
-    result = reconcile_tree(str(root))
-    for rel, edits in _FORK_LANE_EDITS:
-        assert rel in result.fixed
-        assert (root / rel).read_text(encoding="utf-8") == "".join(
-            after for _, after in edits)
+def test_reconcile_signing_gated_lane_tests_leaves_unmatched_files_alone(tmp_path):
+    """A moved anchor leaves that file alone instead of guessing a shape."""
+    tests = tmp_path / "tests"
+    (tests / "scripts").mkdir(parents=True)
+    (tests / "scripts" / "test_release_lanes.py").write_text(
+        "def test_the_default():\n    assert something_else\n")
+    assert _reconcile_signing_gated_lane_tests(str(tmp_path)) == []
+    assert (tests / "scripts" / "test_release_lanes.py").read_text() == (
+        "def test_the_default():\n    assert something_else\n")
 
 
 def test_reconcile_security_contact_removes_undeliverable_mailbox(tmp_path):
@@ -6820,14 +4555,13 @@ def test_reconcile_security_contact_removes_undeliverable_mailbox(tmp_path):
     assert (tmp_path / "SECURITY.md").read_text() == text
 
 
-def test_reconcile_ui_scope_pins_rejects_range_and_unknown_version(tmp_path, monkeypatch):
+def test_reconcile_ui_scope_pins_rejects_range_and_unknown_version(tmp_path):
     """A range silently installs a different package: fail closed instead.
 
     Verified against registry.npmjs.org: @nous-research/ui latest is 1.5.2,
     @nastech-research/ui latest is 0.18.4 -- so "^1.5.2" or "latest" cannot
     mean the same thing after branding.
     """
-    registry = _table_answer(monkeypatch)
     app = tmp_path / "apps" / "desktop"
     app.mkdir(parents=True)
     manifest = app / "package.json"
@@ -6841,8 +4575,6 @@ def test_reconcile_ui_scope_pins_rejects_range_and_unknown_version(tmp_path, mon
     assert isinstance(excinfo.value, UiScopePinError)
     assert "must be pinned to an exact version" in str(excinfo.value)
     assert "@nastech-research/ui" in str(excinfo.value)
-    # a range never needs the registry: it is refused on shape alone
-    assert registry.urls == []
 
     manifest.write_text(json.dumps(
         {"name": "desktop", "dependencies": {"@nastech-research/ui": "latest"}}))
@@ -6854,8 +4586,7 @@ def test_reconcile_ui_scope_pins_rejects_range_and_unknown_version(tmp_path, mon
     with pytest.raises(ValueError) as excinfo:
         _reconcile_ui_scope_pins(str(tmp_path))
     assert "not a version the fork has published" in str(excinfo.value)
-    assert "the registry lists" in str(excinfo.value)
-    assert registry.urls == [updates._NASTECH_UI_REGISTRY_URL]
+    assert "_NASTECH_UI_INTEGRITY" in str(excinfo.value)
 
     # the upstream scope must never survive branding
     manifest.write_text(json.dumps(
@@ -6876,379 +4607,6 @@ def test_reconcile_ui_scope_pins_allows_the_upstream_pinned_version(tmp_path):
     assert "0.18.2" in _NASTECH_UI_INTEGRITY
 
 
-def test_lock_record_names_the_published_set_for_an_unpublished_ui_version(monkeypatch):
-    """Say what the gate is waiting on, and do not imply the value can be typed in.
-
-    Upstream moved ``@nous-research/ui`` to 0.19.1 and every sync since has stopped with
-    ``no fork-published integrity for @nastech-research/ui@0.19.1; add it to
-    _NASTECH_UI_INTEGRITY in updates.py``.  That reads like a row to fill in, while the
-    actual prerequisite is a fork ``npm publish``: ``@nastech-research/ui`` stops at 0.18.4,
-    so there is no ``dist.integrity`` to copy, and a hand-written sha512 would pass this
-    gate and then fail ``npm ci`` for every user who installs the fork.
-    """
-    registry = _table_answer(monkeypatch)
-    version = "9.9.9"
-    assert version not in _NASTECH_UI_INTEGRITY
-    rec = {
-        "name": "@nous-research/ui",
-        "version": version,
-        "resolved": f"https://registry.npmjs.org/@nous-research/ui/-/ui-{version}.tgz",
-        "integrity": "sha512-upstream-bytes-are-not-the-forks",
-    }
-
-    with pytest.raises(UiScopePinError) as excinfo:
-        _reconcile_lock_record(rec)
-
-    message = str(excinfo.value)
-    assert f"@nastech-research/ui@{version}" in message
-    assert "has not published" in message
-    for published in sorted(_NASTECH_UI_INTEGRITY):
-        assert published in message
-    assert "dist.integrity" in message
-    # The remedy is the publish, not an engine edit: once npm serves the version
-    # the digest comes from there, so the sync needs nothing from 100Ways.
-    assert "Publish that version" in message
-    assert "no engine change is needed" in message
-    assert registry.urls == [updates._NASTECH_UI_REGISTRY_URL]
-    # Fail closed: nothing is rewritten, so no half-branded record can reach the tree.
-    assert rec["integrity"] == "sha512-upstream-bytes-are-not-the-forks"
-    assert "nous-research" in rec["resolved"]
-
-
-def test_lock_record_still_rewrites_a_fork_published_ui_version():
-    """The clearer failure must not cost the happy path its rewrite."""
-    version = sorted(_NASTECH_UI_INTEGRITY)[0]
-    rec = {
-        "name": "@nous-research/ui",
-        "version": version,
-        "resolved": f"https://registry.npmjs.org/@nous-research/ui/-/ui-{version}.tgz",
-        "integrity": "sha512-upstream",
-    }
-
-    assert _reconcile_lock_record(rec) is True
-    assert rec["resolved"] == (
-        f"https://registry.npmjs.org/@nastech-research/ui/-/ui-{version}.tgz"
-    )
-    assert rec["integrity"] == _NASTECH_UI_INTEGRITY[version]
-
-
-# ---------------------------------------------------------------------------
-# The registry fallback: a version the fork publishes after the table is cut
-# ---------------------------------------------------------------------------
-
-
-class _RegistryResponse:
-    """The two methods ``urlopen``'s return value is used for here."""
-
-    def __init__(self, body: bytes):
-        self._body = body
-
-    def read(self) -> bytes:
-        return self._body
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc_info):
-        return False
-
-
-class _UiRegistry:
-    """A canned npm answer for the fork's ``@nastech-research/ui`` scope.
-
-    Every request is recorded, because the two properties that make the
-    fallback safe are about requests: the reviewed table must answer without
-    one, and only the fork's own package may ever be asked -- upstream holds
-    different bytes under the same version numbers, so its digest in a lock is
-    the exact failure this gate exists to prevent.
-    """
-
-    def __init__(self, document=None, *, raw: str | None = None, error: Exception | None = None):
-        self.document = document
-        self.raw = raw
-        self.error = error
-        self.urls: list[str] = []
-
-    def install(self, monkeypatch) -> "_UiRegistry":
-        monkeypatch.setattr(updates.urllib.request, "urlopen", self._urlopen)
-        monkeypatch.setattr(updates, "_ui_registry_document", None)
-        return self
-
-    def _urlopen(self, request, timeout=None):
-        self.urls.append(request.full_url)
-        if self.error is not None:
-            raise self.error
-        body = self.raw if self.raw is not None else json.dumps(self.document)
-        return _RegistryResponse(body.encode())
-
-
-def _fork_published(integrity_by_version: dict) -> dict:
-    """A package document shaped like npm's answer for ``@nastech-research/ui``.
-
-    A ``None`` digest publishes the version with no ``dist.integrity`` at all,
-    which is the registry's way of answering nothing useful.  The tarball host
-    is a ``.invalid`` domain: nothing here can be fetched, only read.
-    """
-    return {
-        "name": "@nastech-research/ui",
-        "dist-tags": {"latest": sorted(integrity_by_version)[-1]},
-        "versions": {
-            version: {
-                "name": "@nastech-research/ui",
-                "version": version,
-                "dist": {
-                    "tarball": f"https://registry.nastech-research.invalid/ui-{version}.tgz",
-                    **({"integrity": integrity} if integrity is not None else {}),
-                },
-            }
-            for version, integrity in integrity_by_version.items()
-        },
-    }
-
-
-# 0.19.1 is the version upstream moved to that no sync could brand: the fork
-# has to publish it, and this is the digest npm would then serve for it.
-_FORK_NEW_DIGEST = "sha512-FORKREPUBLISHED0191BYTES=="
-
-
-def _table_answer(monkeypatch) -> _UiRegistry:
-    """The registry says exactly what the reviewed table says: today's truth."""
-    return _UiRegistry(_fork_published(dict(_NASTECH_UI_INTEGRITY))).install(monkeypatch)
-
-
-def _registry_publishes_the_new_version(monkeypatch) -> _UiRegistry:
-    """The table's versions plus a fork-published 0.19.1."""
-    document = _fork_published({**_NASTECH_UI_INTEGRITY, "0.19.1": _FORK_NEW_DIGEST})
-    return _UiRegistry(document).install(monkeypatch)
-
-
-@pytest.fixture(autouse=True)
-def _no_live_registry(monkeypatch):
-    """No test in this module may reach npm: the transport blocks instead.
-
-    The fallback is lazy and memoised, so a test that asks for an unreviewed
-    ui version without stubbing the registry gets a loud error rather than a
-    request whose answer depends on what the fork published this week.  The
-    memo is reset for every test too, so one test's cached document cannot
-    answer another's question.
-    """
-
-    def _blocked(request, timeout=None):
-        raise AssertionError(f"test reached the npm registry for {request.full_url}")
-
-    monkeypatch.setattr(updates.urllib.request, "urlopen", _blocked)
-    monkeypatch.setattr(updates, "_ui_registry_document", None)
-
-
-def _ui_lock_record(version: str) -> dict:
-    """The upstream lock record branding copies in for a ``@nous-research/ui`` pin."""
-    return {
-        "name": "@nous-research/ui",
-        "version": version,
-        "resolved": f"https://registry.npmjs.org/@nous-research/ui/-/ui-{version}.tgz",
-        "integrity": "sha512-UPSTREAM-TARBALL-BYTES",
-    }
-
-
-def test_lock_record_takes_the_digest_the_registry_publishes(monkeypatch):
-    """A version published after the table was cut needs no engine edit.
-
-    This is the whole point of the fallback: ``@nastech-research/ui@0.19.1``
-    blocked every sync until someone publishes it AND ships a 100Ways PR with
-    the new digest.  The publish is the fork's job; the digest is on npm the
-    moment it happens, and reading it there is safer than typing it here --
-    a hand-copied upstream digest would pass the gate and then fail ``npm ci``.
-    """
-    registry = _registry_publishes_the_new_version(monkeypatch)
-    rec = _ui_lock_record("0.19.1")
-
-    assert _reconcile_lock_record(rec) is True
-    assert rec["integrity"] == _FORK_NEW_DIGEST
-    assert rec["resolved"] == ("https://registry.npmjs.org/@nastech-research/ui/-/ui-0.19.1.tgz")
-    assert "UPSTREAM" not in rec["integrity"]
-    assert registry.urls == ["https://registry.npmjs.org/@nastech-research%2Fui"]
-
-
-def test_table_versions_never_cost_a_request(monkeypatch):
-    """The offline table stays the answer for what it reviews: no network, no flake."""
-    registry = _table_answer(monkeypatch)
-    for version in sorted(_NASTECH_UI_INTEGRITY):
-        rec = _ui_lock_record(version)
-        assert _reconcile_lock_record(rec) is True
-        assert rec["integrity"] == _NASTECH_UI_INTEGRITY[version]
-    assert registry.urls == []
-
-
-def test_the_fork_is_the_only_package_ever_asked(monkeypatch):
-    """Upstream's digest for the same version number must never be fetched."""
-    registry = _table_answer(monkeypatch)
-    with pytest.raises(UiScopePinError):
-        _reconcile_lock_record(_ui_lock_record("9.9.9"))
-    assert registry.urls == [updates._NASTECH_UI_REGISTRY_URL]
-    for url in registry.urls:
-        assert "nastech-research" in url
-        assert "nous-research" not in url
-
-
-def test_two_unknown_versions_cost_one_request(monkeypatch):
-    """One document answers every question the run asks."""
-    registry = _registry_publishes_the_new_version(monkeypatch)
-    assert _reconcile_lock_record(_ui_lock_record("0.19.1")) is True
-    with pytest.raises(UiScopePinError):
-        _reconcile_lock_record(_ui_lock_record("9.9.9"))
-    assert registry.urls == [updates._NASTECH_UI_REGISTRY_URL]
-
-
-def test_transport_failure_stops_the_sync_without_writing_the_lock(monkeypatch):
-    """An answer that could not be read is not a verdict that no release exists.
-
-    The distinction is what keeps a network blip from becoming a wrong lock:
-    an unverified ``dist.integrity`` installs fine until ``npm ci`` compares
-    the tarball, which fails for every user of the fork at once.
-    """
-    registry = _UiRegistry(error=OSError("no route to registry.npmjs.org")).install(monkeypatch)
-    rec = _ui_lock_record("0.19.1")
-
-    with pytest.raises(UiRegistryLookupError) as excinfo:
-        _reconcile_lock_record(rec)
-
-    assert isinstance(excinfo.value, ValueError)  # conformance reports it as an issue
-    assert not isinstance(excinfo.value, UiScopePinError)  # the fork has nothing to publish
-    assert "Nothing was written to the lock" in str(excinfo.value)
-    assert "_NASTECH_UI_INTEGRITY" in str(excinfo.value)  # the offline remedy
-    assert registry.urls == [updates._NASTECH_UI_REGISTRY_URL]
-    # fail closed: the record is byte-for-byte what upstream shipped
-    assert rec["integrity"] == "sha512-UPSTREAM-TARBALL-BYTES"
-    assert "nous-research" in rec["resolved"]
-
-
-def test_http_error_is_not_read_as_an_unpublished_version(monkeypatch):
-    """A 4xx/5xx answer does not establish that no such release exists."""
-    error = updates.urllib.error.HTTPError(
-        updates._NASTECH_UI_REGISTRY_URL, 500, "server error", None, None
-    )
-    _UiRegistry(error=error).install(monkeypatch)
-
-    with pytest.raises(UiRegistryLookupError) as excinfo:
-        _reconcile_lock_record(_ui_lock_record("0.19.1"))
-    assert "HTTP 500" in str(excinfo.value)
-    assert not isinstance(excinfo.value, UiScopePinError)
-
-
-def test_a_body_that_is_not_json_is_not_an_answer(monkeypatch):
-    """The npm error page is HTML; parsing it must not look like a verdict."""
-    _UiRegistry(raw="<html><body>Bad Gateway</body></html>").install(monkeypatch)
-    with pytest.raises(UiRegistryLookupError) as excinfo:
-        _reconcile_lock_record(_ui_lock_record("0.19.1"))
-    assert "registry lookup" in str(excinfo.value)
-
-
-def test_a_document_without_a_versions_map_is_not_an_answer(monkeypatch):
-    """A renamed or unpublished scope answers with a body that has no versions."""
-    _UiRegistry(raw="{}").install(monkeypatch)
-    with pytest.raises(UiRegistryLookupError) as excinfo:
-        _reconcile_lock_record(_ui_lock_record("0.19.1"))
-    assert "no versions map" in str(excinfo.value)
-
-
-@pytest.mark.parametrize("integrity", [None, "sha1-not-a-npm-digest", 512])
-def test_a_published_entry_with_an_unusable_digest_is_not_an_answer(monkeypatch, integrity):
-    """npm ci verifies a sha512 or not at all, so anything else halts the stage."""
-    # ``None`` is the digest-less case: _fork_published omits dist.integrity.
-    doc = _fork_published({**_NASTECH_UI_INTEGRITY, "0.19.1": integrity})
-    _UiRegistry(doc).install(monkeypatch)
-
-    with pytest.raises(UiRegistryLookupError) as excinfo:
-        _reconcile_lock_record(_ui_lock_record("0.19.1"))
-    assert "ui@0.19.1" in str(excinfo.value)
-
-
-def test_manifest_pin_the_registry_publishes_needs_no_engine_edit(tmp_path, monkeypatch):
-    """The package.json gate reads the same answer as the lock gate."""
-    _registry_publishes_the_new_version(monkeypatch)
-    app = tmp_path / "apps" / "desktop"
-    app.mkdir(parents=True)
-    (app / "package.json").write_text(
-        json.dumps({"name": "desktop", "dependencies": {"@nastech-research/ui": "0.19.1"}})
-    )
-
-    assert _reconcile_ui_scope_pins(str(tmp_path)) == []
-
-
-def test_manifest_pin_the_registry_lacks_names_the_publish(tmp_path, monkeypatch):
-    """The failure tells the fork what to publish, not what to type into the engine."""
-    registry = _table_answer(monkeypatch)
-    app = tmp_path / "apps" / "desktop"
-    app.mkdir(parents=True)
-    (app / "package.json").write_text(
-        json.dumps({"name": "desktop", "dependencies": {"@nastech-research/ui": "9.9.9"}})
-    )
-
-    with pytest.raises(UiScopePinError) as excinfo:
-        _reconcile_ui_scope_pins(str(tmp_path))
-    assert "not a version the fork has published" in str(excinfo.value)
-    assert "the registry lists" in str(excinfo.value)
-    for version in sorted(_NASTECH_UI_INTEGRITY):
-        assert version in str(excinfo.value)
-    assert registry.urls == [updates._NASTECH_UI_REGISTRY_URL]
-
-
-def test_live_cdn_reference_the_registry_publishes_is_left_alone(tmp_path, monkeypatch):
-    """The registry answers "is this live?"; the reviewed evidence says what to change to.
-
-    An esm.sh font URL at a version the fork publishes resolves to real bytes,
-    so rewriting it would be a blind edit of a working reference.  Repinning
-    still only ever lands on a version whose font bytes were hashed and
-    compared (``_UI_SCOPE_ASSET_EVIDENCE``), never on the newest thing npm
-    happens to serve.
-    """
-    registry = _registry_publishes_the_new_version(monkeypatch)
-    tpl = tmp_path / "optional-skills" / "creative" / "pretext" / "templates"
-    tpl.mkdir(parents=True)
-    template = tpl / "donut-orbit.html"
-    live = (
-        '  src: url("https://esm.sh/@nastech-research/ui@0.19.1/dist/fonts/'
-        'Mondwest-Regular.woff2") format("woff2");\n'
-    )
-    template.write_text(live)
-
-    assert _reconcile_ui_scope_pins(str(tmp_path)) == []
-    assert template.read_text() == live
-
-    # and a dead version is repinned inside the reviewed set only, even though
-    # the registry offers a newer one
-    template.write_text(_REAL_DONUT_FONT_REFS)
-    assert _reconcile_ui_scope_pins(str(tmp_path)) == [
-        "optional-skills/creative/pretext/templates/donut-orbit.html"
-    ]
-    assert template.read_text().count("@nastech-research/ui@0.18.4") == 2
-    assert "ui@0.19.1" not in template.read_text()
-    assert registry.urls == [updates._NASTECH_UI_REGISTRY_URL]
-
-
-def test_a_failed_lookup_is_not_cached(monkeypatch):
-    """The next check asks again rather than trusting a stale failure."""
-    _UiRegistry(error=OSError("no net")).install(monkeypatch)
-    with pytest.raises(UiRegistryLookupError):
-        _reconcile_lock_record(_ui_lock_record("0.19.1"))
-
-    registry = _registry_publishes_the_new_version(monkeypatch)
-    rec = _ui_lock_record("0.19.1")
-    assert _reconcile_lock_record(rec) is True
-    assert registry.urls == [updates._NASTECH_UI_REGISTRY_URL]
-
-
-def test_a_404_on_the_package_is_not_read_as_an_unpublished_version(monkeypatch):
-    """A scope that cannot be found is not evidence about a version of it."""
-    error = updates.urllib.error.HTTPError(
-        updates._NASTECH_UI_REGISTRY_URL, 404, "not found", None, None
-    )
-    _UiRegistry(error=error).install(monkeypatch)
-    with pytest.raises(UiRegistryLookupError) as excinfo:
-        _reconcile_lock_record(_ui_lock_record("0.19.1"))
-    assert "HTTP 404" in str(excinfo.value)
-
-
 def test_reconcile_domains_keeps_the_real_assets_worker_host(tmp_path):
     """Contrast case: the one real Nastech origin is never sent to github.io."""
     (tmp_path / "notes.md").write_text(
@@ -7263,34 +4621,8 @@ def test_reconcile_domains_keeps_the_real_assets_worker_host(tmp_path):
     assert "https://nastechresearch.github.io/nastech-agent/docs" in text
 
 
-def test_reconcile_domains_sends_the_apex_to_the_site_not_the_404_root(tmp_path):
-    """The Pages user root serves no site; only the repo path does.
-
-    Probed 2026-10-27: ``https://nastechresearch.github.io`` answers 404 while
-    ``https://nastechresearch.github.io/nastech-agent/`` answers 200.  A
-    subdomain, a mailbox and a port-qualified host are different objects and
-    keep their own rules.
-    """
-    (tmp_path / "notes.md").write_text(
-        "Home: https://nastechresearch.com\n"
-        "Bare: (https://nastechresearch.com)\n"
-        "Portal: https://portal.nastechresearch.com/login\n"
-        "Mail: security@nastechresearch.com\n"
-        "Port: https://nastechresearch.com:8443/x\n"
-    )
-
-    assert _reconcile_domains(str(tmp_path)) == ["notes.md"]
-    text = (tmp_path / "notes.md").read_text()
-    assert "https://nastechresearch.github.io/nastech-agent\n" in text
-    assert "(https://nastechresearch.github.io/nastech-agent)" in text
-    assert "https://portal.nastechresearch.github.io/login" in text
-    assert "security@nastechresearch.com" in text
-    assert "/nastech-agent:8443" not in text
-
-
-def test_pipeline_registers_the_dead_config_reconciles(tmp_path, monkeypatch):
+def test_pipeline_registers_the_dead_config_reconciles(tmp_path):
     """reconcile_tree must actually run the three new stages on a real run."""
-    _table_answer(monkeypatch)
     hermes = _hermes_repo(tmp_path)
     hermes_path = os.path.join(hermes, "hermes_cli")
     with open(os.path.join(hermes_path, "auth_constants.py"), "w", encoding="utf-8") as fh:
@@ -7338,7 +4670,7 @@ def test_pipeline_registers_the_dead_config_reconciles(tmp_path, monkeypatch):
     assert "nous-research" not in template
 
 
-def test_reconcile_ui_scope_pins_rejects_unpublished_cdn_version(tmp_path, monkeypatch):
+def test_reconcile_ui_scope_pins_rejects_unpublished_cdn_version(tmp_path):
     """A scoped CDN reference must not point at a version nobody published.
 
     Verified live: upstream's @nous-research/ui@0.4.0 exists (npm 200) but the
@@ -7346,7 +4678,6 @@ def test_reconcile_ui_scope_pins_rejects_unpublished_cdn_version(tmp_path, monke
     rebrand turns this template's font URL into a dead link that resolves to
     a package the fork never shipped.
     """
-    _table_answer(monkeypatch)
     tpl = tmp_path / "optional-skills" / "creative" / "pretext" / "templates"
     tpl.mkdir(parents=True)
     (tpl / "donut-orbit.html").write_text(
@@ -7419,7 +4750,7 @@ def test_ui_scope_asset_evidence_records_verified_byte_identity():
         assert set(versions) & set(_NASTECH_UI_INTEGRITY)
 
 
-def test_reconcile_ui_scope_repins_verified_identical_font_version(tmp_path, monkeypatch):
+def test_reconcile_ui_scope_repins_verified_identical_font_version(tmp_path):
     """A dead version with a proven-identical published twin is repinned.
 
     Reproduces the real template: the direct font URL and the DS_CDN base
@@ -7427,7 +4758,6 @@ def test_reconcile_ui_scope_repins_verified_identical_font_version(tmp_path, mon
     byte-identical in the published 0.18.4, so both references are repinned
     (instead of the stage failing and stopping the sync).
     """
-    _table_answer(monkeypatch)
     tpl = tmp_path / "optional-skills" / "creative" / "pretext" / "templates"
     tpl.mkdir(parents=True)
     template = tpl / "donut-orbit.html"
@@ -7448,14 +4778,13 @@ def test_reconcile_ui_scope_repins_verified_identical_font_version(tmp_path, mon
     assert template.read_text() == text
 
 
-def test_reconcile_ui_scope_pins_still_fails_closed_without_verified_target(tmp_path, monkeypatch):
+def test_reconcile_ui_scope_pins_still_fails_closed_without_verified_target(tmp_path):
     """No evidence for the asset means no repin: raise, do not guess.
 
     A version the fork never published whose asset has no recorded
     byte-identical twin cannot be repaired safely, so the reference must stay
     loud -- this is the guarantee that keeps the repin from being blind.
     """
-    _table_answer(monkeypatch)
     tpl = tmp_path / "optional-skills" / "creative" / "pretext" / "templates"
     tpl.mkdir(parents=True)
     template = tpl / "donut-orbit.html"
@@ -7483,857 +4812,3 @@ def test_reconcile_ui_scope_pins_still_fails_closed_without_verified_target(tmp_
     )
     with pytest.raises(UiScopePinError):
         _reconcile_ui_scope_pins(str(tmp_path))
-
-
-# ---------------------------------------------------------------------------
-# The AGENTS.md chain cap that branding alone breaks
-# ---------------------------------------------------------------------------
-
-_AGENTS_CHECKER_REL = "scripts/ci/check_agents_md_size.py"
-_AGENTS_HINTS_REL = "agent/subdirectory_hints.py"
-_AGENTS_ROOT_DECLARATION = "Long-form background: `%s`.\n" % _DEV_GUIDE_DIR
-_AGENTS_GATEWAY_POINTER = (
-    "Applies on top of the root `AGENTS.md`. Long-form: `%sgateway-internals.md`.\n" % _DEV_GUIDE_DIR
-) + ("Long form: `%sgateway-internals.md` § `/login`.\n" % _DEV_GUIDE_DIR)
-
-
-def _agents_chain_tree(tmp_path, *, root, area, chain_max=30_000, root_max=12_000, hint_max=32_000):
-    """A tree whose AGENTS.md chain is measured by the same numbers the fork's CI reads."""
-    checker = tmp_path / _AGENTS_CHECKER_REL
-    checker.parent.mkdir(parents=True, exist_ok=True)
-    checker.write_text("ROOT_MAX_CHARS = %d\nCHAIN_MAX_CHARS = %d\n" % (root_max, chain_max),
-                       encoding="utf-8")
-    hints = tmp_path / _AGENTS_HINTS_REL
-    hints.parent.mkdir(parents=True, exist_ok=True)
-    hints.write_text("_MAX_HINT_CHARS = %d\n" % hint_max, encoding="utf-8")
-    (tmp_path / "AGENTS.md").write_text(root, encoding="utf-8")
-    for rel, text in area.items():
-        path = tmp_path / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
-    return tmp_path
-
-
-def _padded(text, size):
-    assert size >= len(text), f"{size} cannot hold a {len(text)}-char header"
-    return text + "g" * (size - len(text))
-
-
-def test_reconcile_agents_md_drops_a_directory_the_root_already_stated(tmp_path):
-    """An area pointer pays 29 chars for a directory the root stated in the same block.
-
-    ``scripts/ci/check_agents_md_size.py`` budgets every ``AGENTS.md`` from the
-    git root down to the agent's directory as the ONE context block an agent
-    loads, and the root is inside every block: it names
-    ``website/docs/developer-guide/`` as where long-form lives.  A pointer that
-    repeats the directory buys nothing, so the rewrite keeps the file and drops
-    the prefix -- which is how ``gateway/AGENTS.md`` already cites that very doc
-    in one of its two pointers.
-    """
-    tree = _agents_chain_tree(tmp_path, root=_AGENTS_ROOT_DECLARATION,
-                              area={"gateway/AGENTS.md": _AGENTS_GATEWAY_POINTER +
-                                    "Long form: `engine-notes.md` § Shapes.\n"})
-
-    assert _reconcile_agents_md_chain_cap(str(tree)) == ["gateway/AGENTS.md"]
-    text = (tree / "gateway/AGENTS.md").read_text(encoding="utf-8")
-    assert _DEV_GUIDE_DIR not in text
-    assert "`gateway-internals.md` § `/login`" in text and "`engine-notes.md`" in text
-    # the root is the declaration: shortening it would strand every bare pointer
-    assert _DEV_GUIDE_DIR in (tree / "AGENTS.md").read_text(encoding="utf-8")
-
-
-def test_reconcile_agents_md_pointer_rewrite_is_a_fixed_point(tmp_path):
-    """A second pass sees bare names only and leaves the file byte-identical."""
-    tree = _agents_chain_tree(tmp_path, root=_AGENTS_ROOT_DECLARATION,
-                              area={"gateway/AGENTS.md": _AGENTS_GATEWAY_POINTER})
-    assert _reconcile_agents_md_chain_cap(str(tree)) == ["gateway/AGENTS.md"]
-    before = (tree / "gateway/AGENTS.md").read_bytes()
-
-    assert _reconcile_agents_md_chain_cap(str(tree)) == []
-    assert (tree / "gateway/AGENTS.md").read_bytes() == before
-
-
-def test_reconcile_agents_md_keeps_pointers_whole_when_the_root_stops_declaring_the_dir(tmp_path):
-    """A bare file name resolves only because the root spells out the directory.
-
-    If upstream removes that declaration the rule must not strand area pointers;
-    it leaves the text alone and lets the chain measurement decide.
-    """
-    tree = _agents_chain_tree(tmp_path, root="No directory is named anywhere here.\n",
-                              area={"gateway/AGENTS.md": _AGENTS_GATEWAY_POINTER})
-
-    assert _reconcile_agents_md_chain_cap(str(tree)) == []
-    assert (tree / "gateway/AGENTS.md").read_text(encoding="utf-8") == _AGENTS_GATEWAY_POINTER
-
-
-def test_reconcile_agents_md_clears_the_branded_chain_overrun(tmp_path):
-    """The exact chain nastech-agent PR #159's lint failed: 11840 + 18182 > 30000.
-
-    Upstream measures the same two files at 29956 -- forty-four under the cap --
-    and the brand adds one character per renamed token, sixty-six of them in
-    this chain, so the identical tree that is green upstream is red in the fork.
-    Two repeated directory prefixes (29 chars each) pay for the overrun and leave
-    the chain under budget without rewording a single sentence of guidance.
-    """
-    root = _padded(_AGENTS_ROOT_DECLARATION, 11_840)
-    area = _padded(_AGENTS_GATEWAY_POINTER, 18_182)
-    tree = _agents_chain_tree(tmp_path, root=root, area={"gateway/AGENTS.md": area})
-    assert len(root) + len(area) == 30_022 > 30_000
-
-    assert _reconcile_agents_md_chain_cap(str(tree)) == ["gateway/AGENTS.md"]
-    after = (tree / "gateway/AGENTS.md").read_text(encoding="utf-8")
-    assert len(root) + len(after) == 29_964
-
-
-def test_reconcile_agents_md_stops_when_a_chain_is_still_over(tmp_path):
-    """Past the repeated prefix there is no redundancy left, only prose.
-
-    The rule must not invent a shorter sentence to squeeze under the cap: it
-    raises so the sync stops for a human, because the only other move -- raising
-    ``CHAIN_MAX_CHARS`` -- raises the size an agent is truncated at.
-    """
-    tree = _agents_chain_tree(tmp_path, root=_padded(_AGENTS_ROOT_DECLARATION, 145),
-                              area={"gateway/AGENTS.md": _padded(_AGENTS_GATEWAY_POINTER, 320)},
-                              chain_max=400)
-
-    with pytest.raises(AgentsChainCapError) as caught:
-        _reconcile_agents_md_chain_cap(str(tree))
-    message = str(caught.value)
-    assert "AGENTS.md + gateway/AGENTS.md" in message
-    assert "chain cap" in message and "instead of raising any number" in message
-    # the rewrite still landed: what stopped the sync is the measured remainder
-    assert _DEV_GUIDE_DIR not in (tree / "gateway/AGENTS.md").read_text(encoding="utf-8")
-
-
-def test_reconcile_agents_md_measures_with_the_budget_ci_reads(tmp_path):
-    """Same tree, a larger CHAIN_MAX_CHARS in the checker: nothing is over.
-
-    The numbers live in ``scripts/ci/check_agents_md_size.py``; taking them from
-    there is what keeps this guard from quietly disagreeing with CI when that
-    file moves -- and a checker that no longer names them is an error, not a
-    silently disabled guard.
-    """
-    root, area = _padded(_AGENTS_ROOT_DECLARATION, 145), _padded(_AGENTS_GATEWAY_POINTER, 320)
-    roomy = _agents_chain_tree(tmp_path / "roomy", root=root,
-                               area={"gateway/AGENTS.md": area}, chain_max=20_000)
-    assert _reconcile_agents_md_chain_cap(str(roomy)) == ["gateway/AGENTS.md"]
-
-    moved = _agents_chain_tree(tmp_path / "moved", root=root, area={"gateway/AGENTS.md": area})
-    (moved / _AGENTS_CHECKER_REL).write_text("ROOT_MAX_CHARS = 12_000\n", encoding="utf-8")
-    with pytest.raises(AgentsChainCapError, match="no CHAIN_MAX_CHARS assignment"):
-        _reconcile_agents_md_chain_cap(str(moved))
-
-    blind = _agents_chain_tree(tmp_path / "blind", root=root, area={"gateway/AGENTS.md": area})
-    (blind / _AGENTS_HINTS_REL).unlink()
-    with pytest.raises(AgentsChainCapError, match="not readable"):
-        _reconcile_agents_md_chain_cap(str(blind))
-
-
-def test_reconcile_agents_md_has_no_chain_to_budget_on_a_tree_without_the_checker(tmp_path):
-    """No budgeting file means CI enforces no chain here: change nothing, raise nothing."""
-    bare = _agents_chain_tree(tmp_path / "bare", root=_AGENTS_ROOT_DECLARATION,
-                              area={"gateway/AGENTS.md": _AGENTS_GATEWAY_POINTER})
-    (bare / _AGENTS_CHECKER_REL).unlink()
-    assert _reconcile_agents_md_chain_cap(str(bare)) == []
-    assert (bare / "gateway/AGENTS.md").read_text(encoding="utf-8") == _AGENTS_GATEWAY_POINTER
-
-    _agents_chain_tree(tmp_path / "signs", root="", area={})
-    no_root = tmp_path / "signs" / "AGENTS.md"
-    no_root.unlink()
-    assert _reconcile_agents_md_chain_cap(str(tmp_path / "signs")) == []
-
-
-def test_agents_chain_is_the_block_one_agent_loads():
-    """Root first, every intermediate that exists, the file itself last."""
-    present = {"AGENTS.md", "apps/desktop/AGENTS.md", "apps/desktop/src/AGENTS.md",
-               "tools/AGENTS.md"}
-    assert _agents_chain("apps/desktop/src/AGENTS.md", present) == [
-        "AGENTS.md", "apps/desktop/AGENTS.md", "apps/desktop/src/AGENTS.md"]
-    assert _agents_chain("tools/AGENTS.md", present) == ["AGENTS.md", "tools/AGENTS.md"]
-    assert _agents_chain("AGENTS.md", present) == ["AGENTS.md"]
-    # a missing intermediate contributes nothing, exactly as in the checker
-    assert _agents_chain("apps/desktop/src/AGENTS.md", {"AGENTS.md", "apps/desktop/src/AGENTS.md"}) == [
-        "AGENTS.md", "apps/desktop/src/AGENTS.md"]
-
-
-def test_reconcile_agents_md_chain_cap_runs_from_reconcile_tree(tmp_path):
-    """``reconcile_tree`` must dispatch the rule, or every sync re-publishes the red chain."""
-    tree = _agents_chain_tree(tmp_path / "candidate", root=_AGENTS_ROOT_DECLARATION,
-                              area={"gateway/AGENTS.md": _AGENTS_GATEWAY_POINTER})
-
-    result = reconcile_tree(str(tree))
-    assert "gateway/AGENTS.md" in result.fixed
-    assert _DEV_GUIDE_DIR not in (tree / "gateway/AGENTS.md").read_text(encoding="utf-8")
-
-
-# ---------------------------------------------------------------------------
-# The one armed statement the browse budget's own guard does not cover
-# ---------------------------------------------------------------------------
-
-_DDL_HEAD = (
-    "def _apply_additive_schema(path, budget=None):\n"
-    "    from nastech_cli.sqlite_safe_read import connect_tracked\n"
-    "    budget = budget or _Budget(BROWSE_RECONCILE_BUDGET_S)\n"
-    "    with closing(connect_tracked(path, isolation_level=None)) as conn:\n"
-    "        _reapply_durability_barriers(conn)\n"
-)
-_DDL_TAIL = (
-    "            apply_declared_schema(cursor)\n"
-    "            budget.check()\n"
-    "            conn.execute('COMMIT')\n"
-    "        except BaseException as exc:\n"
-    "            with contextlib.suppress(sqlite3.Error):\n"
-    "                conn.execute('ROLLBACK')\n"
-    "            if budget.expired and isinstance(exc, sqlite3.OperationalError):\n"
-    "                raise BrowseBudgetExceeded(\n"
-    "                    'browse schema catch-up exceeded its time budget') from exc\n"
-    "            raise\n"
-)
-
-
-def _ddl_tree(tmp_path, *, arm=_BROWSE_DDL_UNGUARDED, tail=_DDL_TAIL):
-    """Upstream's browse DDL shape: the budget handler is armed one statement early."""
-    (tmp_path / _BROWSE_RECONCILE_REL).parent.mkdir(parents=True, exist_ok=True)
-    (tmp_path / _BROWSE_RECONCILE_REL).write_text(_DDL_HEAD + arm + tail, encoding="utf-8")
-    return tmp_path
-
-
-def _ddl_text(tree):
-    return (tree / _BROWSE_RECONCILE_REL).read_text(encoding="utf-8")
-
-
-def test_reconcile_browse_ddl_moves_the_armed_begin_under_its_own_guard(tmp_path):
-    """The transaction-opening statement is the one the expired-budget conversion cannot see.
-
-    ``budget.arm(conn)`` installs the progress handler that raises
-    ``sqlite3.OperationalError('interrupted')`` once ``BROWSE_RECONCILE_BUDGET_S``
-    is gone, and the ``except BaseException`` that turns that into
-    ``BrowseBudgetExceeded`` -- the only path that answers "nothing was changed" --
-    begins after ``BEGIN IMMEDIATE``.  Moving the statement inside the ``try`` is
-    the whole fix: the budget, the busy timeout, the handler cadence and every
-    classifier stay exactly as upstream wrote them.
-    """
-    tree = _ddl_tree(tmp_path)
-
-    assert _reconcile_browse_ddl_budget_guard(str(tree)) == [_BROWSE_RECONCILE_REL]
-    text = _ddl_text(tree)
-    ast.parse(text)
-    assert _BROWSE_DDL_GUARDED in text and _BROWSE_DDL_UNGUARDED not in text
-    # still the first statement of the guarded block, and still ahead of the DDL
-    assert text.index("try:") < text.index("conn.execute('BEGIN IMMEDIATE')")
-    assert text.index("conn.execute('BEGIN IMMEDIATE')") < text.index("apply_declared_schema(cursor)")
-    # the guard it moved under is the one that produces the retryable message
-    assert "raise BrowseBudgetExceeded" in text
-    assert text.count("conn.execute('BEGIN IMMEDIATE')") == 1
-
-
-def test_reconcile_browse_ddl_guard_is_a_fixed_point(tmp_path):
-    """A second sync sees the guarded shape and leaves the file byte-identical."""
-    tree = _ddl_tree(tmp_path)
-    assert _reconcile_browse_ddl_budget_guard(str(tree)) == [_BROWSE_RECONCILE_REL]
-    before = _ddl_text(tree)
-
-    assert _reconcile_browse_ddl_budget_guard(str(tree)) == []
-    assert _ddl_text(tree) == before
-
-
-def test_reconcile_browse_ddl_stops_when_the_anchor_moves(tmp_path):
-    """An armed statement this rule cannot see is the bug returning, quietly.
-
-    The misread is user-facing: an interrupted transaction makes
-    ``nastech_cli/web_server_sessions.py`` answer a clean, untouched store with
-    "Session store schema is unavailable or corrupt", which is PR #159's macOS
-    ``[ddl]`` failure.  So a shape change stops the sync instead of publishing it.
-    """
-    moved = _BROWSE_DDL_UNGUARDED.replace("        conn.execute", "    conn.execute")
-    tree = _ddl_tree(tmp_path, arm=moved)
-    before = _ddl_text(tree)
-
-    with pytest.raises(BrowseBudgetDdlError, match="no longer opens its browse DDL"):
-        _reconcile_browse_ddl_budget_guard(str(tree))
-    assert _ddl_text(tree) == before
-
-
-def test_reconcile_browse_ddl_stops_when_the_guard_loses_what_the_move_needs(tmp_path):
-    """Without the expired-budget conversion the move would classify nothing.
-
-    Either half of the guard can be edited away upstream: the conversion, or the
-    suppressed rollback that keeps a failed ``BEGIN`` from surfacing "cannot
-    rollback - no transaction is active" in place of the real error.
-    """
-    dropped = (
-        "            with contextlib.suppress(sqlite3.Error):\n"
-        "                conn.execute('ROLLBACK')\n",
-        "            if budget.expired and isinstance(exc, sqlite3.OperationalError):\n"
-        "                raise BrowseBudgetExceeded(\n"
-        "                    'browse schema catch-up exceeded its time budget') from exc\n",
-    )
-    for index, arm in enumerate(dropped):
-        assert arm in _DDL_TAIL
-        tree = _ddl_tree(tmp_path / f"guard{index}", tail=_DDL_TAIL.replace(arm, ""))
-        with pytest.raises(BrowseBudgetDdlError, match="no longer has"):
-            _reconcile_browse_ddl_budget_guard(str(tree))
-
-
-def test_reconcile_browse_ddl_has_nothing_to_guard_on_a_tree_without_a_budget(tmp_path):
-    """No armed budget in this file means this rule owns nothing here: no change, no raise."""
-    tree = _ddl_tree(tmp_path, arm="        conn.execute('BEGIN IMMEDIATE')\n        try:\n"
-                                      "            cursor = conn.cursor()\n")
-    text = _ddl_text(tree).replace("budget.arm(conn)", "_Budget(BROWSE_RECONCILE_BUDGET_S)")
-    (tree / _BROWSE_RECONCILE_REL).write_text(text, encoding="utf-8")
-
-    assert _reconcile_browse_ddl_budget_guard(str(tree)) == []
-    assert _ddl_text(tree) == text
-    assert _reconcile_browse_ddl_budget_guard(str(tmp_path / "absent")) == []
-
-
-def test_reconcile_browse_ddl_budget_guard_runs_from_reconcile_tree(tmp_path):
-    """``reconcile_tree`` must dispatch the rule, or every sync re-publishes the corrupt-store 503."""
-    tree = _ddl_tree(tmp_path / "candidate")
-
-    result = reconcile_tree(str(tree))
-    assert _BROWSE_RECONCILE_REL in result.fixed
-    assert _BROWSE_DDL_GUARDED in _ddl_text(tree)
-
-
-def test_unsigned_darwin_build_env_unsets_empty_certificate(tmp_path):
-    """Build-only darwin runs must not hand electron-builder an empty CSC_LINK.
-
-    electron-builder reads a present-but-empty ``CSC_LINK`` as a certificate
-    path, resolves ``''`` to the project directory and throws ``<dir> not a
-    file`` before packaging (run 39508427430, both darwin legs).
-    """
-    candidate = tmp_path / "candidate"
-    wf = candidate / ".github" / "workflows"
-    wf.mkdir(parents=True)
-    path = wf / "desktop-bundled-release.yml"
-    path.write_text(
-        "jobs:\n"
-        "  build-darwin-arm64-release:\n"
-        "    steps:\n"
-        "      - name: Require signing credentials when publishing\n"
-        "        env:\n"
-        "          CSC_LINK: ${{ secrets.CSC_LINK }}\n"
-        "          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}\n"
-        "        run: |\n"
-        "          missing=()\n"
-        "      - name: Build and package\n"
-        "        env:\n"
-        "          CSC_LINK: ${{ secrets.CSC_LINK }}\n"
-        "          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}\n"
-        "        run: |\n"
-        "          # Sign + notarize of a bundled-payload app runs long (Apple scans\n"
-        "          # every Mach-O) — raise the fd limit and let DEBUG show progress.\n"
-        "          python scripts/bundles/desktop.py --variant bundled\n",
-        encoding="utf-8",
-    )
-
-    changed = _reconcile_unsigned_darwin_build_env(str(candidate))
-
-    assert changed == [".github/workflows/desktop-bundled-release.yml"]
-    text = path.read_text(encoding="utf-8")
-    assert 'if [ -z "$CSC_LINK" ]; then' in text
-    assert "unset CSC_LINK CSC_KEY_PASSWORD" in text
-    assert "export CSC_IDENTITY_AUTO_DISCOVERY=false" in text
-    # The guard belongs to the build step, after the credential gate's run.
-    assert text.index("missing=()") < text.index('if [ -z "$CSC_LINK" ]; then')
-    # Fixed point, and the injected prose carries no upstream brand token.
-    assert _reconcile_unsigned_darwin_build_env(str(candidate)) == []
-    rules = BrandingRules()
-    assert rules.transform_text(text) == text
-
-
-def test_unsigned_darwin_build_env_absent_workflow_is_a_no_op(tmp_path):
-    assert _reconcile_unsigned_darwin_build_env(str(tmp_path)) == []
-
-
-def test_unsigned_darwin_build_env_stops_when_the_step_moves(tmp_path):
-    """A reworded upstream step must stop the sync, not silently lose the guard.
-
-    Without the raise the next branded update re-derives the workflow from
-    upstream, ships the empty ``CSC_LINK`` again and every build-only darwin
-    dispatch fails at packaging.
-    """
-    candidate = tmp_path / "candidate"
-    wf = candidate / ".github" / "workflows"
-    wf.mkdir(parents=True)
-    (wf / "desktop-bundled-release.yml").write_text(
-        "jobs:\n"
-        "  build-darwin-arm64-release:\n"
-        "    steps:\n"
-        "      - name: Build and package\n"
-        "        env:\n"
-        "          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}\n"
-        "        run: |\n"
-        "          # Notarization is slow, so keep DEBUG on.\n"
-        "          python scripts/bundles/desktop.py --variant bundled\n",
-        encoding="utf-8",
-    )
-    with pytest.raises(UnsignedDarwinBuildEnvError, match="Re-derive the anchor"):
-        _reconcile_unsigned_darwin_build_env(str(candidate))
-
-
-# ---------------------------------------------------------------------------
-# The Store credential gate must list every name the lane consumes
-# ---------------------------------------------------------------------------
-
-
-def _store_workflow(names, *, extra=()):
-    """A minimal workflow whose ``stable-store`` job consumes ``names``.
-
-    ``workflow_references`` only reads names inside a job block under a top-level
-    ``jobs:`` map, so the names go in the job's ``env``.  ``extra`` adds a
-    neighbouring job's credentials to prove the gate ignores names outside the
-    Store family (``DOCKERHUB_*`` is a different lane's business).
-    """
-    env = "".join(f"          {n}: ${{{{ secrets.{n} }}}}\n" for n in names)
-    other = "".join(f"          {n}: ${{{{ secrets.{n} }}}}\n" for n in extra)
-    body = (
-        "name: desktop release\n"
-        "on:\n  workflow_dispatch:\n"
-        "jobs:\n"
-        "  stable-store:\n"
-        "    runs-on: windows-latest\n"
-        "    steps:\n"
-        "      - run: msstore reconfigure\n"
-        "        env:\n"
-        f"{env}"
-    )
-    if other:
-        body += (
-            "  docker-publish:\n"
-            "    runs-on: ubuntu-latest\n"
-            "    steps:\n"
-            "      - run: docker push\n"
-            "        env:\n"
-            f"{other}"
-        )
-    return body
-
-
-def _store_tree(tmp_path, text, filename="desktop-bundled-release.yml"):
-    candidate = tmp_path / "candidate"
-    wf = candidate / ".github" / "workflows"
-    wf.mkdir(parents=True)
-    (wf / filename).write_text(text, encoding="utf-8")
-    return candidate
-
-
-def _store_gate_reads(candidate):
-    """The Store-family names ``pubconfig``'s parser reads out of a tree.
-
-    Derived with the same reader and parser the pre-flight classifies with, so the
-    consumed set is never a list typed next to the gate it is compared against.
-    """
-    from hundredways import pubconfig
-
-    references = []
-    for name, text in pubconfig.load_workflows(str(candidate)):
-        references.extend(pubconfig.workflow_references(text, workflow=name))
-    return {r.name for r in references if r.name.startswith("MS_STORE_")}
-
-
-def test_the_shipped_gate_covers_the_forks_own_store_lane():
-    """``STORE_CREDENTIALS`` == the names the fork's real Store job reads.
-
-    The workflow here is a verbatim transcription of the fork's lane
-    (``tests/fixtures/store_lane``, from ``origin/main``
-    ``desktop-bundled-release.yml`` measured 2026-10-25: ``stable-store`` at 2477, the
-    credential ``env`` at 2487-2497, the ``msstore reconfigure`` of ``--sellerId`` at
-    2513), not a fixture built from the gate -- so dropping ``MS_STORE_SELLER_ID`` from
-    the gate fails this test instead of shipping the hole again.
-    """
-    lane = os.path.join(os.path.dirname(__file__), "fixtures", "store_lane")
-
-    assert _store_gate_reads(lane) == frozenset(STORE_CREDENTIALS)
-    assert "MS_STORE_SELLER_ID" in STORE_CREDENTIALS
-    assert _reconcile_store_gate_covers_the_lane(lane) is None
-
-
-def test_store_gate_lists_every_name_a_lane_consumes(tmp_path):
-    """A gate written to match its lane passes; the completeness is derived twice.
-
-    The consumed set comes from the parser, the gated set from the engine's table,
-    and the rule compares them the same way ``pubconfig`` will at pre-flight.
-    """
-    candidate = _store_tree(tmp_path, _store_workflow(STORE_CREDENTIALS))
-
-    assert _store_gate_reads(candidate) == frozenset(STORE_CREDENTIALS)
-    assert _reconcile_store_gate_covers_the_lane(str(candidate)) is None
-
-
-def test_store_gate_refuses_a_sixth_credential_the_lane_consumes(tmp_path):
-    """A credential upstream adds to the lane but the gate omits must fail the sync.
-
-    Without the raise the gate admits a run whose Store job reads the new name
-    as an empty string -- exactly the shape that let the seller-id hole ship.
-    """
-    candidate = _store_tree(
-        tmp_path,
-        _store_workflow((*STORE_CREDENTIALS, "MS_STORE_CERT_HASH")),
-    )
-
-    with pytest.raises(StoreLaneGateError, match="MS_STORE_CERT_HASH"):
-        _reconcile_store_gate_covers_the_lane(str(candidate))
-
-
-def test_store_gate_refuses_a_lane_it_cannot_measure(tmp_path):
-    """A visible ``msstore`` step with no parsable credential is a moved anchor.
-
-    The audit is only worth shipping if it can see the lane: a tree whose Store step
-    reads its credentials somewhere the parser does not look would report an empty
-    consumed set, pass, and let the same hole reopen silently.  The rule raises and
-    names the file:line a human has to re-derive.
-    """
-    moved = _store_workflow(STORE_CREDENTIALS).replace("secrets.MS_STORE_", "env.MS_STORE_")
-    assert "msstore" in moved
-    candidate = _store_tree(tmp_path, moved)
-
-    assert _store_gate_reads(candidate) == set()
-    with pytest.raises(StoreLaneGateError, match="blind"):
-        _reconcile_store_gate_covers_the_lane(str(candidate))
-
-
-def test_store_gate_refuses_a_gate_that_is_not_one_name_family(tmp_path, monkeypatch):
-    """The family prefix is derived from the gate, so a mixed gate cannot be audited.
-
-    Guessing a shorter stem would match names the lane does not own; refusing says
-    so instead of quietly checking nothing.
-    """
-    from hundredways import updates
-
-    candidate = _store_tree(tmp_path, _store_workflow(STORE_CREDENTIALS))
-    monkeypatch.setattr(updates, "STORE_CREDENTIALS", ("MS_STORE_TENANT_ID", "DOCKERHUB_TOKEN"))
-
-    with pytest.raises(StoreLaneGateError, match="name-family prefix"):
-        updates._reconcile_store_gate_covers_the_lane(str(candidate))
-
-
-def test_store_gate_ignores_a_neighbour_lanes_credentials(tmp_path):
-    """A name outside the Store family is another lane's hole, not a short gate.
-
-    Refusing here would widen the guard onto credentials the Store lane never
-    reads (``DOCKERHUB_TOKEN`` belongs to the image publish), which is not this
-    rule's job and would block a sync whose Store lane is complete.
-    """
-    candidate = _store_tree(
-        tmp_path,
-        _store_workflow(STORE_CREDENTIALS, extra=("DOCKERHUB_TOKEN",)),
-    )
-
-    assert _reconcile_store_gate_covers_the_lane(str(candidate)) is None
-
-
-def test_store_gate_is_read_only_and_absent_ci_is_a_no_op(tmp_path):
-    """The rule audits, it never edits: a pass leaves the tree byte-for-byte alone."""
-    candidate = _store_tree(tmp_path, _store_workflow(STORE_CREDENTIALS))
-    workflow = candidate / ".github/workflows/desktop-bundled-release.yml"
-    before = workflow.read_bytes()
-    empty_ci = tmp_path / "empty-ci"
-    (empty_ci / ".github" / "workflows").mkdir(parents=True)
-
-    assert _reconcile_store_gate_covers_the_lane(str(candidate)) is None
-    assert _reconcile_store_gate_covers_the_lane(str(candidate)) is None
-    assert workflow.read_bytes() == before
-    # no CI directory at all, and a CI directory holding no workflow, are both
-    # "nothing to audit" -- not a crash and not a silently green gate.
-    assert _reconcile_store_gate_covers_the_lane(str(tmp_path / "empty")) is None
-    assert _reconcile_store_gate_covers_the_lane(str(empty_ci)) is None
-
-
-def test_store_gate_runs_from_reconcile_tree(tmp_path):
-    """``reconcile_tree`` must dispatch the gate check, or the fork ships the hole.
-
-    The lane goes in its own workflow file here because the audit reads *every*
-    workflow while the unrelated darwin-anchor rule only knows
-    ``desktop-bundled-release.yml``; naming the real file would make this test fail
-    on that rule's anchor instead of on the dispatch it pins.
-    """
-    candidate = _store_tree(
-        tmp_path,
-        _store_workflow((*STORE_CREDENTIALS, "MS_STORE_CERT_HASH")),
-        filename="store-lane.yml",
-    )
-
-    with pytest.raises(StoreLaneGateError, match="MS_STORE_CERT_HASH"):
-        reconcile_tree(str(candidate))
-
-
-def test_store_gate_is_dispatched_after_every_workflow_writer():
-    """Ordering is load-bearing: the audit measures the tree the sync ships.
-
-    Derived from the engine's own AST rather than a remembered list: every
-    ``_reconcile_*`` rule that touches a ``.github/workflows/`` path -- by literal,
-    through a module constant holding one, or through a rule it calls -- must be
-    dispatched before the Store-gate audit, or the audit grades a workflow a later
-    rule then rewrites.
-    """
-    from hundredways import updates as updates_module
-
-    tree = ast.parse(open(updates_module.__file__, encoding="utf-8").read())
-    path_consts = set()
-    for node in tree.body:
-        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Constant):
-            continue
-        if isinstance(node.value.value, str) and node.value.value.startswith(".github/workflows/"):
-            path_consts.update(t.id for t in node.targets if isinstance(t, ast.Name))
-    rules = {
-        node.name: node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name.startswith("_reconcile_")
-    }
-
-    def touches_a_workflow(node):
-        for sub in ast.walk(node):
-            if (
-                isinstance(sub, ast.Constant)
-                and isinstance(sub.value, str)
-                and sub.value.startswith(".github/workflows/")
-            ):
-                return True
-            if isinstance(sub, ast.Name) and sub.id in path_consts:
-                return True
-        return False
-
-    writers = {name for name, node in rules.items() if touches_a_workflow(node)}
-    grown = True
-    while grown:
-        grown = False
-        for name, node in rules.items():
-            if name in writers:
-                continue
-            called = {
-                sub.func.id
-                for sub in ast.walk(node)
-                if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
-            }
-            if called & writers:
-                writers.add(name)
-                grown = True
-
-    body = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "reconcile_tree"
-    )
-    order = {}
-    for sub in ast.walk(body):
-        if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and sub.func.id in rules:
-            order[sub.func.id] = min(sub.lineno, order.get(sub.func.id, sub.lineno))
-
-    assert writers, "the sync writes workflows, so this ordering has to be pinned"
-    assert "_reconcile_store_gate_covers_the_lane" in order
-    audit = order["_reconcile_store_gate_covers_the_lane"]
-    late = sorted(name for name, line in order.items() if name in writers and line > audit)
-    assert not late, f"the Store audit runs before workflow writers: {late}"
-
-
-def test_store_credentials_gate_has_no_ungated_store_name(tmp_path):
-    """The pre-flight agrees: with the fix the Store lane has no ungated-consumed name."""
-    from hundredways import pubconfig
-
-    candidate = _store_tree(tmp_path, _store_workflow(STORE_CREDENTIALS))
-    (candidate / ".github/workflows/docker.yml").write_text(
-        _store_workflow((), extra=("DOCKERHUB_TOKEN",)), encoding="utf-8"
-    )
-    found = pubconfig.analyze_root(str(candidate), pubconfig.ActionsInventory())
-
-    ungated = {f.name for f in found if f.verdict == pubconfig.UNGATED_CONSUMED}
-    assert not {n for n in ungated if n.startswith("MS_STORE_")}
-    assert _reconcile_store_gate_covers_the_lane(str(candidate)) is None
-
-
-def test_store_rest_credentials_stay_the_four_the_script_reads(tmp_path):
-    """The lane set grew, the ``store.py`` fold did not: it still reads only REST names."""
-    from hundredways.updates import _reconcile_signing_gated_store
-
-    fixture = os.path.join(os.path.dirname(__file__), "fixtures", "signing_lanes")
-    candidate = tmp_path / "fork"
-    shutil.copytree(fixture, str(candidate))
-    store_py = candidate / "scripts/releases/store.py"
-
-    assert _reconcile_signing_gated_store(str(candidate)) is True
-    after = store_py.read_text(encoding="utf-8")
-
-    # The injected tuple names exactly the REST set, so the seller id -- which the
-    # workflow's msstore CLI uses but the Partner Center call never reads -- does
-    # not turn a configured submission into a false skip.
-    injected = after.split("_STORE_CREDENTIALS = (", 1)[1].split(")", 1)[0]
-    for name in STORE_REST_CREDENTIALS:
-        assert f'"{name}"' in injected
-    assert "MS_STORE_SELLER_ID" not in injected
-    # The fold is idempotent: a second pass changes the file not at all.
-    assert _reconcile_signing_gated_store(str(candidate)) is False
-# The receipt's commit prose lives in a data log, not in the JSON the fork lints
-# ---------------------------------------------------------------------------
-
-_TMP_SUBJECT = "test(gateway): compare against the server's resolved home (macOS /tmp is a symlink)"
-
-
-def test_the_receipt_keeps_commit_prose_out_of_the_linted_json(tmp_path):
-    manifest = {
-        "number": 2,
-        "upstream_sha": "5e5be7c2f114144ed96266acd2afab643c7172fe",
-        "commit_subjects": ["fix(tui): /save always reports a failed write", _TMP_SUBJECT],
-    }
-
-    receipt = split_manifest_subjects(manifest, str(tmp_path))
-
-    assert "commit_subjects" not in receipt
-    assert receipt["commit_subjects_file"] == "commit-subjects.jsonl"
-    assert receipt["commit_subject_count"] == 2
-    assert "/tmp" not in json.dumps(receipt), "the /tmp subject must not survive in the receipt"
-    assert (tmp_path / "commit-subjects.jsonl").read_text(encoding="utf-8").splitlines() == [
-        json.dumps("fix(tui): /save always reports a failed write"),
-        json.dumps(_TMP_SUBJECT),
-    ]
-
-
-def test_every_subject_is_kept_verbatim_and_in_order(tmp_path):
-    subjects = ['fix(a): quote " and \\ survive', "feat(b): ünïcode — dash", _TMP_SUBJECT]
-
-    split_manifest_subjects({"commit_subjects": subjects}, str(tmp_path))
-
-    lines = (tmp_path / "commit-subjects.jsonl").read_text(encoding="utf-8").splitlines()
-    assert [json.loads(line) for line in lines] == subjects
-
-
-def test_the_loader_folds_the_log_back_where_the_narrative_reads_it(tmp_path):
-    manifest = {"number": 3, "commit_subjects": ["fix(a): one", _TMP_SUBJECT]}
-    receipt = split_manifest_subjects(manifest, str(tmp_path))
-    path = tmp_path / "manifest.json"
-    path.write_text(json.dumps(receipt), encoding="utf-8")
-
-    assert read_manifest_with_subjects(str(path))["commit_subjects"] == manifest["commit_subjects"]
-
-
-def test_a_receipt_that_still_inlines_its_subjects_reads_the_same(tmp_path):
-    path = tmp_path / "manifest.json"
-    path.write_text(json.dumps({"commit_subjects": ["fix(a): one"]}), encoding="utf-8")
-
-    assert read_manifest_with_subjects(str(path))["commit_subjects"] == ["fix(a): one"]
-
-
-def test_a_receipt_with_no_subjects_at_all_still_reads(tmp_path):
-    path = tmp_path / "manifest.json"
-    path.write_text(json.dumps({"number": 4}), encoding="utf-8")
-
-    assert read_manifest_with_subjects(str(path)) == {"number": 4}
-
-
-def _orphan_picker_tree(tmp_path, body=None):
-    path = tmp_path / _ORPHAN_PICKER_TEST_REL
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        '"""Regression tests for the setup pickers."""\n'
-        "from unittest.mock import patch\n\n\n"
-        "def test_prompt_model_selection_uses_curses_radiolist():\n"
-        "    from nastech_cli.auth import _prompt_model_selection\n"
-        "    from nastech_cli.curses_ui import radio_item_plain\n\n"
-        "    seen = {}\n\n"
-        + (_ORPHAN_PICKER_TEST_MIRRORED if body is None else body)
-        + "\n\n"
-        + (
-            ""
-            if body is not None
-            else '    with patch("nastech_cli.curses_ui.curses_radiolist", side_effect=_fake):\n'
-            '        _prompt_model_selection(["model-a", "model-b"])\n\n'
-            '    assert seen["title"] == "Select default model:"\n'
-            '    assert [radio_item_plain(item) for item in seen["items"]]\n'
-        ),
-        encoding="utf-8",
-    )
-    return path
-
-
-def test_the_orphan_picker_fake_binds_the_live_widget_signature(tmp_path):
-    path = _orphan_picker_tree(tmp_path)
-
-    changed = _reconcile_orphan_picker_fake(str(tmp_path), [_ORPHAN_PICKER_TEST_REL])
-
-    assert changed == [_ORPHAN_PICKER_TEST_REL]
-    text = path.read_text(encoding="utf-8")
-    assert "bind = signature(curses_ui.curses_radiolist).bind" in text
-    assert "def _fake(*args, **kwargs):" in text
-    assert "search_labels=None," not in text, "the mirrored keyword list must be gone"
-
-
-def test_a_second_pass_over_the_bound_fake_changes_nothing(tmp_path):
-    path = _orphan_picker_tree(tmp_path)
-    _reconcile_orphan_picker_fake(str(tmp_path), [_ORPHAN_PICKER_TEST_REL])
-    first = path.read_text(encoding="utf-8")
-
-    assert _reconcile_orphan_picker_fake(str(tmp_path), [_ORPHAN_PICKER_TEST_REL]) == []
-    assert path.read_text(encoding="utf-8") == first
-
-
-def test_a_tree_without_the_orphan_test_is_left_alone(tmp_path):
-    assert _reconcile_orphan_picker_fake(str(tmp_path), []) == []
-    assert list(tmp_path.iterdir()) == []
-
-
-def test_a_picker_file_preservation_did_not_carry_is_left_alone(tmp_path):
-    """Only ``preserve_fork_files`` puts this path in the tree, so that list is the scope.
-
-    Upstream deleted its copy, so a sync whose fork has since dropped the test too
-    must not stop on a ``OrphanPickerFakeError`` about a file nobody ships.
-    """
-    path = _orphan_picker_tree(tmp_path)
-    before = path.read_text(encoding="utf-8")
-
-    assert _reconcile_orphan_picker_fake(str(tmp_path), ["optional-skills/other.md"]) == []
-    assert path.read_text(encoding="utf-8") == before
-
-
-def test_a_fake_the_rule_does_not_recognise_stops_the_sync(tmp_path):
-    _orphan_picker_tree(tmp_path, body="    def _fake(something_else):\n        return 1\n")
-
-    with pytest.raises(OrphanPickerFakeError, match="keyword set moved again"):
-        _reconcile_orphan_picker_fake(str(tmp_path), [_ORPHAN_PICKER_TEST_REL])
-
-
-def _names_called_inside(module, function_name: str) -> set:
-    """Every bare function call inside ``function_name``, closures included."""
-    tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == function_name:
-            return {
-                child.func.id
-                for child in ast.walk(node)
-                if isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
-            }
-    raise AssertionError(f"{function_name} is not in {module.__file__}")
-
-
-@pytest.mark.parametrize(
-    "rule",
-    [
-        "_reconcile_orphan_picker_fake",
-        "_reconcile_fork_skill_catalogs",
-        "_reconcile_docs_posix_separators",
-        "_reconcile_fork_skill_sidebars",
-        "_reconcile_assets_worker_config",
-        "_reconcile_assets_worker_index",
-    ],
-)
-def test_a_rule_that_needs_a_fork_only_file_never_runs_before_preservation(rule):
-    """``reconcile_tree`` is the stage *before* ``preserve_fork_files``.
-
-    A fork-only path does not exist while it runs, so a rule that rewrites one from
-    inside ``reconcile_tree`` reads ``None``, returns ``[]`` and reports success.  That
-    is how #155 merged green -- its unit test created the file first -- while every
-    published candidate kept shipping the stale mirrored radiolist fake the rule
-    exists to repair, and the fork's CI stayed red for it.  Each of these rules is
-    therefore called from the preserve stage with the paths preservation carried in.
-    """
-    assert rule not in _names_called_inside(updates, "reconcile_tree")
-    assert rule in _names_called_inside(updates, "_preserve")
-
-
-def test_the_parity_rebuild_replays_the_preserved_picker_fix():
-    """Without the replay, ``verify_final_candidate`` expects the stale bytes and
-    reports the repaired candidate as a source-parity mismatch, so the fix cannot ship.
-    """
-    assert "_reconcile_orphan_picker_fake" in _names_called_inside(
-        conformance, "verify_final_candidate"
-    )

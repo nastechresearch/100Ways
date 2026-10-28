@@ -92,14 +92,14 @@ def test_tagged_unresolving_way_is_dangling():
 def test_coverage_has_one_row_per_way():
     registry = build_registry()
     rows = coverage(registry)
-    assert len(rows) == registry.count >= 200
+    assert len(rows) == registry.count == 200
 
 
 def test_summary_counts_total_exactly():
     rows = coverage()
     totals = summary(rows)
     assert set(totals) == {"built", "dangling", "catalog-only"}
-    assert sum(totals.values()) == len(rows) >= 200
+    assert sum(totals.values()) == len(rows) == 200
 
 
 def test_by_category_groups_without_losing_ways():

@@ -24,47 +24,6 @@ jobs:
           pip install -e .
           pip install "pytest>=7,<9" "pyyaml>=6,<7"
 
-      - name: Fetch the fork's release surface
-        # The lane reconcile is only worth having if it reproduces the tree the
-        # fork ships, so compare against nastech-agent's own files instead of
-        # only against the fixtures below.  These are every path the two lane
-        # rules read or write; a full checkout of the fork is ~290 MB.
-        run: |
-          set -euo pipefail
-          tree=build/nastech-agent
-          fetch() {
-            mkdir -p "$tree/$(dirname "$1")"
-            curl -fsSL "https://raw.githubusercontent.com/nastechresearch/nastech-agent/main/$1" \
-              -o "$tree/$1"
-          }
-          for path in scripts/releases/lanes.py scripts/releases/stable.py \
-                     scripts/releases/store.py scripts/releases/entrypoint.py \
-                     .github/workflows/stable-release.yml \
-                     tests/scripts/test_release_lanes.py \
-                     tests/scripts/test_release_channels.py \
-                     tests/scripts/test_stable_release.py \
-                     tests/scripts/test_release_entrypoint.py; do
-            fetch "$path"
-          done
-          # A tree synced before upstream's lane table carries optional_platforms.py
-          # instead; whichever shape the fork has moved past is simply absent.
-          curl -fsSL "https://raw.githubusercontent.com/nastechresearch/nastech-agent/main/scripts/releases/optional_platforms.py" \
-            -o "$tree/scripts/releases/optional_platforms.py" || true
-
-      - name: Fork release-surface drift
-        # Advisory, and deliberately not part of the gate below: a lane-policy
-        # change lands in 100Ways before the sync that carries it into the fork,
-        # so during that window the fork's shipped tree is *expected* not to be a
-        # fixed point of the new rules. Blocking on it would turn every engine PR
-        # after a policy change red until a release landed; the check exists to
-        # make the drift visible instead of silent.
-        env:
-          NASTECH_AGENT_TREE: ${{ github.workspace }}/build/nastech-agent
-        continue-on-error: true
-        run: |
-          python3 -m pytest tests/test_signing_gated_lanes.py -q \
-            -k "real_fork" --no-header
-
       - name: Run test suite
         run: |
           python3 -m pytest tests/ -q

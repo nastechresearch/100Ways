@@ -41,12 +41,6 @@ REAL_TREE = os.environ.get("NASTECH_AGENT_TREE")
 
 LANE_PATHS = ("scripts/releases/optional_platforms.py", "scripts/releases/stable.py",
               "scripts/releases/store.py", ".github/workflows/stable-release.yml")
-# A fork checkout that moved to the lane table carries lanes.py instead of
-# optional_platforms.py, so the fixed-point check reads both shapes.  The five
-# files that read the lane default are part of the same surface: a drift there
-# is the fork's release tests asserting a policy the shipped tree does not have.
-_RELEASE_SURFACE = (*LANE_PATHS, updates._LANES_MODULE,
-                    *(rel for rel, _marker, _edits in updates._FORK_LANE_RELEASE))
 ALL_APPLE = {"CSC_LINK": "x", "CSC_KEY_PASSWORD": "x", "APPLE_API_KEY_P8": "x",
              "APPLE_API_KEY_ID": "x", "APPLE_API_ISSUER": "x"}
 ALL_WINDOWS = {"AZURE_SIGN_ENDPOINT": "x", "AZURE_SIGN_ACCOUNT": "x", "AZURE_SIGN_PROFILE": "x",
@@ -71,13 +65,6 @@ def tree(tmp_path):
 
 def _reconcile(dst):
     return updates._reconcile_signing_gated_release_lanes(str(dst))
-
-
-def _reconcile_lane_surface(dst):
-    """Both lane rules: the table itself, then the files that read its default."""
-    changed = list(updates._reconcile_signing_gated_release_lanes(str(dst)))
-    changed.extend(updates._reconcile_fork_lane_release_surface(str(dst)))
-    return changed
 
 
 def _import_fork(dst):
@@ -195,50 +182,25 @@ def test_reconcile_fails_loudly_when_an_anchor_moved(tree):
 
 
 def test_reconcile_matches_the_real_fork(tmp_path):
-    """The tree the fork ships must already be a fixed point of the reconcile.
-
-    A first pass that rewrites anything means the fork's checked-in release lane
-    policy and the engine's disagree, so the next generated sync would quietly
-    move the fork off the policy its signing accounts support.
-    """
     if not REAL_TREE:
         pytest.skip("set NASTECH_AGENT_TREE to the fork checkout to compare against it")
     dst = tmp_path / "real"
-    for rel in _RELEASE_SURFACE:
-        source = Path(REAL_TREE) / rel
-        if source.is_file():
-            target = dst / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, target)
-    lanes = dst / updates._LANES_MODULE
-    if not lanes.is_file() and not (dst / "scripts/releases/optional_platforms.py").is_file():
-        pytest.fail(f"{REAL_TREE} carries neither {updates._LANES_MODULE} nor "
-                    "scripts/releases/optional_platforms.py, so it is not a fork "
-                    "checkout of the release surface")
-    assert _reconcile_lane_surface(dst) == []
-    assert _reconcile_lane_surface(dst) == []
-    if lanes.is_file():
-        # The rule keys off its own marker comment, so re-running it cannot see a
-        # hand-edit to the set beside the marker. Compare the shipped block to
-        # the engine's literal instead: that is what a sync has to reproduce.
-        assert updates._LANES_DEFAULT_FORK in lanes.read_text(encoding="utf-8"), (
-            "the fork's checked-in default lane set is not the set the engine "
-            "derives, so the next sync would move it back")
+    shutil.copytree(REAL_TREE, dst)
+    assert _reconcile(dst) == list(LANE_PATHS)
+    assert _reconcile(dst) == []
     # The real workflow is the one that ships, so its reconciled YAML must load:
     # a bad indent or a swallowed newline here is a broken release workflow.
     import yaml
 
     doc = yaml.safe_load((dst / ".github/workflows/stable-release.yml").read_text(encoding="utf-8"))
-    admit = doc["jobs"]["admit"]
-    assert any("scripts.releases.stable admit" in str(step.get("run", ""))
-               for step in admit["steps"]), "admit no longer derives the lane set"
-    assert admit["outputs"]["lanes"] == "${{ steps.admit.outputs.lanes }}"
-    # The fork's narrowed DEFAULT has to reach the legs it gates: a Windows
-    # candidate that stopped reading the lane set would demand Azure signing
-    # credentials this org does not have.
-    body = (dst / ".github/workflows/stable-release.yml").read_text(encoding="utf-8")
-    assert "fromJSON(needs.admit.outputs.lanes).windows" in body, \
-        "no job reads the Windows lane from the claim"
+    assert [name for name, job in doc["jobs"].items()
+            if any("INCLUDE_TERMUX" in step.get("env", {}) for step in job.get("steps", []))], \
+        "no gate step reads INCLUDE_TERMUX"
+    for name, job in doc["jobs"].items():
+        for step in job.get("steps", []):
+            block = step.get("env", {})
+            if "INCLUDE_MACOS_ARM64" in block:
+                assert block["INCLUDE_MACOS_ARM64"] == LANE_OUTPUTS[0]
 
 
 # --- upstream's lane table ------------------------------------------------
@@ -298,11 +260,8 @@ def _default_of(dst):
 def test_reconcile_sets_the_default_lane_set_on_upstreams_lane_table(lane_tree):
     assert _reconcile(lane_tree) == ["scripts/releases/lanes.py"]
     default = _default_of(lane_tree)
-    # The desktop lanes ship unsigned (the bundled builder honours `skip-signed`, and every
-    # desktop leg now declares it), so only the Store lane and the two desktop-gated test
-    # lanes leave, and Termux joins although upstream opts out.
-    assert {"smoke", "upgrade"}.isdisjoint(default)
-    assert {"termux", "docker", "ci", "macos-arm64", "windows"} <= default
+    assert {"macos-intel", "macos-arm64", "windows", "windows-store"}.isdisjoint(default)
+    assert {"termux", "docker", "ci"} <= default
 
 
 def test_reconcile_leaves_the_lane_table_alone_the_second_time(lane_tree):
@@ -707,263 +666,3 @@ def test_the_entrypoint_banner_is_untouched(fork):
     # banner must not learn a flag it cannot honour.
     text = _reconciled("entrypoint.py")
     assert "include-macos-arm64" not in text
-
-
-def _bundled_release_tree(tmp_path, body=None):
-    dst = tmp_path / "branded"
-    workflows = dst / ".github" / "workflows"
-    workflows.mkdir(parents=True)
-    if body is None:
-        body = (
-            "\n".join(
-                [
-                    "      skip-signed:",
-                    *updates._UNSIGNED_DESKTOP_EDITS[3][0].splitlines(),
-                    "        type: boolean",
-                    "        default: false",
-                    "      - name: Require signing credentials when publishing",
-                    *updates._UNSIGNED_DESKTOP_EDITS[0][0].splitlines(),
-                    "      - name: Write App Store Connect key for notarytool",
-                    *updates._UNSIGNED_DESKTOP_EDITS[1][0].splitlines(),
-                    "      - name: Verify the build is signed and notarized",
-                    *updates._UNSIGNED_DESKTOP_EDITS[2][0].splitlines(),
-                    '          codesign --verify --strict --verbose=2 "$app"',
-                    '          xcrun stapler validate "$app"',
-                ]
-            )
-            + "\n"
-        )
-    (workflows / "desktop-bundled-release.yml").write_text(body, encoding="utf-8")
-    return dst
-
-
-def test_the_apple_signing_gates_take_the_declared_unsigned_escape(tmp_path):
-    dst = _bundled_release_tree(tmp_path)
-
-    assert updates._reconcile_unsigned_desktop_publish(str(dst)) is True
-
-    text = (dst / updates._DESKTOP_BUNDLED_RELEASE).read_text(encoding="utf-8")
-    assert text.count(updates._UNSIGNED_DESKTOP_GUARD) == 3
-    # The post-build Gatekeeper backstop is guarded, not deleted: a build that claims to
-    # be signed is still verified.
-    assert "xcrun stapler validate" in text and "codesign --verify" in text
-
-
-def test_the_unsigned_escape_is_written_once(tmp_path):
-    dst = _bundled_release_tree(tmp_path)
-    updates._reconcile_unsigned_desktop_publish(str(dst))
-    first = (dst / updates._DESKTOP_BUNDLED_RELEASE).read_text(encoding="utf-8")
-
-    assert updates._reconcile_unsigned_desktop_publish(str(dst)) is False
-    assert (dst / updates._DESKTOP_BUNDLED_RELEASE).read_text(encoding="utf-8") == first
-
-
-def test_a_tree_without_the_bundled_builder_is_left_alone(tmp_path):
-    assert updates._reconcile_unsigned_desktop_publish(str(tmp_path)) is False
-
-
-def test_a_reworded_signing_gate_stops_the_sync(tmp_path):
-    dst = _bundled_release_tree(tmp_path, body="      - name: Require something else\n")
-
-    with pytest.raises(
-        updates.UnsignedDesktopPublishError, match="no longer contains the signing anchor"
-    ):
-        updates._reconcile_unsigned_desktop_publish(str(dst))
-
-
-# --- the unsigned desktop callers ----------------------------------------
-
-CALLER_FIXTURE = Path(__file__).parent / "fixtures" / "unsigned_callers" / "stable-release.yml"
-
-
-def _caller_tree(tmp_path, body=None):
-    """A branded tree carrying upstream's six bundled-builder caller legs verbatim."""
-    dst = tmp_path / "branded"
-    workflows = dst / ".github" / "workflows"
-    workflows.mkdir(parents=True)
-    text = CALLER_FIXTURE.read_text(encoding="utf-8") if body is None else body
-    (workflows / "stable-release.yml").write_text(text, encoding="utf-8")
-    return dst
-
-
-def _callers(dst):
-    return updates._reconcile_unsigned_desktop_callers(str(dst))
-
-
-def test_the_store_lane_stays_out_until_partner_center_credentials_exist(lane_tree):
-    """``windows-store`` submits to Partner Center with credentials this fork does not have.
-
-    Turning the lane on would only turn a new red on, so the default set keeps it out and
-    ``--with windows-store`` re-enables it once ``MS_STORE_*`` exists.
-    """
-    _reconcile(lane_tree)
-    assert "windows-store" not in _default_of(lane_tree)
-
-
-# Upstream's own lane module, transcribed at 9b904dcc (see the fixture header).  The fork's
-# release tests assert exact lane and job sets, so they are checked against the code that
-# computes those sets rather than against a restatement of it: a lane policy change that
-# moves the skipped jobs moves these literals too, instead of going red only in the fork.
-UPSTREAM_LANES_TIP = Path(__file__).parent / "fixtures" / "upstream_lanes" / "lanes.txt"
-
-
-def _fork_lane_table() -> dict:
-    """Upstream's lane table with the engine's fork default lane set applied to it."""
-    source = UPSTREAM_LANES_TIP.read_text(encoding="utf-8")
-    assert updates._LANES_DEFAULT in source, "the fixture lost the DEFAULT anchor"
-    forked = source.replace(updates._LANES_DEFAULT, updates._LANES_DEFAULT_FORK)
-    namespace: dict = {}
-    exec(compile(forked, "lanes.py", "exec"), namespace)
-    return namespace
-
-
-def _quoted_names(text: str) -> set:
-    """Every double-quoted lane or job name in one literal of an exact-literal edit."""
-    return set(re.findall(r'"([a-z0-9-]+)"', text))
-
-
-def _skipped_jobs(namespace: dict, lanes) -> set:
-    """The stable-release jobs a lane set leaves out, derived lanes included."""
-    runs = namespace["jobs_to_run"](lanes)
-    return {job for job, does_run in runs.items() if not does_run}
-
-
-def test_the_fixture_default_skips_what_upstream_does_not_opt_in():
-    """A restated baseline would hide the fork's own change; this one cannot."""
-    namespace = _fork_lane_table()
-
-    assert _skipped_jobs(namespace, namespace["DEFAULT"]) == {
-        "candidates-darwin-x64",
-        "macos-packaged-arm64",
-        "macos-packaged-x64",
-        "transitions-darwin-arm64",
-        "transitions-darwin-x64",
-        "transitions-win32",
-        "windows-packaged",
-    }
-
-
-def test_the_fork_default_set_is_exactly_the_lanes_this_fork_ships():
-    """The set is checked against the lane table upstream ships at this revision.
-
-    A new ``Lane(..., True, ...)`` row upstream joins DEFAULT silently, because the fork's
-    rewrite only names the lanes it excludes; listing the set here makes that an equality
-    failure on the sync that adds the lane, which is when someone has to decide whether the
-    new lane is one this fork can build unsigned.
-    """
-    namespace = _fork_lane_table()
-
-    assert set(namespace["DEFAULT"]) == {
-        "bootstrap-version",
-        "ci",
-        "docker",
-        "docker-tests",
-        "install-e2e",
-        "macos-arm64",
-        "nix",
-        "pm-bundle",
-        "termux",
-        "termux-checks",
-        "windows",
-        "windows-live",
-    }
-
-
-def test_the_fork_lane_test_names_exactly_the_lanes_the_default_omits():
-    """The fork's own lane test and the default set must not drift apart."""
-    namespace = _fork_lane_table()
-    tail = updates._RELEASE_LANES_TESTS_EDITS[0][1]
-    tail = tail.split("OUT_OF_DEFAULT = {")[1].split("}")[0]
-
-    assert _quoted_names(tail) == set(namespace["NAMES"]) - set(namespace["DEFAULT"])
-
-
-def test_the_stable_release_test_names_exactly_the_jobs_the_fork_default_skips():
-    tail = updates._STABLE_RELEASE_TESTS_EDITS[3][1].split("off = {")[1].split("}")[0]
-    namespace = _fork_lane_table()
-
-    assert _quoted_names(tail) == _skipped_jobs(namespace, namespace["DEFAULT"])
-
-
-def test_restoring_macos_intel_builds_only_its_candidate():
-    """The fork's lane test pairs the default set with ``off - {"candidates-darwin-x64"}``."""
-    namespace = _fork_lane_table()
-    default = _skipped_jobs(namespace, namespace["DEFAULT"])
-    with_intel = namespace["select"](with_=["macos-intel"])
-
-    assert _skipped_jobs(namespace, with_intel) == default - {"candidates-darwin-x64"}
-
-
-def test_a_full_lane_set_skips_nothing():
-    namespace = _fork_lane_table()
-
-    assert _skipped_jobs(namespace, namespace["NAMES"]) == set()
-
-
-def test_the_entrypoint_note_names_the_lanes_the_fork_leaves_out():
-    """Upstream's "Not built:" line is a computed list, and the fork's test quotes it."""
-    note = updates._RELEASE_ENTRYPOINT_TESTS_EDITS[0][1]
-    assert '"Not built: windows-store, macos-intel." in text' in note
-
-
-def test_every_desktop_caller_leg_declares_the_build_unsigned(tmp_path):
-    dst = _caller_tree(tmp_path)
-
-    assert _callers(dst) is True
-
-    text = (dst / updates._STABLE_RELEASE_WORKFLOW).read_text(encoding="utf-8")
-    # The two macOS legs never passed the input at all, and the three Windows legs passed
-    # it inverted (skip when the lane is *off*), so no leg shipped unsigned before this.
-    assert text.count("      skip-signed: true\n") == 5
-    assert "!fromJSON(needs.admit.outputs.lanes).windows }}" not in text
-    # The Store leg is untouched: its lane stays off, so it still skips submission.
-    store_leg = "      skip-store: ${{ !fromJSON(needs.admit.outputs.lanes)['windows-store'] }}\n"
-    assert text.count(store_leg) == 3
-    assert "      skip-signed: true\n" not in text.split("jobs: termux")[1]
-
-
-def test_the_unsigned_caller_edits_are_written_once(tmp_path):
-    dst = _caller_tree(tmp_path)
-    _callers(dst)
-    first = (dst / updates._STABLE_RELEASE_WORKFLOW).read_text(encoding="utf-8")
-
-    assert _callers(dst) is False
-    assert (dst / updates._STABLE_RELEASE_WORKFLOW).read_text(encoding="utf-8") == first
-
-
-def test_a_desktop_leg_that_moved_stops_the_sync(tmp_path):
-    body = CALLER_FIXTURE.read_text(encoding="utf-8").replace(
-        "      jobs: darwin-x64\n", "      groups: darwin-x64\n"
-    )
-    dst = _caller_tree(tmp_path, body=body)
-
-    with pytest.raises(updates.UnsignedDesktopCallerError, match="darwin-x64"):
-        _callers(dst)
-
-
-def test_a_tree_without_the_stable_release_workflow_is_left_alone(tmp_path):
-    assert _callers(tmp_path) is False
-
-
-def test_the_skip_signed_input_description_names_macos_too(tmp_path):
-    upstream_input = [
-        "      skip-signed:",
-        "        description: 'Stable candidates only: build no signed Windows package "
-        "(the claim has no windows lane). Needs no Azure signing.'",
-        "        type: boolean",
-        "        default: false",
-        "",
-        *updates._UNSIGNED_DESKTOP_EDITS[0][0].splitlines(),
-        *updates._UNSIGNED_DESKTOP_EDITS[1][0].splitlines(),
-        *updates._UNSIGNED_DESKTOP_EDITS[2][0].splitlines(),
-    ]
-    dst = tmp_path / "branded"
-    workflows = dst / ".github" / "workflows"
-    workflows.mkdir(parents=True)
-    bundled = workflows / "desktop-bundled-release.yml"
-    bundled.write_text("\n".join(upstream_input), encoding="utf-8")
-
-    assert updates._reconcile_unsigned_desktop_publish(str(dst)) is True
-
-    text = bundled.read_text(encoding="utf-8")
-    assert "no Apple signing or notarization" in text

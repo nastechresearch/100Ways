@@ -17,7 +17,7 @@ def _git(repo: str | Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
-def change_category(subject: str) -> str:
+def _category(subject: str) -> str:
     prefix = subject.lower().split("(", 1)[0].split(":", 1)[0].strip()
     if prefix in {"feat", "feature"}:
         return "New capabilities"
@@ -59,7 +59,7 @@ def write_sync_summary(
         changes = [transform_strict_metadata_text(subject, rules).strip() for subject in commit_subjects if subject.strip()]
     grouped: dict[str, list[str]] = defaultdict(list)
     for subject in changes:
-        grouped[change_category(subject)].append(subject)
+        grouped[_category(subject)].append(subject)
     lines = [
         "# NasTech-Agent Update Summary",
         "",
