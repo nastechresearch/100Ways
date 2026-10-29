@@ -5580,6 +5580,111 @@ def _reconcile_plugin_catalog_admission(dst: str) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# Branding can collapse two upstream identifiers into one.
+# ---------------------------------------------------------------------------
+
+def _reconcile_collapsed_set_elements(dst: str) -> list[str]:
+    """Drop a set element that branding made identical to an earlier one.
+
+    Upstream names a credential env var twice for two products --
+    ``"HERMES_PORTAL_BASE_URL", "NOUS_PORTAL_BASE_URL"`` inside one
+    ``frozenset`` -- and both tokens rename to ``nastech``.  The set then lists
+    ``"NASTECH_PORTAL_BASE_URL"`` twice, which is semantically identical but is
+    a real lint error (ruff B033), so the fork's blocking ruff lane fails on a
+    file nobody edited:
+
+    measured 2026-10-28, ``plugins/config_backends/remote/credentials.py:30``
+    at upstream ``0c74cc6``, publication-readiness gate FAIL / blocker.
+
+    Only a literal set of string constants is touched, the first occurrence
+    keeps its position, and the file is re-parsed before it is written -- a
+    rewrite that would change anything else is refused rather than shipped.
+    """
+    fixed: list[str] = []
+    for rel in _walk_files(dst):
+        if not rel.endswith(".py") or is_locked_path(rel) or is_immutable_path(rel):
+            continue
+        path = os.path.join(dst, rel)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        rewritten = _dedupe_set_literals(text)
+        if rewritten is None or rewritten == text:
+            continue
+        try:
+            ast.parse(rewritten)
+        except SyntaxError:
+            continue
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(rewritten)
+        fixed.append(rel)
+    return fixed
+
+
+def _dedupe_set_literals(text: str) -> str | None:
+    """Remove duplicate string constants from literal sets, or ``None``.
+
+    Other element kinds (a starred expression, a name) are left alone: two
+    identical string literals in one set are redundant whatever else the set
+    holds.
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return None
+    starts = [0]
+    for line in text.splitlines(keepends=True):
+        starts.append(starts[-1] + len(line))
+
+    def offset(lineno: int, col: int) -> int:
+        return starts[lineno - 1] + col
+
+    spans: list[tuple[int, int]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Set):
+            continue
+        seen: set[str] = set()
+        for element in node.elts:
+            if not (isinstance(element, ast.Constant) and isinstance(element.value, str)):
+                continue
+            if element.value in seen:
+                spans.append(
+                    (offset(element.lineno, element.col_offset),
+                     offset(element.end_lineno, element.end_col_offset))
+                )
+            else:
+                seen.add(element.value)
+    if not spans:
+        return None
+    for start, end in sorted(spans, reverse=True):
+        # take the element, one side's comma and the blanks that separated it,
+        # leaving exactly one space where it sat on a shared line
+        while start > 0 and text[start - 1] in " \t":
+            start -= 1
+        if start > 0 and text[start - 1] == ",":
+            start -= 1
+        else:
+            while end < len(text) and text[end] in " \t":
+                end += 1
+            if end < len(text) and text[end] == ",":
+                end += 1
+        text = text[:start] + text[end:]
+        if start == 0 or text[start - 1] == "\n":
+            # the element had a line of its own: drop the empty line too
+            newline = text.find("\n", start)
+            if newline != -1 and not text[start:newline].strip():
+                text = text[:start] + text[newline + 1:]
+        elif text[start - 1:start] == ",":
+            tail = start
+            while tail < len(text) and text[tail] in " \t":
+                tail += 1
+            text = text[:start] + " " + text[tail:]
+    return text
+
+
 class UnpinnedSourceError(ValueError):
     """A known engine workflow stopped matching either the bare or the pinned form.
 
@@ -6832,6 +6937,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_brand_import_ordering(dst):
         result.total += 1
         result.fixed.append("eslint.config.shared.mjs")
+    for rel in _reconcile_collapsed_set_elements(dst):
+        result.total += 1
+        result.fixed.append(rel)
     for rel in _reconcile_domains(dst):
         result.total += 1
         result.fixed.append(rel)

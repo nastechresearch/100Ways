@@ -8337,3 +8337,42 @@ def test_the_parity_rebuild_replays_the_preserved_picker_fix():
     assert "_reconcile_orphan_picker_fake" in _names_called_inside(
         conformance, "verify_final_candidate"
     )
+
+
+def test_a_set_element_branding_collapsed_keeps_one_copy(tmp_path):
+    """Two upstream constants that brand to one name must not both be listed.
+
+    Upstream ``plugins/config_backends/remote/credentials.py`` names both
+    ``HERMES_PORTAL_BASE_URL`` and ``NOUS_PORTAL_BASE_URL`` inside one
+    ``frozenset``; both tokens rename to ``nastech``, so the branded file lists
+    ``"NASTECH_PORTAL_BASE_URL"`` twice -- semantically identical, but ruff
+    B033, a blocker in the publication-readiness gate (measured 2026-10-28 at
+    upstream ``0c74cc6``, step 13).
+    """
+    from hundredways.updates import _dedupe_set_literals, _reconcile_collapsed_set_elements
+
+    source = (
+        "PLANE_CREDENTIAL_ENV_NAMES = frozenset({\n"
+        '    "NASTECH_CONFIG_BACKEND", "NASTECH_PORTAL_BASE_URL", "NASTECH_PORTAL_BASE_URL",\n'
+        "    *(PREFIX + k.upper() for k in _IDP_KEYS),\n"
+        '    "NASTECH_SHARED_AUTH_DIR",\n'
+        "})\n"
+    )
+    deduped = _dedupe_set_literals(source)
+    assert deduped is not None
+    assert deduped.count('"NASTECH_PORTAL_BASE_URL"') == 1
+    compile(deduped, "credentials.py", "exec")
+    # a second pass is a no-op, and the starred sibling is untouched
+    assert _dedupe_set_literals(deduped) is None
+    assert "*(PREFIX + k.upper() for k in _IDP_KEYS)" in deduped
+
+    # a list or a call keeps its repeated argument: order and arity are meaning
+    assert _dedupe_set_literals('L = ["A", "A"]\n') is None
+    assert _dedupe_set_literals('f("A", "A")\n') is None
+
+    (tmp_path / "credentials.py").write_text(source, encoding="utf-8")
+    assert _reconcile_collapsed_set_elements(str(tmp_path)) == ["credentials.py"]
+    written = (tmp_path / "credentials.py").read_text(encoding="utf-8")
+    assert written.count('"NASTECH_PORTAL_BASE_URL"') == 1
+    compile(written, "credentials.py", "exec")
+    assert _reconcile_collapsed_set_elements(str(tmp_path)) == []
