@@ -5584,6 +5584,80 @@ def _reconcile_plugin_catalog_admission(dst: str) -> bool:
 # Branding can collapse two upstream identifiers into one.
 # ---------------------------------------------------------------------------
 
+class BundleSizeRecordError(ValueError):
+    """The bundled-release workflow no longer has the audit step this rule anchors on."""
+
+
+_BUNDLE_SIZE_STEP = (
+    "\n"
+    "      - name: Record artifact sizes\n"
+    "        if: always()\n"
+    "        shell: bash\n"
+    "        run: |\n"
+    "          python3 - <<'PY'\n"
+    "          import json, pathlib\n"
+    "          root = pathlib.Path(\"apps/desktop/release\")\n"
+    "          suffixes = {\".dmg\", \".zip\", \".exe\", \".msix\", \".appimage\", \".deb\", \".blockmap\"}\n"
+    "          rows = [\n"
+    "              {\"name\": p.name, \"bytes\": p.stat().st_size}\n"
+    "              for p in sorted(root.rglob(\"*\"))\n"
+    "              if p.is_file() and p.suffix.lower() in suffixes\n"
+    "          ]\n"
+    "          pathlib.Path(\"bundle-artifact-sizes.json\").write_text(json.dumps(rows, indent=2))\n"
+    "          for row in rows:\n"
+    "              print(f\"{row['bytes'] / 1048576:8.1f} MB  {row['name']}\")\n"
+    "          PY\n"
+    "      - name: Upload artifact sizes\n"
+    "        if: always()\n"
+    "        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n"
+    "        with:\n"
+    "          name: bundle-sizes-${{ matrix.target.label }}\n"
+    "          path: bundle-artifact-sizes.json\n"
+    "          if-no-files-found: warn\n"
+    "          retention-days: 7\n"
+)
+
+_BUNDLE_SIZE_ANCHOR = (
+    "          node apps/desktop/scripts/audit-bundle-arch.mjs \\\n"
+    "            --arch=\"${MATRIX_LABEL##*-}\" --root=apps/desktop/release\n"
+)
+
+
+def _reconcile_bundle_size_record(dst: str) -> bool:
+    """Record every desktop artifact's size so a release can be sized and gated.
+
+    Nothing in the fork keeps artifact sizes: the bundled workflow uploads only
+    to R2 and produces no workflow artifact, every release is a draft with no
+    assets, and the smoke and e2e workflows have no successful run whose log
+    would carry a size.  That left the GitHub-native migration sizing a release
+    from an estimate -- measured 2026-10-29: `gh release view` reports
+    `assets=0` for every fork *and* upstream release, so there is no reference
+    number anywhere.
+
+    The step is `if: always()` so a leg that fails later still reports the
+    payload it built, and the numbers land as a small workflow artifact (never a
+    release), which is also what the publish gate needs to refuse a file over
+    GitHub's 2 GiB per-asset limit.
+    """
+    rel = ".github/workflows/desktop-bundled-release.yml"
+    text = _reconcile_budget_read(dst, rel)
+    if text is None:
+        return False
+    if "name: Record artifact sizes" in text:
+        return False
+    if _BUNDLE_SIZE_ANCHOR not in text:
+        raise BundleSizeRecordError(
+            f"{rel}: the audit-bundle-arch invocation is absent, so the size "
+            "record cannot be placed after packaging; read the workflow and "
+            "retarget _reconcile_bundle_size_record"
+        )
+    updated = text.replace(_BUNDLE_SIZE_ANCHOR, _BUNDLE_SIZE_ANCHOR + _BUNDLE_SIZE_STEP)
+    if updated == text:
+        return False
+    _reconcile_budget_write(dst, rel, updated)
+    return True
+
+
 def _reconcile_arch_audit_exemptions(dst: str) -> bool:
     """Let the bundle audit ignore sounddevice's vendored Windows portaudio DLLs.
 
@@ -6988,6 +7062,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_brand_import_ordering(dst):
         result.total += 1
         result.fixed.append("eslint.config.shared.mjs")
+    if _reconcile_bundle_size_record(dst):
+        result.total += 1
+        result.fixed.append(".github/workflows/desktop-bundled-release.yml")
     if _reconcile_arch_audit_exemptions(dst):
         result.total += 1
         result.fixed.append("apps/desktop/scripts/audit-bundle-arch.mjs")
