@@ -29,7 +29,7 @@ Two facts make this cheap rather than a rewrite:
 | Question | Decision |
 |---|---|
 | Where do binaries live | **Published GitHub Releases.** Pages keeps the site, docs, installers and download pages. |
-| Termux | **No APT repository.** The `.deb` is a release asset; docs give the download-and-`apt install ./…` path. |
+| Termux | **Keep `pkg`.** A fixed-tag `termux-repo` release is the apt repository: index plus the current and previous `.deb`, refreshed on every publish. Signed with the existing `TERMUX_APT_GPG_KEY`. |
 | Publication | **Stable publishes as a normal release** (resolves `latest`). **Canary publishes as a pre-release** (never `latest`). Drafts exist only while a build is in flight. |
 | Canary retention | **Newest 3 stay**; older pre-releases are deleted with their assets at the start of each publish. |
 | Commit builds | **Artifact only** — no release at all, retention-bounded. |
@@ -47,7 +47,13 @@ Two facts make this cheap rather than a rewrite:
 - **Canary** — tag `vX.Y.Z+canary.<stamp>`, `prerelease: true`. Same asset set,
   with `canary.yml` instead of `latest.yml`. Never `latest`.
 - **Commit build** — no release. The bundle is a workflow artifact with a
-  7-day retention.
+  7-day retention. The recorded sizes (`bundle-artifact-sizes.json`) are what
+  make a release measurable instead of estimated.
+- **`termux-repo`** — one fixed-tag release holding the apt repository:
+  `Packages`, `Packages.gz`, `Release`, `InRelease`, and the current and
+  previous `.deb`. Its assets are **replaced**, not appended; it is the single
+  deliberate exception to asset immutability, because `pkg` needs a stable
+  source URL.
 - **`toolchain`** — one long-lived release, one asset per tool sha256. Written
   by a maintainer job, not by app builds.
 
@@ -80,20 +86,34 @@ Serving `latest.json` from Pages is deliberate: installers read it from a
 static file instead of spending the unauthenticated GitHub API budget
 (60 requests/hour/IP) that a popular install link would exhaust.
 
-### 3.4 Termux
+### 3.4 Termux: `pkg` keeps working, served from a release
 
-`stage_apt_repo.py`, the APT key handling, `TERMUX_APT_GPG_KEY`, and the apt
-staging/upload steps are removed. The Termux build attaches
-`nastech-agent_<ver>_aarch64.deb` to the release, and the docs replace the
-`apt` repository instructions with:
+The apt source points at one fixed tag, so nothing on the user side changes:
 
 ```
-curl -LO <release-url>/nastech-agent_<ver>_aarch64.deb
-apt install ./nastech-agent_<ver>_aarch64.deb
+deb https://github.com/nastechresearch/nastech-agent/releases/download/termux-repo/ ./
 ```
 
-`scripts/gen-bootstrap-pins.py` and any pin table that consumed the apt pool
-are updated in the same change, or removed if nothing else reads them.
+apt resolves `Release`/`InRelease`/`Packages.gz` relative to that base and then
+downloads each `Filename:` from the same place; release-asset URLs are exactly
+`<base>/<asset>` and apt follows the redirect to GitHub's object store.
+
+Each publish refreshes that release in a fixed order:
+
+1. upload the new `.deb`,
+2. regenerate `Packages` / `Packages.gz`, sign `Release` → `InRelease` with
+   `TERMUX_APT_GPG_KEY`, upload them **last**,
+3. delete the assets for versions older than the previous one.
+
+Ordering is the whole point: an index is only visible after the file it names
+exists, which is exactly the failure the last run hit
+(`404 … nastech-agent_0.21.5~canary…_aarch64.deb`). A client that reads mid-swap
+sees either the old complete index or the new complete index, never a dangling
+one.
+
+`stage_apt_repo.py` keeps its index-building logic and changes only its
+destination (release assets instead of R2 objects). The R2 upload and the
+separate key-materialisation step are replaced by the ordered refresh above.
 
 ### 3.5 Toolchain mirror and build-input archive
 
@@ -138,7 +158,8 @@ picks a step up with the next candidate.
    canary.
 4. **Installers and Pages.** `latest.json` published by job 2, installers
    resolve it, download pages generated.
-5. **Termux.** Remove the apt repo, attach the `.deb`, update docs.
+5. **Termux.** Move the apt repository onto the `termux-repo` release with the
+   ordered refresh; keep the existing `deb …` source line working unchanged.
 6. **Archive inputs.** R2 → workflow artifacts.
 7. **Decommission.** Delete the worker from the registry, remove the R2
    secrets/variables, and (owner action, outside the repo) delete the bucket
@@ -153,7 +174,11 @@ the R2 uploads would break a download path that still has users.
   by any number of builds.
 - Stable releases: permanent.
 - Canary: newest **3** kept; older releases deleted with assets at the start of
-  each publish. At ~1 GB per build that is roughly 3 GB steady-state, flat.
+  each publish. With six desktop targets (macOS ×2, Windows ×2, Linux ×2) plus
+  the Termux `.deb`, a release is larger than a single platform; the measured
+  number from `bundle-artifact-sizes.json` decides whether three canaries is
+  still the right count or should drop to two.
+- `termux-repo`: two `.deb` versions at all times, refreshed in place.
 - Commit builds: artifacts only, 7-day retention, never a release.
 - Toolchain: one release, grows only when a tool version is added.
 
@@ -167,6 +192,7 @@ the R2 uploads would break a download path that still has users.
 | `latest` can point at a canary | Canary is a pre-release, so `releases/latest` cannot resolve to it; a check asserts the flag on every canary publish |
 | Installers hit the API rate limit | `latest.json` on Pages is the primary path; the API is only a fallback |
 | Deleted canary breaks someone's saved link | Retention is documented where canary downloads are offered; stable links never move |
+| The `termux-repo` release is mutable by design | Only the index and the two current `.deb` files are replaced, always in the order above, and nothing else references that tag |
 | R2 and Releases both live during migration | Step order keeps every consumer on R2 until its replacement is verified; step 7 removes R2 last |
 
 ## 7. Verification
@@ -181,6 +207,8 @@ the R2 uploads would break a download path that still has users.
 - A grep gate: no `workers.dev`, `r2.dev` or `cloudflarestorage` outside test
   fixtures and this spec.
 - Retention: after two canary publishes, exactly three canary pre-releases exist.
+- Termux: `pkg update && pkg upgrade nastech-agent` installs the new version from
+  the release-hosted repo, with the R2 host blocked.
 
 ## 8. Out of scope
 
