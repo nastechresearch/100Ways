@@ -8410,3 +8410,54 @@ def test_the_bundle_audit_ignores_sounddevice_vendored_dlls(tmp_path):
         assert "audit-bundle-arch.mjs" in str(exc)
     else:
         raise AssertionError("a moved anchor must raise")
+
+
+def test_the_bundled_workflow_records_its_artifact_sizes(tmp_path):
+    """Nothing else keeps a size: no release assets, no artifact, no log line.
+
+    Measured 2026-10-29: `gh release view` reports `assets=0` for every fork
+    release and every upstream release, the bundled workflow uploads only to
+    R2, and the smoke workflow has no successful run.  The GitHub-native
+    migration and its 2 GiB publish gate therefore had nothing but an estimate,
+    so the workflow records the numbers itself.
+    """
+    import yaml
+
+    from hundredways.updates import BundleSizeRecordError, _reconcile_bundle_size_record
+
+    anchor = (
+        "          node apps/desktop/scripts/audit-bundle-arch.mjs \\\n"
+        '            --arch="${MATRIX_LABEL##*-}" --root=apps/desktop/release\n'
+    )
+    workflow = (
+        "jobs:\n"
+        "  build:\n"
+        "    steps:\n"
+        "      - name: Audit bundle architecture\n"
+        "        run: |\n"
+        '          MATRIX_LABEL="darwin-arm64"\n' + anchor
+    )
+    target = tmp_path / ".github" / "workflows"
+    target.mkdir(parents=True)
+    path = target / "desktop-bundled-release.yml"
+    path.write_text(workflow, encoding="utf-8")
+
+    assert _reconcile_bundle_size_record(str(tmp_path)) is True
+    written = path.read_text(encoding="utf-8")
+    assert written.count("name: Record artifact sizes") == 1
+    assert "bundle-sizes-${{ matrix.target.label }}" in written
+    assert "if: always()" in written
+    doc = yaml.safe_load(written)
+    names = [s.get("name") for s in doc["jobs"]["build"]["steps"]]
+    assert names == ["Audit bundle architecture", "Record artifact sizes", "Upload artifact sizes"]
+    # idempotent by the marker
+    assert _reconcile_bundle_size_record(str(tmp_path)) is False
+
+    # a moved anchor fails loudly instead of silently leaving sizes unrecorded
+    path.write_text(workflow.replace("audit-bundle-arch.mjs", "audit-arch.mjs"), encoding="utf-8")
+    try:
+        _reconcile_bundle_size_record(str(tmp_path))
+    except BundleSizeRecordError as exc:
+        assert "desktop-bundled-release.yml" in str(exc)
+    else:
+        raise AssertionError("a moved anchor must raise")
