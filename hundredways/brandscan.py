@@ -30,9 +30,17 @@ from pathlib import Path
 
 from .rules import (
     BrandingRules,
+    catalog_entry_repo_url,
+    catalog_key_value,
     is_immutable_path,
     is_locked_path,
+    preserved_algolia_index_spans,
+    preserved_catalog_subdir_spans,
+    preserved_external_url_spans,
+    preserved_identifier_names,
     preserved_repo_url_spans,
+    preserved_url_link_label_spans,
+    token_only_inside,
 )
 
 # A word may begin with the upstream brand and then run on
@@ -74,12 +82,23 @@ def _is_camel_nous(word: str) -> bool:
     return word.lower() == "nous" and word[:1].islower() and any(c.isupper() for c in word[1:])
 
 
-def _allowed(path: str, word: str, line: str) -> bool:
+def _allowed(
+    path: str,
+    word: str,
+    line: str,
+    catalog_repo: str | None = None,
+    preserved_ids: tuple[str, ...] = (),
+) -> bool:
     """Path-scoped inherited fixtures the weekly gate deliberately permits.
 
     This mirrors :func:`hundredways.weekly_sync._allowed_brand_occurrence`
     exactly; ``tests/test_brandscan.py`` asserts the two never drift.  A hit is
     "allowed" (inherited) rather than a new first-party brand leak.
+
+    ``catalog_repo`` is the document's single top-level ``repo:`` URL when it has
+    exactly one; the catalog exemption is scoped by that fact rather than by
+    path, because the transform preserves a foreign ``subdir`` wherever the
+    document appears -- a docs page quoting a catalog entry included.
     """
     word = word.lower()
     if path.startswith("contributors/names/"):
@@ -88,6 +107,38 @@ def _allowed(path: str, word: str, line: str) -> bool:
     # inside one is inherited, not a first-party leak.  Matches the exemption
     # BrandingRules.transform_text applies when it preserves such a path.
     if any(word in match.group(0).lower() for match in preserved_repo_url_spans(line)):
+        return True
+    # An Algolia index the configured app really has is another object name we
+    # do not own: renaming it leaves the search box querying nothing.
+    if any(
+        word in match.group("value").lower() for match in preserved_algolia_index_spans(line)
+    ):
+        return True
+    # A whole URL on a host the fork does not run is the same object problem one
+    # level up: its path is their page, so the inherited word inside it is not a
+    # leak we can fix without breaking the link.
+    if any(word in match.group(0).lower() for match in preserved_external_url_spans(line)):
+        return True
+    # A markdown label that spells out the address of a preserved link is the
+    # same page, written twice: branding only the label prints an address that
+    # no longer resolves, next to the link that still does.
+    if any(
+        word in match.group("label").lower()
+        for match in preserved_url_link_label_spans(line)
+    ):
+        return True
+    # A preserved repository is kept wherever the file spells it, so a token
+    # inside its bare ``owner/repo`` form is inherited.  Mirrors
+    # weekly_sync._allowed_brand_occurrence.
+    if preserved_ids and token_only_inside(line, word, preserved_ids):
+        return True
+    # A catalog ``subdir`` is a directory inside the entry's repository.  When the
+    # inherited word is still there, the repository is not ours, so the name is
+    # theirs and renaming it would aim the installer at a path that 404s.
+    if catalog_repo is not None and any(
+        word in catalog_key_value(match).lower()
+        for match in preserved_catalog_subdir_spans(line)
+    ):
         return True
     lower = line.lower()
     if path == "package-lock.json" and word == "hermes":
@@ -188,6 +239,8 @@ def scan_brand(root: str, max_findings: int = 5000) -> BrandScan:
         lowered = text.lower()
         if "hermes" not in lowered and "nous" not in lowered:
             continue
+        catalog_repo = catalog_entry_repo_url(text)
+        preserved_ids = preserved_identifier_names(text)
         for number, line in enumerate(text.splitlines(), start=1):
             for match in STRONG_BRAND_RE.finditer(line):
                 word = match.group("brand")
@@ -201,7 +254,9 @@ def scan_brand(root: str, max_findings: int = 5000) -> BrandScan:
                         path=relative,
                         line=number,
                         kind="text",
-                        allowed=_allowed(relative, word, line),
+                        allowed=_allowed(
+                            relative, word, line, catalog_repo, preserved_ids
+                        ),
                         sample=line.strip()[:200],
                     )
                 )

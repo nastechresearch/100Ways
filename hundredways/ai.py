@@ -221,6 +221,54 @@ class AIEngine:
         except Exception as exc:
             return self._fallback_stage_review(stage, context) + f" [AI unavailable: {exc}]"
 
+    def edit_block(self, path: str, excerpt: str, instruction: str) -> str:
+        """Return a SEARCH/REPLACE block, or "" when the model cannot supply one.
+
+        Silence is the right failure here.  The caller only accepts a block whose
+        search text matches the file exactly once, so a guessed edit would be
+        refused anyway -- and refusing quietly keeps the chat honest about it.
+        """
+        if not self.available:
+            return ""
+        system = (
+            "You edit one Python module in a fork-sync engine. Reply with exactly one "
+            "block and no prose, in this shape:\n<<<<<<<\n"
+            "<lines copied verbatim from the file, appearing exactly once>\n-------\n"
+            "<the lines you want instead>\n>>>>>>>\n"
+            "Never rename a public symbol, never delete a check, never raise a budget "
+            "or a cap, and never touch a secret."
+        )
+        try:
+            return self._chat(
+                system,
+                f"File {path} (excerpt):\n{excerpt}\n\nRequested change: {instruction}",
+                model=self.model_for_stage("reconcile"),
+            )
+        except Exception:
+            return ""
+
+    def narrative(self, context: str) -> str:
+        """One short prose paragraph to sit beside a verified summary.
+
+        Returns "" rather than a fallback string: an unreachable model must
+        leave the narrative deterministic, not put error text in front of a
+        reviewer.
+        """
+        if not self.available:
+            return ""
+        try:
+            return self._chat(
+                "You write one short paragraph of plain prose to accompany the "
+                "summary of a verified fork-sync update, using only the facts "
+                "given. Do not restate a count, a gate result, or an action that "
+                "was performed, and do not mention merging, tagging, releasing or "
+                "deploying. 2-3 sentences, no markdown.",
+                context,
+                model=self.model_for_stage("summary"),
+            )
+        except Exception:
+            return ""
+
     # -- deterministic fallbacks --------------------------------------------
 
     @staticmethod

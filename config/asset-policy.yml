@@ -1,0 +1,47 @@
+# Owned-asset policy for the identity art a Nastech release ships.
+#
+# Read by hundredways/policy.py -- block style, two-space steps, no flow
+# collections, anchors, tags, block scalars or sequences of mappings
+# (tests/test_policy.py proves this file parses to the same answer
+# yaml.safe_load gives).
+#
+# Why this file exists at all
+# --------------------------
+# config/owned-assets/manifest.json records what the registry claims *today*.
+# It cannot say what the registry *must* claim, so the two ways upstream art
+# sneaks into a release both go unseen: Hermes renames the directory our assets
+# land in (every claim under the old prefix quietly stops landing), or Hermes
+# adds a logo, icon or frame next to the one we already replace (their pixels
+# ship under our name).  A text rule protects words; only this list says which
+# classes of pixels are ours outright.
+#
+# What each key means, because `100ways assets` only ever claims what it says:
+#
+#   must_own   fork-relative directory prefixes, each with its trailing slash.
+#              Under one of these, a file whose name the brand classifier reads
+#              as identity art (logo, banner, mascot, icon, frame, sprite, pet,
+#              favicon, app-icon) must appear as a manifest target.  A prefix
+#              the registry claims nothing under is a finding, not a pass.
+#
+# Every entry is measured against whatever the run was handed, and says out loud
+# what it could not look at:
+#   * the manifest alone -- does the registry claim anything here at all?  Needs
+#     no checkout, which is why CI can run it on the engine itself.
+#   * a candidate tree -- is any art file in the class unclaimed, and does the
+#     class still hold any file?  Without a tree both are reported as not
+#     measured, never as clean.
+#   * an upstream tree -- do the unclaimed bytes belong to Hermes?  A path some
+#     upstream file brands into is their art in our name and blocks the release;
+#     one upstream never had is a file the fork authored, and the orphan pass
+#     (hundredways/adapters.py find_orphans) already asks who owns it.
+
+version: 1
+
+must_own:
+  - apps/bootstrap-installer/public/
+  - apps/desktop/packaging/
+  - apps/desktop/public/
+  - apps/desktop/src/components/pet/
+  - assets/
+  - plugins/nastech-achievements/docs/assets/
+  - website/static/img/

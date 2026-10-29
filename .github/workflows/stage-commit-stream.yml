@@ -148,6 +148,20 @@ jobs:
               json.dump(context, fh)
           PY
 
+      # A window job cannot afford to re-derive this: upstream's history is about
+      # 1.3 GB and stage-telegram-window.yml may run up to eight hops per chain.
+      # Publishing both files into the cached directory is what lets a window
+      # answer from the numbers this run just reported.
+      - name: Publish decision and context for Telegram windows
+        if: ${{ inputs.notify }}
+        env:
+          DECISION: ${{ runner.temp }}/commit-stream.json
+          CONTEXT: ${{ runner.temp }}/telegram-context.json
+        run: |
+          set -euo pipefail
+          cp "$DECISION" telegram-state/decision.json
+          cp "$CONTEXT" telegram-state/telegram-context.json
+
       - name: Send Telegram commit-stream status
         if: ${{ inputs.notify }}
         env:
@@ -170,15 +184,35 @@ jobs:
           fi
           python3 - <<'PY'
           import json, os
+          from pathlib import Path
           from hundredways.commit_stream import CommitStreamDecision, format_telegram_status
+          from hundredways.operation_safety import notification_fingerprint, should_send_notification
           from hundredways.telegram_agent import reply_keyboard, send_message
           with open(os.environ["DECISION"], encoding="utf-8") as handle:
-              decision = CommitStreamDecision(**json.load(handle))
+              payload = json.load(handle)
+          decision = CommitStreamDecision(**payload)
+          marker = Path("telegram-state/last-status.json")
+          previous = ""
+          if marker.is_file():
+              try:
+                  previous = str(json.loads(marker.read_text(encoding="utf-8")).get("fingerprint", ""))
+              except (OSError, ValueError):
+                  previous = ""
+          if not should_send_notification(previous_fingerprint=previous, payload=payload):
+              # Nothing the chat cares about moved since the last delivery: same
+              # status, same pending count, same refs, same gate.
+              print("Status unchanged since the last delivery; not repeating it.")
+              raise SystemExit(0)
           send_message(
               os.environ["TELEGRAM_BOT_TOKEN"],
               os.environ["TELEGRAM_CHAT_ID"],
               format_telegram_status(decision),
               keyboard=True,
+          )
+          marker.parent.mkdir(parents=True, exist_ok=True)
+          marker.write_text(
+              json.dumps({"fingerprint": notification_fingerprint(payload)}) + "\n",
+              encoding="utf-8",
           )
           PY
 

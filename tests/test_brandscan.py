@@ -63,6 +63,15 @@ def test_allow_list_mirrors_the_weekly_gate(tmp_path):
         ("reports/SYNC-SUMMARY.md", "nous", "> powered by nousresearch"),
         ("reports/SYNC-SUMMARY.md", "nous", "> Powered by Nastech"),
         ("README.md", "hermes", "hermes_cli"),
+        ("website/docusaurus.config.ts", "hermes", "      indexName: 'hermes docs',"),
+        ("README.md", "hermes", "the hermes docs index is searchable"),
+        ("plugin-catalog/bot-cabinet-v2.yaml", "hermes", "https://botcabinet.com/hermes/"),
+        (
+            "website/docs/user-guide/features/memory-providers.md",
+            "hermes",
+            "https://docs.honcho.dev/v3/guides/integrations/hermes"
+            "#running-honcho-locally-with-hermes",
+        ),
     ]
     for path, word, line in cases:
         assert _allowed(path, word, line) == _allowed_brand_occurrence(word, line, path)

@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from hundredways.conformance import verify_final_candidate
+from hundredways.integrity import tree_digest
 from hundredways.rules import BrandingRules
 from hundredways.updates import UpdateManager, brand_tree
 
@@ -192,3 +193,54 @@ def test_final_conformance_replays_fork_preservation_and_post_preserve_reconcile
     ]
     assert catalog_rel in with_fork.reconciled_paths
     assert page_rel in with_fork.reconciled_paths
+
+
+def test_final_candidate_reports_every_issue_kind_in_sequence(tmp_path):
+    source = _tree(
+        tmp_path / "source",
+        {
+            "README.md": "# Hermes Agent\n",
+            "hermes_cli/main.py": "def use_hermes():\n    return 'Nous Research'\n",
+        },
+    )
+    candidate = tmp_path / "candidate"
+    brand_tree(str(source), str(candidate), BrandingRules())
+    (candidate / "nastech_cli" / "main.py").write_text("unsafe post-brand edit\n", encoding="utf-8")
+    (candidate / "zeta.md").write_text("extra\n", encoding="utf-8")
+    (candidate / "alpha.md").write_text("extra\n", encoding="utf-8")
+    unsafe = candidate / "unsafe.txt"
+    unsafe.write_text("unsafe\n", encoding="utf-8")
+    unsafe.chmod(0o666)
+
+    report = verify_final_candidate(source, candidate)
+
+    assert [(issue.code, issue.path) for issue in report.issues] == [
+        ("source-parity", "nastech_cli/main.py"),
+        ("unexpected-candidate-path", "alpha.md"),
+        ("unexpected-candidate-path", "unsafe.txt"),
+        ("unexpected-candidate-path", "zeta.md"),
+        ("candidate-world-writable", "unsafe.txt"),
+    ]
+    assert (report.source_files, report.verified_files) == (2, 1)
+    assert report.candidate_digest == tree_digest(candidate)
+
+
+def test_final_candidate_path_checks_are_not_pruned_like_the_brand_audits(tmp_path):
+    """A candidate ``.git`` is a finding, so conformance must see every path."""
+    source = _tree(tmp_path / "source", {"README.md": "# Hermes Agent\n"})
+    candidate = tmp_path / "candidate"
+    brand_tree(str(source), str(candidate), BrandingRules())
+    metadata = candidate / ".git"
+    metadata.mkdir()
+    (metadata / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+    report = verify_final_candidate(source, candidate)
+
+    assert [(issue.code, issue.path) for issue in report.issues] == [
+        ("unexpected-candidate-path", ".git/HEAD"),
+        ("candidate-candidate-git-metadata", ".git"),
+        ("candidate-candidate-git-metadata", ".git/HEAD"),
+    ]
+    assert report.candidate_digest == tree_digest(candidate)
+    assert report.candidate_digest
+
