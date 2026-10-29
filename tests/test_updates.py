@@ -8376,3 +8376,37 @@ def test_a_set_element_branding_collapsed_keeps_one_copy(tmp_path):
     assert written.count('"NASTECH_PORTAL_BASE_URL"') == 1
     compile(written, "credentials.py", "exec")
     assert _reconcile_collapsed_set_elements(str(tmp_path)) == []
+
+
+def test_the_bundle_audit_ignores_sounddevice_vendored_dlls(tmp_path):
+    """A mac or linux payload can never load a PE shipped as package data.
+
+    Measured 2026-10-28 (run 40697271031, step "Audit bundle architecture"):
+    four Windows portaudio DLLs from ``_sounddevice_data`` failed the shared
+    ``bundled`` audit on darwin-arm64 and win32-arm64.  The audit already lists
+    this class for ``discord/bin/libopus-*.dll`` and ``pvporcupine/lib/``; the
+    engine adds the sounddevice entry where the fork would otherwise re-publish
+    the red every sync.
+    """
+    from hundredways.updates import ArchAuditAnchorError, _reconcile_arch_audit_exemptions
+
+    scripts = tmp_path / "apps" / "desktop" / "scripts"
+    scripts.mkdir(parents=True)
+    audit = scripts / "audit-bundle-arch.mjs"
+    audit.write_text("const EXEMPT_PATTERNS = [\n]\n", encoding="utf-8")
+
+    assert _reconcile_arch_audit_exemptions(str(tmp_path)) is True
+    written = audit.read_text(encoding="utf-8")
+    assert "_sounddevice_data" in written
+    assert written.index("const EXEMPT_PATTERNS = [") < written.index("_sounddevice_data")
+    # idempotent: the marker is the entry itself
+    assert _reconcile_arch_audit_exemptions(str(tmp_path)) is False
+
+    # a moved anchor fails loudly rather than re-publishing the red
+    audit.write_text("const PATTERNS = [\n]\n", encoding="utf-8")
+    try:
+        _reconcile_arch_audit_exemptions(str(tmp_path))
+    except ArchAuditAnchorError as exc:
+        assert "audit-bundle-arch.mjs" in str(exc)
+    else:
+        raise AssertionError("a moved anchor must raise")

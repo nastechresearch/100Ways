@@ -5584,6 +5584,57 @@ def _reconcile_plugin_catalog_admission(dst: str) -> bool:
 # Branding can collapse two upstream identifiers into one.
 # ---------------------------------------------------------------------------
 
+def _reconcile_arch_audit_exemptions(dst: str) -> bool:
+    """Let the bundle audit ignore sounddevice's vendored Windows portaudio DLLs.
+
+    ``_sounddevice_data`` ships 32- and 64-bit *Windows* portaudio DLLs inside
+    every wheel, whatever platform it was built for.  A macOS or Linux payload
+    can never load a PE, so they are inert bytes -- the same class the file's
+    own ``EXEMPT_PATTERNS`` already lists for ``discord/bin/libopus-*.dll`` and
+    ``pvporcupine/lib/``.  Without the entry the shared ``bundled`` audit fails
+    on both darwin and win32 targets:
+
+    measured 2026-10-28, run 40697271031, step ``Audit bundle architecture``:
+    ``4 binaries do not match --arch=arm64`` -- ``libportaudio32bit-asio.dll``,
+    ``libportaudio32bit.dll``, ``libportaudio64bit-asio.dll``,
+    ``libportaudio64bit.dll``.
+
+    Idempotent by the marker; a moved anchor raises
+    :class:`ArchAuditAnchorError` so a sync fails loudly instead of silently
+    re-publishing the red.
+    """
+    rel = "apps/desktop/scripts/audit-bundle-arch.mjs"
+    text = _reconcile_budget_read(dst, rel)
+    if text is None:
+        return False
+    if "_sounddevice_data" in text:
+        return False
+    anchor = "const EXEMPT_PATTERNS = [\n"
+    if anchor not in text:
+        raise ArchAuditAnchorError(
+            f"{rel}: the 'const EXEMPT_PATTERNS = [' anchor is absent, so the "
+            "sounddevice exemption cannot be applied; read upstream's list and "
+            "retarget _reconcile_arch_audit_exemptions -- skipping silently "
+            "re-publishes run 40697271031's '4 binaries do not match'"
+        )
+    entry = (
+        "  // sounddevice ships 32- and 64-bit WINDOWS portaudio DLLs in every\n"
+        "  // wheel's _sounddevice_data; a mac or linux payload can never load a\n"
+        "  // PE, so they are inert bytes, not a wrong-arch payload.\n"
+        "  /agent-payload[/\\\\]venv[/\\\\](Lib|lib[/\\\\]python[\\d.]+)"
+        "[/\\\\]site-packages[/\\\\]_sounddevice_data[/\\\\]/i,\n"
+    )
+    updated = text.replace(anchor, anchor + entry, 1)
+    if updated == text:
+        return False
+    _reconcile_budget_write(dst, rel, updated)
+    return True
+
+
+class ArchAuditAnchorError(ValueError):
+    """The bundle-architecture audit no longer has the list this rule edits."""
+
+
 def _reconcile_collapsed_set_elements(dst: str) -> list[str]:
     """Drop a set element that branding made identical to an earlier one.
 
@@ -6937,6 +6988,9 @@ def reconcile_tree(dst: str) -> ReconcileResult:
     if _reconcile_brand_import_ordering(dst):
         result.total += 1
         result.fixed.append("eslint.config.shared.mjs")
+    if _reconcile_arch_audit_exemptions(dst):
+        result.total += 1
+        result.fixed.append("apps/desktop/scripts/audit-bundle-arch.mjs")
     for rel in _reconcile_collapsed_set_elements(dst):
         result.total += 1
         result.fixed.append(rel)
