@@ -578,6 +578,51 @@ def catalog_entry_repo_url(text: str) -> str | None:
     return catalog_key_value(matches[0])
 
 
+def preserved_identifier_names(
+    text: str, rules: "BrandingRules | None" = None
+) -> tuple[str, ...]:
+    """Repository identifiers this text keeps verbatim, as ``owner/repo``.
+
+    The transform preserves such a repository wherever the file spells it --
+    its URL, and the same ``owner/repo`` written bare in a comment, a label or a
+    sentence (see :meth:`BrandingRules.transform_text`).  The line-scoped brand
+    audits cannot repeat the file-level test, so the caller passes this set and
+    they exempt a token only while every occurrence of it on the line sits
+    inside one of these names.
+    """
+    rules = rules if rules is not None else BrandingRules()
+    return tuple(
+        sorted(
+            {
+                f"{match.group('owner')}/{match.group('repo')}"
+                for match in GITHUB_REPO_RE.finditer(text)
+                if rules.preserves_repo_path(match.group(0))
+            }
+        )
+    )
+
+
+def token_only_inside(line: str, token: str, names: tuple[str, ...]) -> bool:
+    """True when every ``token`` on ``line`` sits inside one of ``names``."""
+    lowered, needle = line.lower(), token.lower()
+    spans: list[tuple[int, int]] = []
+    for name in names:
+        start = lowered.find(name.lower())
+        while start != -1:
+            spans.append((start, start + len(name)))
+            start = lowered.find(name.lower(), start + 1)
+    if not spans:
+        return False
+    position = lowered.find(needle)
+    if position == -1:
+        return False
+    while position != -1:
+        if not any(lo <= position and position + len(needle) <= hi for lo, hi in spans):
+            return False
+        position = lowered.find(needle, position + 1)
+    return True
+
+
 def preserved_catalog_subdir_spans(line: str) -> tuple[re.Match, ...]:
     """The ``subdir`` key on a catalog line whose value the brand must not carry.
 

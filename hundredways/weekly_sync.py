@@ -27,7 +27,9 @@ from .rules import (
     preserved_algolia_index_spans,
     preserved_catalog_subdir_spans,
     preserved_external_url_spans,
+    preserved_identifier_names,
     preserved_repo_url_spans,
+    token_only_inside,
 )
 from .skill_policy import SkillPolicyIssue, audit_skill_firewall
 from .tree_index import FileIndex
@@ -303,7 +305,11 @@ def audit_visual_assets(branded_root: str, upstream_root: str) -> list[VisualIss
 
 
 def _allowed_brand_occurrence(
-    token: str, line: str, path: str, catalog_repo: str | None = None
+    token: str,
+    line: str,
+    path: str,
+    catalog_repo: str | None = None,
+    preserved_ids: tuple[str, ...] = (),
 ) -> bool:
     """Return True only for the user's explicit, path-scoped exceptions."""
     lower = line.lower()
@@ -327,6 +333,12 @@ def _allowed_brand_occurrence(
     if any(
         token.lower() in match.group(0).lower() for match in preserved_external_url_spans(line)
     ):
+        return True
+    # A repository the transform keeps is kept wherever the file spells it,
+    # including a bare ``owner/repo`` in a comment or a sentence.  ``preserved_ids``
+    # is that file's set, so a token is exempt only while every occurrence of it
+    # on the line sits inside one of them.
+    if preserved_ids and token_only_inside(line, token, preserved_ids):
         return True
     # A catalog ``subdir`` names a directory inside the entry's repository, so an
     # inherited word surviving in one means that repository is not ours.  Scoped
@@ -376,10 +388,13 @@ def audit_first_party_brand(
         if text is None:
             continue
         catalog_repo = catalog_entry_repo_url(text)
+        preserved_ids = preserved_identifier_names(text, rules)
         for number, line in enumerate(text.splitlines(), start=1):
             for match in pattern.finditer(line):
                 token = match.group(1).lower()
-                if not _allowed_brand_occurrence(token, line, rel, catalog_repo):
+                if not _allowed_brand_occurrence(
+                    token, line, rel, catalog_repo, preserved_ids
+                ):
                     issues.append(AuditIssue("first-party-brand", rel, f"line {number}: {line.strip()[:180]}"))
     return issues
 
