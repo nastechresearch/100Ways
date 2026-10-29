@@ -494,6 +494,13 @@ THIRD_PARTY_SERVICE_HOSTS: frozenset[str] = frozenset(
         "linchpin.studio",
         "mybot.farm",
         "pidgeon.ai",
+        # ``app.supermemory.ai/integrations?connect=hermes`` is Supermemory's
+        # connect deep-link for its own integration, and the guide documenting
+        # it is ``supermemory.ai/docs/integrations/hermes``: measured 2026-10-27,
+        # that page answers 200 while ``.../integrations/nastech`` answers 404.
+        # A subdomain is covered, because the host test matches a host sitting
+        # *under* a listed root.
+        "supermemory.ai",
     }
 )
 
@@ -576,6 +583,34 @@ def catalog_entry_repo_url(text: str) -> str | None:
     if len(matches) != 1:
         return None
     return catalog_key_value(matches[0])
+
+
+def _looks_like_url(text: str) -> bool:
+    """True for the scheme-less spelling of an address, as a link label uses it."""
+    head = text.split("/")[0]
+    if not head or "." not in head:
+        return False
+    return re.fullmatch(
+        r"[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?(:[0-9]+)?", head
+    ) is not None and re.search(r"\.[A-Za-z]{2,}$", head) is not None
+
+
+# ``[app.supermemory.ai/integrations?connect=hermes](https://app.supermemory.ai/...)``
+# shows the reader an address and links to it.  Branding only the href leaves a
+# link that works and an address printed beside it that does not exist.
+MARKDOWN_URL_LABEL_RE = re.compile(r"\[(?P<label>[^\][\n]+)\]\((?P<href>[^)\s]+)\)")
+
+
+def preserved_url_link_label_spans(
+    line: str, rules: "BrandingRules | None" = None
+) -> tuple[re.Match, ...]:
+    """Markdown labels that are the address of a URL branding leaves verbatim."""
+    rules = rules if rules is not None else BrandingRules()
+    return tuple(
+        match
+        for match in MARKDOWN_URL_LABEL_RE.finditer(line)
+        if rules.preserves_url_link_label(match.group("label"), match.group("href"))
+    )
 
 
 def preserved_identifier_names(
@@ -748,7 +783,24 @@ class BrandingRules:
             return False
         if _host_under(self.brand_service_name(host).lower(), roots):
             return False
-        return host.endswith(".github.io") or host in third_party_service_hosts()
+        return host.endswith(".github.io") or _host_under(
+            host, third_party_service_hosts()
+        )
+
+    def preserves_url_link_label(self, label: str, href: str) -> bool:
+        """True when a markdown label is the address its href points at.
+
+        Both halves have to agree before anything is protected: the label is a
+        bare URL, its host is the href's host, and that href is a URL branding
+        leaves verbatim.  Prose that merely mentions our wordmark beside a link
+        -- ``[upstream Hermes integration docs](...)`` -- is still ours to brand.
+        """
+        if not _looks_like_url(label) or not self.preserves_external_url(href):
+            return False
+        href_match = EXTERNAL_URL_RE.search(href)
+        return href_match is not None and label.split("/")[0].lower() == href_match.group(
+            "host"
+        ).lower()
 
     def preserves_catalog_subdir(self, repo_url: str, subdir: str) -> bool:
         """True when a catalog entry's ``subdir`` names a path we do not run.
@@ -840,6 +892,18 @@ class BrandingRules:
             spans.append(url)
             identifiers.append(None)
             return _mask(len(spans) - 1)
+
+        def _stash_label(match: re.Match) -> str:
+            label, href = match.group("label"), match.group("href")
+            if not self.preserves_url_link_label(label, href):
+                return match.group(0)
+            if self.brand_service_name(label) == label:
+                return match.group(0)
+            spans.append(label)
+            identifiers.append(None)
+            return f"[{_mask(len(spans) - 1)}]({href})"
+
+        working = MARKDOWN_URL_LABEL_RE.sub(_stash_label, working)
 
         working = EXTERNAL_URL_RE.sub(_stash_url, working)
 

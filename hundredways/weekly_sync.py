@@ -29,6 +29,7 @@ from .rules import (
     preserved_external_url_spans,
     preserved_identifier_names,
     preserved_repo_url_spans,
+    preserved_url_link_label_spans,
     token_only_inside,
 )
 from .skill_policy import SkillPolicyIssue, audit_skill_firewall
@@ -332,6 +333,13 @@ def _allowed_brand_occurrence(
     # Mirrors brandscan._allowed.
     if any(
         token.lower() in match.group(0).lower() for match in preserved_external_url_spans(line)
+    ):
+        return True
+    # A markdown label that spells out the address of a preserved link is that
+    # same page written twice.  Mirrors brandscan._allowed.
+    if any(
+        token.lower() in match.group("label").lower()
+        for match in preserved_url_link_label_spans(line)
     ):
         return True
     # A repository the transform keeps is kept wherever the file spells it,

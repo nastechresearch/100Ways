@@ -39,6 +39,7 @@ from .rules import (
     preserved_external_url_spans,
     preserved_identifier_names,
     preserved_repo_url_spans,
+    preserved_url_link_label_spans,
     token_only_inside,
 )
 
@@ -117,6 +118,14 @@ def _allowed(
     # level up: its path is their page, so the inherited word inside it is not a
     # leak we can fix without breaking the link.
     if any(word in match.group(0).lower() for match in preserved_external_url_spans(line)):
+        return True
+    # A markdown label that spells out the address of a preserved link is the
+    # same page, written twice: branding only the label prints an address that
+    # no longer resolves, next to the link that still does.
+    if any(
+        word in match.group("label").lower()
+        for match in preserved_url_link_label_spans(line)
+    ):
         return True
     # A preserved repository is kept wherever the file spells it, so a token
     # inside its bare ``owner/repo`` form is inherited.  Mirrors

@@ -214,7 +214,20 @@ jobs:
           allowlist |= url_preservation_drift
           allowlist |= service_preservation_drift
           allowlist |= external_url_preservation_drift
+          # Reviewed rule change: Supermemory's connect deep-link belongs to
+          # Supermemory.  ``app.supermemory.ai/integrations?connect=hermes`` is
+          # its own integration, and the page that documents it is
+          # ``supermemory.ai/docs/integrations/hermes`` -- probed 2026-10-27,
+          # 200 for that path and 404 for ``.../integrations/nastech``.  The
+          # host is listed (a subdomain is covered) and a markdown label that
+          # spells out a preserved link's address is kept with it, because
+          # branding half of the pair prints an address that does not resolve.
+          service_host_drift = {
+              "plugins/memory/supermemory/README.md",
+              "plugins/memory/supermemory/__init__.py",
+          }
           allowlist |= foreign_repository_drift
+          allowlist |= service_host_drift
           drifted = {f.mapped_path for f in report.failed}
           new_drift = drifted - allowlist
           # The allowlist above is the precise instrument: an unnamed drifted

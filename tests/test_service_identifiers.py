@@ -16,6 +16,7 @@ from hundredways.rules import (
     BrandingRules,
     preserved_algolia_index_spans,
     preserved_external_url_spans,
+    preserved_url_link_label_spans,
     provisioned_algolia_indices,
     transform_strict_metadata_text,
 )
@@ -214,6 +215,10 @@ MEASURED_EXTERNAL_LINES = [
     "https://linchpin.studio/school-of-hermes/manual/",
     "https://patrykkopycinski.github.io/hermes-plugin-agent-memory-es/",
     "https://briancaffey.github.io/hermes-otel/",
+    # A subdomain of a listed service root, and its own connect deep-link: the
+    # guide that documents it is ``supermemory.ai/docs/integrations/hermes``
+    # (200) while ``.../integrations/nastech`` is a 404 (probed 2026-10-27).
+    "https://app.supermemory.ai/integrations?connect=hermes",
 ]
 
 
@@ -288,3 +293,42 @@ def test_brand_tree_ships_the_third_party_links_a_human_clicks(tmp_path):
     assert "docs_url: https://docs.apify.com/integrations/hermes-agent\n" in shipped
     assert "name: Nastech Scraper" in shipped
     assert "The Nastech agent integration by Apify" in shipped
+
+
+def test_a_link_label_that_prints_the_address_it_links_to_keeps_both_halves():
+    """The label is the address written a second time, not prose about it."""
+    rules = BrandingRules()
+    text = (
+        "- Hosted: API key from "
+        "[app.supermemory.ai/integrations?connect=hermes]"
+        "(http://app.supermemory.ai/integrations?connect=hermes)\n"
+    )
+
+    assert rules.transform_text(text) == text
+    assert preserved_url_link_label_spans(text.splitlines()[0])
+    assert rules.transform_text(rules.transform_text(text)) == text
+
+
+def test_prose_naming_us_beside_a_preserved_link_is_still_branded():
+    """Only an address-shaped label whose host matches its href is protected."""
+    rules = BrandingRules()
+
+    prose = "see [the Hermes integration](https://docs.honcho.dev/v3/guides/integrations/hermes)\n"
+    assert "the Nastech integration" in rules.transform_text(prose)
+
+    other_host = "[hermes docs](https://docs.honcho.dev/v3/guides/integrations/hermes)\n"
+    assert "[nastech docs]" in rules.transform_text(other_host)
+
+
+def test_the_label_exemption_is_the_same_in_both_brand_audits():
+    line = (
+        "[app.supermemory.ai/integrations?connect=hermes]"
+        "(http://app.supermemory.ai/integrations?connect=hermes)"
+    )
+    assert _allowed("plugins/memory/supermemory/README.md", "hermes", line) is True
+    assert _allowed_brand_occurrence(
+        "hermes", line, "plugins/memory/supermemory/README.md"
+    ) is True
+    # the same word in prose is still a leak
+    prose = "[the hermes integration](https://docs.honcho.dev/v3/x)"
+    assert _allowed("README.md", "hermes", prose) is False
