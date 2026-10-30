@@ -118,6 +118,29 @@ def test_updated_file_added_line_brand_violation_is_reported(tmp_path):
     assert not report.gate_passes()
 
 
+def test_added_line_keeps_a_bare_repo_pair_the_file_preserves(tmp_path):
+    """A preserved repository's second spelling is not an unbranded line.
+
+    ``url = ".../roqianjas/hermes-account-pool.git"`` beside
+    ``target_repository = "roqianjas/hermes-account-pool"`` must both stay
+    inherited, or the copy step compares a URL against a repository that does
+    not exist.  The brand stage keeps the pair verbatim, so an upstream update
+    that adds the bare half is not a brand violation -- judging the inserted
+    line on its own renames it and flags a snapshot that is already correct.
+    """
+    rules = BrandingRules()
+    url_line = 'url = "https://github.com/roqianjas/hermes-account-pool.git"\n'
+    bare_line = 'target_repository = "roqianjas/hermes-account-pool"\n'
+    upstream = _tree(tmp_path / "upstream", {"app.py": url_line})
+    fork = _tree(tmp_path / "fork", {"app.py": url_line})
+    branded = _tree(tmp_path / "branded", {"app.py": url_line + bare_line})
+    report = fork_consistency(str(fork), str(branded), str(upstream), rules)
+    entry = next(e for e in report.entries if e.path == "app.py")
+    assert entry.status == "updated"
+    assert entry.violations == []
+    assert report.gate_passes()
+
+
 def test_scan_brand_violations_sweeps_whole_tree(tmp_path):
     rules = BrandingRules()
     tree = _tree(tmp_path / "tree", {

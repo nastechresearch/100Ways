@@ -275,17 +275,30 @@ def _added_line_violations(fork_text: str, branded_text: str,
                            rel: str, rules: BrandingRules) -> list[ForkViolation]:
     """Diff fork version -> branded version; flag ADDED lines that still carry
     a brandable token.  Added lines are the upstream update -- they must be
-    branded.  ``branded_text`` line numbers are reported (1-based)."""
+    branded.  ``branded_text`` line numbers are reported (1-based).
+
+    The decision reads the whole branded text transformed once, the same way
+    the brand stage (and the brand audit's fixed-point check) reads the file:
+    a preserved foreign reference only resolves with the file in view, so
+    judging the inserted line alone would flag content branding deliberately
+    kept verbatim.  A per-line transform remains the fallback when the whole
+    transform does not preserve line boundaries."""
     fork_lines = fork_text.splitlines()
     branded_lines = branded_text.splitlines()
     sm = difflib.SequenceMatcher(None, fork_lines, branded_lines)
+    transformed = rules.transform_text(branded_text).splitlines()
+    whole_file = len(transformed) == len(branded_lines)
     hits: list[ForkViolation] = []
     for op in sm.get_opcodes():
         if op[0] != "insert":
             continue
         for k in range(op[3], op[4]):
             line = branded_lines[k] if k < len(branded_lines) else ""
-            if rules.transform_text(line) != line:
+            if whole_file and k < len(transformed):
+                out = transformed[k]
+            else:
+                out = rules.transform_text(line)
+            if line != out:
                 hits.append(ForkViolation(path=rel, line=k + 1, snippet=line[:200]))
     return hits
 
