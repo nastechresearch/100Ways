@@ -173,7 +173,11 @@ def verify_final_candidate(
         try:
             brand_tree(str(source_path), str(expected), rules, owned)
             apply_owned_assets(str(expected), owned)
-            reconciled = reconcile_tree(str(expected))
+            reconciled = reconcile_tree(
+                str(expected),
+                fork_root=str(fork_root_path) if fork_root_path else None,
+                rules=rules,
+            )
             preserved = _replay_fork_preservation(
                 str(expected),
                 str(source_path),

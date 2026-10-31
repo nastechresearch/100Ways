@@ -195,6 +195,60 @@ def test_final_conformance_replays_fork_preservation_and_post_preserve_reconcile
     assert page_rel in with_fork.reconciled_paths
 
 
+def test_final_conformance_reapplies_the_fork_release_publication_layer(tmp_path):
+    """A fork-first layer in a shared module is rebuilt, never trusted.
+
+    ``reconcile_tree`` reads that layer from the fork checkout, so the
+    conformance rebuild has to pass the fork root too.  Without it the expected
+    tree holds upstream's module while the candidate holds the fork's, and the
+    file reads as a source-parity mismatch on every sync.
+    """
+    rel = "scripts/releases/channel_releases.py"
+    source = _git_repo(
+        tmp_path / "source",
+        {
+            rel: (
+                "import os\n\n\n"
+                "def publish_release(policy, env, root):\n"
+                '    if policy == "canary-release":\n'
+                '        stable.output(["gh", "release", "edit", env["TAG"], "--draft=false"])\n'
+                "    def release_gate(request):\n"
+                "        return True\n"
+            ),
+        },
+    )
+    fork = _tree(
+        tmp_path / "fork",
+        {
+            rel: (
+                "def verify_canary_outputs():\n"
+                "    return None\n\n\n"
+                '# Assets the release carries.\n'
+                '_ASSET_SUFFIXES = (".zip",)\n\n\n'
+                "def release_assets(root):\n"
+                "    return []\n\n\n"
+                "def publish_release(policy, env, root):\n"
+                '    if policy == "canary-release":\n'
+                '        upload_assets(env["TAG"], env["REPO"], root)\n'
+                "    def release_gate(request):\n"
+                "        return True\n"
+            ),
+        },
+    )
+    updates_dir = tmp_path / "Updates-Commits"
+    res = UpdateManager(str(updates_dir), hermes_url=str(source), fork_root=str(fork)).run()
+    assert res.gate, [s for s in res.stages if s.status == "fail"]
+    candidate = Path(res.dir)
+    assert "_ASSET_SUFFIXES" in (candidate / rel).read_text(encoding="utf-8")
+
+    report = verify_final_candidate(source, candidate, fork_root=str(fork))
+
+    assert report.passed, [
+        f"{issue.code} {issue.path}: {issue.detail}" for issue in report.issues
+    ]
+    assert rel in report.reconciled_paths
+
+
 def test_final_candidate_reports_every_issue_kind_in_sequence(tmp_path):
     source = _tree(
         tmp_path / "source",
