@@ -2632,6 +2632,151 @@ def _reconcile_fork_release_publication(
     return changed
 
 
+_FORK_CANARY_TEST_FILE = "tests/ci/test_protected_canary_publication.py"
+
+# The fork's additions to that shared test, located by the lines that bracket
+# each one.  They are read from the fork checkout rather than copied here, so
+# the engine cannot drift from the test the fork actually runs.  ``(start, end)``
+# is the first and last line of the span, both included.
+_CANARY_TEST_SPANS = {
+    "assets_dir": (
+        '    assets = tmp_path / "release-assets"\n',
+        '    assets.mkdir()\n',
+    ),
+    "gh_assets": (
+        '        "assets=Path(os.environ[\'FIXTURE_ASSETS\'])\\n"\n',
+        '        "assets=Path(os.environ[\'FIXTURE_ASSETS\'])\\n"\n',
+    ),
+    "gh_list": (
+        "        # prune_canaries lists prereleases before deleting the ones past the keep window.",
+        '        "elif args[:2]==[\'release\',\'list\']: print(\'[]\')\\n"\n',
+    ),
+    "gh_upload": (
+        "        # The release is the distribution point: attachments are recorded so the",
+        '        "elif args[:2]==[\'release\',\'delete\']: pass\\n"\n',
+    ),
+    "assertions": (
+        "    # Publishing attaches the release's assets:",
+        '    assert any(name.endswith(".blockmap") for name in attached)\n',
+    ),
+}
+
+
+def _fork_canary_test_spans(fork_root: str) -> dict[str, str] | None:
+    """Read the fork's canary-test additions out of its own file."""
+    path = os.path.join(fork_root, _FORK_CANARY_TEST_FILE)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines(keepends=True)
+    except OSError:
+        return None
+    spans: dict[str, str] = {}
+    for name, (start_marker, end_marker) in _CANARY_TEST_SPANS.items():
+        for index, line in enumerate(lines):
+            if line.startswith(start_marker):
+                for stop in range(index, len(lines)):
+                    if lines[stop].startswith(end_marker):
+                        spans[name] = "".join(lines[index:stop + 1])
+                        break
+                break
+    # The env entry is the fork's first line plus its continuation; the
+    # candidate still carries upstream's single long line.
+    for index, line in enumerate(lines):
+        if '"FIXTURE_RELEASE": str(release_state), "FIXTURE_ASSETS"' in line:
+            spans["env_entry"] = "".join(lines[index:index + 2])
+            break
+    if len(spans) != len(_CANARY_TEST_SPANS) + 1:
+        return None
+    return spans
+
+
+def _reconcile_fork_release_test(dst: str, fork_root: str | None = None) -> bool:
+    """Carry the fork's additions to the canary publication test.
+
+    The fork's channel module attaches a canary's assets before flipping the
+    draft, and the fork's copy of this shared test teaches its ``gh`` fixture
+    the extra calls (list, upload, delete) and asserts what was attached.  The
+    candidate takes upstream's test, so the fork's publication path would be
+    exercised against a fixture that rejects it -- the canary test failed on
+    exactly that once the module layer was re-applied.
+
+    Each addition is inserted at its own anchor and only when missing, so
+    upstream's lines are never removed: a sync can add to this test but never
+    subtract from it.  A missing anchor fails the pipeline instead of shipping
+    the fork's module with a test that cannot pass.
+    """
+    if not fork_root:
+        return False
+    spans = _fork_canary_test_spans(fork_root)
+    if spans is None:
+        return False
+    target = os.path.join(dst, _FORK_CANARY_TEST_FILE)
+    try:
+        with open(target, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return False
+    changed = False
+
+    def _insert_before(block: str, anchor: str, where: str) -> None:
+        nonlocal text, changed
+        if block in text:
+            return
+        if text.count(anchor) != 1:
+            raise RuntimeError(
+                f"{_FORK_CANARY_TEST_FILE}: cannot place the fork {where} span"
+            )
+        text = text.replace(anchor, block + anchor, 1)
+        changed = True
+
+    _insert_before(
+        spans["assets_dir"],
+        '    release_state = tmp_path / "github-release.json"\n',
+        "asset-recorder",
+    )
+    _insert_before(
+        spans["gh_assets"],
+        '        "if args[:1]==[\'api\']: print(\'main\')\\n"\n',
+        "fixture-assets",
+    )
+    _insert_before(
+        spans["gh_list"],
+        '        "elif args[:2]==[\'release\',\'edit\']:\\n"\n',
+        "release-list",
+    )
+    _insert_before(
+        spans["gh_upload"],
+        '        "else: raise SystemExit(\'unexpected gh call: \'+repr(args))\\n"\n',
+        "release-upload",
+    )
+    if spans["env_entry"] not in text:
+        marker = '           "FIXTURE_RELEASE": str(release_state),'
+        lines = text.splitlines(keepends=True)
+        matches = [
+            index
+            for index, line in enumerate(lines)
+            if line.startswith(marker) and '"FIXTURE_ASSETS"' not in line
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"{_FORK_CANARY_TEST_FILE}: cannot place the fork asset-dir env span"
+            )
+        lines[matches[0]:matches[0] + 1] = [spans["env_entry"]]
+        text = "".join(lines)
+        changed = True
+    _insert_before(
+        spans["assertions"],
+        '    resolved = ChannelReader(env["CLOUDFLARE_R2_PUBLIC_URL"], '
+        'repository=env["GITHUB_REPOSITORY"]).resolve("canary")\n',
+        "attached-assets",
+    )
+    if not changed:
+        return False
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    return True
+
+
 def _reconcile_apt_pool_first_char(dst: str) -> bool:
     """Fix hardcoded pool first-char dirs left stale by deb-name branding.
 
@@ -7008,6 +7153,12 @@ def reconcile_tree(
     if _reconcile_fork_release_publication(dst, fork_root, rules):
         result.total += 1
         result.fixed.append(_FORK_PUBLICATION_FILE)
+    # The test that exercises that layer is fork-modified in a shared path too;
+    # carrying the module without its test leaves the fork's canary path
+    # running against upstream's older fixture.
+    if _reconcile_fork_release_test(dst, fork_root):
+        result.total += 1
+        result.fixed.append(_FORK_CANARY_TEST_FILE)
     # Signing-gated release lanes: the fork-local policy the token rules cannot
     # express, so it is re-derived here after every brand and cannot be
     # clobbered by a fresh upstream sync. The paths are recorded so

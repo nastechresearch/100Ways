@@ -4273,6 +4273,152 @@ def test_a_fork_without_the_publication_layer_is_left_alone(tmp_path):
     assert (candidate / rel).read_text(encoding="utf-8") == body
 
 
+def test_fork_canary_test_additions_are_carried_with_the_publication_layer(tmp_path):
+    """The test for the fork's publication layer travels with the module.
+
+    The fork teaches this shared test's ``gh`` fixture the release calls its
+    module makes and asserts the assets were attached.  Carrying the module
+    without the test leaves that path running against upstream's older fixture,
+    which rejects the upload (the canary test failed on exactly that).
+
+    Each addition is read from the fork and inserted at its own anchor, so
+    upstream's lines are never removed.
+    """
+    rel = "tests/ci/test_protected_canary_publication.py"
+    candidate = tmp_path / "candidate" / rel
+    fork = tmp_path / "fork" / rel
+    candidate.parent.mkdir(parents=True)
+    fork.parent.mkdir(parents=True)
+    candidate.write_text(
+        "def test_publish(tmp_path):\n"
+        "    tools = tmp_path / \"tools\"\n"
+        "    tools.mkdir()\n"
+        "    release_state = tmp_path / \"github-release.json\"\n"
+        "    release_state.write_text(\"{}\")\n"
+        "    gh = tools / \"gh\"\n"
+        "    gh.write_text(\n"
+        "        \"import json,os,sys\\n\"\n"
+        "        \"args=sys.argv[1:]\\nstate=Path(os.environ['FIXTURE_RELEASE'])\\n\"\n"
+        "        \"if args[:1]==['api']: print('main')\\n\"\n"
+        "        \"elif args[:2]==['release','view']: print(state.read_text())\\n\"\n"
+        "        \"elif args[:2]==['release','edit']:\\n\"\n"
+        "        \" data=json.loads(state.read_text());data['isDraft']=False;state.write_text(json.dumps(data))\\n\"\n"
+        "        \"else: raise SystemExit('unexpected gh call: '+repr(args))\\n\"\n"
+        "    )\n"
+        "    env = {**os.environ,\n"
+        "           \"FIXTURE_RELEASE\": str(release_state), \"FIXTURE_WINDOWS_VERSION\": windows_version, \"GITHUB_ACTIONS\": \"true\",\n"
+        "           }\n"
+        "    # upstream-only coverage the fork has not caught up with\n"
+        "    assert env[\"GITHUB_ACTIONS\"] == \"true\"\n"
+        "    resolved = ChannelReader(env[\"CLOUDFLARE_R2_PUBLIC_URL\"], repository=env[\"GITHUB_REPOSITORY\"]).resolve(\"canary\")\n",
+        encoding="utf-8",
+    )
+    fork.write_text(
+        "def test_publish(tmp_path):\n"
+        "    tools = tmp_path / \"tools\"\n"
+        "    tools.mkdir()\n"
+        "    assets = tmp_path / \"release-assets\"\n"
+        "    assets.mkdir()\n"
+        "    release_state = tmp_path / \"github-release.json\"\n"
+        "    release_state.write_text(\"{}\")\n"
+        "    gh = tools / \"gh\"\n"
+        "    gh.write_text(\n"
+        "        \"import json,os,sys\\n\"\n"
+        "        \"args=sys.argv[1:]\\nstate=Path(os.environ['FIXTURE_RELEASE'])\\n\"\n"
+        "        \"assets=Path(os.environ['FIXTURE_ASSETS'])\\n\"\n"
+        "        \"if args[:1]==['api']: print('main')\\n\"\n"
+        "        \"elif args[:2]==['release','view']: print(state.read_text())\\n\"\n"
+        "        # prune_canaries lists prereleases before deleting the ones past the keep window.\n"
+        "        \"elif args[:2]==['release','list']: print('[]')\\n\"\n"
+        "        \"elif args[:2]==['release','edit']:\\n\"\n"
+        "        \" data=json.loads(state.read_text());data['isDraft']=False;state.write_text(json.dumps(data))\\n\"\n"
+        "        # The release is the distribution point: attachments are recorded so the\n"
+        "        # test can assert what a client and the updater would actually find.\n"
+        "        \"elif args[:2]==['release','upload']:\\n\"\n"
+        "        \" for path in [a for a in args[2:] if os.path.isabs(a)]:\\n\"\n"
+        "        \"  (assets / Path(path).name).write_text(Path(path).name)\\n\"\n"
+        "        \"elif args[:2]==['release','delete-asset']:\\n\"\n"
+        "        \" (assets / args[3]).unlink(missing_ok=True)\\n\"\n"
+        "        \"elif args[:2]==['release','delete']: pass\\n\"\n"
+        "        \"else: raise SystemExit('unexpected gh call: '+repr(args))\\n\"\n"
+        "    )\n"
+        "    env = {**os.environ,\n"
+        "           \"FIXTURE_RELEASE\": str(release_state), \"FIXTURE_ASSETS\": str(assets),\n"
+        "           \"FIXTURE_WINDOWS_VERSION\": windows_version, \"GITHUB_ACTIONS\": \"true\",\n"
+        "           }\n"
+        "    # Publishing attaches the release's assets:\n"
+        "    attached = []\n"
+        "    assert any(name.endswith(\".dmg\") for name in attached)\n"
+        "    assert any(name.endswith(\".blockmap\") for name in attached)\n"
+        "    resolved = ChannelReader(env[\"CLOUDFLARE_R2_PUBLIC_URL\"], repository=env[\"GITHUB_REPOSITORY\"]).resolve(\"canary\")\n",
+        encoding="utf-8",
+    )
+
+    result = reconcile_tree(str(tmp_path / "candidate"), fork_root=str(tmp_path / "fork"))
+
+    assert rel in result.fixed
+    updated = candidate.read_text(encoding="utf-8")
+    # Every fork addition is present ...
+    assert 'assets = tmp_path / "release-assets"' in updated
+    assert "\"assets=Path(os.environ['FIXTURE_ASSETS'])\\n\"" in updated
+    assert "\"elif args[:2]==['release','list']: print('[]')\\n\"" in updated
+    assert "\"elif args[:2]==['release','upload']:\\n\"" in updated
+    assert '"FIXTURE_ASSETS": str(assets),' in updated
+    assert 'assert any(name.endswith(".blockmap") for name in attached)' in updated
+    # ... and upstream's own line survives untouched.
+    assert "upstream-only coverage" in updated
+    # Idempotent.
+    assert rel not in reconcile_tree(str(tmp_path / "candidate"), fork_root=str(tmp_path / "fork")).fixed
+
+
+def test_fork_canary_test_reconcile_fails_closed_when_an_anchor_is_gone(tmp_path):
+    """A candidate that no longer has the anchor must fail, not skip silently.
+
+    Shipping the fork's publication module with upstream's test is what made
+    the canary test fail in the first place, so a missing anchor is a hard
+    error instead of a quiet no-op.
+    """
+    rel = "tests/ci/test_protected_canary_publication.py"
+    candidate = tmp_path / "candidate" / rel
+    fork = tmp_path / "fork" / rel
+    candidate.parent.mkdir(parents=True)
+    fork.parent.mkdir(parents=True)
+    fork.write_text(
+        "    assets = tmp_path / \"release-assets\"\n"
+        "    assets.mkdir()\n"
+        "    release_state = tmp_path / \"github-release.json\"\n"
+        "    gh.write_text(\n"
+        "        \"assets=Path(os.environ['FIXTURE_ASSETS'])\\n\"\n"
+        "        \"if args[:1]==['api']: print('main')\\n\"\n"
+        "        # prune_canaries lists prereleases before deleting the ones past the keep window.\n"
+        "        \"elif args[:2]==['release','list']: print('[]')\\n\"\n"
+        "        \"elif args[:2]==['release','edit']:\\n\"\n"
+        "        # The release is the distribution point: attachments are recorded so the\n"
+        "        \"elif args[:2]==['release','delete']: pass\\n\"\n"
+        "        \"else: raise SystemExit('unexpected gh call: '+repr(args))\\n\"\n"
+        "    )\n"
+        "           \"FIXTURE_RELEASE\": str(release_state), \"FIXTURE_ASSETS\": str(assets),\n"
+        "           \"FIXTURE_WINDOWS_VERSION\": windows_version,\n"
+        "    # Publishing attaches the release's assets:\n"
+        "    assert any(name.endswith(\".blockmap\") for name in attached)\n",
+        encoding="utf-8",
+    )
+    # The candidate kept every anchor except the one the assertions hang from.
+    candidate.write_text(
+        "    release_state = tmp_path / \"github-release.json\"\n"
+        "    gh.write_text(\n"
+        "        \"if args[:1]==['api']: print('main')\\n\"\n"
+        "        \"elif args[:2]==['release','edit']:\\n\"\n"
+        "        \"else: raise SystemExit('unexpected gh call: '+repr(args))\\n\"\n"
+        "    )\n"
+        "           \"FIXTURE_RELEASE\": str(release_state), \"FIXTURE_WINDOWS_VERSION\": windows_version,\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="cannot place the fork attached-assets span"):
+        reconcile_tree(str(tmp_path / "candidate"), fork_root=str(tmp_path / "fork"))
+
+
 def test_reconcile_apt_pool_first_char_rewrites_stale_pool_dirs(tmp_path):
     """Branded deb names leave the test's hardcoded first-char pool dir stale.
 
