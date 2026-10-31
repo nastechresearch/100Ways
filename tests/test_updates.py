@@ -29,6 +29,7 @@ from hundredways.updates import (
     BrowseBudgetDdlError,
     BrowseBudgetFlockTestError,
     ChannelReaderUserAgentError,
+    CronProfileTimezoneOracleError,
     DocsSearchHydrationGateError,
     ForkLaneReleaseEditError,
     FreeRunnerParallelismError,
@@ -82,6 +83,7 @@ from hundredways.updates import (
     _reconcile_ci_runner_budgets,
     _reconcile_connector_test_guest_offline,
     _reconcile_credential_display_test,
+    _reconcile_cron_profile_timezone_fire_instant,
     _reconcile_desktop_export_order,
     _reconcile_desktop_notification_timer_teardown,
     _reconcile_desktop_path_fixtures,
@@ -2509,6 +2511,88 @@ def test_reconcile_preserves_fixed_width_credential_mask_assertion(tmp_path):
     assert 'assert "nastech-" in out' in updated
     assert 'assert "nastech-REA" in out' not in updated
     assert _reconcile_credential_display_test(str(candidate)) == 0
+
+
+_CRON_ORACLE_UPSTREAM = '''
+def test_foreign_process_tick_persists_owning_profile_offset(tmp_path, monkeypatch):
+    next_run = datetime.fromisoformat(job["next_run_at"])
+    expected_offset = datetime.now(ZoneInfo("America/New_York")).utcoffset()
+    assert next_run.utcoffset() == expected_offset, (
+        f"fires (offset delta) early (#97905)"
+    )
+    assert (next_run.hour, next_run.minute) == (14, 0)
+'''
+
+
+def _cron_oracle_candidate(tmp_path, body: str):
+    candidate = tmp_path / "candidate"
+    target = candidate / "tests" / "cron" / "test_cron_next_run_profile_timezone.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(body, encoding="utf-8")
+    return candidate, target
+
+
+def test_reconcile_cron_profile_timezone_oracle_reads_the_fire_instant(tmp_path):
+    candidate, target = _cron_oracle_candidate(tmp_path, _CRON_ORACLE_UPSTREAM)
+
+    assert _reconcile_cron_profile_timezone_fire_instant(str(candidate)) == 1
+    updated = target.read_text(encoding="utf-8")
+    assert "datetime.now(ZoneInfo" not in updated
+    fire_line = 'expected_offset = fire_wall.replace(tzinfo=ZoneInfo("America/New_York"))'
+    assert fire_line in updated
+    assert "#97905" in updated  # the repro it still guards
+    assert _reconcile_cron_profile_timezone_fire_instant(str(candidate)) == 0
+
+
+def test_reconcile_cron_profile_timezone_oracle_leaves_the_fork_wording_alone(tmp_path):
+    """#189 ships the same correction in its own words: the marker, not the line, decides."""
+    corrected = _CRON_ORACLE_UPSTREAM.replace(
+        '    expected_offset = datetime.now(ZoneInfo("America/New_York")).utcoffset()\n',
+        "    # The owning profile's offset at the FIRE instant, not at now.\n"
+        "    expected_offset = (\n"
+        "        next_run.replace(tzinfo=None).replace(tzinfo=EASTERN).utcoffset()\n"
+        "    )\n",
+    )
+    candidate, target = _cron_oracle_candidate(tmp_path, corrected)
+
+    assert _reconcile_cron_profile_timezone_fire_instant(str(candidate)) == 0
+    assert target.read_text(encoding="utf-8") == corrected
+
+
+def test_reconciled_cron_oracle_holds_across_the_fall_back(tmp_path):
+    """The replacement is the assertion the DST window needs, proven on both instants.
+
+    A ``0 14 * * *`` Eastern job created 2026-10-31 fires 2026-11-01T14:00-05:00:
+    correct, and upstream's now-based oracle calls it a foreign offset.  A tick
+    that really did persist the process's own ``+00:00`` must stay red, or the
+    rule would have traded a false failure for a false pass.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    def check(persisted: str) -> bool:
+        next_run = datetime.fromisoformat(persisted)
+        fire_wall = next_run.replace(tzinfo=None)
+        expected_offset = fire_wall.replace(tzinfo=ZoneInfo("America/New_York")).utcoffset()
+        return (next_run.utcoffset() == expected_offset
+                and (next_run.hour, next_run.minute) == (14, 0))
+
+    assert check("2026-11-01T14:00:00-05:00")  # correct across fall-back
+    assert check("2026-08-03T14:00:00-04:00")  # correct in summer
+    assert not check("2026-11-01T14:00:00+00:00")  # the #97905 foreign offset
+    assert not check("2026-11-01T09:00:00-05:00")  # right zone, wrong wall clock
+
+
+def test_reconcile_cron_profile_timezone_oracle_stops_when_the_shape_moves(tmp_path):
+    """A moved oracle must fail the sync: shipping the now-based form re-bricks merges."""
+    candidate, _ = _cron_oracle_candidate(
+        tmp_path, "def test_x():\n    expected_offset = something_else()\n"
+    )
+    with pytest.raises(CronProfileTimezoneOracleError) as excinfo:
+        _reconcile_cron_profile_timezone_fire_instant(str(candidate))
+    # ValueError on purpose: conformance reports it, reconcile marks the stage failed.
+    assert isinstance(excinfo.value, ValueError)
+    assert "test_cron_next_run_profile_timezone.py" in str(excinfo.value)
 
 
 def test_text_content_branded_binary_locked_untouched(tmp_path):
