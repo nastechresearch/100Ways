@@ -1186,6 +1186,91 @@ def _reconcile_credential_display_test(dst: str) -> int:
     return 1
 
 
+class CronProfileTimezoneOracleError(ValueError):
+    """The profile-timezone cron test no longer carries the oracle line to correct.
+
+    A ``ValueError`` on purpose: :mod:`hundredways.conformance` reports it as a
+    conformance issue instead of aborting the run, while the ``reconcile`` stage
+    still marks the update failed (``not any(s.status == "fail" ...)``).  That
+    oracle is the only assertion which fails a build that persists a job with a
+    UTC offset its own profile does not use -- the #97905 class, a job that then
+    fires early by the offset delta -- so a moved shape must stop the sync
+    instead of publishing a test that cannot detect it.
+    """
+
+
+_CRON_PROFILE_TZ_TEST_REL = "tests/cron/test_cron_next_run_profile_timezone.py"
+
+# Upstream's oracle: the zone's offset at the instant the test happens to run.
+_CRON_ORACLE_NEEDLE = (
+    '    expected_offset = datetime.now(ZoneInfo("America/New_York")).utcoffset()\n'
+)
+
+# The same defect tolerant of indentation and line wrapping, used only to tell a
+# moved needle apart from an upstream fix.
+_CRON_ORACLE_SHAPE = re.compile(
+    r'datetime\.now\(\s*ZoneInfo\(\s*["\']America/New_York["\']\s*\)\s*\)\s*\.utcoffset\(\)'
+)
+
+# The offset of the wall clock the job was actually stored with.
+_CRON_ORACLE_REPLACEMENT = (
+    "    # The owning profile's offset at the FIRE instant, not the one it happens to\n"
+    "    # be in while the test runs: a job created in EDT and fired in EST is correct\n"
+    "    # at -05:00, and a now-based oracle demands the season the job is not in.\n"
+    "    # Self-consistency is still the #97905 repro -- a foreign-process tick\n"
+    "    # persisted 14:00+00:00, whose wall clock resolves to the owning zone's\n"
+    "    # offset, never +00:00.\n"
+    "    fire_wall = next_run.replace(tzinfo=None)\n"
+    '    expected_offset = fire_wall.replace(tzinfo=ZoneInfo("America/New_York")).utcoffset()\n'
+)
+
+
+def _reconcile_cron_profile_timezone_fire_instant(dst: str) -> int:
+    """Read the owning profile's UTC offset at the fire instant, not at ``now``.
+
+    ``compute_next_run`` holds a cron job's wall clock in the *job's* zone, so a
+    ``0 14 * * *`` Eastern job created on 2026-10-31 is correctly stored
+    ``2026-11-01T14:00:00-05:00`` while the zone's offset at that moment is still
+    ``-04:00``: the fall-back has not happened yet.  Upstream's oracle compares
+    the persisted offset to ``datetime.now(zone).utcoffset()``, so it demands the
+    season the job is not in and goes red on every run inside the window
+    (18:00Z-06:00Z on a spring/fall transition day), which gates every merge on
+    the fork.  Measured on the 2026-10-31 candidate: ``assert -1 day, 19:00:00 ==
+    -1 day, 20:00:00``.
+
+    The corrected oracle re-derives the offset from the stored wall clock itself,
+    which keeps the #97905 repro intact: a tick under a foreign process's offset
+    writes ``14:00+00:00``, and ``14:00`` in Eastern is never ``+00:00``.  The
+    next assertion in the same test still pins the wall clock to ``14:00``, so
+    offset and hour are both checked -- self-consistency alone cannot pass a job
+    stored at the wrong hour.  Idempotent by the comment's marker, and it leaves
+    the fork's own wording in place once #189 has merged.
+    """
+    text = _reconcile_budget_read(dst, _CRON_PROFILE_TZ_TEST_REL)
+    if text is None:
+        return 0
+    if "at the FIRE instant" in text:
+        return 0  # already corrected, by this rule or by the fork's own commit
+    if _CRON_ORACLE_NEEDLE not in text:
+        if _CRON_ORACLE_SHAPE.search(text):
+            raise CronProfileTimezoneOracleError(
+                f"{_CRON_PROFILE_TZ_TEST_REL} still has upstream's now-based oracle but "
+                f"not the exact line {_CRON_ORACLE_NEEDLE.strip()!r}, so the offset "
+                "patch no longer applies. Re-point the needle at upstream's new shape."
+            )
+        raise CronProfileTimezoneOracleError(
+            f"{_CRON_PROFILE_TZ_TEST_REL} has neither the fire-instant marker nor "
+            "upstream's now-based oracle, so Hermes may have fixed the test itself. "
+            "Confirm the corrected oracle on upstream, merge it through the next sync, "
+            "and delete this rule; do not let it stand down silently."
+        )
+    _reconcile_budget_write(
+        dst, _CRON_PROFILE_TZ_TEST_REL,
+        text.replace(_CRON_ORACLE_NEEDLE, _CRON_ORACLE_REPLACEMENT, 1),
+    )
+    return 1
+
+
 def _reconcile_compression_fallback_admission(dst: str) -> int:
     """Allow the configured compression fallback to start while a stalled primary winds down.
 
@@ -7209,6 +7294,9 @@ def reconcile_tree(
     if _reconcile_credential_display_test(dst):
         result.total += 1
         result.fixed.append("tests/nastech_cli/test_show_config_credential.py")
+    if _reconcile_cron_profile_timezone_fire_instant(dst):
+        result.total += 1
+        result.fixed.append("tests/cron/test_cron_next_run_profile_timezone.py")
     if _reconcile_compression_fallback_admission(dst):
         result.total += 1
         result.fixed.append("agent/conversation_compression.py")
