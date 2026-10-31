@@ -57,6 +57,11 @@ def test_allow_list_mirrors_the_weekly_gate(tmp_path):
 
     cases = [
         ("contributors/names/c.md", "hermes", "hermesagent"),
+        (
+            "plugins/config_backends/remote/vendor/SOURCE.json",
+            "nousresearch",
+            '{ "repo": "NousResearch/gateway-gateway"',
+        ),
         ("package-lock.json", "hermes", '"hermes-parser": "1.0.0"'),
         ("package-lock.json", "hermes", '"other-hermes": 1'),
         ("website/package-lock.json", "nous", '"@nous-research/image-size"'),

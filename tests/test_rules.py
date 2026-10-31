@@ -1,4 +1,9 @@
-from hundredways.rules import BrandingRules, TokenRule, is_locked_path
+from hundredways.rules import (
+    BrandingRules,
+    TokenRule,
+    is_locked_path,
+    is_vendored_path,
+)
 
 
 def test_simple_branding():
@@ -614,6 +619,19 @@ def test_vendored_third_party_content_is_locked():
     # a whole segment, not a substring: our own files still brand
     assert not is_locked_path("src/vendored_helpers.py")
     assert not is_locked_path("vendorized/config.yaml")
+
+
+def test_vendored_paths_are_distinguishable_from_other_locked_paths():
+    """The audits exempt vendored bytes, not every locked file.
+
+    A lockfile's brand word may still be a first-party leak worth reporting, so
+    the lock reason has to be nameable instead of inferred from ``is_locked_path``.
+    """
+    assert is_vendored_path("plugins/config_backends/remote/vendor/SOURCE.json")
+    assert is_vendored_path("native/fts5_cjk/vendor/sqlite3.h")
+    assert not is_vendored_path("package-lock.json")
+    assert not is_vendored_path("assets/logo.png")
+    assert not is_vendored_path("src/vendored_helpers.py")
 
 
 def test_docs_svg_is_brandable():

@@ -1178,6 +1178,19 @@ def is_immutable_path(path: str) -> bool:
     return any(sub in lowered for sub in IMMUTABLE_PATH_SUBSTRINGS)
 
 
+def is_vendored_path(path: str) -> bool:
+    """True when ``path`` is inside a vendored third-party tree.
+
+    Kept separate from :func:`is_locked_path` because the audits need to tell
+    *why* a file is locked: a lockfile's brand words may still be a first-party
+    leak worth reporting, while a vendored file's bytes are somebody else's and
+    content-addressed by a sibling manifest, so its words are inherited.
+    """
+    return any(
+        segment in LOCKED_PATH_SEGMENTS for segment in path.lower().split("/")
+    )
+
+
 def is_locked_path(path: str) -> bool:
     """True when a path must NOT be auto-branded (content or rename)."""
     lowered = path.lower()
@@ -1185,7 +1198,7 @@ def is_locked_path(path: str) -> bool:
         return True
     if path.rsplit("/", 1)[-1] in LOCKED_FILENAMES:
         return True
-    if any(segment in LOCKED_PATH_SEGMENTS for segment in lowered.split("/")):
+    if is_vendored_path(path):
         return True
     for sub in LOCKED_PATH_SUBSTRINGS:
         if sub in path:

@@ -34,6 +34,7 @@ from .rules import (
     catalog_key_value,
     is_immutable_path,
     is_locked_path,
+    is_vendored_path,
     preserved_algolia_index_spans,
     preserved_catalog_subdir_spans,
     preserved_external_url_spans,
@@ -102,6 +103,12 @@ def _allowed(
     """
     word = word.lower()
     if path.startswith("contributors/names/"):
+        return True
+    # Vendored third-party content is content-addressed by its origin, so the
+    # brand lock copies it verbatim and the word inside is inherited.  Scoped to
+    # the vendor lock; a lockfile's words are still audited below.  Mirrors
+    # weekly_sync._allowed_brand_occurrence.
+    if is_vendored_path(path):
         return True
     # A repository identifier we do not own cannot be renamed, so a brand run
     # inside one is inherited, not a first-party leak.  Matches the exemption

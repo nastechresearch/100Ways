@@ -53,6 +53,32 @@ def test_brand_audit_flags_first_party_brand_and_allows_vendor_package(tmp_path)
     assert issues[0].code == "first-party-brand"
 
 
+def test_brand_audit_allows_content_addressed_vendored_fixtures(tmp_path):
+    """A vendored fixture's brand words are the vendor's, not ours.
+
+    Upstream ships ``plugins/config_backends/remote/vendor/conformance`` beside
+    a ``config-fixtures.sha256`` manifest and a ``SOURCE.json`` naming the real
+    owner.  Branding a fixture changes the digest the conformance runner
+    verifies, so the transform copies it byte-for-byte -- and the gate must read
+    the surviving word as inherited.  A lockfile gets no such exemption.
+    """
+    vendored = tmp_path / "plugins" / "config_backends" / "remote" / "vendor"
+    fixture = vendored / "conformance" / "config-resolution.json"
+    fixture.parent.mkdir(parents=True)
+    fixture.write_text('"provider": "nous"\n')
+    (vendored / "SOURCE.json").write_text(
+        '{"repo": "NousResearch/gateway-gateway"}\n'
+    )
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "notes.md").write_text("Launch Hermes today.\n")
+
+    issues = audit_first_party_brand(str(tmp_path))
+
+    assert [(issue.code, issue.path) for issue in issues] == [
+        ("first-party-brand", "src/notes.md")
+    ]
+
+
 def test_brand_audit_flags_third_party_misaki_source_in_uv_lock(tmp_path):
     lock = tmp_path / "uv.lock"
     lock.write_text(

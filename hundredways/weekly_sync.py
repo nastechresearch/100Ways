@@ -24,6 +24,7 @@ from .rules import (
     catalog_key_value,
     is_immutable_path,
     is_locked_path,
+    is_vendored_path,
     preserved_algolia_index_spans,
     preserved_catalog_subdir_spans,
     preserved_external_url_spans,
@@ -315,6 +316,15 @@ def _allowed_brand_occurrence(
     """Return True only for the user's explicit, path-scoped exceptions."""
     lower = line.lower()
     if path.startswith("contributors/names/"):
+        return True
+    # Vendored third-party content is content-addressed by its origin: the
+    # sibling checksum manifest and ``SOURCE.json`` pin the bytes and name the
+    # real owner, so branding it would break the digest the consumer verifies.
+    # The transform therefore leaves the file byte-for-byte inherited, and a
+    # brand word inside it is the vendor's, not a first-party leak.  This is
+    # scoped to the vendor lock, not a general lockfile exemption: a lockfile's
+    # words are still audited below.  Mirrors brandscan._allowed.
+    if is_vendored_path(path):
         return True
     # A repository identifier we do not own cannot be renamed, so a brand run
     # inside one is inherited, not a first-party leak.  Mirrors
