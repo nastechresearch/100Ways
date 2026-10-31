@@ -2595,6 +2595,31 @@ def test_reconcile_cron_profile_timezone_oracle_stops_when_the_shape_moves(tmp_p
     assert "test_cron_next_run_profile_timezone.py" in str(excinfo.value)
 
 
+def test_reconcile_cron_profile_timezone_oracle_names_a_rewrapped_defect(tmp_path):
+    """A still-now-based oracle that only moved shape stops the sync, and says so."""
+    wrapped = (
+        "def test_x():\n"
+        '        expected_offset = datetime.now(\n'
+        '            ZoneInfo("America/New_York")\n'
+        "        ).utcoffset()\n"
+    )
+    candidate, _ = _cron_oracle_candidate(tmp_path, wrapped)
+
+    with pytest.raises(CronProfileTimezoneOracleError) as excinfo:
+        _reconcile_cron_profile_timezone_fire_instant(str(candidate))
+    assert "Re-point the needle" in str(excinfo.value)
+
+
+def test_reconcile_cron_profile_timezone_oracle_distinguishes_an_upstream_fix(tmp_path):
+    """The defect gone means "delete this rule", not "the needle is stale"."""
+    fixed = 'def test_x():\n    expected_offset = fire_wall.replace(tzinfo=EASTERN).utcoffset()\n'
+    candidate, _ = _cron_oracle_candidate(tmp_path, fixed)
+
+    with pytest.raises(CronProfileTimezoneOracleError) as excinfo:
+        _reconcile_cron_profile_timezone_fire_instant(str(candidate))
+    assert "Hermes may have fixed the test itself" in str(excinfo.value)
+
+
 def test_text_content_branded_binary_locked_untouched(tmp_path):
     hermes = _hermes_repo(tmp_path)
     updates_dir = str(tmp_path / "Updates-Commits")

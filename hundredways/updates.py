@@ -1206,6 +1206,12 @@ _CRON_ORACLE_NEEDLE = (
     '    expected_offset = datetime.now(ZoneInfo("America/New_York")).utcoffset()\n'
 )
 
+# The same defect tolerant of indentation and line wrapping, used only to tell a
+# moved needle apart from an upstream fix.
+_CRON_ORACLE_SHAPE = re.compile(
+    r'datetime\.now\(\s*ZoneInfo\(\s*["\']America/New_York["\']\s*\)\s*\)\s*\.utcoffset\(\)'
+)
+
 # The offset of the wall clock the job was actually stored with.
 _CRON_ORACLE_REPLACEMENT = (
     "    # The owning profile's offset at the FIRE instant, not the one it happens to\n"
@@ -1246,11 +1252,17 @@ def _reconcile_cron_profile_timezone_fire_instant(dst: str) -> int:
     if "at the FIRE instant" in text:
         return 0  # already corrected, by this rule or by the fork's own commit
     if _CRON_ORACLE_NEEDLE not in text:
+        if _CRON_ORACLE_SHAPE.search(text):
+            raise CronProfileTimezoneOracleError(
+                f"{_CRON_PROFILE_TZ_TEST_REL} still has upstream's now-based oracle but "
+                f"not the exact line {_CRON_ORACLE_NEEDLE.strip()!r}, so the offset "
+                "patch no longer applies. Re-point the needle at upstream's new shape."
+            )
         raise CronProfileTimezoneOracleError(
-            f"{_CRON_PROFILE_TZ_TEST_REL} carries neither the fire-instant oracle "
-            f"nor upstream's now-based line {_CRON_ORACLE_NEEDLE.strip()!r}, so the "
-            "offset oracle patch no longer applies. Update the needle to upstream's "
-            "new shape, then re-run."
+            f"{_CRON_PROFILE_TZ_TEST_REL} has neither the fire-instant marker nor "
+            "upstream's now-based oracle, so Hermes may have fixed the test itself. "
+            "Confirm the corrected oracle on upstream, merge it through the next sync, "
+            "and delete this rule; do not let it stand down silently."
         )
     _reconcile_budget_write(
         dst, _CRON_PROFILE_TZ_TEST_REL,
