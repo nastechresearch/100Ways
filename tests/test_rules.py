@@ -454,6 +454,30 @@ def test_one_identifier_keeps_every_spelling_when_we_do_not_own_it():
     )
 
 
+def test_a_preserved_repository_is_kept_in_the_rest_path_form():
+    """The same identifier is preserved when the file spells it as a REST path.
+
+    The fork's release fixture keys responses by ``/repos/<owner>/<repo>/...``
+    while the origin URL beside it is preserved verbatim.  Branding only the
+    path half asked the fixture server for a repository it never served, so
+    ``resolve_source_release`` logged a 404 and returned ``(None, None)``.
+    """
+    rules = BrandingRules()
+    text = (
+        '    url = "https://github.com/Fixture/hermes-agent.git"\n'
+        '    releases.responses["/repos/Fixture/hermes-agent/releases/latest"] = {}\n'
+    )
+    assert rules.transform_text(text) == text
+    # a repository we do own is still branded under this shape too
+    ours = (
+        '    url = "https://github.com/NousResearch/hermes-agent.git"\n'
+        '    releases.responses["/repos/NousResearch/hermes-agent/releases/latest"] = {}\n'
+    )
+    out = rules.transform_text(ours)
+    assert "hermes" not in out.lower()
+    assert "NousResearch" not in out
+
+
 def test_the_bare_spelling_exception_never_widens_preservation():
     """Preservation still holds for a URL the file does not spell bare.
 
@@ -572,6 +596,24 @@ def test_dotenv_templates_are_brandable():
     assert not is_locked_path(".env.example")
     assert not is_locked_path("apps/desktop/.env.example")
     assert not is_locked_path(".envrc")
+
+
+def test_vendored_third_party_content_is_locked():
+    """Vendored fixtures are checksum-pinned by their origin, so they never brand.
+
+    ``plugins/config_backends/remote/vendor/conformance`` ships a
+    ``config-fixtures.sha256`` manifest and a ``SOURCE.json`` naming the real
+    owner; rewriting ``"service.name": "hermes"`` inside a fixture changed its
+    digest and the vendored-manifest test failed against the pinned value.
+    """
+    assert is_locked_path("plugins/config_backends/remote/vendor/SOURCE.json")
+    assert is_locked_path(
+        "plugins/config_backends/remote/vendor/conformance/config-fixtures.sha256"
+    )
+    assert is_locked_path("native/fts5_cjk/vendor/sqlite3.h")
+    # a whole segment, not a substring: our own files still brand
+    assert not is_locked_path("src/vendored_helpers.py")
+    assert not is_locked_path("vendorized/config.yaml")
 
 
 def test_docs_svg_is_brandable():

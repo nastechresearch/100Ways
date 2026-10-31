@@ -936,10 +936,18 @@ class BrandingRules:
             if name is not None and self.preserves_repo_path(spans[index])
         }
         if preserved_names:
+            # A preserved identifier is preserved at every spelling the file
+            # uses, including as a path segment.  The REST path form
+            # ``/repos/<owner>/<repo>/releases/latest`` is how the fixture
+            # servers in the fork's release tests key their responses, and a
+            # slash before or after the name is a separator, not part of a
+            # different identifier -- blocking on it branded that path while
+            # the URL beside it stayed inherited, so the test asked for a
+            # repository the fixture never served (404).
             bare = re.compile(
-                r"(?<![.\w/-])(?P<bare>"
+                r"(?<![.\w-])(?P<bare>"
                 + "|".join(re.escape(name) for name in sorted(preserved_names))
-                + r")(?![\w/-])"
+                + r")(?![\w-])"
             )
 
             def _stash_bare(match: re.Match) -> str:
@@ -1121,6 +1129,15 @@ LOCKED_PATH_SUBSTRINGS = (
     "poetry.lock",
 )
 
+# Whole path segments whose content belongs to somebody else.  Vendored
+# third-party sources and fixtures are content-addressed by their origin: a
+# sibling ``*.sha256`` manifest and ``SOURCE.json`` pin the bytes and name the
+# real owner.  Branding one changes the digest the consumer verifies and leaves
+# the provenance URL pointing at a repository we do not own, so the file is
+# copied byte-for-byte like a lockfile.  The match is a full segment, not a
+# substring: ``src/vendored_helpers.py`` is ours and still brands.
+LOCKED_PATH_SEGMENTS = ("vendor",)
+
 # Exact basenames that must NOT be auto-branded even though they are text.
 # Real secret files (.env) and package-manager rc files are real data.
 LOCKED_FILENAMES = (".env", ".npmrc")
@@ -1167,6 +1184,8 @@ def is_locked_path(path: str) -> bool:
     if lowered.endswith(LOCKED_EXTENSIONS):
         return True
     if path.rsplit("/", 1)[-1] in LOCKED_FILENAMES:
+        return True
+    if any(segment in LOCKED_PATH_SEGMENTS for segment in lowered.split("/")):
         return True
     for sub in LOCKED_PATH_SUBSTRINGS:
         if sub in path:

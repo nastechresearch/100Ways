@@ -2531,6 +2531,107 @@ def _reconcile_reasoning_effort_selection(dst: str) -> int:
     return 1
 
 
+_FORK_PUBLICATION_FILE = "scripts/releases/channel_releases.py"
+
+
+def _fork_release_publication_spans(fork_root: str) -> tuple[str, str] | None:
+    """Read the fork's GitHub-release publication layer as two verbatim spans.
+
+    The fork added a publication layer to the upstream-derived channel module:
+    a block of helpers (``release_assets`` / ``write_latest_manifest`` /
+    ``upload_assets`` / ``prune_canaries``) and the canary branch that attaches
+    the staged artifacts before flipping the draft.  Both live in a shared
+    path, so a fresh upstream sync replaces the module and the fork's
+    preserved tests then import symbols that no longer exist -- and a canary
+    release would flip its draft without ever attaching an asset, the exact
+    bug the fork fixed.
+
+    The fork file is the single source of truth: the spans are read from it
+    rather than copied into this engine, so the two cannot drift.  ``None``
+    means the fork does not carry the layer (nothing to carry).
+    """
+    path = os.path.join(fork_root, _FORK_PUBLICATION_FILE)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines(keepends=True)
+    except OSError:
+        return None
+
+    def _index(predicate, start: int = 0) -> int:
+        for index in range(start, len(lines)):
+            if predicate(lines[index]):
+                return index
+        return -1
+
+    helper = _index(lambda line: line.startswith("_ASSET_SUFFIXES = ("))
+    if helper < 0:
+        return None
+    while helper > 0 and lines[helper - 1].startswith("#"):
+        helper -= 1
+    publish = _index(lambda line: line.startswith("def publish_release("), helper)
+    canary = _index(
+        lambda line: line.rstrip("\n") == '    if policy == "canary-release":',
+        publish,
+    )
+    gate = _index(lambda line: line.startswith("    def release_gate("), canary)
+    if min(publish, canary, gate) < 0:
+        return None
+    helpers = "".join(lines[helper:publish]).strip("\n")
+    branch = "".join(lines[canary:gate]).rstrip("\n")
+    return helpers, branch
+
+
+def _reconcile_fork_release_publication(
+    dst: str,
+    fork_root: str | None = None,
+    rules: BrandingRules | None = None,
+) -> bool:
+    """Re-apply the fork's release-publication layer to the branded module.
+
+    Upstream owns every other line of ``channel_releases.py``; only the
+    fork-first publication layer is restored.  Fails closed when the fork has
+    the layer and the branded module no longer has the anchors it grows from:
+    silently skipping would ship a canary release with no assets again.
+    """
+    if not fork_root:
+        return False
+    spans = _fork_release_publication_spans(fork_root)
+    if spans is None:
+        return False
+    helpers, branch = spans
+    rules = rules or BrandingRules()
+    path = os.path.join(dst, _FORK_PUBLICATION_FILE)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return False
+    changed = False
+    if "_ASSET_SUFFIXES" not in text:
+        anchor = "\ndef publish_release("
+        if anchor not in text:
+            raise RuntimeError(
+                f"{_FORK_PUBLICATION_FILE}: cannot place the fork release-publication helpers"
+            )
+        body = rules.transform_text(helpers)
+        text = text.replace(anchor, f"\n\n{body}\n\n\ndef publish_release(", 1)
+        changed = True
+    start = text.find('    if policy == "canary-release":')
+    end = text.find("\n    def release_gate(", start)
+    if start < 0 or end < 0:
+        raise RuntimeError(
+            f"{_FORK_PUBLICATION_FILE}: cannot re-apply the fork canary publication branch"
+        )
+    expected = rules.transform_text(branch)
+    if text[start:end].rstrip("\n") != expected:
+        text = text[:start] + expected + text[end:]
+        changed = True
+    if changed:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    return changed
+
+
 def _reconcile_apt_pool_first_char(dst: str) -> bool:
     """Fix hardcoded pool first-char dirs left stale by deb-name branding.
 
@@ -6887,14 +6988,26 @@ def _reconcile_ui_scope_pins(dst: str) -> list[str]:
     return fixed
 
 
-def reconcile_tree(dst: str) -> ReconcileResult:
+def reconcile_tree(
+    dst: str,
+    *,
+    fork_root: str | None = None,
+    rules: BrandingRules | None = None,
+) -> ReconcileResult:
     """Apply known post-brand fixes to the branded tree in place.
+
+    ``fork_root`` is the fork checkout the pipeline preserves fork-local files
+    from; the reconcilers that carry fork-first code in a shared path read it
+    there so the engine never duplicates the fork's implementation.
 
     Returns which paths were fixed so the caller can (a) report them and
     (b) feed them to ``verify_branded`` / ``compare_trees``, which must
     expect the reconciled content instead of the raw token transform.
     """
     result = ReconcileResult()
+    if _reconcile_fork_release_publication(dst, fork_root, rules):
+        result.total += 1
+        result.fixed.append(_FORK_PUBLICATION_FILE)
     # Signing-gated release lanes: the fork-local policy the token rules cannot
     # express, so it is re-derived here after every brand and cannot be
     # clobbered by a fresh upstream sync. The paths are recorded so
@@ -7712,7 +7825,7 @@ class UpdateManager:
         )
 
         def _reconcile() -> ReconcileResult:
-            result = reconcile_tree(dest)
+            result = reconcile_tree(dest, fork_root=self.fork_root, rules=self.rules)
             return result
         reconcile = stage("reconcile", _reconcile,
                           "sync lockfile root records + apply fork-local content fixes")

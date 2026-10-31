@@ -4203,6 +4203,76 @@ def test_reconcile_reasoning_effort_selection_falls_back_before_main_def(tmp_pat
     assert _reconcile_reasoning_effort_selection(str(candidate)) == 0
 
 
+def test_fork_release_publication_is_reapplied_after_a_sync(tmp_path):
+    """A shared release module must keep the fork's publication layer.
+
+    The fork's preserved release tests import ``write_latest_manifest`` and
+    friends from this module, and its canary path attaches the staged assets
+    before flipping the draft.  A fresh upstream sync replaces the whole module
+    with upstream's, which has neither -- so the layer is read from the fork
+    checkout and re-applied instead of duplicated in the engine.
+    """
+    candidate = tmp_path / "candidate"
+    fork = tmp_path / "fork"
+    rel = "scripts/releases/channel_releases.py"
+    (candidate / rel).parent.mkdir(parents=True)
+    (fork / rel).parent.mkdir(parents=True)
+    (fork / rel).write_text(
+        'def verify_canary_outputs():\n'
+        '    return None\n\n\n'
+        '# Assets the release carries.\n'
+        '_ASSET_SUFFIXES = (".zip",)\n\n\n'
+        'def release_assets(root):\n'
+        '    return []\n\n\n'
+        'def publish_release(policy, env, root):\n'
+        '    if policy == "canary-release":\n'
+        '        upload_assets(env["TAG"], env["REPO"], root)\n'
+        '    def release_gate(request):\n'
+        '        return True\n',
+        encoding="utf-8",
+    )
+    (candidate / rel).write_text(
+        'def verify_canary_outputs():\n'
+        '    return None\n\n\n'
+        'def publish_release(policy, env, root):\n'
+        '    if policy == "canary-release":\n'
+        '        stable.output(["gh", "release", "edit", env["TAG"], "--draft=false"])\n'
+        '    def release_gate(request):\n'
+        '        return True\n',
+        encoding="utf-8",
+    )
+
+    result = reconcile_tree(str(candidate), fork_root=str(fork))
+    assert result.fixed == [rel]
+    updated = (candidate / rel).read_text(encoding="utf-8")
+    assert "_ASSET_SUFFIXES" in updated
+    assert "def release_assets(root):" in updated
+    assert "upload_assets(env[\"TAG\"], env[\"REPO\"], root)" in updated
+    assert "--draft=false" not in updated
+    # Idempotent: the second pass has nothing left to graft.
+    assert rel not in reconcile_tree(str(candidate), fork_root=str(fork)).fixed
+
+
+def test_a_fork_without_the_publication_layer_is_left_alone(tmp_path):
+    candidate = tmp_path / "candidate"
+    fork = tmp_path / "fork"
+    rel = "scripts/releases/channel_releases.py"
+    (candidate / rel).parent.mkdir(parents=True)
+    (fork / rel).parent.mkdir(parents=True)
+    body = (
+        'def publish_release(policy, env, root):\n'
+        '    if policy == "canary-release":\n'
+        '        stable.output(["gh", "release", "edit", env["TAG"], "--draft=false"])\n'
+        '    def release_gate(request):\n'
+        '        return True\n'
+    )
+    (fork / rel).write_text(body, encoding="utf-8")
+    (candidate / rel).write_text(body, encoding="utf-8")
+
+    assert rel not in reconcile_tree(str(candidate), fork_root=str(fork)).fixed
+    assert (candidate / rel).read_text(encoding="utf-8") == body
+
+
 def test_reconcile_apt_pool_first_char_rewrites_stale_pool_dirs(tmp_path):
     """Branded deb names leave the test's hardcoded first-char pool dir stale.
 
