@@ -4065,6 +4065,117 @@ def _reconcile_ci_runner_budgets(dst: str) -> list[str]:
     return fixed
 
 
+# Jobs that read only the commit graph.  Each is upstream-owned, so the fork's
+# own ``filter:`` line is re-derived away by the next candidate unless this rule
+# re-applies it.
+_BLOBLESS_CHECKOUT_FILES = (
+    ".github/workflows/contributor-check.yml",
+    ".github/workflows/lint.yml",
+    ".github/workflows/lockfile-diff.yml",
+    ".github/workflows/prompt-surface-diff.yml",
+)
+_FULL_HISTORY_CHECKOUT_RE = re.compile(r"^([ \t]*)fetch-depth: 0[ \t]*(?:#.*)?[ \t]*$", re.M)
+_CHECKOUT_STEP_RE = re.compile(r"uses:[ \t]*actions/checkout@", re.M)
+_FILTER_KEY_RE = re.compile(r"^[ \t]*filter:[ \t]*", re.M)
+_BLOBLESS_FILTER_BLOCK = (
+    "{indent}# Blobless: this job reads the commit graph (a merge base, author\n"
+    "{indent}# emails, two snapshots of one path), never every blob in the history.\n"
+    "{indent}# That blob download is what overran its budget on a free runner.\n"
+    "{indent}filter: blob:none\n"
+)
+
+
+class BloblessCheckoutAnchorError(ValueError):
+    """A merge-base job's full-history checkout moved, so the blobless filter could not apply."""
+
+
+def _checkout_key_after(lines: list[str], depth_line: int, indent: int) -> int:
+    """Index of the next ``with:`` key under the checkout at ``depth_line``.
+
+    The filter sits under comment lines (the fork's own, or this rule's), so the
+    walk passes them instead of demanding adjacency -- but only at the checkout's
+    own indent or deeper, so a comment belonging to the next job cannot pull the
+    inserted key out of the ``with:`` block.
+    """
+    pos = depth_line + 1
+    while pos < len(lines):
+        stripped = lines[pos].lstrip()
+        if stripped.startswith("#") and len(lines[pos]) - len(stripped) >= indent:
+            pos += 1
+            continue
+        return pos
+    return pos
+
+
+def _blobless_checkout_lines(text: str) -> tuple[list[str], bool]:
+    """``text`` with a blobless filter at each full-history checkout, and whether one was added."""
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    added = False
+    pos = 0
+    while pos < len(lines):
+        match = _FULL_HISTORY_CHECKOUT_RE.match(lines[pos])
+        if match is None:
+            out.append(lines[pos])
+            pos += 1
+            continue
+        indent = len(match.group(1))
+        key = _checkout_key_after(lines, pos, indent)
+        out.extend(lines[pos:key])
+        if not _FILTER_KEY_RE.match(lines[key] if key < len(lines) else ""):
+            out.append(_BLOBLESS_FILTER_BLOCK.format(indent=match.group(1)))
+            added = True
+        pos = key
+    return out, added
+
+
+def _reconcile_blobless_merge_base_jobs(dst: str) -> list[str]:
+    """Check the four merge-base jobs out blobless, not with every historical blob.
+
+    ``actions/checkout`` with ``fetch-depth: 0`` downloads every blob in the
+    repository's history, and these four jobs read nothing but the commit graph:
+    a merge base plus author emails, the lockfile at two refs, the prompt-surface
+    snapshots at two refs, or the two worktrees ``ruff + ty diff`` compares.  On
+    the free 4-core images the blob download alone overruns the job budget, so the
+    lane reports ``cancelled`` with no failing step at all -- contributor-check
+    died at its 10-minute cap, ``ruff + ty diff`` at 10m53s, and the two 5-minute
+    diff jobs at 5m03s / 5m04s (candidate runs 41680849462, 41682958867 and
+    41683685858).  ``filter: blob:none`` leaves ``git log`` and ``git merge-base``
+    reading exactly as before while dropping the blobs, and is this repo's own
+    convention for history-reading jobs (14 of its 39 ``fetch-depth: 0`` sites
+    already carry it).  Fork PR #198 measured the delta on hosted runners: the
+    prompt-surface summary went 5m04s -> 1m28s and ``ruff + ty diff`` 10m53s ->
+    2m37s, with no budget or step count changed.
+
+    A checkout that no longer asks for full history is a moved anchor rather than
+    a fixed job -- the timeout is a property of the blob download, so returning
+    quietly here would re-brick four lanes on every sync.  The sync stops.
+    """
+    fixed: list[str] = []
+    for rel in _BLOBLESS_CHECKOUT_FILES:
+        text = _reconcile_budget_read(dst, rel)
+        if text is None:
+            continue
+        lines = text.splitlines(keepends=True)
+        if not any(_FULL_HISTORY_CHECKOUT_RE.match(line) for line in lines):
+            if _CHECKOUT_STEP_RE.search(text):
+                raise BloblessCheckoutAnchorError(
+                    f"{rel} runs actions/checkout without a 'fetch-depth: 0' line, so the "
+                    "blobless guard has no anchor. Either upstream moved these jobs off "
+                    "full-history fetches (then delete the file from "
+                    "_BLOBLESS_CHECKOUT_FILES) or it renamed the key (then re-derive the "
+                    "anchor). Do not drop the guard to get a green sync: the four lanes this "
+                    "rule protects are cancelled at their budgets without a failing step."
+                )
+            continue
+        out, added = _blobless_checkout_lines(text)
+        if not added:
+            continue
+        _reconcile_budget_write(dst, rel, "".join(out))
+        fixed.append(rel)
+    return fixed
+
+
 class UnsignedDarwinBuildEnvError(ValueError):
     """The macOS bundle build step moved, so the unsigned guard could not apply."""
 
@@ -7234,6 +7345,9 @@ def reconcile_tree(
         result.total += 1
         result.fixed.append(rel)
     for rel in _reconcile_free_runner_parallelism(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    for rel in _reconcile_blobless_merge_base_jobs(dst):
         result.total += 1
         result.fixed.append(rel)
     for rel in _reconcile_free_runner_js_lane(dst):
