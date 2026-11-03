@@ -26,6 +26,7 @@ from hundredways.updates import (
     STORE_REST_CREDENTIALS,
     AgentsChainCapError,
     AssetsWorkerIndexError,
+    BloblessCheckoutAnchorError,
     BrowseBudgetDdlError,
     BrowseBudgetFlockTestError,
     ChannelReaderUserAgentError,
@@ -76,6 +77,7 @@ from hundredways.updates import (
     _reconcile_assets_worker_index,
     _reconcile_anon_surface_copy,
     _reconcile_apt_pool_first_char,
+    _reconcile_blobless_merge_base_jobs,
     _reconcile_browse_budget_flock_tests,
     _reconcile_browse_ddl_budget_guard,
     _reconcile_channel_reader_user_agent,
@@ -621,6 +623,147 @@ def test_free_runner_parallelism_stops_when_the_windows_rows_move(tmp_path):
     )
     with pytest.raises(FreeRunnerParallelismError, match="arm64"):
         _reconcile_free_runner_parallelism(str(candidate))
+
+
+_BLOBLESS_BLOCK = (
+    "          # Blobless: this job reads the commit graph (a merge base, author\n"
+    "          # emails, two snapshots of one path), never every blob in the history.\n"
+    "          # That blob download is what overran its budget on a free runner.\n"
+    "          filter: blob:none\n"
+)
+_CHECKOUT_V7 = "      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1\n"
+
+
+def _blobless_checkout_tree(tmp_path):
+    """A branded candidate tree carrying upstream's merge-base checkouts, blobs and all."""
+    candidate = tmp_path / "candidate"
+    wf = candidate / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / "contributor-check.yml").write_text(
+        "jobs:\n"
+        "  contributor-check:\n"
+        "    timeout-minutes: 10\n"
+        "    steps:\n"
+        + _CHECKOUT_V7
+        + "        with:\n"
+        "          ref: ${{ inputs.commit }}\n"
+        "          fetch-depth: 0  # Full history needed for git log\n"
+        "\n"
+        "      - name: Check for unmapped contributor emails\n"
+        "        run: git log --format='%ae' $(git merge-base HEAD origin/main)..HEAD\n",
+        encoding="utf-8",
+    )
+    (wf / "lint.yml").write_text(
+        "jobs:\n"
+        "  ruff-ty-diff:\n"
+        "    timeout-minutes: 10\n"
+        "    steps:\n"
+        + _CHECKOUT_V7
+        + "        with:\n"
+        "          ref: ${{ inputs.commit }}\n"
+        "          fetch-depth: 0 # need full history for merge-base + worktree\n"
+        "      - uses: ./.github/actions/setup-pm\n"
+        "  pr-download-annotation:\n"
+        "    steps:\n"
+        + _CHECKOUT_V7
+        + "        with:\n"
+        "          ref: ${{ inputs.commit }}\n"
+        "          fetch-depth: 2 # the merge commit and its first parent\n"
+        "          persist-credentials: false\n",
+        encoding="utf-8",
+    )
+    (wf / "lockfile-diff.yml").write_text(
+        "jobs:\n"
+        "  lockfile-diff:\n"
+        "    timeout-minutes: 5\n"
+        "    steps:\n"
+        + _CHECKOUT_V7
+        + "        with:\n"
+        "          ref: ${{ inputs.commit }}\n"
+        "          # Blobless: the job reads the lockfile at two refs, never every blob in\n"
+        "          # the history. That blob fetch is what overran this job's budget.\n"
+        "          fetch-depth: 0 # need history for the merge base\n"
+        "          filter: blob:none\n",
+        encoding="utf-8",
+    )
+    (wf / "prompt-surface-diff.yml").write_text(
+        "jobs:\n"
+        "  prompt-surface-diff:\n"
+        "    timeout-minutes: 5\n"
+        "    steps:\n"
+        + _CHECKOUT_V7
+        + "        with:\n"
+        "          ref: ${{ inputs.commit }}\n"
+        "          fetch-depth: 0 # need history for the merge base\n"
+        "          filter: blob:none\n"
+        "          persist-credentials: false\n"
+        "  prompt-surface-restore:\n"
+        "    steps:\n"
+        + _CHECKOUT_V7
+        + "        with:\n"
+        "          ref: ${{ inputs.commit }}\n"
+        "          fetch-depth: 0 # the snapshots at both ends of the range\n",
+        encoding="utf-8",
+    )
+    return candidate, wf
+
+
+def test_blobless_merge_base_jobs_fetch_the_graph_not_the_blobs(tmp_path):
+    """A merge-base job needs the commit graph, so its blobs are pure overrun."""
+    candidate, wf = _blobless_checkout_tree(tmp_path)
+    lockfile_before = (wf / "lockfile-diff.yml").read_text(encoding="utf-8")
+
+    changed = _reconcile_blobless_merge_base_jobs(str(candidate))
+    assert changed == [
+        ".github/workflows/contributor-check.yml",
+        ".github/workflows/lint.yml",
+        ".github/workflows/prompt-surface-diff.yml",
+    ]
+    contributor = (wf / "contributor-check.yml").read_text(encoding="utf-8")
+    assert (
+        "          fetch-depth: 0  # Full history needed for git log\n" + _BLOBLESS_BLOCK
+    ) in contributor
+    lint = (wf / "lint.yml").read_text(encoding="utf-8")
+    assert lint.count("filter: blob:none") == 1
+    # The merge-commit job asks for two commits, so there is no blob storm to stop.
+    assert (
+        "          fetch-depth: 2 # the merge commit and its first parent\n"
+        "          persist-credentials: false\n"
+    ) in lint
+    surface = (wf / "prompt-surface-diff.yml").read_text(encoding="utf-8")
+    # Per checkout site, not per file: the first job already carries the fork's own
+    # filter, and the second one must still get it.
+    assert surface.count("filter: blob:none") == 2
+    assert (
+        "          fetch-depth: 0 # need history for the merge base\n"
+        "          filter: blob:none\n"
+        "          persist-credentials: false\n"
+    ) in surface
+    # Fork PR #198's own shape (its comment above the fetch, filter right after) is
+    # already blobless and must survive byte-for-byte.
+    assert (wf / "lockfile-diff.yml").read_text(encoding="utf-8") == lockfile_before
+    for rel in changed:
+        text = (candidate / rel).read_text(encoding="utf-8")
+        assert "hermes" not in text.lower() and "nous" not in text.lower()
+        assert BrandingRules().transform_text(text) == text
+    assert _reconcile_blobless_merge_base_jobs(str(candidate)) == []
+
+
+def test_blobless_merge_base_jobs_stop_when_the_checkout_moves(tmp_path):
+    """A full-history fetch that vanished is a moved anchor, not a fixed job.
+
+    Without the filter the four lanes are cancelled at their budgets with no
+    failing step, so the sync has to stop rather than re-brick them.
+    """
+    candidate, wf = _blobless_checkout_tree(tmp_path)
+    path = wf / "contributor-check.yml"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("fetch-depth: 0", "fetch-depth: 1"),
+        encoding="utf-8",
+    )
+    with pytest.raises(BloblessCheckoutAnchorError, match="no anchor"):
+        _reconcile_blobless_merge_base_jobs(str(candidate))
+    assert "filter: blob:none" not in (wf / "lint.yml").read_text(encoding="utf-8")
 
 
 def _free_runner_js_lane_tree(tmp_path):
