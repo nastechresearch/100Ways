@@ -4602,6 +4602,217 @@ _PAGES_RELEASE_EDITS = (
 )
 
 
+# Fork Termux APT feed: a flat signed repository published as release assets.
+
+_APT_CHECK_APT_REL = "scripts/termux/check_apt.sh"
+_APT_CHECK_APT_OLD_1 = """\
+expected="${2:?expected package version required}"
+repository="${3:-file:/apt}"
+"""
+_APT_CHECK_APT_NEW_1 = """\
+expected="${2:?expected package version required}"
+# The feed is published FLAT as the assets of one fixed-tag release (a release
+# asset name cannot hold '/'), which is why the source line below names no
+# suite or component directory and no `by-hash`: apt reads <repository>/Release
+# and <repository>/Packages, then each stanza's Filename relative to the same
+# base.  Measured with apt 2.8.3: on a flat repository `by-hash=force` is inert
+# (apt issues no by-hash request either way), so index integrity here is carried
+# by the Release SHA256/SHA512 rows, which apt still enforces -- flipping one
+# byte of Packages makes `apt-get update` exit 100.
+repository="${3:-file:/apt}"
+"""
+_APT_CHECK_APT_OLD_2 = (
+    'printf \'deb [signed-by=/apt/key.asc by-hash=force] %s %s main\\n\' "$repository" "$suite" > "$work/sources.list"\n'
+)
+_APT_CHECK_APT_NEW_2 = (
+    '# The feed directory is mounted read-only at /apt by every caller, so the suite\n'
+    '# that was staged is checked against the suite that is published: a channel wired\n'
+    "# to the wrong feed would otherwise install over another channel's packages.\n"
+    'grep -qx "Suite: $suite" /apt/Release\n'
+    'printf \'deb [signed-by=/apt/key.asc] %s ./\\n\' "$repository" > "$work/sources.list"\n'
+)
+_APT_CHECK_APT_EDITS = (
+    (_APT_CHECK_APT_OLD_1, _APT_CHECK_APT_NEW_1),
+    (_APT_CHECK_APT_OLD_2, _APT_CHECK_APT_NEW_2),
+)
+
+_APT_STABLE_RELEASES_DOC_REL = "website/docs/developer-guide/stable-releases.md"
+_APT_STABLE_RELEASES_DOC_OLD_1 = """\
+
+The candidate manifest binds the admitted claim epoch. Admission recomputes the
+"""
+_APT_STABLE_RELEASES_DOC_NEW_1 = """\
+
+The Termux feed devices install from is not in that archive. It is a flat signed
+repository published as assets of the channel's own fixed-tag release
+(`termux-repo` for stable, `termux-repo-canary` for canary), because a release
+asset name is one path component. Each publish re-signs the index, and the
+mandatory `Date:` makes those bytes new every time, so a fixed-name index can
+never be stored under a put-if-absent prefix: re-dispatching one tag writes a
+different `InRelease` under the same key, and the immutable upload answers 412.
+The candidate phase still hands its staged tree to the tag archive, because
+`advance_termux_apt` reads the signed index from there.
+
+The candidate manifest binds the admitted claim epoch. Admission recomputes the
+"""
+_APT_STABLE_RELEASES_DOC_EDITS = (
+    (_APT_STABLE_RELEASES_DOC_OLD_1, _APT_STABLE_RELEASES_DOC_NEW_1),
+)
+
+_APT_TERMUX_DOC_REL = "website/docs/getting-started/termux.md"
+_APT_TERMUX_DOC_OLD_1 = """\
+Two APT channels are published under
+`https://nastech-assets.nastechresearch.workers.dev/releases/termux/<channel>`:
+
+| Channel | APT suite | Contents |
+| --- | --- | --- |
+| `stable` | `nastech-stable` | Tagged `vMAJOR.MINOR.PATCH` releases that passed the stable release gate |
+| `canary` | `nastech-canary` | Prerelease builds from canary tags; versions carry `~canary.<timestamp>` |
+
+The steps below use `stable`. To follow prereleases, replace `stable` with
+`canary` and `nastech-stable` with `nastech-canary` in steps 2 and 4. Both
+channels are signed with the same key.
+"""
+_APT_TERMUX_DOC_NEW_1 = """\
+Both APT channels are signed flat repositories published as assets of the
+repository's own release tags:
+
+| Channel | Feed base | APT suite | Contents |
+| --- | --- | --- | --- |
+| `stable` | `https://github.com/nastechresearch/nastech-agent/releases/download/termux-repo` | `nastech-stable` | Tagged `vMAJOR.MINOR.PATCH` releases that passed the stable release gate |
+| `canary` | `https://github.com/nastechresearch/nastech-agent/releases/download/termux-repo-canary` | `nastech-canary` | Prerelease builds from canary tags; versions carry `~canary.<timestamp>` |
+
+The steps below use `stable`. To follow prereleases, replace `termux-repo` with
+`termux-repo-canary` in steps 2 and 4. Both channels are signed with the same
+key, and each feed advertises only its own channel's packages.
+"""
+_APT_TERMUX_DOC_OLD_2 = (
+    '     https://nastech-assets.nastechresearch.workers.dev/releases/termux/stable/key.asc \\\n'
+)
+_APT_TERMUX_DOC_NEW_2 = (
+    '     https://github.com/nastechresearch/nastech-agent/releases/download/termux-repo/key.asc \\\n'
+)
+_APT_TERMUX_DOC_OLD_3 = (
+    '     "deb [signed-by=$PREFIX/etc/apt/keyrings/nastech-agent.asc] https://nastech-assets.nastechresearch.workers.dev/releases/termux/stable nastech-stable main" \\\n'
+)
+_APT_TERMUX_DOC_NEW_3 = (
+    '     "deb [signed-by=$PREFIX/etc/apt/keyrings/nastech-agent.asc] https://github.com/nastechresearch/nastech-agent/releases/download/termux-repo ./" \\\n'
+)
+_APT_TERMUX_DOC_OLD_4 = """\
+stable version. Each suite only lists its own channel's packages; to move
+between channels, edit the channel path and suite in `nastech-agent.list`, then
+"""
+_APT_TERMUX_DOC_NEW_4 = """\
+stable version. Each feed only lists its own channel's packages; to move
+between channels, edit the feed tag in `nastech-agent.list`, then
+"""
+_APT_TERMUX_DOC_EDITS = (
+    (_APT_TERMUX_DOC_OLD_1, _APT_TERMUX_DOC_NEW_1),
+    (_APT_TERMUX_DOC_OLD_2, _APT_TERMUX_DOC_NEW_2),
+    (_APT_TERMUX_DOC_OLD_3, _APT_TERMUX_DOC_NEW_3),
+    (_APT_TERMUX_DOC_OLD_4, _APT_TERMUX_DOC_NEW_4),
+)
+
+_APT_TERMUX_DOC_ZH_REL = "website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/getting-started/termux.md"
+_APT_TERMUX_DOC_ZH_OLD_1 = (
+    '     https://nastech-assets.nastechresearch.workers.dev/releases/termux/canary/key.asc \\\n'
+)
+_APT_TERMUX_DOC_ZH_NEW_1 = (
+    '     https://github.com/nastechresearch/nastech-agent/releases/download/termux-repo-canary/key.asc \\\n'
+)
+_APT_TERMUX_DOC_ZH_OLD_2 = (
+    '4. 添加 canary 仓库：\n'
+    '\n'
+    '   ```bash\n'
+    "   printf '%s\\n' \\\n"
+    '     "deb [signed-by=$PREFIX/etc/apt/keyrings/nastech-agent.asc] https://nastech-assets.nastechresearch.workers.dev/releases/termux/canary nastech-canary main" \\\n'
+)
+_APT_TERMUX_DOC_ZH_NEW_2 = (
+    '4. 添加 canary 仓库（扁平仓库，发行版字段写 `./`）：\n'
+    '\n'
+    '   ```bash\n'
+    "   printf '%s\\n' \\\n"
+    '     "deb [signed-by=$PREFIX/etc/apt/keyrings/nastech-agent.asc] https://github.com/nastechresearch/nastech-agent/releases/download/termux-repo-canary ./" \\\n'
+)
+_APT_TERMUX_DOC_ZH_EDITS = (
+    (_APT_TERMUX_DOC_ZH_OLD_1, _APT_TERMUX_DOC_ZH_NEW_1),
+    (_APT_TERMUX_DOC_ZH_OLD_2, _APT_TERMUX_DOC_ZH_NEW_2),
+)
+
+_APT_FEED_EDITS = (
+    (_APT_CHECK_APT_REL, _APT_CHECK_APT_EDITS),
+    (_APT_STABLE_RELEASES_DOC_REL, _APT_STABLE_RELEASES_DOC_EDITS),
+    (_APT_TERMUX_DOC_REL, _APT_TERMUX_DOC_EDITS),
+    (_APT_TERMUX_DOC_ZH_REL, _APT_TERMUX_DOC_ZH_EDITS),
+)
+
+
+class TermuxAptFeedAnchorError(ValueError):
+    """The Termux APT checker moved, so the flat feed layout could not be re-applied."""
+
+
+def _reconcile_termux_apt_flat_feed(dst: str) -> list[str]:
+    """Check and document the Termux feed as the flat repository it is now published as.
+
+    The APT feed is no longer a prefix under an R2 bucket: it is a flat signed
+    repository published as the assets of one fixed-tag release per channel
+    (``termux-repo`` for stable, ``termux-repo-canary`` for canary), because a
+    GitHub release asset name is one path component and cannot hold ``/``.  A flat
+    repository changes what the source line has to say -- ``apt`` reads
+    ``<repository>/Release`` and ``<repository>/Packages`` and resolves each
+    stanza's ``Filename`` against the same base -- so ``scripts/termux/check_apt.sh``
+    was writing a suite/component line for a layout that no longer exists, and the
+    two Termux install pages plus their zh-Hans translation were pointing devices at
+    the retired worker prefix.
+
+    Dropping ``by-hash=force`` is not a lost check: measured with apt 2.8.3, on a
+    flat repository the option is inert (apt issues no by-hash request either way),
+    and index integrity is carried by the ``Release`` SHA256/SHA512 rows, which apt
+    still enforces -- flipping one byte of ``Packages`` makes ``apt-get update`` exit
+    100.  ``signed-by`` stays, so the repository is still signature-verified.  What
+    the flat source line can no longer express is the channel, so the script now
+    asserts ``Suite:`` in the published ``Release`` against the suite it staged: a
+    feed wired to the wrong channel would otherwise install over another channel's
+    packages.
+
+    ``scripts/termux/check_apt.sh`` is the file that grades the feed, so an absent
+    anchor there raises :class:`TermuxAptFeedAnchorError` rather than letting a
+    verifier keep describing the old layout; the documentation pages are only
+    rewritten when they carry the retired prefix.
+    """
+    fixed: list[str] = []
+    for rel, edits in _APT_FEED_EDITS:
+        text = _reconcile_budget_read(dst, rel)
+        if text is None:
+            continue
+        if not any(old in text for old, _ in edits):
+            if rel == _APT_CHECK_APT_REL and _APT_CHECK_APT_NEW_2 not in text:
+                raise TermuxAptFeedAnchorError(
+                    f"{rel} documents neither the flat ``./`` source line this rule writes nor the "
+                    "suite/component line it replaces, so the APT feed checker moved. Upstream "
+                    "rewrote how the feed is read: re-derive the table from its current text "
+                    "instead of dropping this rule -- a checker left describing the old layout "
+                    "passes while devices install from a feed nothing verifies."
+                )
+            continue
+        updated = text
+        for old, new in edits:
+            if new in updated:
+                continue
+            if updated.count(old) != 1:
+                raise TermuxAptFeedAnchorError(
+                    f"{rel} carries part of the APT feed shapes this rule rewrites but not all of "
+                    "them. Upstream moved the feed: re-derive the table from its current text. Do "
+                    "not drop the rule to get a green sync -- a half-applied feed leaves one "
+                    "channel installing over another."
+                )
+            updated = updated.replace(old, new, 1)
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+    return fixed
+
+
 class PagesReleasePlaneAnchorError(ValueError):
     """A release-plane file moved, so the GitHub Pages hand-off could not be re-applied."""
 
@@ -8058,6 +8269,11 @@ def reconcile_tree(
         result.fixed.append(rel)
     # The picker test upstream deleted is preserved from the fork, fake and all, so its
     # rewrite runs with the other preserved-file rules -- see ``_preserve`` below.
+    # The Termux feed is a flat repository published as release assets now; the
+    # checker and the install pages are upstream-owned, so the layout is a rule.
+    for rel in _reconcile_termux_apt_flat_feed(dst):
+        result.total += 1
+        result.fixed.append(rel)
     # The fork's release plane is GitHub Pages: nine upstream-owned files still
     # name the retired worker origin after brand_tree, so the hand-off is a rule.
     # Before the prompt-surface snapshot -- that step counts characters in the
