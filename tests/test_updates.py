@@ -186,6 +186,13 @@ from hundredways.updates import (
     _UI_SCOPE_ASSET_EVIDENCE,
     UiRegistryLookupError,
     UiScopePinError,
+    WindowsHolderClockWaitError,
+    _LIVE_HOLDER_EDITS,
+    _LIVE_HOLDER_JOIN_REL,
+    _R6_CHECKOUT_HOLDER_CLOCK,
+    _R6_CHECKOUT_HOLDER_EVENT,
+    _R6_CHECKOUT_HOLDER_REL,
+    _reconcile_windows_holder_clock_waits,
     _sigv4_vector_signature,
     _split_prompt_surface_tiers,
     brand_tree,
@@ -780,6 +787,53 @@ def test_blobless_merge_base_jobs_stop_when_the_checkout_moves(tmp_path):
     with pytest.raises(BloblessCheckoutAnchorError, match="no anchor"):
         _reconcile_blobless_merge_base_jobs(str(candidate))
     assert "filter: blob:none" not in (wf / "lint.yml").read_text(encoding="utf-8")
+
+
+def _windows_holder_clock_tree(tmp_path):
+    """A branded candidate tree carrying upstream's two clock-timed Windows holder fixtures."""
+    candidate = tmp_path / "candidate"
+    r6 = candidate.joinpath(*_R6_CHECKOUT_HOLDER_REL.split("/"))
+    live = candidate.joinpath(*_LIVE_HOLDER_JOIN_REL.split("/"))
+    r6.parent.mkdir(parents=True, exist_ok=True)
+    live.parent.mkdir(parents=True, exist_ok=True)
+    r6.write_text(_R6_CHECKOUT_HOLDER_CLOCK, encoding="utf-8")
+    live.write_text(
+        "import psutil\n\n" + _LIVE_HOLDER_EDITS[0][0] + "\n" + _LIVE_HOLDER_EDITS[1][0],
+        encoding="utf-8",
+    )
+    return candidate, r6, live
+
+
+def test_windows_holder_clock_waits_become_event_based(tmp_path):
+    """A holder that only sleeps cannot prove the wait it claims to cover ran."""
+    candidate, r6, live = _windows_holder_clock_tree(tmp_path)
+
+    changed = _reconcile_windows_holder_clock_waits(str(candidate))
+    assert set(changed) == {_R6_CHECKOUT_HOLDER_REL, _LIVE_HOLDER_JOIN_REL}
+    holder = r6.read_text(encoding="utf-8")
+    assert holder == _R6_CHECKOUT_HOLDER_EVENT
+    assert "time.sleep(float(sys.argv[2]))" not in holder
+    assert "'still holds the checkout' in handle.read()" in holder
+    assert "time.time() + 25" not in holder
+    joined = live.read_text(encoding="utf-8")
+    assert "from tests.waiting import wait_until" in joined
+    assert joined.count("wait_until(lambda: not [p.pid") == 1
+    assert joined.endswith(_LIVE_HOLDER_EDITS[1][1])
+    for text in (holder, joined):
+        assert "hermes" not in text.lower() and "nous" not in text.lower()
+        assert BrandingRules().transform_text(text) == text
+    assert _reconcile_windows_holder_clock_waits(str(candidate)) == []
+
+
+def test_windows_holder_clock_waits_stop_when_the_fixture_moves(tmp_path):
+    candidate, r6, live = _windows_holder_clock_tree(tmp_path)
+    r6.write_text(
+        _R6_CHECKOUT_HOLDER_EVENT.replace("print('locked', flush=True)\n", ""),
+        encoding="utf-8",
+    )
+    with pytest.raises(WindowsHolderClockWaitError, match="exactly one copy"):
+        _reconcile_windows_holder_clock_waits(str(candidate))
+    assert _LIVE_HOLDER_EDITS[1][0] in live.read_text(encoding="utf-8")
 
 
 def _free_runner_js_lane_tree(tmp_path):
