@@ -192,6 +192,17 @@ from hundredways.updates import (
     _R6_CHECKOUT_HOLDER_CLOCK,
     _R6_CHECKOUT_HOLDER_EVENT,
     _R6_CHECKOUT_HOLDER_REL,
+    PagesReleasePlaneAnchorError,
+    _PAGES_BUNDLE_SMOKE_REL,
+    _PAGES_CHANNEL_BUILD_REL,
+    _PAGES_CHANNEL_TESTS_REL,
+    _PAGES_DEPLOY_SITE_REL,
+    _PAGES_R2_HOST_REL,
+    _PAGES_R2_SCOPE_REL,
+    _PAGES_RELEASE_EDITS,
+    _PAGES_SOURCE_RELEASES_REL,
+    _PAGES_TS_CHECKOUT_SOURCE_REL,
+    _reconcile_github_pages_release_plane,
     _reconcile_windows_holder_clock_waits,
     _sigv4_vector_signature,
     _split_prompt_surface_tiers,
@@ -834,6 +845,98 @@ def test_windows_holder_clock_waits_stop_when_the_fixture_moves(tmp_path):
     with pytest.raises(WindowsHolderClockWaitError, match="exactly one copy"):
         _reconcile_windows_holder_clock_waits(str(candidate))
     assert _LIVE_HOLDER_EDITS[1][0] in live.read_text(encoding="utf-8")
+
+
+def _pages_release_plane_tree(tmp_path, duplicate_permission=False):
+    """A branded candidate whose release-plane files still name the retired worker.
+
+    Each of the nine upstream-owned files is written from the exact spans the rule
+    reads, so the fixture is the pre-hand-off text and the expectation is the
+    post-hand-off text -- no paraphrase of either.
+    """
+    candidate = tmp_path / "candidate"
+    paths = {}
+    for rel, edits in _PAGES_RELEASE_EDITS:
+        path = candidate.joinpath(*rel.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        body = "\n".join(old for old, _ in edits)
+        if duplicate_permission and rel == _PAGES_BUNDLE_SMOKE_REL:
+            body = edits[0][0] + body
+        path.write_text(body, encoding="utf-8")
+        paths[rel] = path
+    return candidate, paths
+
+
+def test_github_pages_release_plane_serves_the_control_plane_from_pages(tmp_path):
+    """One origin, derived: the host, the site prefix and the sandbox allowlist agree.
+
+    nastech-agent#194 moves the control plane to the Pages project site, which
+    carries the repository in its path -- so a pointer path that omits it 404s, and
+    the retired worker origin must not survive a sync anywhere in these files.
+    """
+    candidate, paths = _pages_release_plane_tree(tmp_path)
+
+    changed = _reconcile_github_pages_release_plane(str(candidate))
+    assert changed == [rel for rel, _ in _PAGES_RELEASE_EDITS]
+
+    origin = "https://nastechresearch.github.io/nastech-agent"
+    for rel, edits in _PAGES_RELEASE_EDITS:
+        text = paths[rel].read_text(encoding="utf-8")
+        assert text == "\n".join(new for _, new in edits)
+        assert "workers.dev" not in text
+        assert "hermes" not in text.lower() and "nous" not in text.lower()
+        assert BrandingRules().transform_text(text) == text
+    assert f'_PUBLIC_BASE = "{origin}"' in paths[_PAGES_SOURCE_RELEASES_REL].read_text("utf-8")
+    typescript = paths[_PAGES_TS_CHECKOUT_SOURCE_REL].read_text("utf-8")
+    assert f"const pagesBase: string = '{origin}'" in typescript
+    assert "const pagesPrefix: string = pagesOrigin.pathname" in typescript
+    assert "'api.github.com'" in typescript
+    channel_tests = paths[_PAGES_CHANNEL_TESTS_REL].read_text("utf-8")
+    assert '"/releases/' not in channel_tests
+    assert 'os.environ.get("RELEASE_CHANNEL_STORE", "r2")' in paths[_PAGES_R2_HOST_REL].read_text("utf-8")
+    assert 'os.environ.get("RELEASE_CHANNEL_STORE", "r2")' in paths[_PAGES_R2_SCOPE_REL].read_text("utf-8")
+    assert 'os.environ.get("RELEASE_CHANNEL_STORE", "r2")' in paths[_PAGES_CHANNEL_BUILD_REL].read_text("utf-8")
+    assert "RELEASE_CHANNEL_STORE: github" in paths[_PAGES_BUNDLE_SMOKE_REL].read_text("utf-8")
+    assert "cp -r releases _site/releases" in paths[_PAGES_DEPLOY_SITE_REL].read_text("utf-8")
+
+    assert _reconcile_github_pages_release_plane(str(candidate)) == []
+
+
+def test_github_pages_release_plane_stops_when_an_anchor_is_ambiguous(tmp_path):
+    """Two copies of one anchor is a moved plane, not a licence to guess which to rewrite."""
+    candidate, paths = _pages_release_plane_tree(tmp_path, duplicate_permission=True)
+
+    with pytest.raises(PagesReleasePlaneAnchorError, match="not all"):
+        _reconcile_github_pages_release_plane(str(candidate))
+
+    smoke = paths[_PAGES_BUNDLE_SMOKE_REL].read_text("utf-8")
+    assert "RELEASE_CHANNEL_STORE" not in smoke
+    assert "workers.dev" in paths[_PAGES_SOURCE_RELEASES_REL].read_text("utf-8")
+
+
+def test_github_pages_release_plane_leaves_a_tree_without_the_plane_alone(tmp_path):
+    """A candidate whose Deploy Site job is not the Pages build is not this rule's business."""
+    stub = tmp_path / "candidate" / ".github" / "workflows" / "deploy-site.yml"
+    stub.parent.mkdir(parents=True)
+    stub.write_text(
+        "      - name: Stage deployment\n        run: |\n"
+        "          mkdir -p _site/docs\n          cp -r website/build/* _site/docs/\n",
+        encoding="utf-8",
+    )
+
+    assert _reconcile_github_pages_release_plane(str(tmp_path / "candidate")) == []
+
+
+def test_github_pages_release_plane_stops_when_the_reader_origin_does_not_move(tmp_path):
+    """Every other file derives from ``_PUBLIC_BASE``, so it cannot be left on the worker."""
+    candidate, paths = _pages_release_plane_tree(tmp_path)
+    origin = paths[_PAGES_SOURCE_RELEASES_REL]
+    origin.write_text(
+        '_PUBLIC_BASE = "https://downloads.example.test/source"\n', encoding="utf-8"
+    )
+
+    with pytest.raises(PagesReleasePlaneAnchorError, match="no such origin"):
+        _reconcile_github_pages_release_plane(str(candidate))
 
 
 def _free_runner_js_lane_tree(tmp_path):

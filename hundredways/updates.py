@@ -4363,6 +4363,320 @@ def _reconcile_windows_holder_clock_waits(dst: str) -> list[str]:
     return fixed
 
 
+# Fork release plane: assets and channel pointers are served by GitHub Pages.
+
+_PAGES_DEPLOY_SITE_REL = ".github/workflows/deploy-site.yml"
+_PAGES_DEPLOY_SITE_OLD_1 = """\
+      - 'website/**'
+      - 'skills/**'
+"""
+_PAGES_DEPLOY_SITE_NEW_1 = """\
+      - 'website/**'
+      - 'releases/**'  # control-plane commits from the release plane must republish Pages
+      - 'skills/**'
+"""
+_PAGES_DEPLOY_SITE_OLD_2 = """\
+          HTML
+          # llms.txt / llms-full.txt are also published at the site root
+"""
+_PAGES_DEPLOY_SITE_NEW_2 = """\
+          HTML
+          # The fork's release control plane lives in the repository tree
+          # (scripts/releases/ghpages.py commits it via the Contents API) and
+          # is published by this very build, so ChannelReader speaks the same
+          # /releases/… protocol Pages now serves.
+          if [ -d releases ]; then
+            cp -r releases _site/releases
+          fi
+          # llms.txt / llms-full.txt are also published at the site root
+"""
+_PAGES_DEPLOY_SITE_EDITS = (
+    (_PAGES_DEPLOY_SITE_OLD_1, _PAGES_DEPLOY_SITE_NEW_1),
+    (_PAGES_DEPLOY_SITE_OLD_2, _PAGES_DEPLOY_SITE_NEW_2),
+)
+
+_PAGES_BUNDLE_SMOKE_REL = ".github/workflows/desktop-bundle-smoke.yml"
+_PAGES_BUNDLE_SMOKE_OLD_1 = """\
+  contents: read
+
+"""
+_PAGES_BUNDLE_SMOKE_NEW_1 = """\
+  contents: read
+
+env:
+  RELEASE_CHANNEL_STORE: github
+
+
+"""
+_PAGES_BUNDLE_SMOKE_EDITS = (
+    (_PAGES_BUNDLE_SMOKE_OLD_1, _PAGES_BUNDLE_SMOKE_NEW_1),
+)
+
+_PAGES_SOURCE_RELEASES_REL = "nastech_cli/source_releases.py"
+_PAGES_SOURCE_RELEASES_OLD_1 = """\
+_PUBLIC_BASE = "https://nastech-assets.nastechresearch.workers.dev"
+"""
+_PAGES_SOURCE_RELEASES_NEW_1 = """\
+_PUBLIC_BASE = "https://nastechresearch.github.io/nastech-agent"
+"""
+_PAGES_SOURCE_RELEASES_EDITS = (
+    (_PAGES_SOURCE_RELEASES_OLD_1, _PAGES_SOURCE_RELEASES_NEW_1),
+)
+
+_PAGES_CHANNEL_BUILD_REL = "scripts/releases/channel_build.py"
+_PAGES_CHANNEL_BUILD_OLD_1 = """\
+    base = channel_public_base()
+    store = R2ChannelStore(*r2.credentials(), scope=scope)
+"""
+_PAGES_CHANNEL_BUILD_NEW_1 = """\
+    from scripts.releases.ghpages import configured_store
+    if os.environ.get("RELEASE_CHANNEL_STORE", "r2") == "github":
+        base = os.environ.get("RELEASE_PAGES_PUBLIC_BASE", "https://nastechresearch.github.io/nastech-agent")
+    else:
+        base = channel_public_base()
+    store = configured_store(repository, scope=scope)
+"""
+_PAGES_CHANNEL_BUILD_EDITS = (
+    (_PAGES_CHANNEL_BUILD_OLD_1, _PAGES_CHANNEL_BUILD_NEW_1),
+)
+
+_PAGES_CHANNEL_PUBLISH_REL = "scripts/releases/channel_publish.py"
+_PAGES_CHANNEL_PUBLISH_OLD_1 = """\
+        values["public-root"] = os.environ["CLOUDFLARE_R2_PUBLIC_URL"]
+"""
+_PAGES_CHANNEL_PUBLISH_NEW_1 = """\
+        values["public-root"] = (os.environ.get("CLOUDFLARE_R2_PUBLIC_URL")
+                                     or os.environ.get("RELEASE_PAGES_PUBLIC_BASE",
+                                                       "https://nastechresearch.github.io/nastech-agent"))
+"""
+_PAGES_CHANNEL_PUBLISH_OLD_2 = """\
+        publisher = ChannelPublisher(R2ChannelStore(*r2.credentials()), args.repository, args.public_base,
+"""
+_PAGES_CHANNEL_PUBLISH_NEW_2 = """\
+        from scripts.releases.ghpages import configured_store
+        publisher = ChannelPublisher(configured_store(args.repository), args.repository, args.public_base,
+"""
+_PAGES_CHANNEL_PUBLISH_EDITS = (
+    (_PAGES_CHANNEL_PUBLISH_OLD_1, _PAGES_CHANNEL_PUBLISH_NEW_1),
+    (_PAGES_CHANNEL_PUBLISH_OLD_2, _PAGES_CHANNEL_PUBLISH_NEW_2),
+)
+
+_PAGES_R2_HOST_REL = "scripts/releases/r2.py"
+_PAGES_R2_HOST_OLD_1 = """\
+def public_base_url(explicit: str | None = None) -> str:
+    return R2Scope.configured().public_base(
+"""
+_PAGES_R2_HOST_NEW_1 = """\
+def public_base_url(explicit: str | None = None) -> str:
+    if (explicit is None
+            and not os.environ.get("CLOUDFLARE_R2_PUBLIC_URL")
+            and os.environ.get("RELEASE_CHANNEL_STORE", "r2") == "github"):
+        from scripts.releases.ghpages import pages_public_base
+        return R2Scope.configured().public_base(pages_public_base())
+    return R2Scope.configured().public_base(
+"""
+_PAGES_R2_HOST_EDITS = (
+    (_PAGES_R2_HOST_OLD_1, _PAGES_R2_HOST_NEW_1),
+)
+
+_PAGES_R2_SCOPE_REL = "scripts/releases/r2_scope.py"
+_PAGES_R2_SCOPE_OLD_1 = """\
+        return expected
+    from nastech_cli.release_channels import public_base
+"""
+_PAGES_R2_SCOPE_NEW_1 = """\
+        return expected
+    if explicit is None and os.environ.get("RELEASE_CHANNEL_STORE", "r2") == "github":
+        # The fork's control plane lives on GitHub Pages, not the worker.
+        from scripts.releases.ghpages import pages_public_base
+        return pages_public_base()
+    from nastech_cli.release_channels import public_base
+"""
+_PAGES_R2_SCOPE_EDITS = (
+    (_PAGES_R2_SCOPE_OLD_1, _PAGES_R2_SCOPE_NEW_1),
+)
+
+_PAGES_CHANNEL_TESTS_REL = "tests/nastech_cli/test_source_release_channels.py"
+_PAGES_CHANNEL_TESTS_OLD_1 = """\
+    responses = {}
+    requests = []
+    for channel, tag in tags.items():
+        responses[f"/releases/{channel}/index.html"] = (
+"""
+_PAGES_CHANNEL_TESTS_NEW_1 = """\
+    # The legacy pointer host is GitHub Pages now: the site prefix is part of
+    # every public path the reader builds from _PUBLIC_BASE.
+    pages = "/nastech-agent"
+    responses = {}
+    requests = []
+    for channel, tag in tags.items():
+        responses[f"{pages}/releases/{channel}/index.html"] = (
+"""
+_PAGES_CHANNEL_TESTS_OLD_2 = """\
+    responses["/releases/stable/release-candidates.json"] = {
+"""
+_PAGES_CHANNEL_TESTS_NEW_2 = """\
+    responses[f"{pages}/releases/stable/release-candidates.json"] = {
+"""
+_PAGES_CHANNEL_TESTS_OLD_3 = """\
+    releases.responses.pop("/releases/stable/release-candidates.json")
+    releases.responses.pop(f"/releases/{channel}/index.html")
+"""
+_PAGES_CHANNEL_TESTS_NEW_3 = """\
+    releases.responses.pop("/nastech-agent/releases/stable/release-candidates.json")
+    releases.responses.pop(f"/nastech-agent/releases/{channel}/index.html")
+"""
+_PAGES_CHANNEL_TESTS_EDITS = (
+    (_PAGES_CHANNEL_TESTS_OLD_1, _PAGES_CHANNEL_TESTS_NEW_1),
+    (_PAGES_CHANNEL_TESTS_OLD_2, _PAGES_CHANNEL_TESTS_NEW_2),
+    (_PAGES_CHANNEL_TESTS_OLD_3, _PAGES_CHANNEL_TESTS_NEW_3),
+)
+
+_PAGES_TS_CHECKOUT_SOURCE_REL = "apps/desktop/electron/updater/checkout-source.test.ts"
+_PAGES_TS_CHECKOUT_SOURCE_OLD_1 = """\
+const python: string = process.env.NASTECH_PYTHON || 'python3'
+
+"""
+_PAGES_TS_CHECKOUT_SOURCE_NEW_1 = """\
+const python: string = process.env.NASTECH_PYTHON || 'python3'
+
+// The origin the reader resolves against is `nastech_cli/source_releases._PUBLIC_BASE`. A GitHub
+// Pages project site carries the repository in its path, so the sandbox host, the path every record
+// is served under and the authority the manifest records are one value; as three literals they
+// drifted apart and the sandbox rejected its own reader.
+const pagesBase: string = 'https://nastechresearch.github.io/nastech-agent'
+const pagesOrigin: URL = new URL(pagesBase)
+const pagesHost: string = pagesOrigin.hostname
+const pagesPrefix: string = pagesOrigin.pathname
+
+"""
+_PAGES_TS_CHECKOUT_SOURCE_OLD_2 = """\
+      publicBase: 'https://nastech-assets.nastechresearch.workers.dev'
+"""
+_PAGES_TS_CHECKOUT_SOURCE_NEW_2 = """\
+      publicBase: pagesBase
+"""
+_PAGES_TS_CHECKOUT_SOURCE_OLD_3 = """\
+        `/releases/channels/${channel}.json`,
+"""
+_PAGES_TS_CHECKOUT_SOURCE_NEW_3 = """\
+        `${pagesPrefix}/releases/channels/${channel}.json`,
+"""
+_PAGES_TS_CHECKOUT_SOURCE_OLD_4 = """\
+      responses.set(`/${manifestKey(channel)}`, body)
+"""
+_PAGES_TS_CHECKOUT_SOURCE_NEW_4 = """\
+      responses.set(`${pagesPrefix}/${manifestKey(channel)}`, body)
+"""
+_PAGES_TS_CHECKOUT_SOURCE_OLD_5 = """\
+        assert parsed.hostname in ('nastech-assets.nastechresearch.workers.dev', 'api.github.com')
+"""
+_PAGES_TS_CHECKOUT_SOURCE_NEW_5 = """\
+        assert parsed.hostname in ('${pagesHost}', 'api.github.com')
+"""
+_PAGES_TS_CHECKOUT_SOURCE_OLD_6 = """\
+    responses.delete(`/releases/channels/canary.json`)
+"""
+_PAGES_TS_CHECKOUT_SOURCE_NEW_6 = """\
+    responses.delete(`${pagesPrefix}/releases/channels/canary.json`)
+"""
+_PAGES_TS_CHECKOUT_SOURCE_EDITS = (
+    (_PAGES_TS_CHECKOUT_SOURCE_OLD_1, _PAGES_TS_CHECKOUT_SOURCE_NEW_1),
+    (_PAGES_TS_CHECKOUT_SOURCE_OLD_2, _PAGES_TS_CHECKOUT_SOURCE_NEW_2),
+    (_PAGES_TS_CHECKOUT_SOURCE_OLD_3, _PAGES_TS_CHECKOUT_SOURCE_NEW_3),
+    (_PAGES_TS_CHECKOUT_SOURCE_OLD_4, _PAGES_TS_CHECKOUT_SOURCE_NEW_4),
+    (_PAGES_TS_CHECKOUT_SOURCE_OLD_5, _PAGES_TS_CHECKOUT_SOURCE_NEW_5),
+    (_PAGES_TS_CHECKOUT_SOURCE_OLD_6, _PAGES_TS_CHECKOUT_SOURCE_NEW_6),
+)
+
+_PAGES_RELEASE_EDITS = (
+    (_PAGES_DEPLOY_SITE_REL, _PAGES_DEPLOY_SITE_EDITS),
+    (_PAGES_BUNDLE_SMOKE_REL, _PAGES_BUNDLE_SMOKE_EDITS),
+    (_PAGES_SOURCE_RELEASES_REL, _PAGES_SOURCE_RELEASES_EDITS),
+    (_PAGES_CHANNEL_BUILD_REL, _PAGES_CHANNEL_BUILD_EDITS),
+    (_PAGES_CHANNEL_PUBLISH_REL, _PAGES_CHANNEL_PUBLISH_EDITS),
+    (_PAGES_R2_HOST_REL, _PAGES_R2_HOST_EDITS),
+    (_PAGES_R2_SCOPE_REL, _PAGES_R2_SCOPE_EDITS),
+    (_PAGES_CHANNEL_TESTS_REL, _PAGES_CHANNEL_TESTS_EDITS),
+    (_PAGES_TS_CHECKOUT_SOURCE_REL, _PAGES_TS_CHECKOUT_SOURCE_EDITS),
+)
+
+
+class PagesReleasePlaneAnchorError(ValueError):
+    """A release-plane file moved, so the GitHub Pages hand-off could not be re-applied."""
+
+
+def _reconcile_github_pages_release_plane(dst: str) -> list[str]:
+    """Hand the fork's release control plane from the R2 worker to GitHub Pages.
+
+    ``scripts/releases/ghpages.py`` (a fork-only file, so ``preserve_fork_files``
+    carries it) speaks the ``R2ChannelStore`` get/put/keys CAS surface against
+    the GitHub Contents API and commits channel records, per-channel pages and
+    release-candidate pointers into the repository tree.  Two things follow, and
+    every one of them lands in a file ``brand_tree`` re-derives:
+
+    * the public origin.  ``nastech_cli/source_releases.py`` published
+      ``https://nastech-assets.nastechresearch.workers.dev``, a worker deployment
+      whose dev domain does not decode percent-encoded keys; the fork's plane is
+      the project site ``https://nastechresearch.github.io/nastech-agent``.  A
+      Pages *project* site carries the repository in its path, so that origin is
+      host ``nastechresearch.github.io`` **and** prefix ``/nastech-agent`` --
+      naming three literals separately is how the desktop checkout sandbox came
+      to reject its own reader (nastech-agent#194, 3cc19e3e7).
+    * the yard selector.  ``RELEASE_CHANNEL_STORE`` picks ``github`` in the
+      release lanes while ``r2`` stays selectable for upstream carry, so the
+      reader and the publisher resolve the same base without a credential.
+
+    The rule re-applies all of it as one table: the Deploy Site workflow
+    publishes ``releases/`` into the Pages artifact, the smoke lane pins the
+    selector, the reader, both channel writers and the two R2 base resolvers
+    follow the selector, and the Python and electron tests assert against the
+    derived origin instead of a literal.  Nothing here deletes an R2 path or
+    relaxes a check -- the retired host is replaced where the fork publishes,
+    and ``r2`` remains the default when the selector is unset.
+
+    A file carrying none of the pre-hand-off shapes is left alone -- that is a
+    candidate whose tree does not have this part of the plane (or one that has
+    already moved).  A file carrying *some* of them but not all raises
+    :class:`PagesReleasePlaneAnchorError`, because upstream rewrote the release
+    plane and a half-applied table publishes pointers to one host while reading
+    them from another.  ``nastech_cli/source_releases.py`` is checked even when
+    it carries none: every other file derives its origin from that constant, so
+    a candidate whose reader still resolves to the retired worker stops the sync.
+    """
+    fixed: list[str] = []
+    for rel, edits in _PAGES_RELEASE_EDITS:
+        text = _reconcile_budget_read(dst, rel)
+        if text is None:
+            continue
+        if not any(old in text for old, _ in edits):
+            continue
+        updated = text
+        for old, new in edits:
+            if new in updated:
+                continue
+            if updated.count(old) != 1:
+                raise PagesReleasePlaneAnchorError(
+                    f"{rel} carries part of the release-plane shapes this rule rewrites but not "
+                    "all of them. Upstream moved the release plane: re-derive the table from its "
+                    "current text. Do not drop the rule to get a green sync -- a half-applied "
+                    "table publishes channel pointers to one host and reads them from another."
+                )
+            updated = updated.replace(old, new, 1)
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+    origin = _reconcile_budget_read(dst, _PAGES_SOURCE_RELEASES_REL)
+    if origin is not None and _PAGES_SOURCE_RELEASES_NEW_1 not in origin:
+        raise PagesReleasePlaneAnchorError(
+            f"{_PAGES_SOURCE_RELEASES_REL} publishes no such origin "
+            f"({_PAGES_SOURCE_RELEASES_NEW_1.strip()}), so the reader would resolve a base no "
+            "longer published. Upstream renamed the constant or moved the plane: re-derive the "
+            "table from its current text instead of dropping this rule."
+        )
+    return fixed
+
+
 class UnsignedDarwinBuildEnvError(ValueError):
     """The macOS bundle build step moved, so the unsigned guard could not apply."""
 
@@ -7744,6 +8058,13 @@ def reconcile_tree(
         result.fixed.append(rel)
     # The picker test upstream deleted is preserved from the fork, fake and all, so its
     # rewrite runs with the other preserved-file rules -- see ``_preserve`` below.
+    # The fork's release plane is GitHub Pages: nine upstream-owned files still
+    # name the retired worker origin after brand_tree, so the hand-off is a rule.
+    # Before the prompt-surface snapshot -- that step counts characters in the
+    # rendered text these edits rewrite.
+    for rel in _reconcile_github_pages_release_plane(dst):
+        result.total += 1
+        result.fixed.append(rel)
     # Prompt-surface LAST: it counts characters in the rendered prompts, and
     # _reconcile_domains above rewrites the domain hosts inside those prompt
     # files.  Computing it any earlier leaves surfaces.json describing the
