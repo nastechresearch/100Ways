@@ -202,6 +202,13 @@ from hundredways.updates import (
     _PAGES_RELEASE_EDITS,
     _PAGES_SOURCE_RELEASES_REL,
     _PAGES_TS_CHECKOUT_SOURCE_REL,
+    TermuxAptFeedAnchorError,
+    _APT_CHECK_APT_REL,
+    _APT_FEED_EDITS,
+    _APT_STABLE_RELEASES_DOC_REL,
+    _APT_TERMUX_DOC_REL,
+    _APT_TERMUX_DOC_ZH_REL,
+    _reconcile_termux_apt_flat_feed,
     _reconcile_github_pages_release_plane,
     _reconcile_windows_holder_clock_waits,
     _sigv4_vector_signature,
@@ -937,6 +944,66 @@ def test_github_pages_release_plane_stops_when_the_reader_origin_does_not_move(t
 
     with pytest.raises(PagesReleasePlaneAnchorError, match="no such origin"):
         _reconcile_github_pages_release_plane(str(candidate))
+
+
+def _termux_apt_flat_feed_tree(tmp_path):
+    """A branded candidate whose checker and install pages still describe the R2-prefix feed."""
+    candidate = tmp_path / "candidate"
+    paths = {}
+    for rel, edits in _APT_FEED_EDITS:
+        path = candidate.joinpath(*rel.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(old for old, _ in edits), encoding="utf-8")
+        paths[rel] = path
+    return candidate, paths
+
+
+def test_termux_apt_flat_feed_checks_and_documents_the_flat_repository(tmp_path):
+    """A feed published as release assets is flat, so the checker says ``./`` and names the suite.
+
+    nastech-agent#195 moves the Termux APT index out of the retired worker prefix;
+    a release asset name cannot hold ``/``, so nothing here may keep describing a
+    suite/component layout.
+    """
+    candidate, paths = _termux_apt_flat_feed_tree(tmp_path)
+
+    changed = _reconcile_termux_apt_flat_feed(str(candidate))
+    assert changed == [rel for rel, _ in _APT_FEED_EDITS]
+    for rel, edits in _APT_FEED_EDITS:
+        text = paths[rel].read_text(encoding="utf-8")
+        assert text == "\n".join(new for _, new in edits)
+        assert "workers.dev" not in text
+        assert "releases/termux/" not in text
+        assert BrandingRules().transform_text(text) == text
+    checker = paths[_APT_CHECK_APT_REL].read_text("utf-8")
+    assert "by-hash=force]" not in checker
+    assert 'printf \'deb [signed-by=/apt/key.asc] %s ./\\n\'' in checker
+    assert 'grep -qx "Suite: $suite" /apt/Release' in checker
+    assert "deb [signed-by=$PREFIX/etc/apt/keyrings/nastech-agent.asc] https://github.com/nastechresearch/nastech-agent/releases/download/termux-repo ./" in paths[
+        _APT_TERMUX_DOC_REL
+    ].read_text("utf-8")
+    assert "termux-repo-canary ./" in paths[_APT_TERMUX_DOC_ZH_REL].read_text("utf-8")
+
+    assert _reconcile_termux_apt_flat_feed(str(candidate)) == []
+
+
+def test_termux_apt_flat_feed_stops_when_the_checker_moves(tmp_path):
+    """A checker matching neither layout would grade a feed no device installs from."""
+    candidate, paths = _termux_apt_flat_feed_tree(tmp_path)
+    paths[_APT_CHECK_APT_REL].write_text("# upstream rewrote the whole checker\n", encoding="utf-8")
+
+    with pytest.raises(TermuxAptFeedAnchorError, match="checker moved"):
+        _reconcile_termux_apt_flat_feed(str(candidate))
+
+
+def test_termux_apt_flat_feed_stops_when_a_shape_is_partial(tmp_path):
+    candidate, paths = _termux_apt_flat_feed_tree(tmp_path)
+    doc = paths[_APT_TERMUX_DOC_REL]
+    first_old = _APT_FEED_EDITS[2][1][0][0]
+    doc.write_text(doc.read_text("utf-8").replace(first_old, "", 1), encoding="utf-8")
+
+    with pytest.raises(TermuxAptFeedAnchorError, match="not all"):
+        _reconcile_termux_apt_flat_feed(str(candidate))
 
 
 def _free_runner_js_lane_tree(tmp_path):
