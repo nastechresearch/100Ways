@@ -404,6 +404,36 @@ def test_the_store_gate_lists_the_names_the_forks_own_lane_reads():
     assert not still_ungated
 
 
+def test_a_setting_whose_absence_is_the_documented_default_is_not_a_gap():
+    """``MS_STORE_HOLD`` unset means the Store submission commits Immediate (``d6c98faab``).
+
+    A report that named it would tell the owner to configure a toggle that is correct
+    as it stands, and a gate that demanded it would refuse every auto-publishing run.
+    The exemption is only for the ``vars.`` read: the same name reached through
+    ``secrets.`` is a credential and comes back as ``ungated-consumed``, so a required
+    value can never be excused by listing its name as optional.
+    """
+    held = WORKFLOW.replace(
+        "          SELLER: ${{ secrets.MS_STORE_SELLER_ID }}\n",
+        "          SELLER: ${{ secrets.MS_STORE_SELLER_ID }}\n"
+        "          HOLD: ${{ vars.MS_STORE_HOLD }}\n",
+    )
+    refs = workflow_references(held, workflow="release.yml")
+    assert "MS_STORE_HOLD" not in {item.name for item in refs}
+    assert verdicts(analyze(refs, EMPTY, gates=GATES)) == verdicts(
+        analyze(references(), EMPTY, gates=GATES)
+    )
+
+    laundered = workflow_references(
+        held.replace("vars.MS_STORE_HOLD", "secrets.MS_STORE_HOLD"), workflow="release.yml"
+    )
+    assert [
+        item.verdict
+        for item in analyze(laundered, EMPTY, gates=GATES)
+        if item.name == "MS_STORE_HOLD"
+    ] == [pubconfig.UNGATED_CONSUMED]
+
+
 def test_render_is_plain_text_and_carries_the_names_the_owner_must_type():
     found = analyze(references(), EMPTY, gates=GATES)
     text = render(found, repo="nastechresearch/nastech-agent", inventory=EMPTY)
