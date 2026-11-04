@@ -5288,7 +5288,7 @@ def _reconcile_desktop_release_leg_guards(dst: str) -> list[str]:
     one value, which is what :func:`_reconcile_github_pages_release_plane` rewrites in the
     nine files that carry it.
 
-    The unsigned-leg guards (fork PRs #192 and #199) make ``skip-signed`` decide *publication*,
+    The unsigned-leg guards (fork PRs #192 and #202) make ``skip-signed`` decide *publication*,
     never *production*: the Windows leg and the universal-bundle assembly drop upstream's
     signing precondition and build the bundled package unsigned the way the macOS legs always
     have, the architecture audit scans whatever the leg built, and only the recorders that read
