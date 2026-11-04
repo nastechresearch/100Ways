@@ -7593,11 +7593,12 @@ def test_fork_lane_release_default_set_and_its_test_agree(tmp_path):
     ``_reconcile_signing_gated_defaults`` writes the fork's ``DEFAULT`` and this
     rule writes the test that asserts it; the lists are hand-typed in separate
     constants, and what the test names is the lane table's own exclusions **plus**
-    whatever upstream already leaves opt-in and this fork does not add back.  At
-    this revision that second set is empty -- Termux is upstream's only opt-out and
-    the fork ships it -- so the two lists have to agree lane for lane.  A lane added
-    to one and not the other goes red in the fork's release suite with nothing
-    pointing at the pairing.
+    whatever upstream already leaves opt-in and this fork does not add back **plus**
+    any lane this fork itself adds as an opt-in row.  At this revision the second set
+    is empty -- Termux is upstream's only opt-out and the fork ships it -- and the
+    third is ``macos-intel``, which ``_reconcile_macos_intel_lane`` re-adds with
+    ``default=False``.  A lane added to one and not the other goes red in the fork's
+    release suite with nothing pointing at the pairing.
     """
     root, path = _lane_release_tree(tmp_path, _RELEASE_LANES_TESTS, _RELEASE_LANES_TESTS_EDITS)
     assert _reconcile_fork_lane_release_surface(str(root)) == [_RELEASE_LANES_TESTS]
@@ -7609,10 +7610,14 @@ def test_fork_lane_release_default_set_and_its_test_agree(tmp_path):
     # Upstream's own opt-outs, read off the before-text this pair rewrites.
     upstream = _RELEASE_LANES_TESTS_EDITS[0][0].split("set(lane_set.NAMES) - ")[1]
     upstream_opt_in = set(re.findall(r'"([a-z0-9-]+)"', upstream))
-    assert test_names == source_names | (upstream_opt_in - added)
+    # Lanes this fork adds as opt-in rows, read off the lane rule's own text.
+    fork_opt_in = {name for _, new in updates._MACOS_INTEL_LANE_EDITS
+                   for name in re.findall(r'Lane\("([a-z0-9-]+)", False', new)}
+    assert test_names == source_names | (upstream_opt_in - added) | fork_opt_in
     # Termux is the one lane both sides put back in: it needs no signing.
     assert added == {"termux"}
     assert "termux" not in test_names
+    assert fork_opt_in == {"macos-intel"}
 
 
 @pytest.mark.parametrize("drop", [1, 4])
