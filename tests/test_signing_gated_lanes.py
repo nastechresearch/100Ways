@@ -808,10 +808,25 @@ UPSTREAM_LANES_TIP = Path(__file__).parent / "fixtures" / "upstream_lanes" / "la
 
 
 def _fork_lane_table() -> dict:
-    """Upstream's lane table with the engine's fork default lane set applied to it."""
+    """Upstream's lane table as the sync produces it: fork default, then the Intel lane.
+
+    The fixture is an excerpt, so the Intel rewrites that live outside it (the module
+    docstring, the claim-reader note) are not applied here.  The five that move the sets these
+    tests derive from are, and their post-strings are asserted: reading only the default
+    rewrite would describe a table with no ``macos-intel`` row, which is a module this fork
+    never ships, and every set derived from it would be checked against the wrong code.
+    """
     source = UPSTREAM_LANES_TIP.read_text(encoding="utf-8")
     assert updates._LANES_DEFAULT in source, "the fixture lost the DEFAULT anchor"
     forked = source.replace(updates._LANES_DEFAULT, updates._LANES_DEFAULT_FORK)
+    for before, after in updates._MACOS_INTEL_LANE_EDITS:
+        if before in forked:
+            assert forked.count(before) == 1, "an Intel lane anchor became ambiguous"
+            forked = forked.replace(before, after, 1)
+    for shape in ('    Lane("macos-intel", False,', '    "candidates-darwin-x64":',
+                  '    "transitions-darwin-x64":', '    "macos-packaged-x64":',
+                  '"macos/x64": "macos-intel"'):
+        assert shape in forked, f"the fixture no longer carries the Intel lane at {shape!r}"
     namespace: dict = {}
     exec(compile(forked, "lanes.py", "exec"), namespace)
     return namespace
@@ -828,19 +843,22 @@ def _skipped_jobs(namespace: dict, lanes) -> set:
     return {job for job, does_run in runs.items() if not does_run}
 
 
-def test_the_fork_default_builds_every_package_and_skips_only_the_upgrade_arms():
+def test_the_fork_default_builds_unsigned_desktops_and_leaves_intel_and_upgrades_out():
     """A restated baseline would hide the fork's own change; this one cannot.
 
-    Every candidate and every bundle is built, unsigned.  What leaves the default release is
-    the pair of arms that only make sense against a signed channel -- the transition install
-    and the packaged-app upgrade -- because this fork's channel has never carried a signed
-    package to upgrade from.
+    Every Windows and Apple Silicon candidate and every bundle is built, unsigned.  Two
+    kinds of arm leave the default release: the upgrade arms, which only make sense against
+    a signed channel this fork's channel has never carried, and the darwin-x64 arms, whose
+    lane the fork keeps opt-in because an Intel runner adds over an hour to every release.
     """
     namespace = _fork_lane_table()
 
     assert _skipped_jobs(namespace, namespace["DEFAULT"]) == {
+        "candidates-darwin-x64",
         "macos-packaged-arm64",
+        "macos-packaged-x64",
         "transitions-darwin-arm64",
+        "transitions-darwin-x64",
         "transitions-win32",
         "windows-packaged",
     }

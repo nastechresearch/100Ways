@@ -71,6 +71,12 @@ JOB_LANES: dict[str, frozenset[str]] = {name: frozenset(needs) for name, needs i
     "windows-packaged": ("windows", "upgrade"),
 }.items()}
 
+# Candidate handoff group and manifest target, each with the lane that builds it.
+HANDOFF_LANE = {"win32-x64": "windows-build", "win32-arm64": "windows-build", "windows-universal": "windows-build",
+                "darwin-arm64": "macos-arm64", "termux": "termux"}
+TARGET_LANE = {"windows/x64": "windows", "windows/arm64": "windows", "macos/arm64": "macos-arm64",
+               "termux/aarch64": "termux"}
+
 CANDIDATE_CALLS = tuple(job for job in JOB_LANES if job.startswith("candidates-"))
 
 def select(*, only: Iterable[str] | None = None, with_: Iterable[str] = (),
