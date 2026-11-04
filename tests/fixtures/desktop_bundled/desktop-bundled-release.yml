@@ -111,7 +111,7 @@ on:
         type: boolean
         default: false
       skip-signed:
-        description: 'Stable candidates only: build no signed package at all -- no Azure signing for Windows, no Apple signing or notarization for macOS. Needs neither account.'
+        description: 'Stable candidates only: build no signed Windows package (the claim has no windows lane). Needs no Azure signing.'
         type: boolean
         default: false
       skip-store:
@@ -187,11 +187,6 @@ on:
         default: ''
       upload_release:
         description: 'Upload artifacts to the R2 release bucket (staging + feeds)'
-        required: false
-        type: boolean
-        default: false
-      skip-signed:
-        description: 'Unsigned build: skip Azure and Apple signing; artifacts still stage and upload'
         required: false
         type: boolean
         default: false
@@ -692,32 +687,6 @@ jobs:
           node apps/desktop/scripts/audit-bundle-arch.mjs \
             --arch="${MATRIX_LABEL##*-}" --root=apps/desktop/release
 
-      - name: Record artifact sizes
-        if: always()
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import json, pathlib
-          root = pathlib.Path("apps/desktop/release")
-          suffixes = {".dmg", ".zip", ".exe", ".msix", ".appimage", ".deb", ".blockmap"}
-          rows = [
-              {"name": p.name, "bytes": p.stat().st_size}
-              for p in sorted(root.rglob("*"))
-              if p.is_file() and p.suffix.lower() in suffixes
-          ]
-          pathlib.Path("bundle-artifact-sizes.json").write_text(json.dumps(rows, indent=2))
-          for row in rows:
-              print(f"{row['bytes'] / 1048576:8.1f} MB  {row['name']}")
-          PY
-      - name: Upload artifact sizes
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: bundle-sizes-${{ matrix.target.label }}
-          path: bundle-artifact-sizes.json
-          if-no-files-found: warn
-          retention-days: 7
-
       - name: Record and stage channel windows packages
         if: needs.validate.outputs.channel-build != ''
         shell: bash
@@ -986,7 +955,7 @@ jobs:
       # Commit artifacts are downloadable too. Require signing for them,
       # candidates, and published tags before building any payload.
       - name: Require signing credentials when publishing
-        if: inputs.skip-signed != true && (inputs.upload_release == true || inputs.release-phase == 'candidate' || inputs.build_commit != '' || inputs.channel != '')
+        if: inputs.upload_release == true || inputs.release-phase == 'candidate' || inputs.build_commit != '' || inputs.channel != ''
         shell: bash
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
@@ -1012,7 +981,7 @@ jobs:
         # notarytool takes a FILE PATH for --key; raw .p8 content in argv
         # dies with `Invalid option: ***`. The build step must NOT re-declare
         # APPLE_API_KEY in its env: step env shadows GITHUB_ENV.
-        if: inputs.skip-signed != true && (inputs.upload_release == true || inputs.release-phase == 'candidate' || inputs.build_commit != '' || inputs.channel != '')
+        if: inputs.upload_release == true || inputs.release-phase == 'candidate' || inputs.build_commit != '' || inputs.channel != ''
         shell: bash
         env:
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
@@ -1062,9 +1031,8 @@ jobs:
         # UDP 443 for every process for the rest of the job, so stapler, notarytool and
         # the build's own downloads and uploads all fall back to TCP. The rule loads into
         # a com.apple sub-anchor, which the runner's default ruleset already evaluates,
-        # so that ruleset stays as it is. Apple Silicon only: Intel Macs are unsupported
-        # (the macos-intel lane in scripts/releases/lanes.py).
-        if: matrix.target.label == 'darwin-arm64'
+        # so that ruleset stays as it is. The darwin matrix is Apple Silicon only, so
+        # every leg needs it.
         shell: bash
         run: |
           echo 'block return out quick proto udp to any port 443' | sudo pfctl -a com.apple/nastech-no-quic -f -
@@ -1088,15 +1056,6 @@ jobs:
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
         run: |
-          # Build-only dispatches carry no Apple credentials. electron-builder
-          # treats a present-but-empty CSC_LINK as a certificate path, resolves
-          # '' to this project directory, and dies with "<dir> not a file"
-          # before packaging; keep the signing vars out of its environment.
-          if [ -z "$CSC_LINK" ]; then
-            echo "::notice::no signing certificate configured; building unsigned"
-            unset CSC_LINK CSC_KEY_PASSWORD
-            export CSC_IDENTITY_AUTO_DISCOVERY=false
-          fi
           # Sign + notarize of a bundled-payload app runs long (Apple scans
           # every Mach-O) — raise the fd limit and let DEBUG show progress.
           ulimit -n 16384 2>/dev/null || true
@@ -1110,37 +1069,11 @@ jobs:
           node apps/desktop/scripts/audit-bundle-arch.mjs \
             --arch="${MATRIX_LABEL##*-}" --root=apps/desktop/release
 
-      - name: Record artifact sizes
-        if: always()
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import json, pathlib
-          root = pathlib.Path("apps/desktop/release")
-          suffixes = {".dmg", ".zip", ".exe", ".msix", ".appimage", ".deb", ".blockmap"}
-          rows = [
-              {"name": p.name, "bytes": p.stat().st_size}
-              for p in sorted(root.rglob("*"))
-              if p.is_file() and p.suffix.lower() in suffixes
-          ]
-          pathlib.Path("bundle-artifact-sizes.json").write_text(json.dumps(rows, indent=2))
-          for row in rows:
-              print(f"{row['bytes'] / 1048576:8.1f} MB  {row['name']}")
-          PY
-      - name: Upload artifact sizes
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: bundle-sizes-${{ matrix.target.label }}
-          path: bundle-artifact-sizes.json
-          if-no-files-found: warn
-          retention-days: 7
-
       - name: Verify the build is signed and notarized
         # The backstop against a silent unsigned publish: assess the packed
         # app against the real Gatekeeper policy (requires a Developer ID
         # signature AND a stapled notarization ticket to pass offline).
-        if: inputs.skip-signed != true && (inputs.upload_release == true || inputs.release-phase == 'candidate' || inputs.build_commit != '' || inputs.channel != '')
+        if: inputs.upload_release == true || inputs.release-phase == 'candidate' || inputs.build_commit != '' || inputs.channel != ''
         shell: bash
         run: |
           shopt -s nullglob
@@ -1858,10 +1791,7 @@ jobs:
         id: pm
         uses: ./.github/actions/setup-pm
         with:
-          # scripts/termux/build.py builds the TUI with a bare `node`, and every
-          # workspace pins engines >=26 while this image ships 22: install the
-          # locked Node beside Python or node-deps.mjs refuses the run.
-          toolchain: all
+          toolchain: python
           archive-inputs: true
           cache-python: false
 
@@ -2387,10 +2317,10 @@ jobs:
   stable-store:
     name: Submit the verified Store package
     # Runs beside stable-publish: it materializes and digest-checks its own Store candidate
-    # from the admitted manifest and never reads stable-publish's output. It commits the
-    # submission held (Manual), so certification runs before the gate; only the
-    # publication pass switches it to Immediate, so a run whose stable-publish fails
-    # leaves a held submission no customer sees, never a live build.
+    # from the admitted manifest and never reads stable-publish's output. It leaves an
+    # uncommitted Immediate draft; only the publication pass commits it, and it then goes
+    # live as soon as it passes certification. A run whose stable-publish fails leaves a
+    # draft no customer sees, never a live build.
     needs: [validate]
     if: inputs.release-phase == 'publish' && inputs.skip-store != true
     # The Store is not a release gate: a failed submission leaves the release publishable
@@ -2429,8 +2359,8 @@ jobs:
           files=(verified/Store-*.msixbundle)
           test "${#files[@]}" -eq 1
           test -f "${files[0]}"
-          # Committed held (Manual); the publication pass switches it to
-          # Immediate (scripts/releases/store.py).
+          # An uncommitted Immediate draft; the publication pass commits
+          # it (scripts/releases/store.py).
           python -m scripts.releases.store submit "${files[0]}"
       - name: Name the Store package for a manual upload
         if: failure()

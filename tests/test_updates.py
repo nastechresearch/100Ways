@@ -215,6 +215,13 @@ from hundredways.updates import (
     _reconcile_desktop_release_leg_guards,
     _reconcile_termux_apt_flat_feed,
     _reconcile_github_pages_release_plane,
+    GitHubReleaseHandoffAnchorError,
+    _HANDOFF_MODULE_REL,
+    _HANDOFF_SMOKE_TEST_REL,
+    _HANDOFF_SMOKE_WORKFLOW_REL,
+    _HANDOFF_STAGING_TEST_REL,
+    _HANDOFF_SURFACES,
+    _reconcile_github_release_handoff_plane,
     _reconcile_windows_holder_clock_waits,
     _sigv4_vector_signature,
     _split_prompt_surface_tiers,
@@ -1082,8 +1089,8 @@ def test_desktop_release_leg_guards_ignore_a_tree_without_the_workflow(tmp_path)
     assert _reconcile_desktop_release_leg_guards(str(tmp_path / "absent")) == []
 
 
-# Upstream's release workflow as the sync actually sees it -- the branded bytes at 9302ba9e,
-# the commit that retired the macOS Intel leg.  The tree the tests above build from
+# Upstream's release workflow as the sync actually sees it -- the branded bytes at 71736c9f32,
+# upstream's tip when the handoff plane was derived.  The tree the tests above build from
 # ``_BUNDLED_WORKFLOW_EDITS`` is self-consistent by construction: it proves the table applies,
 # never that the table names bytes upstream still ships, which is how a retired leg could sit
 # in it unnoticed.  These two read the real file.
@@ -1121,6 +1128,125 @@ def test_the_release_leg_guards_land_on_upstreams_real_workflow(tmp_path):
     assert "if [ \"$SKIP_SIGNED\" != true ]; then\n            node scripts/stage-msixbundle.mjs" not in text
     assert BrandingRules().transform_text(text) == text
     assert _reconcile_desktop_release_leg_guards(str(candidate)) == []
+
+
+# Upstream's handoff-plane files as the sync actually sees them -- the branded bytes at
+# 71736c9f32.  The union tree built from ``_HANDOFF_SURFACES`` proves the table applies to
+# itself; these fixtures prove it still names bytes upstream ships, which is the only way a
+# retired shape gets caught before it silently reverts a fork PR.
+HANDOFF_FIXTURES = Path(__file__).parent / "fixtures" / "desktop_handoff"
+_HANDOFF_SURFACE_RELS = [rel for rel, _, _, _ in _HANDOFF_SURFACES]
+_HANDOFF_FIXTURE_PATHS = {
+    _HANDOFF_MODULE_REL: HANDOFF_FIXTURES / "handoff.py",
+    _HANDOFF_SMOKE_WORKFLOW_REL: HANDOFF_FIXTURES / "desktop-bundle-smoke.yml",
+    _BUNDLED_WORKFLOW_REL: BUNDLED_TIP_WORKFLOW,
+    _HANDOFF_STAGING_TEST_REL: HANDOFF_FIXTURES / "commit_build_staging.sample.py",
+    _HANDOFF_SMOKE_TEST_REL: HANDOFF_FIXTURES / "desktop_bundle_smoke.sample.py",
+}
+
+
+def _handoff_plane_tree(tmp_path):
+    """The plane as this rule receives it: real upstream files, with the rules that run
+    before it already applied, because their output is part of what these anchors name."""
+    candidate = tmp_path / "candidate"
+    for rel, fixture in _HANDOFF_FIXTURE_PATHS.items():
+        path = candidate.joinpath(*rel.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(fixture.read_text(encoding="utf-8"), encoding="utf-8")
+    for rule in (_reconcile_github_pages_release_plane, _reconcile_unsigned_darwin_build_env,
+                 _reconcile_desktop_release_leg_guards):
+        rule(str(candidate))
+    return candidate
+
+
+def test_every_handoff_anchor_names_bytes_upstream_still_ships(tmp_path):
+    candidate = _handoff_plane_tree(tmp_path)
+
+    for rel, edits, _marker, _what in _HANDOFF_SURFACES:
+        text = (candidate / rel).read_text(encoding="utf-8")
+        for old, new in edits:
+            head = old.strip().splitlines()[0][:60]
+            assert text.count(old) == 1, f"{rel}: anchor absent or ambiguous: {head}"
+            assert new not in text, f"{rel}: the fork's shape is already upstream's: {head}"
+
+
+def test_the_handoff_plane_lands_on_upstreams_real_files(tmp_path):
+    candidate = _handoff_plane_tree(tmp_path)
+
+    assert _reconcile_github_release_handoff_plane(str(candidate)) == _HANDOFF_SURFACE_RELS
+
+    for rel, edits, marker, what in _HANDOFF_SURFACES:
+        text = (candidate / rel).read_text(encoding="utf-8")
+        assert marker in text, f"{rel} never got {what}"
+        # Every hunk landed.  A pre-migration shape cannot be asserted absent: several anchors
+        # are prefixes of their own replacement, which is how an insertion is anchored.
+        for _old, new in edits:
+            assert new in text, f"{rel} is missing {new.strip().splitlines()[0][:60]}"
+        assert BrandingRules().transform_text(text) == text
+
+    # The draft-asset consequence rather than a cosmetic pin: a staged package is not
+    # world-readable, so the fetching leg needs the job's own token and cannot fetch public.
+    smoke = (candidate / _HANDOFF_SMOKE_WORKFLOW_REL).read_text(encoding="utf-8")
+    assert "  RELEASE_HANDOFF_STORE: github\n" in smoke
+    assert "GH_TOKEN: ${{ github.token }}" in smoke
+    assert "handoff fetch --public-base" not in smoke
+
+    assert _reconcile_github_release_handoff_plane(str(candidate)) == []
+
+
+def _handoff_plane_union_tree(tmp_path):
+    candidate = tmp_path / "candidate"
+    paths = {}
+    for rel, edits, _marker, _what in _HANDOFF_SURFACES:
+        path = candidate.joinpath(*rel.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(old for old, _ in edits), encoding="utf-8")
+        paths[rel] = path
+    return candidate, paths
+
+
+def test_the_handoff_plane_writes_the_merged_plane(tmp_path):
+    """Five upstream-owned files carry one plane, so the rule has to be their union.
+
+    ``handoff.py`` resolves the store, the two workflows pin it and carry the token the draft
+    assets need, and the two tests replay those legs.  A hunk landing in the wrong file, or two
+    overlapping, is a release that stages to one archive and fetches from another.
+    """
+    candidate, paths = _handoff_plane_union_tree(tmp_path)
+
+    assert _reconcile_github_release_handoff_plane(str(candidate)) == _HANDOFF_SURFACE_RELS
+
+    for rel, edits, marker, _what in _HANDOFF_SURFACES:
+        text = paths[rel].read_text(encoding="utf-8")
+        assert text == "\n".join(new for _, new in edits)
+        assert marker in text
+        assert BrandingRules().transform_text(text) == text
+
+    assert _reconcile_github_release_handoff_plane(str(candidate)) == []
+
+
+def test_the_handoff_plane_stops_when_a_surface_is_partial(tmp_path):
+    candidate, paths = _handoff_plane_union_tree(tmp_path)
+    rel, edits, _marker, _what = _HANDOFF_SURFACES[0]
+    paths[rel].write_text(
+        paths[rel].read_text(encoding="utf-8").replace(edits[0][0], "", 1), encoding="utf-8")
+
+    with pytest.raises(GitHubReleaseHandoffAnchorError, match="not all"):
+        _reconcile_github_release_handoff_plane(str(candidate))
+
+
+def test_the_handoff_plane_stops_when_the_resolver_moves(tmp_path):
+    """A file matching neither layout would ship a plane with no store selection at all."""
+    candidate, paths = _handoff_plane_union_tree(tmp_path)
+    paths[_HANDOFF_MODULE_REL].write_text(
+        "import json\n\n\ndef stage():\n    return json.dumps({})\n", encoding="utf-8")
+
+    with pytest.raises(GitHubReleaseHandoffAnchorError, match="nor the store resolver"):
+        _reconcile_github_release_handoff_plane(str(candidate))
+
+
+def test_the_handoff_plane_ignores_a_tree_without_the_plane(tmp_path):
+    assert _reconcile_github_release_handoff_plane(str(tmp_path / "absent")) == []
 
 
 def _free_runner_js_lane_tree(tmp_path):
