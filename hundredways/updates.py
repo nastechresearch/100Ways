@@ -4985,14 +4985,14 @@ _BUNDLED_UNSIGNED_LEGS_NEW_3 = (
     '            --name "$TARGET" --root "$root" "${args[@]}"\n'
 )
 _BUNDLED_UNSIGNED_LEGS_OLD_4 = """\
-        # Per-arch feed inputs stay in the tag archive until both legs pass.
+        # The feed input stays in the tag archive until the leg and its smoke pass.
         run: |
           args=(--include '*.dmg' --include '*.zip' --include '*.blockmap' --include '*-mac.yml')
           if [ "$RELEASE_PHASE" = candidate ] || { [ "$NASTECH_DESKTOP_VARIANT" = bundled ] && [[ "$NASTECH_PAYLOAD_TAG" == *+canary.* ]]; }; then
 """
 _BUNDLED_UNSIGNED_LEGS_NEW_4 = """\
           SKIP_SIGNED: ${{ inputs.skip-signed }}
-        # Per-arch feed inputs stay in the tag archive until both legs pass.
+        # The feed input stays in the tag archive until the leg and its smoke pass.
         run: |
           args=(--include '*.dmg' --include '*.zip' --include '*.blockmap' --include '*-mac.yml')
           # The recorder reads the Developer ID signature an unsigned build cannot
@@ -5018,36 +5018,23 @@ _BUNDLED_UNSIGNED_LEGS_NEW_5 = """\
       && needs.validate.result == 'success' && needs.validate.outputs.sha != ''
 """
 _BUNDLED_UNSIGNED_LEGS_OLD_6 = """\
+    needs: [validate, build-darwin-arm64, smoke-darwin-arm64]
     if: >-
-      !cancelled() && inputs.release-phase == 'candidate'
-      && needs.validate.result == 'success' && needs.validate.outputs.sha != ''
-      && needs.validate.outputs.darwin-x64 == 'true'
+      !cancelled() && inputs.build_commit == '' && inputs.channel == '' && inputs.upload_release == true
+      && inputs.release-phase == ''
+      && needs.validate.outputs.darwin-arm64 == 'true'
 """
 _BUNDLED_UNSIGNED_LEGS_NEW_6 = """\
-    if: >-
-      !cancelled() && inputs.release-phase == 'candidate'
-      && inputs.skip-signed != true
-      && needs.validate.result == 'success' && needs.validate.outputs.sha != ''
-      && needs.validate.outputs.darwin-x64 == 'true'
-"""
-_BUNDLED_UNSIGNED_LEGS_OLD_7 = """\
-    needs: [validate, build-darwin-arm64, build-darwin-x64, smoke-darwin-arm64, smoke-darwin-x64]
-    if: >-
-      !cancelled() && inputs.build_commit == '' && inputs.channel == '' && inputs.upload_release == true
-      && inputs.release-phase == ''
-      && needs.validate.outputs.darwin-arm64 == 'true' && needs.validate.outputs.darwin-x64 == 'true'
-"""
-_BUNDLED_UNSIGNED_LEGS_NEW_7 = """\
-    needs: [validate, build-darwin-arm64, build-darwin-x64, smoke-darwin-arm64, smoke-darwin-x64]
+    needs: [validate, build-darwin-arm64, smoke-darwin-arm64]
     # The feed is what every installed app auto-updates from, so it may point at
-    # signed bytes only. The Windows publisher gets this from its smoke gates,
-    # which an unsigned MSIX cannot install; a dmg runs unsigned, so the guard
-    # belongs on the publication itself.
+    # signed bytes only. The Windows publisher gets that from its smoke gates, which
+    # an unsigned MSIX cannot pass; a darwin smoke happily installs and runs an
+    # unsigned dmg, so here the guard belongs on the publication itself.
     if: >-
       !cancelled() && inputs.build_commit == '' && inputs.channel == '' && inputs.upload_release == true
       && inputs.release-phase == ''
       && inputs.skip-signed != true
-      && needs.validate.outputs.darwin-arm64 == 'true' && needs.validate.outputs.darwin-x64 == 'true'
+      && needs.validate.outputs.darwin-arm64 == 'true'
 """
 _BUNDLED_APT_FEED_OLD_1 = """\
       - name: Stage the APT repo and publish to R2
@@ -5222,7 +5209,6 @@ _BUNDLED_WORKFLOW_EDITS = (
     (_BUNDLED_UNSIGNED_LEGS_OLD_4, _BUNDLED_UNSIGNED_LEGS_NEW_4),
     (_BUNDLED_UNSIGNED_LEGS_OLD_5, _BUNDLED_UNSIGNED_LEGS_NEW_5),
     (_BUNDLED_UNSIGNED_LEGS_OLD_6, _BUNDLED_UNSIGNED_LEGS_NEW_6),
-    (_BUNDLED_UNSIGNED_LEGS_OLD_7, _BUNDLED_UNSIGNED_LEGS_NEW_7),
     (_BUNDLED_APT_FEED_OLD_1, _BUNDLED_APT_FEED_NEW_1),
     (_BUNDLED_APT_FEED_OLD_2, _BUNDLED_APT_FEED_NEW_2),
     (_BUNDLED_APT_FEED_OLD_3, _BUNDLED_APT_FEED_NEW_3),
@@ -5273,8 +5259,8 @@ def _reconcile_desktop_release_leg_guards(dst: str) -> list[str]:
     recording what it never signed: the architecture audit is skipped when the leg built no
     bundle at all, the Windows/macOS recorders run only for signed bytes (an ``.msix`` identity
     is read out of the Authenticode signature and a release row records a Developer ID team, so
-    an unsigned build cannot produce either), and the darwin receipts and the updater feed stop
-    before pointing devices at unsigned packages.  Skipping a receipt is not a lost check: the
+    an unsigned build cannot produce either), and the darwin receipt and the macOS updater feed
+    stop before pointing devices at unsigned packages.  Skipping a receipt is not a lost check: the
     job would assemble a receipt from rows that were never written, and the handoff fetch that
     matches nothing returns nothing, so an unsigned leg would publish a receipt for zero
     packages.

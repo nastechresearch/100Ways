@@ -1040,7 +1040,7 @@ def test_desktop_release_leg_guards_write_the_merged_workflow(tmp_path):
     for _label, marker in _BUNDLED_LEG_MARKERS:
         assert marker in text
     assert text.count('if [ "$SKIP_SIGNED" != true ]; then') == 2
-    assert text.count("&& inputs.skip-signed != true") == 3
+    assert text.count("&& inputs.skip-signed != true") == 2
     assert "timeout-minutes: 25" in text
     assert "RELEASE_CHANNEL_STORE: github" in text
     assert text.count('"$PWD/termux-build/apt-flat:/apt:ro"') == 3
@@ -1075,6 +1075,43 @@ def test_desktop_release_leg_guards_stops_when_the_workflow_moves(tmp_path):
 
 def test_desktop_release_leg_guards_ignore_a_tree_without_the_workflow(tmp_path):
     assert _reconcile_desktop_release_leg_guards(str(tmp_path / "absent")) == []
+
+
+# Upstream's release workflow as the sync actually sees it -- the branded bytes at 9302ba9e,
+# the commit that retired the macOS Intel leg.  The tree the tests above build from
+# ``_BUNDLED_WORKFLOW_EDITS`` is self-consistent by construction: it proves the table applies,
+# never that the table names bytes upstream still ships, which is how a retired leg could sit
+# in it unnoticed.  These two read the real file.
+BUNDLED_TIP_WORKFLOW = (
+    Path(__file__).parent / "fixtures" / "desktop_bundled" / "desktop-bundled-release.yml"
+)
+
+
+def test_every_release_leg_anchor_names_bytes_upstream_still_ships():
+    text = BUNDLED_TIP_WORKFLOW.read_text(encoding="utf-8")
+
+    for old, new in _BUNDLED_WORKFLOW_EDITS:
+        head = old.strip().splitlines()[0][:60]
+        assert text.count(old) == 1, f"anchor is absent or ambiguous in upstream's file: {head}"
+        assert new not in text, f"the fork's replacement is already upstream's text: {head}"
+
+
+def test_the_release_leg_guards_land_on_upstreams_real_workflow(tmp_path):
+    candidate = tmp_path / "candidate"
+    path = candidate.joinpath(*_BUNDLED_WORKFLOW_REL.split("/"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(BUNDLED_TIP_WORKFLOW.read_text(encoding="utf-8"), encoding="utf-8")
+
+    assert _reconcile_desktop_release_leg_guards(str(candidate)) == [_BUNDLED_WORKFLOW_REL]
+
+    text = path.read_text(encoding="utf-8")
+    for _label, marker in _BUNDLED_LEG_MARKERS:
+        assert marker in text
+    # Nothing this rule writes may re-name a leg upstream retired: the guard would then sit
+    # on a job that does not exist, and the sync would read its silence as a clean apply.
+    assert "darwin-x64" not in text
+    assert BrandingRules().transform_text(text) == text
+    assert _reconcile_desktop_release_leg_guards(str(candidate)) == []
 
 
 def _free_runner_js_lane_tree(tmp_path):
