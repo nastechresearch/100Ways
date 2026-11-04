@@ -222,6 +222,12 @@ from hundredways.updates import (
     _HANDOFF_STAGING_TEST_REL,
     _HANDOFF_SURFACES,
     _reconcile_github_release_handoff_plane,
+    ChannelStoreSeamAnchorError,
+    _CHANNEL_SEAM_CANARY_WORKFLOW_REL,
+    _CHANNEL_SEAM_RELEASES_REL,
+    _CHANNEL_SEAM_STABLE_WORKFLOW_REL,
+    _CHANNEL_SEAM_SURFACES,
+    _reconcile_channel_store_selection,
     _reconcile_windows_holder_clock_waits,
     _sigv4_vector_signature,
     _split_prompt_surface_tiers,
@@ -1271,6 +1277,176 @@ def test_the_handoff_plane_stops_when_the_resolver_moves(tmp_path):
 
 def test_the_handoff_plane_ignores_a_tree_without_the_plane(tmp_path):
     assert _reconcile_github_release_handoff_plane(str(tmp_path / "absent")) == []
+
+
+# The channel store seam (fork PRs #206 and #208) as the sync receives it: the fork's own
+# files at ``origin/main``, which is what ``brand_tree`` plus the five plane rules above leave
+# behind for this table to rewrite.  Fixtures rather than the union of the anchors, because
+# these hunks sit inside large files whose surrounding lines decide whether an anchor is
+# unique -- and uniqueness inside the real file is exactly what a moved upstream breaks.
+CHANNEL_SEAM_FIXTURES = Path(__file__).parent / "fixtures" / "channel_store_seam"
+_CHANNEL_SEAM_SURFACE_RELS = [rel for rel, _, _ in _CHANNEL_SEAM_SURFACES]
+_CHANNEL_SEAM_FIXTURE_PATHS = {rel: CHANNEL_SEAM_FIXTURES / Path(rel).name
+                               for rel in _CHANNEL_SEAM_SURFACE_RELS}
+
+
+def _channel_seam_tree(tmp_path):
+    """One candidate tree carrying all six surfaces, untouched by this rule."""
+    candidate = tmp_path / "candidate"
+    paths = {}
+    for rel, fixture in _CHANNEL_SEAM_FIXTURE_PATHS.items():
+        path = candidate.joinpath(*rel.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(fixture.read_text(encoding="utf-8"), encoding="utf-8")
+        paths[rel] = path
+    return candidate, paths
+
+
+def test_every_channel_seam_anchor_names_bytes_upstream_still_ships(tmp_path):
+    candidate, paths = _channel_seam_tree(tmp_path)
+
+    for rel, _marker, edits in _CHANNEL_SEAM_SURFACES:
+        text = paths[rel].read_text(encoding="utf-8")
+        for old, new in edits:
+            head = old.strip().splitlines()[0][:60]
+            assert text.count(old) == 1, f"{rel}: anchor absent or ambiguous: {head}"
+            assert new not in text, f"{rel}: the fork's shape is already upstream's: {head}"
+
+
+def test_the_channel_seam_lands_on_upstreams_real_files(tmp_path):
+    candidate, paths = _channel_seam_tree(tmp_path)
+
+    assert _reconcile_channel_store_selection(str(candidate)) == _CHANNEL_SEAM_SURFACE_RELS
+
+    for rel, marker, edits in _CHANNEL_SEAM_SURFACES:
+        text = paths[rel].read_text(encoding="utf-8")
+        assert marker in text, f"{rel} never got its fork shape"
+        for _old, new in edits:
+            assert new in text, f"{rel} is missing {new.strip().splitlines()[0][:60]}"
+        assert BrandingRules().transform_text(text) == text
+
+    # Idempotent: a candidate that already carries the plane is left byte-identical, so a
+    # rerun of the sync cannot double-apply a hunk whose anchor is now the fork's own text.
+    before = {rel: paths[rel].read_text(encoding="utf-8") for rel in _CHANNEL_SEAM_SURFACE_RELS}
+    assert _reconcile_channel_store_selection(str(candidate)) == []
+    assert {rel: paths[rel].read_text(encoding="utf-8") for rel in before} == before
+
+
+def test_the_channel_writes_and_the_head_advance_resolve_through_one_seam(tmp_path):
+    """The consequence the PR exists for: no channel write names a store by assumption.
+
+    Asserted as behaviour the fork's own publication code has to keep, not as byte equality
+    against a snapshot: a rule that lands the hunks in the wrong file, or that leaves one
+    ``R2ChannelStore`` construction behind, would still produce a green-looking diff.
+    """
+    candidate, paths = _channel_seam_tree(tmp_path)
+    _reconcile_channel_store_selection(str(candidate))
+
+    channels = paths["scripts/releases/channels.py"].read_text(encoding="utf-8")
+    assert "def write_immutable_feeds(store, reader, prefix: str, root: Path," in channels
+    assert "store.put(key, body)" in channels
+    assert 'reader.read_bytes(key, hashlib.sha256(body).hexdigest()) != body' in channels
+
+    publish = paths["scripts/releases/channel_publish.py"].read_text(encoding="utf-8")
+    releases = paths[_CHANNEL_SEAM_RELEASES_REL].read_text(encoding="utf-8")
+    for name, text in (("channel_publish.py", publish), ("channel_releases.py", releases)):
+        assert "write_immutable_feeds(publisher.store, publisher.reader, prefix, root, feeds)" in text, name
+        assert 'r2.put(tag="", key=key, file=str(file), key_is_full=True, immutable=True)' not in text, name
+
+    # The head advance is bound to the store AND to that store's public origin, together.
+    assert "def configured_channel_publisher(" in releases
+    assert "channel_public_base()" in releases
+    assert "R2ChannelStore(*r2.credentials())" not in releases
+
+    scope = paths["scripts/releases/r2_scope.py"].read_text(encoding="utf-8")
+    assert "        from scripts.releases import r2\n        return r2.public_base_url()" in scope
+    assert "DEFAULT_PUBLIC_URL" not in scope
+
+    canary = paths[_CHANNEL_SEAM_CANARY_WORKFLOW_REL].read_text(encoding="utf-8")
+    assert "  RELEASE_CHANNEL_STORE: github\n" in canary
+    assert "  RELEASE_HANDOFF_STORE: github\n" in canary
+
+
+def test_the_stable_controller_keeps_its_refusal_to_pin_the_channel_seam(tmp_path):
+    """One pin in ``stable-release.yml``, and it is the handoff seam -- deliberately.
+
+    The stable head advance reads the tag-scoped release archive, and the writer of that
+    archive is still ``r2.put`` inside ``scripts/bundles/release_artifacts.assemble``.  So a
+    channel pin here would pair an R2 read with a Pages origin, which is a release that
+    fails at the read rather than a release that skipped a step.  This test exists so the
+    next engine change has to notice it is refusing something, and so a tidy-up that pins
+    both seams cannot land in the rule before the archive writer moves.
+    """
+    candidate, paths = _channel_seam_tree(tmp_path)
+    _reconcile_channel_store_selection(str(candidate))
+
+    stable = paths[_CHANNEL_SEAM_STABLE_WORKFLOW_REL].read_text(encoding="utf-8")
+    assert "  RELEASE_HANDOFF_STORE: github\n" in stable
+    assert "RELEASE_CHANNEL_STORE" not in stable
+    # The refusal is documented where it is enforced, not only here.
+    assert "The channel seam stays unpinned here" in stable
+
+
+def test_the_channel_seam_stops_when_a_surface_is_partial(tmp_path):
+    candidate, paths = _channel_seam_tree(tmp_path)
+    rel, _marker, edits = _CHANNEL_SEAM_SURFACES[2]
+    paths[rel].write_text(
+        paths[rel].read_text(encoding="utf-8").replace(edits[3][0], "", 1), encoding="utf-8")
+
+    with pytest.raises(ChannelStoreSeamAnchorError, match="rewrite #4"):
+        _reconcile_channel_store_selection(str(candidate))
+
+
+def test_the_channel_seam_ignores_a_tree_without_the_plane(tmp_path):
+    assert _reconcile_channel_store_selection(str(tmp_path / "absent")) == []
+
+    # A surface that exists but is not the channel plane (a reduced tree, a module that
+    # never carried the seam) is left byte-identical rather than raising: the plane gate
+    # asks whether any anchor of the surface is in the file at all.
+    candidate = tmp_path / "reduced"
+    path = candidate / "scripts/releases/channel_releases.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "def publish_release(policy, env, root):\n"
+        '    if policy == "canary-release":\n'
+        "        return None\n",
+        encoding="utf-8",
+    )
+    before = path.read_text(encoding="utf-8")
+
+    assert _reconcile_channel_store_selection(str(candidate)) == []
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_no_channel_seam_anchor_touches_the_fork_publication_spans(tmp_path):
+    """``_reconcile_fork_release_publication`` owns two spans of this file; this rule owns none of them.
+
+    Both rules rewrite ``scripts/releases/channel_releases.py``, one by copying verbatim
+    spans out of the fork tree and one by table.  An anchor that reaches into a span would
+    be applied to text the other rule has already replaced -- and which of them wins would
+    depend on registration order rather than on the plane.  So the separation is an
+    invariant, and this is the only place it is checked.
+    """
+    text = _CHANNEL_SEAM_FIXTURE_PATHS[_CHANNEL_SEAM_RELEASES_REL].read_text(encoding="utf-8")
+    lines = text.splitlines(keepends=True)
+
+    def span(start_needle, end_needle):
+        start = next(index for index, line in enumerate(lines) if line.startswith(start_needle))
+        end = next(index for index, line in enumerate(lines) if line.startswith(end_needle))
+        return (start, end)
+
+    owned = [span("_ASSET_SUFFIXES = (", "def publish_release("),
+             span('    if policy == "canary-release":', "    def release_gate(")]
+    edits = next(edits for rel, _marker, edits in _CHANNEL_SEAM_SURFACES
+                 if rel == _CHANNEL_SEAM_RELEASES_REL)
+    for index, (old, _new) in enumerate(edits, start=1):
+        start = text.index(old)
+        first = text[:start].count("\n")
+        last = first + old.count("\n")
+        for owned_start, owned_end in owned:
+            assert not (first < owned_end and last > owned_start), (
+                f"hunk #{index} of the channel seam reaches into the fork publication span "
+                f"{owned_start}-{owned_end}; one of the two rules has to give up that text")
 
 
 def _free_runner_js_lane_tree(tmp_path):

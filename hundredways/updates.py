@@ -6798,6 +6798,677 @@ def _reconcile_macos_intel_desktop_plane(dst: str) -> list[str]:
     return changed
 
 
+# ---------------------------------------------------------------------------
+# The channel store seam (fork PRs #206 and #208)
+# ---------------------------------------------------------------------------
+# The channel plane is where a published build becomes something an installed app can
+# update from: a build's immutable feeds, then the pointer and the record that name that
+# build as the channel's head.  Upstream writes both to Cloudflare R2 -- ``r2.put`` for the
+# feeds and a directly constructed ``R2ChannelStore`` for the heads -- while this fork's
+# control plane is GitHub Pages.  Six upstream-owned files carry that difference and
+# ``brand_tree`` re-derives every one of them, so the fork's change is a table:
+#
+#   * ``scripts/releases/channels.py``                  the feed writer every caller shares,
+#   * ``scripts/releases/channel_publish.py``           the build publication controller,
+#   * ``scripts/releases/channel_releases.py``          the head-advance controller,
+#   * ``scripts/releases/r2_scope.py``                  the public origin the reader binds to,
+#   * ``.github/workflows/canary-release.yml``          the controller that pins both seams,
+#   * ``.github/workflows/stable-release.yml``          the controller that pins one, on purpose.
+#
+# The hunks below are the fork's own bytes, generated from the two PRs' diffs against the
+# tree the earlier rules leave behind rather than transcribed: each anchor is unique in that
+# text and applying every hunk reproduces the fork's file exactly, which is what
+# ``tests/test_updates.py`` re-proves from fixtures on every engine run.
+
+_CHANNELS_PY_OLD_1 = """\
+from copy import deepcopy
+import hashlib
+import http.client
+import secrets
+import uuid
+
+"""
+
+
+_CHANNELS_PY_NEW_1 = """\
+from copy import deepcopy
+import hashlib
+import http.client
+from pathlib import Path
+import secrets
+import uuid
+
+"""
+
+
+_CHANNELS_PY_OLD_2 = """\
+            if not token or token in seen:
+                raise ChannelError("Incomplete or repeated channel pagination token")
+            seen.add(token)
+
+
+def preview_identity(name: str, token: str) -> dict:
+"""
+
+
+_CHANNELS_PY_NEW_2 = '''\
+            if not token or token in seen:
+                raise ChannelError("Incomplete or repeated channel pagination token")
+            seen.add(token)
+
+
+def write_immutable_feeds(store, reader, prefix: str, root: Path, files: list[Path]) -> None:
+    """Write each generated build feed through the SELECTED store, then verify
+    the public read-back against the exact local bytes.
+
+    The create-only CAS guard that the direct R2 transport expressed as
+    If-None-Match: * lives in every store's `put(key, body)`; routing feeds any
+    other way would silently repoint a release mid-run.
+    """
+    for file in files:
+        key = prefix + Path(file).relative_to(root).as_posix()
+        body = Path(file).read_bytes()
+        store.put(key, body)
+        if reader.read_bytes(key, hashlib.sha256(body).hexdigest()) != body:
+            raise ChannelError("Immutable feed public read-back differs")
+
+
+def preview_identity(name: str, token: str) -> dict:
+'''
+
+
+_CHANNELS_PY_EDITS = (
+    (_CHANNELS_PY_OLD_1, _CHANNELS_PY_NEW_1),
+    (_CHANNELS_PY_OLD_2, _CHANNELS_PY_NEW_2),
+)
+
+
+_CHANNEL_PUBLISH_PY_OLD_1 = """\
+
+from nastech_cli.release_channels import ChannelReader, build_prefix, canonical_json, decode_json, require_sha256, validate_request
+from scripts.releases import commit_build, handoff, r2
+
+NATIVE_LEGS = ("darwin-arm64", "darwin-x64", "win32-arm64", "win32-x64", "windows-universal")
+REQUIRED_JOBS = ("validate", "build-darwin-arm64", "build-darwin-x64",
+"""
+
+
+_CHANNEL_PUBLISH_PY_NEW_1 = """\
+
+from nastech_cli.release_channels import ChannelReader, build_prefix, canonical_json, decode_json, require_sha256, validate_request
+from scripts.releases import commit_build, handoff, r2
+from scripts.releases.channels import write_immutable_feeds
+
+NATIVE_LEGS = ("darwin-arm64", "darwin-x64", "win32-arm64", "win32-x64", "windows-universal")
+REQUIRED_JOBS = ("validate", "build-darwin-arm64", "build-darwin-x64",
+"""
+
+
+_CHANNEL_PUBLISH_PY_OLD_2 = """\
+    validate_manifest(manifest, {**current[0], "head": None}, publisher.public_base)
+    if manifest.get("receiverProtocol") != 1:
+        raise ValueError("Candidate packages have no retirement receiver")
+    for file in feeds:
+        key = prefix + file.relative_to(root).as_posix()
+        r2.put(tag="", key=key, file=str(file), key_is_full=True, immutable=True)
+        if publisher.reader.read_bytes(key) != file.read_bytes():
+            raise ValueError("Receiver feed readback mismatch")
+    publisher._write(prefix + "build.json", manifest)
+    head = {"buildId": request["buildId"], "sequence": request["sequence"], "manifestKey": prefix + "build.json",
+            "sha256": hashlib.sha256(canonical_json(manifest)).hexdigest()}
+"""
+
+
+_CHANNEL_PUBLISH_PY_NEW_2 = """\
+    validate_manifest(manifest, {**current[0], "head": None}, publisher.public_base)
+    if manifest.get("receiverProtocol") != 1:
+        raise ValueError("Candidate packages have no retirement receiver")
+    write_immutable_feeds(publisher.store, publisher.reader, prefix, root, feeds)
+    publisher._write(prefix + "build.json", manifest)
+    head = {"buildId": request["buildId"], "sequence": request["sequence"], "manifestKey": prefix + "build.json",
+            "sha256": hashlib.sha256(canonical_json(manifest)).hexdigest()}
+"""
+
+
+_CHANNEL_PUBLISH_PY_OLD_3 = """\
+    handoff.fetch_channel_build(request, list(NATIVE_LEGS), root, public_base=request["publicBase"])
+    manifest, feeds = assemble(request, root, needs=needs)
+    prefix = build_prefix(request["buildId"])
+    for file in feeds:
+        key = prefix + file.relative_to(root).as_posix()
+        r2.put(tag="", key=key, file=str(file), key_is_full=True, immutable=True)
+        r2.download_public_object(request["publicBase"], key, root / "verified" / file.name,
+                                  expected_size=file.stat().st_size, expected_sha256=r2.file_sha256(file))
+    publisher.store.put(prefix + "build.json", canonical_json(manifest))
+    return publisher.promote(request["buildId"])
+
+"""
+
+
+_CHANNEL_PUBLISH_PY_NEW_3 = """\
+    handoff.fetch_channel_build(request, list(NATIVE_LEGS), root, public_base=request["publicBase"])
+    manifest, feeds = assemble(request, root, needs=needs)
+    prefix = build_prefix(request["buildId"])
+    write_immutable_feeds(publisher.store, publisher.reader, prefix, root, feeds)
+    publisher.store.put(prefix + "build.json", canonical_json(manifest))
+    return publisher.promote(request["buildId"])
+
+"""
+
+
+_CHANNEL_PUBLISH_PY_OLD_4 = r"""        with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
+            stream.write("".join(f"{key}={value}\n" for key, value in values.items()))
+    elif args.command in {"publish", "receiver-publish"}:
+        from scripts.releases.channels import ChannelPublisher, R2ChannelStore
+        needs = json.loads(os.environ.get("RELEASE_NEEDS", "{}"))
+        require_success(needs)
+        # Repeat maintainer/default-controller admission on promotion, including reruns.
+"""
+
+
+_CHANNEL_PUBLISH_PY_NEW_4 = r"""        with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
+            stream.write("".join(f"{key}={value}\n" for key, value in values.items()))
+    elif args.command in {"publish", "receiver-publish"}:
+        from scripts.releases.channels import ChannelPublisher
+        needs = json.loads(os.environ.get("RELEASE_NEEDS", "{}"))
+        require_success(needs)
+        # Repeat maintainer/default-controller admission on promotion, including reruns.
+"""
+
+
+_CHANNEL_PUBLISH_PY_EDITS = (
+    (_CHANNEL_PUBLISH_PY_OLD_1, _CHANNEL_PUBLISH_PY_NEW_1),
+    (_CHANNEL_PUBLISH_PY_OLD_2, _CHANNEL_PUBLISH_PY_NEW_2),
+    (_CHANNEL_PUBLISH_PY_OLD_3, _CHANNEL_PUBLISH_PY_NEW_3),
+    (_CHANNEL_PUBLISH_PY_OLD_4, _CHANNEL_PUBLISH_PY_NEW_4),
+)
+
+
+_CHANNEL_RELEASES_PY_OLD_1 = '''\
+"""Advance protected R2 heads from the release transaction's accepted native bytes."""
+from __future__ import annotations
+
+import argparse
+'''
+
+
+_CHANNEL_RELEASES_PY_NEW_1 = '''\
+"""Advance the protected channel heads from the release transaction's accepted native bytes.
+
+The store is SELECTED, never assumed: every construction and write here goes
+through ``scripts.releases.ghpages.configured_store``, so a release with zero
+R2 env publishes through the seam like every other writer.  The seam's default
+is still the object store, which is why every controller workflow that advances
+a head names it -- see ``tests/scripts/test_release_channel_store.py``."""
+from __future__ import annotations
+
+import argparse
+'''
+
+
+_CHANNEL_RELEASES_PY_OLD_2 = """\
+from datetime import datetime, timezone, UTC
+
+from nastech_cli.release_channels import (
+    ChannelError, build_prefix, canonical_json, validate_identity,
+)
+from scripts.bundles.channel_artifacts import assemble
+from scripts.releases import handoff, lanes as lane_set, r2, stable
+from scripts.releases.channels import ChannelPublisher, R2ChannelStore
+from scripts.releases.progress import log
+from scripts.releases.versioning import parse_attempt_ref
+
+NATIVE_LEGS = ("darwin-arm64", "darwin-x64", "win32-arm64", "win32-x64", "windows-universal")
+"""
+
+
+_CHANNEL_RELEASES_PY_NEW_2 = """\
+from datetime import datetime, timezone, UTC
+
+from nastech_cli.release_channels import (
+    ChannelError, build_prefix, canonical_json, validate_identity, validate_repository,
+)
+from scripts.bundles.channel_artifacts import assemble
+from scripts.releases import handoff, lanes as lane_set, r2, stable
+from scripts.releases.channels import ChannelPublisher, write_immutable_feeds
+from scripts.releases.progress import log
+from scripts.releases.r2_scope import channel_public_base
+from scripts.releases.versioning import parse_attempt_ref
+
+NATIVE_LEGS = ("darwin-arm64", "darwin-x64", "win32-arm64", "win32-x64", "windows-universal")
+"""
+
+
+_CHANNEL_RELEASES_PY_OLD_3 = '''\
+
+
+def select_channel(publisher: ChannelPublisher, policy: str) -> str:
+    """R2 records select the name; historical labels are first-rollout defaults only."""
+    matches = [record for record in publisher.list() if record["policy"] == policy]
+    if len(matches) > 1:
+        raise ChannelError("Ambiguous protected policy in R2; select one authority before publishing")
+    if matches:
+        if matches[0]["state"] != "active":
+            raise ChannelError("Protected channel is retired")
+'''
+
+
+_CHANNEL_RELEASES_PY_NEW_3 = '''\
+
+
+def select_channel(publisher: ChannelPublisher, policy: str) -> str:
+    """Channel records select the name; historical labels are first-rollout defaults only."""
+    matches = [record for record in publisher.list() if record["policy"] == policy]
+    if len(matches) > 1:
+        raise ChannelError("Ambiguous protected policy in the channel store; select one authority before publishing")
+    if matches:
+        if matches[0]["state"] != "active":
+            raise ChannelError("Protected channel is retired")
+'''
+
+
+_CHANNEL_RELEASES_PY_OLD_4 = '''\
+    return candidate
+
+
+def stable_head_version(env: dict) -> str | None:
+    """Return the protected stable head's source version, if one exists."""
+    publisher = ChannelPublisher(R2ChannelStore(*r2.credentials()), env["GITHUB_REPOSITORY"],
+                                 r2.public_base_url(), authorize=lambda _action, _record: None)
+    current = publisher._read(select_channel(publisher, "stable-release"))
+    if current is None or current[0]["head"] is None:
+        return None
+'''
+
+
+_CHANNEL_RELEASES_PY_NEW_4 = '''\
+    return candidate
+
+
+def configured_channel_publisher(repository: str, authorize, verify_build=None) -> ChannelPublisher:
+    """Publisher seam: the store and its public origin move together.
+
+    ``configured_store`` honors RELEASE_CHANNEL_STORE explicitly (R2 keeps
+    working while an operator selects it); the matching origin is
+    ``channel_public_base()``, so a reader never asks for keys the selected
+    writer did not write.
+    """
+    from scripts.releases.ghpages import configured_store
+
+    repository = validate_repository(repository)
+    return ChannelPublisher(configured_store(repository), repository,
+                            channel_public_base(), authorize=authorize, verify_build=verify_build)
+
+
+def stable_head_version(env: dict) -> str | None:
+    """Return the protected stable head's source version, if one exists."""
+    publisher = configured_channel_publisher(env["GITHUB_REPOSITORY"],
+                                             authorize=lambda _action, _record: None)
+    current = publisher._read(select_channel(publisher, "stable-release"))
+    if current is None or current[0]["head"] is None:
+        return None
+'''
+
+
+_CHANNEL_RELEASES_PY_OLD_5 = '''\
+
+
+def read_archive_bytes(key: str) -> bytes:
+    """Read one immutable object from the release archive."""
+    store = R2ChannelStore(*r2.credentials())
+    found = store.get(key)
+    if found is None:
+        raise ChannelError(f"Release archive object is unavailable: {key}")
+'''
+
+
+_CHANNEL_RELEASES_PY_NEW_5 = '''\
+
+
+def read_archive_bytes(key: str) -> bytes:
+    """Read one immutable object from the release archive through the selected store."""
+    from scripts.releases.ghpages import configured_store
+
+    store = configured_store(validate_repository(os.environ.get("GITHUB_REPOSITORY")))
+    found = store.get(key)
+    if found is None:
+        raise ChannelError(f"Release archive object is unavailable: {key}")
+'''
+
+
+_CHANNEL_RELEASES_PY_OLD_6 = '''\
+
+def advance_stable(env: dict, release: dict, root: Path) -> dict:
+    """Advance one published release from its immutable tag-scoped receipts."""
+    creds, base, bucket = r2.credentials()
+    R2ChannelStore(creds, base, bucket)
+    public_base = r2.public_base_url()
+    key = f"releases/tag/{release['claim_tag']}/release-candidates.json"
+    digest = hashlib.sha256(read_archive_bytes(key)).hexdigest()
+    log(f"Candidate manifest {key}: sha256 {digest} "
+'''
+
+
+_CHANNEL_RELEASES_PY_NEW_6 = '''\
+
+def advance_stable(env: dict, release: dict, root: Path) -> dict:
+    """Advance one published release from its immutable tag-scoped receipts."""
+    key = f"releases/tag/{release['claim_tag']}/release-candidates.json"
+    digest = hashlib.sha256(read_archive_bytes(key)).hexdigest()
+    log(f"Candidate manifest {key}: sha256 {digest} "
+'''
+
+
+_CHANNEL_RELEASES_PY_OLD_7 = """\
+        "RELEASE_COMMIT": release["commit"],
+        "RELEASE_CLAIM_TAG": release["claim_tag"],
+        "RELEASE_CLAIM_OBJECT": release["claim_object"],
+        "CANDIDATE_MANIFEST_URL": f"{public_base}/{key}",
+        "CANDIDATE_MANIFEST_SHA256": digest,
+    }
+    return publish_release("stable-release", scoped_env, root)
+"""
+
+
+_CHANNEL_RELEASES_PY_NEW_7 = """\
+        "RELEASE_COMMIT": release["commit"],
+        "RELEASE_CLAIM_TAG": release["claim_tag"],
+        "RELEASE_CLAIM_OBJECT": release["claim_object"],
+        "CANDIDATE_MANIFEST_URL": f"{channel_public_base()}/{key}",
+        "CANDIDATE_MANIFEST_SHA256": digest,
+    }
+    return publish_release("stable-release", scoped_env, root)
+"""
+
+
+_CHANNEL_RELEASES_PY_OLD_8 = """\
+    payload_tag = f"v{parsed[0]}" if parsed else tag
+    if env.get("R2_DISPOSABLE_RUN"):
+        raise ChannelError("Disposable receiver builds cannot enter production release publication")
+    publisher = ChannelPublisher(R2ChannelStore(*r2.credentials()), env["GITHUB_REPOSITORY"],
+                                 r2.public_base_url(), authorize=lambda action, record:
+                                 admit_transaction(policy, env, require_published=True))
+    name = select_channel(publisher, policy)
+    log(f"Channel advance: policy={policy} channel={name} archive={tag} payload={payload_tag} "
+        f"commit={commit[:10]}")
+"""
+
+
+_CHANNEL_RELEASES_PY_NEW_8 = """\
+    payload_tag = f"v{parsed[0]}" if parsed else tag
+    if env.get("R2_DISPOSABLE_RUN"):
+        raise ChannelError("Disposable receiver builds cannot enter production release publication")
+    publisher = configured_channel_publisher(
+        env["GITHUB_REPOSITORY"],
+        authorize=lambda action, record: admit_transaction(policy, env, require_published=True))
+    name = select_channel(publisher, policy)
+    log(f"Channel advance: policy={policy} channel={name} archive={tag} payload={payload_tag} "
+        f"commit={commit[:10]}")
+"""
+
+
+_CHANNEL_RELEASES_PY_OLD_9 = r"""        # Explicit bootstrap may have reserved another opaque token for the same app.
+        identity["token"] = current[0]["identity"]["token"]
+        if identity != current[0]["identity"]:
+            raise ChannelError("Protected R2 identity differs from the existing product")
+    final_claim = stable.final_context({**env, "RELEASE_TAG": payload_tag})[2] \
+        if policy == "stable-release" else None
+    if final_claim is not None and not lane_set.advances_desktop(final_claim["lanes"]):
+"""
+
+
+_CHANNEL_RELEASES_PY_NEW_9 = r"""        # Explicit bootstrap may have reserved another opaque token for the same app.
+        identity["token"] = current[0]["identity"]["token"]
+        if identity != current[0]["identity"]:
+            raise ChannelError("Protected channel identity differs from the existing product")
+    final_claim = stable.final_context({**env, "RELEASE_TAG": payload_tag})[2] \
+        if policy == "stable-release" else None
+    if final_claim is not None and not lane_set.advances_desktop(final_claim["lanes"]):
+"""
+
+
+_CHANNEL_RELEASES_PY_OLD_10 = """\
+        match_accepted_packages(manifest, accepted)
+    prefix = build_prefix(request["buildId"])
+    log(f"Build {request['buildId']}: writing {len(feeds)} immutable feeds under {prefix}")
+    for file in feeds:
+        key = prefix + file.relative_to(root).as_posix()
+        r2.put(tag=tag, key=key, file=str(file), key_is_full=True, immutable=True)
+        if publisher.reader.read_bytes(key) != file.read_bytes():
+            raise ChannelError("Immutable protected feed public read-back differs")
+    publisher._write(prefix + "build.json", manifest)
+
+    def qualified(pinned: dict, actual: dict) -> bool:
+"""
+
+
+_CHANNEL_RELEASES_PY_NEW_10 = """\
+        match_accepted_packages(manifest, accepted)
+    prefix = build_prefix(request["buildId"])
+    log(f"Build {request['buildId']}: writing {len(feeds)} immutable feeds under {prefix}")
+    write_immutable_feeds(publisher.store, publisher.reader, prefix, root, feeds)
+    publisher._write(prefix + "build.json", manifest)
+
+    def qualified(pinned: dict, actual: dict) -> bool:
+"""
+
+
+_CHANNEL_RELEASES_PY_EDITS = (
+    (_CHANNEL_RELEASES_PY_OLD_1, _CHANNEL_RELEASES_PY_NEW_1),
+    (_CHANNEL_RELEASES_PY_OLD_2, _CHANNEL_RELEASES_PY_NEW_2),
+    (_CHANNEL_RELEASES_PY_OLD_3, _CHANNEL_RELEASES_PY_NEW_3),
+    (_CHANNEL_RELEASES_PY_OLD_4, _CHANNEL_RELEASES_PY_NEW_4),
+    (_CHANNEL_RELEASES_PY_OLD_5, _CHANNEL_RELEASES_PY_NEW_5),
+    (_CHANNEL_RELEASES_PY_OLD_6, _CHANNEL_RELEASES_PY_NEW_6),
+    (_CHANNEL_RELEASES_PY_OLD_7, _CHANNEL_RELEASES_PY_NEW_7),
+    (_CHANNEL_RELEASES_PY_OLD_8, _CHANNEL_RELEASES_PY_NEW_8),
+    (_CHANNEL_RELEASES_PY_OLD_9, _CHANNEL_RELEASES_PY_NEW_9),
+    (_CHANNEL_RELEASES_PY_OLD_10, _CHANNEL_RELEASES_PY_NEW_10),
+)
+
+
+_R2_SCOPE_PY_OLD_1 = """\
+    if explicit is not None:
+        return public_base(explicit)
+    if not configured:
+        # The documented production origin is the default, exactly as the
+        # commit-build path (r2.public_base_url) does, so a local command can
+        # name the page it is about to publish without hand-setting the URL.
+        from scripts.releases.r2 import DEFAULT_PUBLIC_URL
+        configured = DEFAULT_PUBLIC_URL
+    return public_base(configured)
+"""
+
+
+_R2_SCOPE_PY_NEW_1 = """\
+    if explicit is not None:
+        return public_base(explicit)
+    if not configured:
+        # The documented production origin is the default, and it is read
+        # through the commit-build path's own seam (r2.public_base_url) so the
+        # selected store and its public origin -- real or stubbed -- always
+        # move together; the controller patched one, it must move the other.
+        from scripts.releases import r2
+        return r2.public_base_url()
+    return public_base(configured)
+"""
+
+
+_R2_SCOPE_PY_EDITS = (
+    (_R2_SCOPE_PY_OLD_1, _R2_SCOPE_PY_NEW_1),
+)
+
+
+_CANARY_RELEASE_YML_OLD_1 = """\
+concurrency:
+  group: canary-release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+"""
+
+
+_CANARY_RELEASE_YML_NEW_1 = """\
+concurrency:
+  group: canary-release
+  cancel-in-progress: false
+
+env:
+  # Pin the store seams to the GitHub-native plane, exactly as
+  # desktop-bundled-release.yml (the workflow that advances these heads) does.
+  # Without them a stale non-secret bucket variable would silently keep this
+  # controller on R2; an explicitly selected r2 store still wins here, so an
+  # in-flight R2 release is never repointed mid-run.
+  RELEASE_CHANNEL_STORE: github
+  RELEASE_HANDOFF_STORE: github
+
+jobs:
+  tag:
+"""
+
+
+_CANARY_RELEASE_YML_EDITS = (
+    (_CANARY_RELEASE_YML_OLD_1, _CANARY_RELEASE_YML_NEW_1),
+)
+
+
+_STABLE_RELEASE_YML_OLD_1 = """\
+concurrency:
+  group: stable-release
+  cancel-in-progress: false
+
+jobs:
+  admit:
+"""
+
+
+_STABLE_RELEASE_YML_NEW_1 = """\
+concurrency:
+  group: stable-release
+  cancel-in-progress: false
+
+env:
+  # Pin the handoff seam to the plane the desktop legs already write to.
+  # Unset, `handoff.store()` falls back to the bucket variable, so with
+  # CLOUDFLARE_R2_BUCKET configured here the candidate merge would look for leg
+  # packages in the object store while the legs staged them as draft release
+  # assets -- a missing handoff for work that succeeded. An operator-selected r2
+  # still wins at the seam, so an in-flight R2 release is never repointed
+  # mid-run. The channel seam stays unpinned here: this workflow's head advance
+  # still builds an R2 store directly while `r2.public_base_url()` answers the
+  # channel pin with a Pages origin, so pinning it would name one store's bytes
+  # with another store's URL. It belongs with the change that moves a store and
+  # its public origin together.
+  RELEASE_HANDOFF_STORE: github
+
+jobs:
+  admit:
+"""
+
+
+_STABLE_RELEASE_YML_EDITS = (
+    (_STABLE_RELEASE_YML_OLD_1, _STABLE_RELEASE_YML_NEW_1),
+)
+
+_CHANNEL_SEAM_CHANNELS_REL = "scripts/releases/channels.py"
+_CHANNEL_SEAM_PUBLISH_REL = "scripts/releases/channel_publish.py"
+_CHANNEL_SEAM_RELEASES_REL = "scripts/releases/channel_releases.py"
+_CHANNEL_SEAM_SCOPE_REL = "scripts/releases/r2_scope.py"
+_CHANNEL_SEAM_CANARY_WORKFLOW_REL = ".github/workflows/canary-release.yml"
+_CHANNEL_SEAM_STABLE_WORKFLOW_REL = ".github/workflows/stable-release.yml"
+
+#: What each surface has to say once the rule has run: the symbol or pin that only the
+#: fork's shape carries.  ``_marker_edits`` reads it before touching a file, so a tree that
+#: already has the plane is left byte-identical instead of tripping over its own anchors.
+_CHANNEL_SEAM_CHANNELS_MARKER = "def write_immutable_feeds("
+_CHANNEL_SEAM_PUBLISH_MARKER = "from scripts.releases.channels import write_immutable_feeds"
+_CHANNEL_SEAM_RELEASES_MARKER = "def configured_channel_publisher("
+_CHANNEL_SEAM_SCOPE_MARKER = "        return r2.public_base_url()\n"
+_CHANNEL_SEAM_CANARY_MARKER = "  RELEASE_CHANNEL_STORE: github\n"
+_CHANNEL_SEAM_STABLE_MARKER = "  RELEASE_HANDOFF_STORE: github\n"
+
+#: ``(path, marker, edits)`` -- the shared writer first, then the two controllers that call
+#: it, then the origin their readers bind to, then the workflows that select the seam.
+_CHANNEL_SEAM_SURFACES = (
+    (_CHANNEL_SEAM_CHANNELS_REL, _CHANNEL_SEAM_CHANNELS_MARKER, _CHANNELS_PY_EDITS),
+    (_CHANNEL_SEAM_PUBLISH_REL, _CHANNEL_SEAM_PUBLISH_MARKER, _CHANNEL_PUBLISH_PY_EDITS),
+    (_CHANNEL_SEAM_RELEASES_REL, _CHANNEL_SEAM_RELEASES_MARKER, _CHANNEL_RELEASES_PY_EDITS),
+    (_CHANNEL_SEAM_SCOPE_REL, _CHANNEL_SEAM_SCOPE_MARKER, _R2_SCOPE_PY_EDITS),
+    (_CHANNEL_SEAM_CANARY_WORKFLOW_REL, _CHANNEL_SEAM_CANARY_MARKER,
+     _CANARY_RELEASE_YML_EDITS),
+    (_CHANNEL_SEAM_STABLE_WORKFLOW_REL, _CHANNEL_SEAM_STABLE_MARKER,
+     _STABLE_RELEASE_YML_EDITS),
+)
+
+
+class ChannelStoreSeamAnchorError(ValueError):
+    """The channel plane moved, so the fork's store selection could not be re-applied."""
+
+
+def _reconcile_channel_store_selection(dst: str) -> list[str]:
+    """Publish the protected channel plane through the store a run actually selects.
+
+    Fork PR #206 stopped the channel plane from *assuming* R2.  ``ChannelPublisher`` holds
+    a store and a reader bound to one public origin, and every write in this plane ends by
+    reading the public bytes back, so the two have to come from one selection:
+    ``configured_channel_publisher()`` takes the store from ``ghpages.configured_store`` and
+    the origin from ``channel_public_base()``, and ``channel_public_base()`` now defers to
+    ``r2.public_base_url()`` for its fallback so a run or a test that moves one moves the
+    other.  ``write_immutable_feeds()`` is the same argument one level down -- a feed routed
+    any other way can be written to the bucket while the head read is answered from Pages,
+    and the create-only guard the direct ``r2.put`` expressed as ``If-None-Match: *`` lives
+    in every store's ``put``, so routing around the store would lose it too.
+
+    The seam's default is still the object store, which is why the pin travels with the
+    code and why the two workflows are in this table rather than left to the default:
+    ``canary-release.yml`` names both seams in its top ``env``, which every job inherits, so
+    a controller and the legs it advances cannot disagree mid-release.
+    ``stable-release.yml`` pins the handoff seam only, and that refusal is carried here
+    instead of being tidied up: the stable head advance reads the tag-scoped release
+    archive, the writer of that archive is still ``r2.put`` inside
+    ``scripts/bundles/release_artifacts.assemble``, and pinning the channel seam there would
+    answer an R2 read with a Pages URL.  The channel pin belongs with the change that moves
+    that writer, and keeping the two in the order that works is part of what this rule
+    protects.
+
+    Order is the rule's other half.  It runs after :func:`_reconcile_github_pages_release_plane`,
+    :func:`_reconcile_desktop_release_leg_guards`, :func:`_reconcile_github_release_handoff_plane`
+    and :func:`_reconcile_macos_intel_desktop_plane`, because their output is part of the text
+    these anchors name, and after ``_reconcile_fork_release_publication``, which re-applies
+    the fork's two publication spans of ``channel_releases.py`` -- no hunk here overlaps
+    either span, so the two mechanisms never write the same lines.  It still runs before the
+    prompt-surface snapshot, which counts characters in files these hunks rewrite.
+
+    A file carrying none of the pre-migration shapes is left alone: that is a tree without
+    this part of the plane, or one that already has it.  A file carrying some of them raises
+    :class:`ChannelStoreSeamAnchorError`, because a plane whose feeds go to one store and
+    whose heads go to another publishes a manifest whose packages nobody can download --
+    a released lie rather than a red sync.
+    """
+    changed: list[str] = []
+    for rel, marker, edits in _CHANNEL_SEAM_SURFACES:
+        text = _sgl_read(dst, rel)
+        if text is not None and marker not in text and not any(old in text for old, _ in edits):
+            # No anchor of this surface is anywhere in the file, so this tree has no
+            # channel plane to migrate -- a synthetic or reduced tree, not upstream
+            # having moved it.  Upstream moving the whole plane at once is loud: the
+            # fork's own preserved ``test_release_channel_store.py`` reads the symbols
+            # these hunks install, so the candidate's CI goes red rather than the
+            # fork quietly losing its store selection.
+            continue
+        if _marker_edits(dst, rel, marker, edits,
+                         error=ChannelStoreSeamAnchorError,
+                         rule="_reconcile_channel_store_selection",
+                         why="so the channel heads land in the store the run selected while "
+                             "its feeds and its public reads land in another: the head "
+                             "names a build whose bytes are not at the origin the reader is "
+                             "bound to, and an auto-updating desktop app is repointed at a "
+                             "404"):
+            changed.append(rel)
+    return changed
+
+
 # The branded Python lane's slice job name is templated
 # (``Run tests (${{ matrix.slice }}/2)``) and the e2e lane is unnamed (its job
 # key is ``e2e``), so the rules' literal ``name: Run tests`` pass never fires
@@ -10153,6 +10824,16 @@ def reconcile_tree(
     # run before it.  Still before the credential gate below, so that audit sees
     # the jobs the Intel plane adds.
     for rel in _reconcile_macos_intel_desktop_plane(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    # The channel store seam (fork PRs #206 and #208) is a sixth layer: it rewrites
+    # the two controllers that advance the protected heads, the feed writer and the
+    # public origin they bind to, plus the seam pins those workflows inherit.  After
+    # every rule above on purpose -- its anchors in ``channel_releases.py`` and in
+    # both workflows are text the Pages, leg-guard, handoff and Intel rules create --
+    # and after ``_reconcile_fork_release_publication``, whose two re-applied spans
+    # this table deliberately stays outside of.
+    for rel in _reconcile_channel_store_selection(dst):
         result.total += 1
         result.fixed.append(rel)
     # Prompt-surface LAST: it counts characters in the rendered prompts, and
