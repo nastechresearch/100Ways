@@ -812,6 +812,18 @@ def test_blobless_merge_base_jobs_stop_when_the_checkout_moves(tmp_path):
     assert "filter: blob:none" not in (wf / "lint.yml").read_text(encoding="utf-8")
 
 
+def _live_holder_text(pairs_index: int) -> str:
+    """One of the two live-holder files, span for span, from the rule's own anchors.
+
+    The fixture is upstream's spans in the order the rule reads them and the
+    expectation is the same spans after the fork's edit, so the test compares real
+    bytes instead of paraphrasing either side.
+    """
+    return "import psutil\n\n" + "\n# ---- anchor ----\n".join(
+        edit[pairs_index] for edit in _LIVE_HOLDER_EDITS
+    )
+
+
 def _windows_holder_clock_tree(tmp_path):
     """A branded candidate tree carrying upstream's two clock-timed Windows holder fixtures."""
     candidate = tmp_path / "candidate"
@@ -820,10 +832,7 @@ def _windows_holder_clock_tree(tmp_path):
     r6.parent.mkdir(parents=True, exist_ok=True)
     live.parent.mkdir(parents=True, exist_ok=True)
     r6.write_text(_R6_CHECKOUT_HOLDER_CLOCK, encoding="utf-8")
-    live.write_text(
-        "import psutil\n\n" + _LIVE_HOLDER_EDITS[0][0] + "\n" + _LIVE_HOLDER_EDITS[1][0],
-        encoding="utf-8",
-    )
+    live.write_text(_live_holder_text(0), encoding="utf-8")
     return candidate, r6, live
 
 
@@ -839,9 +848,12 @@ def test_windows_holder_clock_waits_become_event_based(tmp_path):
     assert "'still holds the checkout' in handle.read()" in holder
     assert "time.time() + 25" not in holder
     joined = live.read_text(encoding="utf-8")
-    assert "from tests.waiting import wait_until" in joined
-    assert joined.count("wait_until(lambda: not [p.pid") == 1
-    assert joined.endswith(_LIVE_HOLDER_EDITS[1][1])
+    assert joined == _live_holder_text(1)
+    assert "if p.is_running()" not in joined, "a tree walk answers for a stranger after pid reuse"
+    assert joined.count("_assert_nothing_holds(live_root)") == 2, joined
+    assert joined.count(
+        "wait_until(lambda: not desktop_release_holders.find_release_cwd_holders(live_root)") == 1, joined
+    assert "children(recursive=True)]" in joined, "the fixture leaks the shim's interpreter"
     for text in (holder, joined):
         assert "hermes" not in text.lower() and "nous" not in text.lower()
         assert BrandingRules().transform_text(text) == text
@@ -856,7 +868,19 @@ def test_windows_holder_clock_waits_stop_when_the_fixture_moves(tmp_path):
     )
     with pytest.raises(WindowsHolderClockWaitError, match="exactly one copy"):
         _reconcile_windows_holder_clock_waits(str(candidate))
-    assert _LIVE_HOLDER_EDITS[1][0] in live.read_text(encoding="utf-8")
+    assert _live_holder_text(0) in live.read_text(encoding="utf-8")
+
+
+def test_windows_holder_clock_waits_stop_when_the_consent_scoped_fixture_moves(tmp_path):
+    """Upstream renaming the helper's anchor must stop the sync, not lose the close check."""
+    candidate, _r6, live = _windows_holder_clock_tree(tmp_path)
+    live.write_text(
+        _live_holder_text(0).replace("    return consent, tree\n", "    return consent\n", 1),
+        encoding="utf-8",
+    )
+    with pytest.raises(WindowsHolderClockWaitError, match=_LIVE_HOLDER_JOIN_REL.replace(".", r"\.")):
+        _reconcile_windows_holder_clock_waits(str(candidate))
+    assert "_assert_nothing_holds" not in live.read_text(encoding="utf-8")
 
 
 def _pages_release_plane_tree(tmp_path, duplicate_permission=False):
