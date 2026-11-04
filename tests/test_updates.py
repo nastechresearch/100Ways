@@ -625,12 +625,8 @@ def test_free_runner_parallelism_stops_when_the_windows_rows_move(tmp_path):
         _reconcile_free_runner_parallelism(str(candidate))
 
 
-_BLOBLESS_BLOCK = (
-    "          # Blobless: this job reads the commit graph (a merge base, author\n"
-    "          # emails, two snapshots of one path), never every blob in the history.\n"
-    "          # That blob download is what overran its budget on a free runner.\n"
-    "          filter: blob:none\n"
-)
+# The rationale sits above the fetch it explains and the filter is the key the rule
+# adds, so upstream's own ``fetch-depth`` line and its trailing comment stay untouched.
 _CHECKOUT_V7 = "      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1\n"
 
 
@@ -720,9 +716,10 @@ def test_blobless_merge_base_jobs_fetch_the_graph_not_the_blobs(tmp_path):
         ".github/workflows/prompt-surface-diff.yml",
     ]
     contributor = (wf / "contributor-check.yml").read_text(encoding="utf-8")
-    assert (
-        "          fetch-depth: 0  # Full history needed for git log\n" + _BLOBLESS_BLOCK
-    ) in contributor
+    contributor_lines = contributor.splitlines()
+    at = contributor_lines.index("          fetch-depth: 0  # Full history needed for git log")
+    assert contributor_lines[at - 3].startswith("          # The commit graph, not the blobs:")
+    assert contributor_lines[at + 1] == "          filter: blob:none"
     lint = (wf / "lint.yml").read_text(encoding="utf-8")
     assert lint.count("filter: blob:none") == 1
     # The merge-commit job asks for two commits, so there is no blob storm to stop.
@@ -747,6 +744,25 @@ def test_blobless_merge_base_jobs_fetch_the_graph_not_the_blobs(tmp_path):
         assert "hermes" not in text.lower() and "nous" not in text.lower()
         assert BrandingRules().transform_text(text) == text
     assert _reconcile_blobless_merge_base_jobs(str(candidate)) == []
+
+
+def test_blobless_merge_base_jobs_explain_the_job_not_the_rule(tmp_path):
+    """Four jobs read four different pieces of the graph, so they get four rationales.
+
+    One shared sentence would overwrite the wording the fork wrote per job, and a
+    reader cannot tell from it why *this* job's blobs are safe to drop.
+    """
+    candidate, wf = _blobless_checkout_tree(tmp_path)
+    _reconcile_blobless_merge_base_jobs(str(candidate))
+    contributor = (wf / "contributor-check.yml").read_text(encoding="utf-8")
+    lint = (wf / "lint.yml").read_text(encoding="utf-8")
+    surface = (wf / "prompt-surface-diff.yml").read_text(encoding="utf-8")
+    assert "author emails out of git log" in contributor
+    assert "HEAD and the base" in lint
+    assert "the surface snapshots" in surface
+    for text in (lint, surface):
+        assert "author emails" not in text
+    assert "surface snapshots" not in contributor
 
 
 def test_blobless_merge_base_jobs_stop_when_the_checkout_moves(tmp_path):

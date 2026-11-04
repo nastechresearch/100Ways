@@ -4068,21 +4068,39 @@ def _reconcile_ci_runner_budgets(dst: str) -> list[str]:
 # Jobs that read only the commit graph.  Each is upstream-owned, so the fork's
 # own ``filter:`` line is re-derived away by the next candidate unless this rule
 # re-applies it.
-_BLOBLESS_CHECKOUT_FILES = (
-    ".github/workflows/contributor-check.yml",
-    ".github/workflows/lint.yml",
-    ".github/workflows/lockfile-diff.yml",
-    ".github/workflows/prompt-surface-diff.yml",
+# One comment per workflow, in the words the fork wrote for that job: each of these
+# reads a different thing out of the history, and the comment is what tells the next
+# reader why this job's blobs are safe to drop and the one below its neighbour's are not.
+_BLOBLESS_CHECKOUTS = (
+    (
+        ".github/workflows/contributor-check.yml",
+        "# The commit graph, not the blobs: this job reads only author emails out of git log.\n"
+        "# Fetching every historical blob is what overran the budget below on a standard\n"
+        "# runner; blobless leaves merge-base and git log exactly as they read.\n",
+    ),
+    (
+        ".github/workflows/lint.yml",
+        "# Blobless: the diff needs the commit graph plus two snapshots (HEAD and the base\n"
+        "# worktree), never every blob in the history. Fetching those blobs is what overran\n"
+        "# this job's 10-minute budget on a standard runner.\n",
+    ),
+    (
+        ".github/workflows/lockfile-diff.yml",
+        "# Blobless: the job reads the merge base plus the lockfile at each side, so it needs\n"
+        "# the commit graph and two blobs, never every blob in the history. That blob fetch\n"
+        "# is what overran this job's budget on a standard runner.\n",
+    ),
+    (
+        ".github/workflows/prompt-surface-diff.yml",
+        "# Blobless: the job reads the merge base plus the surface snapshots, so it needs the\n"
+        "# commit graph and a handful of blobs, never every blob in the history. That blob\n"
+        "# fetch is what overran this job's budget on a standard runner.\n",
+    ),
 )
 _FULL_HISTORY_CHECKOUT_RE = re.compile(r"^([ \t]*)fetch-depth: 0[ \t]*(?:#.*)?[ \t]*$", re.M)
 _CHECKOUT_STEP_RE = re.compile(r"uses:[ \t]*actions/checkout@", re.M)
 _FILTER_KEY_RE = re.compile(r"^[ \t]*filter:[ \t]*", re.M)
-_BLOBLESS_FILTER_BLOCK = (
-    "{indent}# Blobless: this job reads the commit graph (a merge base, author\n"
-    "{indent}# emails, two snapshots of one path), never every blob in the history.\n"
-    "{indent}# That blob download is what overran its budget on a free runner.\n"
-    "{indent}filter: blob:none\n"
-)
+_BLOBLESS_FILTER_BLOCK = "{indent}filter: blob:none\n"
 
 
 class BloblessCheckoutAnchorError(ValueError):
@@ -4107,8 +4125,13 @@ def _checkout_key_after(lines: list[str], depth_line: int, indent: int) -> int:
     return pos
 
 
-def _blobless_checkout_lines(text: str) -> tuple[list[str], bool]:
-    """``text`` with a blobless filter at each full-history checkout, and whether one was added."""
+def _blobless_checkout_lines(text: str, comment: str) -> tuple[list[str], bool]:
+    """``text`` with a blobless filter at each full-history checkout, and whether one was added.
+
+    The filter goes after the fetch (it is the key's own value), the rationale goes
+    above it -- upstream already owns the ``fetch-depth`` line and its trailing
+    comment, so this rule's prose has to sit outside both to keep the anchors intact.
+    """
     lines = text.splitlines(keepends=True)
     out: list[str] = []
     added = False
@@ -4121,10 +4144,15 @@ def _blobless_checkout_lines(text: str) -> tuple[list[str], bool]:
             continue
         indent = len(match.group(1))
         key = _checkout_key_after(lines, pos, indent)
+        if _FILTER_KEY_RE.match(lines[key] if key < len(lines) else ""):
+            out.extend(lines[pos:key])
+            pos = key
+            continue
+        pad = match.group(1)
+        out.extend(f"{pad}{c}\n" for c in comment.splitlines())
         out.extend(lines[pos:key])
-        if not _FILTER_KEY_RE.match(lines[key] if key < len(lines) else ""):
-            out.append(_BLOBLESS_FILTER_BLOCK.format(indent=match.group(1)))
-            added = True
+        out.append(_BLOBLESS_FILTER_BLOCK.format(indent=pad))
+        added = True
         pos = key
     return out, added
 
@@ -4147,12 +4175,17 @@ def _reconcile_blobless_merge_base_jobs(dst: str) -> list[str]:
     prompt-surface summary went 5m04s -> 1m28s and ``ruff + ty diff`` 10m53s ->
     2m37s, with no budget or step count changed.
 
+    The rationale is per job rather than shared: these four read different pieces of
+    the same graph -- author emails, a lockfile at two refs, the surface snapshots,
+    the two worktrees a diff compares -- and the comment above the fetch is what tells
+    a reader why that job's blobs are safe to drop.
+
     A checkout that no longer asks for full history is a moved anchor rather than
     a fixed job -- the timeout is a property of the blob download, so returning
     quietly here would re-brick four lanes on every sync.  The sync stops.
     """
     fixed: list[str] = []
-    for rel in _BLOBLESS_CHECKOUT_FILES:
+    for rel, comment in _BLOBLESS_CHECKOUTS:
         text = _reconcile_budget_read(dst, rel)
         if text is None:
             continue
@@ -4163,12 +4196,12 @@ def _reconcile_blobless_merge_base_jobs(dst: str) -> list[str]:
                     f"{rel} runs actions/checkout without a 'fetch-depth: 0' line, so the "
                     "blobless guard has no anchor. Either upstream moved these jobs off "
                     "full-history fetches (then delete the file from "
-                    "_BLOBLESS_CHECKOUT_FILES) or it renamed the key (then re-derive the "
+                    "_BLOBLESS_CHECKOUTS) or it renamed the key (then re-derive the "
                     "anchor). Do not drop the guard to get a green sync: the four lanes this "
                     "rule protects are cancelled at their budgets without a failing step."
                 )
             continue
-        out, added = _blobless_checkout_lines(text)
+        out, added = _blobless_checkout_lines(text, comment)
         if not added:
             continue
         _reconcile_budget_write(dst, rel, "".join(out))
