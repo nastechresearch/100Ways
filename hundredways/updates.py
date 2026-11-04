@@ -4209,16 +4209,111 @@ def _reconcile_blobless_merge_base_jobs(dst: str) -> list[str]:
     return fixed
 
 
-# Two Windows holder fixtures timed a wait on a clock instead of the event they are
-# meant to overlap.  Both files are upstream-owned, so the fork's own edit is
-# re-derived away by the next candidate unless this rule re-applies it.
+# Two Windows holder fixtures asked a process tree whether it was gone.  Both files are
+# upstream-owned, so the fork's own edit is re-derived away by the next candidate unless
+# this rule re-applies it.
 _R6_CHECKOUT_HOLDER_REL = "tests/scripts/desktop_update/test_desktop_update_windows_commit_outcome.py"
 _LIVE_HOLDER_JOIN_REL = "tests/nastech_cli/test_desktop_release_holder_windows_live.py"
+_LIVE_HOLDER_IMPORT_OLD = 'from nastech_cli import desktop_release_holders, main_desktop\n'
+_LIVE_HOLDER_IMPORT_NEW = '''\
+from nastech_cli import desktop_release_holders, main_desktop
+from tests.waiting import wait_until
+'''
+_LIVE_HOLDER_FIXTURE_OLD = '''\
+    # The child opens its cwd handle during its own startup: wait for it before asserting the lock.
+    assert helper.stdout.readline().strip() == "ready"
+    try:
+        yield desktop_dir, staging, live_root, helper
+    finally:
+'''
+_LIVE_HOLDER_FIXTURE_NEW = '''\
+    # The child opens its cwd handle during its own startup: wait for it before asserting the lock.
+    assert helper.stdout.readline().strip() == "ready"
+    # sys.executable is the venv shim: the interpreter that sleeps is its child, and killing the
+    # shim alone leaves that child sitting in this folder for the whole sleep -- a holder the next
+    # test finds in its scan, under a pid the OS may already have handed to someone else. Take the
+    # tree's identity here, while the parent is still alive to be asked.
+    children = [(proc.pid, proc.create_time())
+                for proc in psutil.Process(helper.pid).children(recursive=True)]
+    try:
+        yield desktop_dir, staging, live_root, helper
+    finally:
+        for pid, start in children:
+            with contextlib.suppress(psutil.NoSuchProcess):
+                proc = psutil.Process(pid)
+                # The same no-recycled-pid check close_holders refuses to exceed.
+                if abs(proc.create_time() - start) <= desktop_release_holders._START_TIME_TOLERANCE_S:
+                    proc.kill()
+'''
+_LIVE_HOLDER_HELPER_OLD = '''\
+    return consent, tree
+
+
+def test_a_consent_given_for_another_run_closes_nothing_and_is_used_up(swap_fixture, monkeypatch):
+'''
+_LIVE_HOLDER_HELPER_NEW = '''\
+    return consent, tree
+
+
+def _assert_nothing_holds(live_root: Path) -> None:
+    """No process may still report the renamed folder as its working directory.
+
+    This is the scope the close itself has: ``close_holders`` re-checks cwd before terminating
+    anything, so a holder that survives is a holder the consent failed to close. Scope it by
+    folder rather than by the helper's process tree because psutil's Windows walk matches on the
+    parent pid a process was *born* with -- a pid the OS has since recycled adopts its dead
+    predecessor's children, and those strangers are exactly what a consent must refuse to close.
+    ``TerminateProcess`` only schedules the exit, so poll before claiming.
+    """
+    wait_until(lambda: not desktop_release_holders.find_release_cwd_holders(live_root),
+               what="the consented holders to stop reporting the renamed folder as their cwd")
+    assert not desktop_release_holders.find_release_cwd_holders(live_root)
+
+
+def test_a_consent_given_for_another_run_closes_nothing_and_is_used_up(swap_fixture, monkeypatch):
+'''
+_LIVE_HOLDER_RETRY_BIND_OLD = '''\
+    desktop_dir, staging, live_root, helper = swap_fixture
+    consent, tree = _consent_for_run(desktop_dir, helper, "desktop-retry-1")
+    monkeypatch.setenv("NASTECH_UPDATE_CORRELATION_ID", "desktop-retry-1")  # windows.ps1 exports its run id
+'''
+_LIVE_HOLDER_RETRY_BIND_NEW = '''\
+    desktop_dir, staging, live_root, helper = swap_fixture
+    consent, _tree = _consent_for_run(desktop_dir, helper, "desktop-retry-1")
+    monkeypatch.setenv("NASTECH_UPDATE_CORRELATION_ID", "desktop-retry-1")  # windows.ps1 exports its run id
+'''
+_LIVE_HOLDER_RETRY_CLOSE_OLD = '''\
+    assert helper.wait(10) is not None
+    assert not [p.pid for p in tree if p.is_running()]
+'''
+_LIVE_HOLDER_RETRY_CLOSE_NEW = '''\
+    assert helper.wait(10) is not None
+    _assert_nothing_holds(live_root)
+'''
+_LIVE_HOLDER_SIBLING_BIND_OLD = '''\
+        sibling_tree.extend([psutil.Process(sibling.pid), *psutil.Process(sibling.pid).children(recursive=True)])
+        consent, tree = _consent_for_run(desktop_dir, helper, "desktop-retry-1")
+'''
+_LIVE_HOLDER_SIBLING_BIND_NEW = '''\
+        sibling_tree.extend([psutil.Process(sibling.pid), *psutil.Process(sibling.pid).children(recursive=True)])
+        consent, _tree = _consent_for_run(desktop_dir, helper, "desktop-retry-1")
+'''
+_LIVE_HOLDER_SIBLING_CLOSE_OLD = '''\
+        assert helper.wait(10) is not None
+        assert not [p.pid for p in tree if p.is_running()]
+'''
+_LIVE_HOLDER_SIBLING_CLOSE_NEW = '''\
+        assert helper.wait(10) is not None
+        _assert_nothing_holds(live_root)
+'''
 _LIVE_HOLDER_EDITS = (
-    ('from nastech_cli import desktop_release_holders, main_desktop\n',
-     'from nastech_cli import desktop_release_holders, main_desktop\nfrom tests.waiting import wait_until\n'),
-    ('    assert helper.wait(10) is not None\n    assert not [p.pid for p in tree if p.is_running()]\n',
-     '    assert helper.wait(10) is not None\n    # TerminateProcess only schedules the exit: a tree member\'s object can outlive the close that\n    # already freed the folder, so join the tree before asking whether any of it still runs.\n    wait_until(lambda: not [p.pid for p in tree if p.is_running()],\n               what="the consented holders to leave the process table")\n    assert not [p.pid for p in tree if p.is_running()]\n'),
+    (_LIVE_HOLDER_IMPORT_OLD, _LIVE_HOLDER_IMPORT_NEW),
+    (_LIVE_HOLDER_FIXTURE_OLD, _LIVE_HOLDER_FIXTURE_NEW),
+    (_LIVE_HOLDER_HELPER_OLD, _LIVE_HOLDER_HELPER_NEW),
+    (_LIVE_HOLDER_RETRY_BIND_OLD, _LIVE_HOLDER_RETRY_BIND_NEW),
+    (_LIVE_HOLDER_RETRY_CLOSE_OLD, _LIVE_HOLDER_RETRY_CLOSE_NEW),
+    (_LIVE_HOLDER_SIBLING_BIND_OLD, _LIVE_HOLDER_SIBLING_BIND_NEW),
+    (_LIVE_HOLDER_SIBLING_CLOSE_OLD, _LIVE_HOLDER_SIBLING_CLOSE_NEW),
 )
 _R6_CHECKOUT_HOLDER_CLOCK = '''_TIMED_CHECKOUT_HOLDER = """
 import msvcrt, os, sys, time
@@ -4306,7 +4401,7 @@ class WindowsHolderClockWaitError(ValueError):
 
 
 def _reconcile_windows_holder_clock_waits(dst: str) -> list[str]:
-    """Let the two Windows holder fixtures wait on the event, not on a fixed sleep.
+    """Let the two Windows holder fixtures observe the event they claim to cover.
 
     ``tests/scripts/desktop_update/test_desktop_update_windows_commit_outcome.py``
     holds the checkout byte-range lock for a fixed 25 s and then asserts that the
@@ -4322,16 +4417,30 @@ def _reconcile_windows_holder_clock_waits(dst: str) -> list[str]:
     it was earned rather than because a sleep had not yet expired.  Six real runs
     of the test on ``windows-latest`` after the change: 6/6 pass (run 41731417021).
 
-    ``tests/nastech_cli/test_desktop_release_holder_windows_live.py`` asks
-    ``is_running()`` once, immediately after the consented close.
-    ``TerminateProcess`` only schedules the exit, so a tree member can still be in
-    the process table after the close that already freed the folder (run
-    41587194063, ``assert not [5004]``) while the next run of the same tree passes
-    (41587194635).  The unchanged assertion is now preceded by a ``wait_until``
-    join, which is what ``tests/AGENTS.md`` asks for instead of a clock.
+    ``tests/nastech_cli/test_desktop_release_holder_windows_live.py`` asked
+    ``is_running()`` of the helper's own process tree once, immediately after the
+    consented close.  Two things made that lie.  ``TerminateProcess`` only
+    schedules the exit, so a tree member can still be in the process table after
+    the close that already freed the folder (run 41587194063, ``assert not
+    [5004]``) while a later run of the same tree passes (41587194635).  And
+    psutil's Windows walk matches on the parent pid a process was *born* with, so
+    once the fixture's own helper has exited the OS can hand its pid to someone
+    else and the walk adopts that stranger's children -- job 126349183334 failed
+    ``assert not [5996]`` on fork ``main`` with a process that was never in the
+    folder the consent protected.  The fixture leaked it: ``sys.executable`` is
+    the venv shim, and killing the shim leaves the interpreter it spawned sitting
+    in the renamed folder for the whole sleep.  Both sites now ask the question
+    the consent actually answers -- no process still reports the folder as its
+    cwd, joined with ``wait_until`` instead of a clock -- and the fixture takes
+    the tree's identity (pid plus create-time) while the parent is alive to be
+    asked, killing only what still matches the identity it recorded.
 
     Neither edit touches a budget, a guard or a timeout: the R6 wait stays at
-    ``MarkerReleaseWaitSeconds`` 7200 and no assertion is relaxed.  A fixture that
+    ``MarkerReleaseWaitSeconds`` 7200 and no assertion is relaxed.  The live-holder
+    check is re-scoped, not softened: ``close_holders`` terminates by cwd, so the
+    folder is exactly what a consent promises to free, and the tree it replaces
+    could both over-claim (a member that left the folder is no holder) and
+    under-claim (a recycled pid reports someone else's children).  A fixture that
     no longer carries the clock shape is a moved anchor, so the sync stops instead
     of shipping a test that can go green while the code path it covers never runs.
     """
