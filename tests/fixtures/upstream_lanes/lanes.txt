@@ -1,5 +1,5 @@
-# Verbatim excerpt of upstream's ``scripts/releases/lanes.py`` at ``9b904dcc`` (its lines
-# 15-56, 63-89, 106-122, 130-136, 151-156 and 169-182): the lane table, the derived-lane
+# Verbatim excerpt of upstream's ``scripts/releases/lanes.py`` at ``9302ba9e`` (its lines
+# 14-54, 61-84, 100-114, 124-128, 145-148 and 163-174): the lane table, the derived-lane
 # rules and the job -> lanes map every stable-release.yml ``if`` reads.  Saved as .txt so
 # the engine's own ``ruff check .`` baseline stays untouched by upstream's line lengths.
 # tests/test_signing_gated_lanes.py execs these bytes after applying
@@ -24,7 +24,6 @@ LANES = (
     Lane("windows", True, "signed Windows x64 + arm64 MSIX and the universal bundle (the update channel's package)"),
     Lane("windows-store", True, "unsigned Microsoft Store bundle, submitted to Partner Center (needs no signing)"),
     Lane("macos-arm64", True, "macOS Apple Silicon DMG + ZIP"),
-    Lane("macos-intel", False, "macOS Intel DMG + ZIP (unsupported on main; its runner adds over an hour)"),
     Lane("termux", False, "Termux (Android aarch64) APT package"),
     Lane("ci", True, "the full CI pipeline"),
     Lane("nix", True, "Nix checks"),
@@ -40,7 +39,7 @@ LANES = (
 NAMES = tuple(lane.name for lane in LANES)
 DEFAULT = frozenset(lane.name for lane in LANES if lane.default)
 
-DESKTOP = ("windows", "macos-arm64", "macos-intel")
+DESKTOP = ("windows", "macos-arm64")
 WINDOWS = ("windows", "windows-store")
 BUNDLES = (*DESKTOP, "windows-store", "termux")
 # The protected desktop channel, the update feeds and the Termux index move only for a release that
@@ -60,7 +59,6 @@ JOB_LANES: dict[str, frozenset[str]] = {name: frozenset(needs) for name, needs i
     "install-e2e": ("install-e2e",),
     "bootstrap-version": ("bootstrap-version",),
     "candidates-darwin-arm64": ("macos-arm64",),
-    "candidates-darwin-x64": ("macos-intel",),
     "candidates-win32-arm64": ("windows-build",),
     "candidates-win32-x64": ("windows-build",),
     "candidates-win32-bundle": ("windows-build",),
@@ -68,10 +66,8 @@ JOB_LANES: dict[str, frozenset[str]] = {name: frozenset(needs) for name, needs i
     "candidate-manifest": ("bundles",),
     "publish-bundles": ("bundles",),
     "transitions-darwin-arm64": ("macos-arm64", "upgrade"),
-    "transitions-darwin-x64": ("macos-intel", "upgrade"),
     "transitions-win32": ("windows", "upgrade"),
     "macos-packaged-arm64": ("macos-arm64", "upgrade"),
-    "macos-packaged-x64": ("macos-intel", "upgrade"),
     "windows-packaged": ("windows", "upgrade"),
 }.items()}
 
@@ -93,22 +89,16 @@ def _known(names: Iterable[str]) -> frozenset[str]:
         raise ValueError(f"unknown lane {', '.join(sorted(unknown))}; lanes are {', '.join(NAMES)}")
     return names
 
-
-
 def effective(lanes: Iterable[str]) -> frozenset[str]:
     lanes = frozenset(lanes)
     return lanes | {name for name, derived in (("bundles", has_bundles(lanes)),
                                                ("desktop-channel", advances_desktop(lanes)),
                                                ("windows-build", bool(lanes & set(WINDOWS)))) if derived}
 
-
-
 def jobs_to_run(lanes: Iterable[str]) -> dict[str, bool]:
     """Whether each lane-controlled job runs. Every ``if`` in the workflow reads this."""
     on = effective(lanes)
     return {job: needs <= on for job, needs in JOB_LANES.items()}
-
-
 
 def has_bundles(lanes: Iterable[str]) -> bool:
     return bool(frozenset(lanes) & set(BUNDLES))
@@ -122,5 +112,3 @@ def runs_smokes(lanes: Iterable[str]) -> bool:
 
 def advances_desktop(lanes: Iterable[str]) -> bool:
     return frozenset(lanes) >= set(CHANNEL_DESKTOP)
-
-

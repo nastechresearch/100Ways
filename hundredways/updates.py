@@ -4065,6 +4065,1250 @@ def _reconcile_ci_runner_budgets(dst: str) -> list[str]:
     return fixed
 
 
+# Jobs that read only the commit graph.  Each is upstream-owned, so the fork's
+# own ``filter:`` line is re-derived away by the next candidate unless this rule
+# re-applies it.
+# One comment per workflow, in the words the fork wrote for that job: each of these
+# reads a different thing out of the history, and the comment is what tells the next
+# reader why this job's blobs are safe to drop and the one below its neighbour's are not.
+_BLOBLESS_CHECKOUTS = (
+    (
+        ".github/workflows/contributor-check.yml",
+        "# The commit graph, not the blobs: this job reads only author emails out of git log.\n"
+        "# Fetching every historical blob is what overran the budget below on a standard\n"
+        "# runner; blobless leaves merge-base and git log exactly as they read.\n",
+    ),
+    (
+        ".github/workflows/lint.yml",
+        "# Blobless: the diff needs the commit graph plus two snapshots (HEAD and the base\n"
+        "# worktree), never every blob in the history. Fetching those blobs is what overran\n"
+        "# this job's 10-minute budget on a standard runner.\n",
+    ),
+    (
+        ".github/workflows/lockfile-diff.yml",
+        "# Blobless: the job reads the merge base plus the lockfile at each side, so it needs\n"
+        "# the commit graph and two blobs, never every blob in the history. That blob fetch\n"
+        "# is what overran this job's budget on a standard runner.\n",
+    ),
+    (
+        ".github/workflows/prompt-surface-diff.yml",
+        "# Blobless: the job reads the merge base plus the surface snapshots, so it needs the\n"
+        "# commit graph and a handful of blobs, never every blob in the history. That blob\n"
+        "# fetch is what overran this job's budget on a standard runner.\n",
+    ),
+)
+_FULL_HISTORY_CHECKOUT_RE = re.compile(r"^([ \t]*)fetch-depth: 0[ \t]*(?:#.*)?[ \t]*$", re.M)
+_CHECKOUT_STEP_RE = re.compile(r"uses:[ \t]*actions/checkout@", re.M)
+_FILTER_KEY_RE = re.compile(r"^[ \t]*filter:[ \t]*", re.M)
+_BLOBLESS_FILTER_BLOCK = "{indent}filter: blob:none\n"
+
+
+class BloblessCheckoutAnchorError(ValueError):
+    """A merge-base job's full-history checkout moved, so the blobless filter could not apply."""
+
+
+def _checkout_key_after(lines: list[str], depth_line: int, indent: int) -> int:
+    """Index of the next ``with:`` key under the checkout at ``depth_line``.
+
+    The filter sits under comment lines (the fork's own, or this rule's), so the
+    walk passes them instead of demanding adjacency -- but only at the checkout's
+    own indent or deeper, so a comment belonging to the next job cannot pull the
+    inserted key out of the ``with:`` block.
+    """
+    pos = depth_line + 1
+    while pos < len(lines):
+        stripped = lines[pos].lstrip()
+        if stripped.startswith("#") and len(lines[pos]) - len(stripped) >= indent:
+            pos += 1
+            continue
+        return pos
+    return pos
+
+
+def _blobless_checkout_lines(text: str, comment: str) -> tuple[list[str], bool]:
+    """``text`` with a blobless filter at each full-history checkout, and whether one was added.
+
+    The filter goes after the fetch (it is the key's own value), the rationale goes
+    above it -- upstream already owns the ``fetch-depth`` line and its trailing
+    comment, so this rule's prose has to sit outside both to keep the anchors intact.
+    """
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    added = False
+    pos = 0
+    while pos < len(lines):
+        match = _FULL_HISTORY_CHECKOUT_RE.match(lines[pos])
+        if match is None:
+            out.append(lines[pos])
+            pos += 1
+            continue
+        indent = len(match.group(1))
+        key = _checkout_key_after(lines, pos, indent)
+        if _FILTER_KEY_RE.match(lines[key] if key < len(lines) else ""):
+            out.extend(lines[pos:key])
+            pos = key
+            continue
+        pad = match.group(1)
+        out.extend(f"{pad}{c}\n" for c in comment.splitlines())
+        out.extend(lines[pos:key])
+        out.append(_BLOBLESS_FILTER_BLOCK.format(indent=pad))
+        added = True
+        pos = key
+    return out, added
+
+
+def _reconcile_blobless_merge_base_jobs(dst: str) -> list[str]:
+    """Check the four merge-base jobs out blobless, not with every historical blob.
+
+    ``actions/checkout`` with ``fetch-depth: 0`` downloads every blob in the
+    repository's history, and these four jobs read nothing but the commit graph:
+    a merge base plus author emails, the lockfile at two refs, the prompt-surface
+    snapshots at two refs, or the two worktrees ``ruff + ty diff`` compares.  On
+    the free 4-core images the blob download alone overruns the job budget, so the
+    lane reports ``cancelled`` with no failing step at all -- contributor-check
+    died at its 10-minute cap, ``ruff + ty diff`` at 10m53s, and the two 5-minute
+    diff jobs at 5m03s / 5m04s (candidate runs 41680849462, 41682958867 and
+    41683685858).  ``filter: blob:none`` leaves ``git log`` and ``git merge-base``
+    reading exactly as before while dropping the blobs, and is this repo's own
+    convention for history-reading jobs (14 of its 39 ``fetch-depth: 0`` sites
+    already carry it).  Fork PR #198 measured the delta on hosted runners: the
+    prompt-surface summary went 5m04s -> 1m28s and ``ruff + ty diff`` 10m53s ->
+    2m37s, with no budget or step count changed.
+
+    The rationale is per job rather than shared: these four read different pieces of
+    the same graph -- author emails, a lockfile at two refs, the surface snapshots,
+    the two worktrees a diff compares -- and the comment above the fetch is what tells
+    a reader why that job's blobs are safe to drop.
+
+    A checkout that no longer asks for full history is a moved anchor rather than
+    a fixed job -- the timeout is a property of the blob download, so returning
+    quietly here would re-brick four lanes on every sync.  The sync stops.
+    """
+    fixed: list[str] = []
+    for rel, comment in _BLOBLESS_CHECKOUTS:
+        text = _reconcile_budget_read(dst, rel)
+        if text is None:
+            continue
+        lines = text.splitlines(keepends=True)
+        if not any(_FULL_HISTORY_CHECKOUT_RE.match(line) for line in lines):
+            if _CHECKOUT_STEP_RE.search(text):
+                raise BloblessCheckoutAnchorError(
+                    f"{rel} runs actions/checkout without a 'fetch-depth: 0' line, so the "
+                    "blobless guard has no anchor. Either upstream moved these jobs off "
+                    "full-history fetches (then delete the file from "
+                    "_BLOBLESS_CHECKOUTS) or it renamed the key (then re-derive the "
+                    "anchor). Do not drop the guard to get a green sync: the four lanes this "
+                    "rule protects are cancelled at their budgets without a failing step."
+                )
+            continue
+        out, added = _blobless_checkout_lines(text, comment)
+        if not added:
+            continue
+        _reconcile_budget_write(dst, rel, "".join(out))
+        fixed.append(rel)
+    return fixed
+
+
+# Two Windows holder fixtures timed a wait on a clock instead of the event they are
+# meant to overlap.  Both files are upstream-owned, so the fork's own edit is
+# re-derived away by the next candidate unless this rule re-applies it.
+_R6_CHECKOUT_HOLDER_REL = "tests/scripts/desktop_update/test_desktop_update_windows_commit_outcome.py"
+_LIVE_HOLDER_JOIN_REL = "tests/nastech_cli/test_desktop_release_holder_windows_live.py"
+_LIVE_HOLDER_EDITS = (
+    ('from nastech_cli import desktop_release_holders, main_desktop\n',
+     'from nastech_cli import desktop_release_holders, main_desktop\nfrom tests.waiting import wait_until\n'),
+    ('    assert helper.wait(10) is not None\n    assert not [p.pid for p in tree if p.is_running()]\n',
+     '    assert helper.wait(10) is not None\n    # TerminateProcess only schedules the exit: a tree member\'s object can outlive the close that\n    # already freed the folder, so join the tree before asking whether any of it still runs.\n    wait_until(lambda: not [p.pid for p in tree if p.is_running()],\n               what="the consented holders to leave the process table")\n    assert not [p.pid for p in tree if p.is_running()]\n'),
+)
+_R6_CHECKOUT_HOLDER_CLOCK = '''_TIMED_CHECKOUT_HOLDER = """
+import msvcrt, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | os.O_BINARY, 0o644)
+os.lseek(fd, 1 << 20, os.SEEK_SET)
+msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)   # nastech_cli/update_lock.py::_try_lock's byte
+time.sleep(float(sys.argv[2]))
+"""
+
+
+@pytest.mark.platforms('windows')
+def test_result_finished_at_is_stamped_after_the_r6_release_wait(tmp_path: Path) -> None:
+    # The relaunched Desktop drops a non-manual result whose finished_at is 30 minutes old; the
+    # R6 wait lasts up to 2 h. The result must carry the time the hand-off actually finished.
+    holders = []
+
+    def hold_checkout(_home: Path, install: Path) -> None:
+        holders.append((subprocess.Popen([sys.executable, '-c', _TIMED_CHECKOUT_HOLDER,
+                                          str(install / '.nastech-update.lock'), '25']), time.time() + 25))
+    try:
+        code, out, _, result, home = _handoff(tmp_path, '-NoGateway', prepare=hold_checkout)
+    finally:
+        for proc, _ in holders:
+            proc.kill(); proc.wait()
+    assert code == 0, out
+    log = (home / 'logs/desktop-update-handoff.log').read_text(encoding='utf-8-sig')
+    assert 'keeping the update marker' in log, log
+    assert result['ok'] is True and result['finished_at'] >= int(holders[0][1]) - 1, result
+'''
+_R6_CHECKOUT_HOLDER_EVENT = '''_TIMED_CHECKOUT_HOLDER = """
+import msvcrt, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | os.O_BINARY, 0o644)
+os.lseek(fd, 1 << 20, os.SEEK_SET)
+msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)   # nastech_cli/update_lock.py::_try_lock's byte
+print('locked', flush=True)
+# Leave when the hand-off has entered its own wait, not when a clock says so: that wait
+# only begins after the marker's owner finishes its work, and a cold runner's PowerShell
+# can need longer to reach it than any fixed hold survives -- the lock then reads free
+# and the wait is skipped entirely. The cap only bounds a release that never waits.
+log, cap = sys.argv[2], time.time() + float(sys.argv[3])
+while time.time() < cap:
+    try:
+        with open(log, encoding='utf-8-sig') as handle:
+            if 'still holds the checkout' in handle.read():
+                break
+    except OSError:
+        pass
+    time.sleep(0.25)
+print('released %.3f' % time.time(), flush=True)
+"""
+
+
+@pytest.mark.platforms('windows')
+def test_result_finished_at_is_stamped_after_the_r6_release_wait(tmp_path: Path) -> None:
+    # The relaunched Desktop drops a non-manual result whose finished_at is 30 minutes old; the
+    # R6 wait lasts up to 2 h. The result must carry the time the hand-off actually finished.
+    holders = []
+
+    def hold_checkout(home: Path, install: Path) -> None:
+        # The lock is only held once the child has taken it; a hand-off that starts first sees an
+        # unlocked file and skips the R6 wait, so read the handshake before releasing it.
+        proc = subprocess.Popen([sys.executable, '-c', _TIMED_CHECKOUT_HOLDER,
+                                 str(install / '.nastech-update.lock'),
+                                 str(home / 'logs' / 'desktop-update-handoff.log'), '90'],
+                                stdout=subprocess.PIPE, text=True, encoding='utf-8')
+        assert proc.stdout.readline().strip() == 'locked'
+        holders.append(proc)
+    try:
+        code, out, _, result, home = _handoff(tmp_path, '-NoGateway', prepare=hold_checkout)
+        # The hand-off returns only once its wait ended, which is this holder leaving the lock.
+        held_for = [proc.stdout.readline().strip() for proc in holders]
+    finally:
+        for proc in holders:
+            proc.kill(); proc.wait()
+    assert code == 0, out
+    assert held_for[0].startswith('released '), held_for
+    log = (home / 'logs/desktop-update-handoff.log').read_text(encoding='utf-8-sig')
+    assert 'keeping the update marker' in log, log
+    assert result['ok'] is True and result['finished_at'] >= int(float(held_for[0].split()[1])) - 1, result
+'''
+
+
+class WindowsHolderClockWaitError(ValueError):
+    """A holder fixture moved, so its event-based wait could not be re-applied."""
+
+
+def _reconcile_windows_holder_clock_waits(dst: str) -> list[str]:
+    """Let the two Windows holder fixtures wait on the event, not on a fixed sleep.
+
+    ``tests/scripts/desktop_update/test_desktop_update_windows_commit_outcome.py``
+    holds the checkout byte-range lock for a fixed 25 s and then asserts that the
+    hand-off's R6 release waited for it.  The hand-off only reaches
+    ``Test-CheckoutLockHeld`` after the marker's owner finishes its own work, and
+    a cold ``windows-latest`` runner can need longer than that to start
+    PowerShell: probe run 41710346641 logged ``free lock-acquired`` at marker age
+    35.0 s -- the holder had already left, the R6 branch never ran, and the test
+    failed on ``keeping the update marker`` (run 41590647193 did the same on the
+    fork's own head).  The holder now reports ``locked`` once it owns the lock,
+    leaves when the hand-off writes its own keeping-line, and the assertion
+    compares against the exit the holder reports, so the wait is entered because
+    it was earned rather than because a sleep had not yet expired.  Six real runs
+    of the test on ``windows-latest`` after the change: 6/6 pass (run 41731417021).
+
+    ``tests/nastech_cli/test_desktop_release_holder_windows_live.py`` asks
+    ``is_running()`` once, immediately after the consented close.
+    ``TerminateProcess`` only schedules the exit, so a tree member can still be in
+    the process table after the close that already freed the folder (run
+    41587194063, ``assert not [5004]``) while the next run of the same tree passes
+    (41587194635).  The unchanged assertion is now preceded by a ``wait_until``
+    join, which is what ``tests/AGENTS.md`` asks for instead of a clock.
+
+    Neither edit touches a budget, a guard or a timeout: the R6 wait stays at
+    ``MarkerReleaseWaitSeconds`` 7200 and no assertion is relaxed.  A fixture that
+    no longer carries the clock shape is a moved anchor, so the sync stops instead
+    of shipping a test that can go green while the code path it covers never runs.
+    """
+    fixed: list[str] = []
+    files = (
+        (_R6_CHECKOUT_HOLDER_REL, ((_R6_CHECKOUT_HOLDER_CLOCK, _R6_CHECKOUT_HOLDER_EVENT),)),
+        (_LIVE_HOLDER_JOIN_REL, _LIVE_HOLDER_EDITS),
+    )
+    for rel, edits in files:
+        text = _reconcile_budget_read(dst, rel)
+        if text is None:
+            continue
+        updated = text
+        for old, new in edits:
+            if new in updated:
+                continue
+            if updated.count(old) != 1:
+                raise WindowsHolderClockWaitError(
+                    f"{rel} no longer carries exactly one copy of the holder shape this rule "
+                    "rewrites, so the event-based wait could not be re-applied. Upstream moved "
+                    "the fixture: re-derive the constants from its current text. Do not drop "
+                    "the rule to get a green sync -- without it the test can pass while the "
+                    "path it claims to cover never runs."
+                )
+            updated = updated.replace(old, new, 1)
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+    return fixed
+
+
+# Fork release plane: assets and channel pointers are served by GitHub Pages.
+
+_PAGES_DEPLOY_SITE_REL = ".github/workflows/deploy-site.yml"
+_PAGES_DEPLOY_SITE_OLD_1 = """\
+      - 'website/**'
+      - 'skills/**'
+"""
+_PAGES_DEPLOY_SITE_NEW_1 = """\
+      - 'website/**'
+      - 'releases/**'  # control-plane commits from the release plane must republish Pages
+      - 'skills/**'
+"""
+_PAGES_DEPLOY_SITE_OLD_2 = """\
+          HTML
+          # llms.txt / llms-full.txt are also published at the site root
+"""
+_PAGES_DEPLOY_SITE_NEW_2 = """\
+          HTML
+          # The fork's release control plane lives in the repository tree
+          # (scripts/releases/ghpages.py commits it via the Contents API) and
+          # is published by this very build, so ChannelReader speaks the same
+          # /releases/… protocol Pages now serves.
+          if [ -d releases ]; then
+            cp -r releases _site/releases
+          fi
+          # llms.txt / llms-full.txt are also published at the site root
+"""
+_PAGES_DEPLOY_SITE_EDITS = (
+    (_PAGES_DEPLOY_SITE_OLD_1, _PAGES_DEPLOY_SITE_NEW_1),
+    (_PAGES_DEPLOY_SITE_OLD_2, _PAGES_DEPLOY_SITE_NEW_2),
+)
+
+_PAGES_BUNDLE_SMOKE_REL = ".github/workflows/desktop-bundle-smoke.yml"
+_PAGES_BUNDLE_SMOKE_OLD_1 = """\
+  contents: read
+
+"""
+_PAGES_BUNDLE_SMOKE_NEW_1 = """\
+  contents: read
+
+env:
+  RELEASE_CHANNEL_STORE: github
+
+
+"""
+_PAGES_BUNDLE_SMOKE_EDITS = (
+    (_PAGES_BUNDLE_SMOKE_OLD_1, _PAGES_BUNDLE_SMOKE_NEW_1),
+)
+
+_PAGES_SOURCE_RELEASES_REL = "nastech_cli/source_releases.py"
+_PAGES_SOURCE_RELEASES_OLD_1 = """\
+_PUBLIC_BASE = "https://nastech-assets.nastechresearch.workers.dev"
+"""
+_PAGES_SOURCE_RELEASES_NEW_1 = """\
+_PUBLIC_BASE = "https://nastechresearch.github.io/nastech-agent"
+"""
+_PAGES_SOURCE_RELEASES_EDITS = (
+    (_PAGES_SOURCE_RELEASES_OLD_1, _PAGES_SOURCE_RELEASES_NEW_1),
+)
+
+_PAGES_CHANNEL_BUILD_REL = "scripts/releases/channel_build.py"
+_PAGES_CHANNEL_BUILD_OLD_1 = """\
+    base = channel_public_base()
+    store = R2ChannelStore(*r2.credentials(), scope=scope)
+"""
+_PAGES_CHANNEL_BUILD_NEW_1 = """\
+    from scripts.releases.ghpages import configured_store
+    if os.environ.get("RELEASE_CHANNEL_STORE", "r2") == "github":
+        base = os.environ.get("RELEASE_PAGES_PUBLIC_BASE", "https://nastechresearch.github.io/nastech-agent")
+    else:
+        base = channel_public_base()
+    store = configured_store(repository, scope=scope)
+"""
+_PAGES_CHANNEL_BUILD_EDITS = (
+    (_PAGES_CHANNEL_BUILD_OLD_1, _PAGES_CHANNEL_BUILD_NEW_1),
+)
+
+_PAGES_CHANNEL_PUBLISH_REL = "scripts/releases/channel_publish.py"
+_PAGES_CHANNEL_PUBLISH_OLD_1 = """\
+        values["public-root"] = os.environ["CLOUDFLARE_R2_PUBLIC_URL"]
+"""
+_PAGES_CHANNEL_PUBLISH_NEW_1 = """\
+        values["public-root"] = (os.environ.get("CLOUDFLARE_R2_PUBLIC_URL")
+                                     or os.environ.get("RELEASE_PAGES_PUBLIC_BASE",
+                                                       "https://nastechresearch.github.io/nastech-agent"))
+"""
+_PAGES_CHANNEL_PUBLISH_OLD_2 = """\
+        publisher = ChannelPublisher(R2ChannelStore(*r2.credentials()), args.repository, args.public_base,
+"""
+_PAGES_CHANNEL_PUBLISH_NEW_2 = """\
+        from scripts.releases.ghpages import configured_store
+        publisher = ChannelPublisher(configured_store(args.repository), args.repository, args.public_base,
+"""
+_PAGES_CHANNEL_PUBLISH_EDITS = (
+    (_PAGES_CHANNEL_PUBLISH_OLD_1, _PAGES_CHANNEL_PUBLISH_NEW_1),
+    (_PAGES_CHANNEL_PUBLISH_OLD_2, _PAGES_CHANNEL_PUBLISH_NEW_2),
+)
+
+_PAGES_R2_HOST_REL = "scripts/releases/r2.py"
+_PAGES_R2_HOST_OLD_1 = """\
+def public_base_url(explicit: str | None = None) -> str:
+    return R2Scope.configured().public_base(
+"""
+_PAGES_R2_HOST_NEW_1 = """\
+def public_base_url(explicit: str | None = None) -> str:
+    if (explicit is None
+            and not os.environ.get("CLOUDFLARE_R2_PUBLIC_URL")
+            and os.environ.get("RELEASE_CHANNEL_STORE", "r2") == "github"):
+        from scripts.releases.ghpages import pages_public_base
+        return R2Scope.configured().public_base(pages_public_base())
+    return R2Scope.configured().public_base(
+"""
+_PAGES_R2_HOST_EDITS = (
+    (_PAGES_R2_HOST_OLD_1, _PAGES_R2_HOST_NEW_1),
+)
+
+_PAGES_R2_SCOPE_REL = "scripts/releases/r2_scope.py"
+_PAGES_R2_SCOPE_OLD_1 = """\
+        return expected
+    from nastech_cli.release_channels import public_base
+"""
+_PAGES_R2_SCOPE_NEW_1 = """\
+        return expected
+    if explicit is None and os.environ.get("RELEASE_CHANNEL_STORE", "r2") == "github":
+        # The fork's control plane lives on GitHub Pages, not the worker.
+        from scripts.releases.ghpages import pages_public_base
+        return pages_public_base()
+    from nastech_cli.release_channels import public_base
+"""
+_PAGES_R2_SCOPE_EDITS = (
+    (_PAGES_R2_SCOPE_OLD_1, _PAGES_R2_SCOPE_NEW_1),
+)
+
+_PAGES_CHANNEL_TESTS_REL = "tests/nastech_cli/test_source_release_channels.py"
+_PAGES_CHANNEL_TESTS_OLD_1 = """\
+    responses = {}
+    requests = []
+    for channel, tag in tags.items():
+        responses[f"/releases/{channel}/index.html"] = (
+"""
+_PAGES_CHANNEL_TESTS_NEW_1 = """\
+    # The legacy pointer host is GitHub Pages now: the site prefix is part of
+    # every public path the reader builds from _PUBLIC_BASE.
+    pages = "/nastech-agent"
+    responses = {}
+    requests = []
+    for channel, tag in tags.items():
+        responses[f"{pages}/releases/{channel}/index.html"] = (
+"""
+_PAGES_CHANNEL_TESTS_OLD_2 = """\
+    responses["/releases/stable/release-candidates.json"] = {
+"""
+_PAGES_CHANNEL_TESTS_NEW_2 = """\
+    responses[f"{pages}/releases/stable/release-candidates.json"] = {
+"""
+_PAGES_CHANNEL_TESTS_OLD_3 = """\
+    releases.responses.pop("/releases/stable/release-candidates.json")
+    releases.responses.pop(f"/releases/{channel}/index.html")
+"""
+_PAGES_CHANNEL_TESTS_NEW_3 = """\
+    releases.responses.pop("/nastech-agent/releases/stable/release-candidates.json")
+    releases.responses.pop(f"/nastech-agent/releases/{channel}/index.html")
+"""
+_PAGES_CHANNEL_TESTS_EDITS = (
+    (_PAGES_CHANNEL_TESTS_OLD_1, _PAGES_CHANNEL_TESTS_NEW_1),
+    (_PAGES_CHANNEL_TESTS_OLD_2, _PAGES_CHANNEL_TESTS_NEW_2),
+    (_PAGES_CHANNEL_TESTS_OLD_3, _PAGES_CHANNEL_TESTS_NEW_3),
+)
+
+_PAGES_TS_CHECKOUT_SOURCE_REL = "apps/desktop/electron/updater/checkout-source.test.ts"
+_PAGES_TS_CHECKOUT_SOURCE_OLD_1 = """\
+const python: string = process.env.NASTECH_PYTHON || 'python3'
+
+"""
+_PAGES_TS_CHECKOUT_SOURCE_NEW_1 = """\
+const python: string = process.env.NASTECH_PYTHON || 'python3'
+
+// The origin the reader resolves against is `nastech_cli/source_releases._PUBLIC_BASE`. A GitHub
+// Pages project site carries the repository in its path, so the sandbox host, the path every record
+// is served under and the authority the manifest records are one value; as three literals they
+// drifted apart and the sandbox rejected its own reader.
+const pagesBase: string = 'https://nastechresearch.github.io/nastech-agent'
+const pagesOrigin: URL = new URL(pagesBase)
+const pagesHost: string = pagesOrigin.hostname
+const pagesPrefix: string = pagesOrigin.pathname
+
+"""
+_PAGES_TS_CHECKOUT_SOURCE_OLD_2 = """\
+      publicBase: 'https://nastech-assets.nastechresearch.workers.dev'
+"""
+_PAGES_TS_CHECKOUT_SOURCE_NEW_2 = """\
+      publicBase: pagesBase
+"""
+_PAGES_TS_CHECKOUT_SOURCE_OLD_3 = """\
+        `/releases/channels/${channel}.json`,
+"""
+_PAGES_TS_CHECKOUT_SOURCE_NEW_3 = """\
+        `${pagesPrefix}/releases/channels/${channel}.json`,
+"""
+_PAGES_TS_CHECKOUT_SOURCE_OLD_4 = """\
+      responses.set(`/${manifestKey(channel)}`, body)
+"""
+_PAGES_TS_CHECKOUT_SOURCE_NEW_4 = """\
+      responses.set(`${pagesPrefix}/${manifestKey(channel)}`, body)
+"""
+_PAGES_TS_CHECKOUT_SOURCE_OLD_5 = """\
+        assert parsed.hostname in ('nastech-assets.nastechresearch.workers.dev', 'api.github.com')
+"""
+_PAGES_TS_CHECKOUT_SOURCE_NEW_5 = """\
+        assert parsed.hostname in ('${pagesHost}', 'api.github.com')
+"""
+_PAGES_TS_CHECKOUT_SOURCE_OLD_6 = """\
+    responses.delete(`/releases/channels/canary.json`)
+"""
+_PAGES_TS_CHECKOUT_SOURCE_NEW_6 = """\
+    responses.delete(`${pagesPrefix}/releases/channels/canary.json`)
+"""
+_PAGES_TS_CHECKOUT_SOURCE_EDITS = (
+    (_PAGES_TS_CHECKOUT_SOURCE_OLD_1, _PAGES_TS_CHECKOUT_SOURCE_NEW_1),
+    (_PAGES_TS_CHECKOUT_SOURCE_OLD_2, _PAGES_TS_CHECKOUT_SOURCE_NEW_2),
+    (_PAGES_TS_CHECKOUT_SOURCE_OLD_3, _PAGES_TS_CHECKOUT_SOURCE_NEW_3),
+    (_PAGES_TS_CHECKOUT_SOURCE_OLD_4, _PAGES_TS_CHECKOUT_SOURCE_NEW_4),
+    (_PAGES_TS_CHECKOUT_SOURCE_OLD_5, _PAGES_TS_CHECKOUT_SOURCE_NEW_5),
+    (_PAGES_TS_CHECKOUT_SOURCE_OLD_6, _PAGES_TS_CHECKOUT_SOURCE_NEW_6),
+)
+
+_PAGES_RELEASE_EDITS = (
+    (_PAGES_DEPLOY_SITE_REL, _PAGES_DEPLOY_SITE_EDITS),
+    (_PAGES_BUNDLE_SMOKE_REL, _PAGES_BUNDLE_SMOKE_EDITS),
+    (_PAGES_SOURCE_RELEASES_REL, _PAGES_SOURCE_RELEASES_EDITS),
+    (_PAGES_CHANNEL_BUILD_REL, _PAGES_CHANNEL_BUILD_EDITS),
+    (_PAGES_CHANNEL_PUBLISH_REL, _PAGES_CHANNEL_PUBLISH_EDITS),
+    (_PAGES_R2_HOST_REL, _PAGES_R2_HOST_EDITS),
+    (_PAGES_R2_SCOPE_REL, _PAGES_R2_SCOPE_EDITS),
+    (_PAGES_CHANNEL_TESTS_REL, _PAGES_CHANNEL_TESTS_EDITS),
+    (_PAGES_TS_CHECKOUT_SOURCE_REL, _PAGES_TS_CHECKOUT_SOURCE_EDITS),
+)
+
+
+# Fork Termux APT feed: a flat signed repository published as release assets.
+
+_APT_CHECK_APT_REL = "scripts/termux/check_apt.sh"
+_APT_CHECK_APT_OLD_1 = """\
+expected="${2:?expected package version required}"
+repository="${3:-file:/apt}"
+"""
+_APT_CHECK_APT_NEW_1 = """\
+expected="${2:?expected package version required}"
+# The feed is published FLAT as the assets of one fixed-tag release (a release
+# asset name cannot hold '/'), which is why the source line below names no
+# suite or component directory and no `by-hash`: apt reads <repository>/Release
+# and <repository>/Packages, then each stanza's Filename relative to the same
+# base.  Measured with apt 2.8.3: on a flat repository `by-hash=force` is inert
+# (apt issues no by-hash request either way), so index integrity here is carried
+# by the Release SHA256/SHA512 rows, which apt still enforces -- flipping one
+# byte of Packages makes `apt-get update` exit 100.
+repository="${3:-file:/apt}"
+"""
+_APT_CHECK_APT_OLD_2 = (
+    'printf \'deb [signed-by=/apt/key.asc by-hash=force] %s %s main\\n\' "$repository" "$suite" > "$work/sources.list"\n'
+)
+_APT_CHECK_APT_NEW_2 = (
+    '# The feed directory is mounted read-only at /apt by every caller, so the suite\n'
+    '# that was staged is checked against the suite that is published: a channel wired\n'
+    "# to the wrong feed would otherwise install over another channel's packages.\n"
+    'grep -qx "Suite: $suite" /apt/Release\n'
+    'printf \'deb [signed-by=/apt/key.asc] %s ./\\n\' "$repository" > "$work/sources.list"\n'
+)
+_APT_CHECK_APT_EDITS = (
+    (_APT_CHECK_APT_OLD_1, _APT_CHECK_APT_NEW_1),
+    (_APT_CHECK_APT_OLD_2, _APT_CHECK_APT_NEW_2),
+)
+
+_APT_STABLE_RELEASES_DOC_REL = "website/docs/developer-guide/stable-releases.md"
+_APT_STABLE_RELEASES_DOC_OLD_1 = """\
+
+The candidate manifest binds the admitted claim epoch. Admission recomputes the
+"""
+_APT_STABLE_RELEASES_DOC_NEW_1 = """\
+
+The Termux feed devices install from is not in that archive. It is a flat signed
+repository published as assets of the channel's own fixed-tag release
+(`termux-repo` for stable, `termux-repo-canary` for canary), because a release
+asset name is one path component. Each publish re-signs the index, and the
+mandatory `Date:` makes those bytes new every time, so a fixed-name index can
+never be stored under a put-if-absent prefix: re-dispatching one tag writes a
+different `InRelease` under the same key, and the immutable upload answers 412.
+The candidate phase still hands its staged tree to the tag archive, because
+`advance_termux_apt` reads the signed index from there.
+
+The candidate manifest binds the admitted claim epoch. Admission recomputes the
+"""
+_APT_STABLE_RELEASES_DOC_EDITS = (
+    (_APT_STABLE_RELEASES_DOC_OLD_1, _APT_STABLE_RELEASES_DOC_NEW_1),
+)
+
+_APT_TERMUX_DOC_REL = "website/docs/getting-started/termux.md"
+_APT_TERMUX_DOC_OLD_1 = """\
+Two APT channels are published under
+`https://nastech-assets.nastechresearch.workers.dev/releases/termux/<channel>`:
+
+| Channel | APT suite | Contents |
+| --- | --- | --- |
+| `stable` | `nastech-stable` | Tagged `vMAJOR.MINOR.PATCH` releases that passed the stable release gate |
+| `canary` | `nastech-canary` | Prerelease builds from canary tags; versions carry `~canary.<timestamp>` |
+
+The steps below use `stable`. To follow prereleases, replace `stable` with
+`canary` and `nastech-stable` with `nastech-canary` in steps 2 and 4. Both
+channels are signed with the same key.
+"""
+_APT_TERMUX_DOC_NEW_1 = """\
+Both APT channels are signed flat repositories published as assets of the
+repository's own release tags:
+
+| Channel | Feed base | APT suite | Contents |
+| --- | --- | --- | --- |
+| `stable` | `https://github.com/nastechresearch/nastech-agent/releases/download/termux-repo` | `nastech-stable` | Tagged `vMAJOR.MINOR.PATCH` releases that passed the stable release gate |
+| `canary` | `https://github.com/nastechresearch/nastech-agent/releases/download/termux-repo-canary` | `nastech-canary` | Prerelease builds from canary tags; versions carry `~canary.<timestamp>` |
+
+The steps below use `stable`. To follow prereleases, replace `termux-repo` with
+`termux-repo-canary` in steps 2 and 4. Both channels are signed with the same
+key, and each feed advertises only its own channel's packages.
+"""
+_APT_TERMUX_DOC_OLD_2 = (
+    '     https://nastech-assets.nastechresearch.workers.dev/releases/termux/stable/key.asc \\\n'
+)
+_APT_TERMUX_DOC_NEW_2 = (
+    '     https://github.com/nastechresearch/nastech-agent/releases/download/termux-repo/key.asc \\\n'
+)
+_APT_TERMUX_DOC_OLD_3 = (
+    '     "deb [signed-by=$PREFIX/etc/apt/keyrings/nastech-agent.asc] https://nastech-assets.nastechresearch.workers.dev/releases/termux/stable nastech-stable main" \\\n'
+)
+_APT_TERMUX_DOC_NEW_3 = (
+    '     "deb [signed-by=$PREFIX/etc/apt/keyrings/nastech-agent.asc] https://github.com/nastechresearch/nastech-agent/releases/download/termux-repo ./" \\\n'
+)
+_APT_TERMUX_DOC_OLD_4 = """\
+stable version. Each suite only lists its own channel's packages; to move
+between channels, edit the channel path and suite in `nastech-agent.list`, then
+"""
+_APT_TERMUX_DOC_NEW_4 = """\
+stable version. Each feed only lists its own channel's packages; to move
+between channels, edit the feed tag in `nastech-agent.list`, then
+"""
+_APT_TERMUX_DOC_EDITS = (
+    (_APT_TERMUX_DOC_OLD_1, _APT_TERMUX_DOC_NEW_1),
+    (_APT_TERMUX_DOC_OLD_2, _APT_TERMUX_DOC_NEW_2),
+    (_APT_TERMUX_DOC_OLD_3, _APT_TERMUX_DOC_NEW_3),
+    (_APT_TERMUX_DOC_OLD_4, _APT_TERMUX_DOC_NEW_4),
+)
+
+_APT_TERMUX_DOC_ZH_REL = "website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/getting-started/termux.md"
+_APT_TERMUX_DOC_ZH_OLD_1 = (
+    '     https://nastech-assets.nastechresearch.workers.dev/releases/termux/canary/key.asc \\\n'
+)
+_APT_TERMUX_DOC_ZH_NEW_1 = (
+    '     https://github.com/nastechresearch/nastech-agent/releases/download/termux-repo-canary/key.asc \\\n'
+)
+_APT_TERMUX_DOC_ZH_OLD_2 = (
+    '4. 添加 canary 仓库：\n'
+    '\n'
+    '   ```bash\n'
+    "   printf '%s\\n' \\\n"
+    '     "deb [signed-by=$PREFIX/etc/apt/keyrings/nastech-agent.asc] https://nastech-assets.nastechresearch.workers.dev/releases/termux/canary nastech-canary main" \\\n'
+)
+_APT_TERMUX_DOC_ZH_NEW_2 = (
+    '4. 添加 canary 仓库（扁平仓库，发行版字段写 `./`）：\n'
+    '\n'
+    '   ```bash\n'
+    "   printf '%s\\n' \\\n"
+    '     "deb [signed-by=$PREFIX/etc/apt/keyrings/nastech-agent.asc] https://github.com/nastechresearch/nastech-agent/releases/download/termux-repo-canary ./" \\\n'
+)
+_APT_TERMUX_DOC_ZH_EDITS = (
+    (_APT_TERMUX_DOC_ZH_OLD_1, _APT_TERMUX_DOC_ZH_NEW_1),
+    (_APT_TERMUX_DOC_ZH_OLD_2, _APT_TERMUX_DOC_ZH_NEW_2),
+)
+
+_APT_FEED_EDITS = (
+    (_APT_CHECK_APT_REL, _APT_CHECK_APT_EDITS),
+    (_APT_STABLE_RELEASES_DOC_REL, _APT_STABLE_RELEASES_DOC_EDITS),
+    (_APT_TERMUX_DOC_REL, _APT_TERMUX_DOC_EDITS),
+    (_APT_TERMUX_DOC_ZH_REL, _APT_TERMUX_DOC_ZH_EDITS),
+)
+
+
+class TermuxAptFeedAnchorError(ValueError):
+    """The Termux APT checker moved, so the flat feed layout could not be re-applied."""
+
+
+def _reconcile_termux_apt_flat_feed(dst: str) -> list[str]:
+    """Check and document the Termux feed as the flat repository it is now published as.
+
+    The APT feed is no longer a prefix under an R2 bucket: it is a flat signed
+    repository published as the assets of one fixed-tag release per channel
+    (``termux-repo`` for stable, ``termux-repo-canary`` for canary), because a
+    GitHub release asset name is one path component and cannot hold ``/``.  A flat
+    repository changes what the source line has to say -- ``apt`` reads
+    ``<repository>/Release`` and ``<repository>/Packages`` and resolves each
+    stanza's ``Filename`` against the same base -- so ``scripts/termux/check_apt.sh``
+    was writing a suite/component line for a layout that no longer exists, and the
+    two Termux install pages plus their zh-Hans translation were pointing devices at
+    the retired worker prefix.
+
+    Dropping ``by-hash=force`` is not a lost check: measured with apt 2.8.3, on a
+    flat repository the option is inert (apt issues no by-hash request either way),
+    and index integrity is carried by the ``Release`` SHA256/SHA512 rows, which apt
+    still enforces -- flipping one byte of ``Packages`` makes ``apt-get update`` exit
+    100.  ``signed-by`` stays, so the repository is still signature-verified.  What
+    the flat source line can no longer express is the channel, so the script now
+    asserts ``Suite:`` in the published ``Release`` against the suite it staged: a
+    feed wired to the wrong channel would otherwise install over another channel's
+    packages.
+
+    ``scripts/termux/check_apt.sh`` is the file that grades the feed, so an absent
+    anchor there raises :class:`TermuxAptFeedAnchorError` rather than letting a
+    verifier keep describing the old layout; the documentation pages are only
+    rewritten when they carry the retired prefix.
+    """
+    fixed: list[str] = []
+    for rel, edits in _APT_FEED_EDITS:
+        text = _reconcile_budget_read(dst, rel)
+        if text is None:
+            continue
+        if not any(old in text for old, _ in edits):
+            if rel == _APT_CHECK_APT_REL and _APT_CHECK_APT_NEW_2 not in text:
+                raise TermuxAptFeedAnchorError(
+                    f"{rel} documents neither the flat ``./`` source line this rule writes nor the "
+                    "suite/component line it replaces, so the APT feed checker moved. Upstream "
+                    "rewrote how the feed is read: re-derive the table from its current text "
+                    "instead of dropping this rule -- a checker left describing the old layout "
+                    "passes while devices install from a feed nothing verifies."
+                )
+            continue
+        updated = text
+        for old, new in edits:
+            if new in updated:
+                continue
+            if updated.count(old) != 1:
+                raise TermuxAptFeedAnchorError(
+                    f"{rel} carries part of the APT feed shapes this rule rewrites but not all of "
+                    "them. Upstream moved the feed: re-derive the table from its current text. Do "
+                    "not drop the rule to get a green sync -- a half-applied feed leaves one "
+                    "channel installing over another."
+                )
+            updated = updated.replace(old, new, 1)
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+    return fixed
+
+
+class PagesReleasePlaneAnchorError(ValueError):
+    """A release-plane file moved, so the GitHub Pages hand-off could not be re-applied."""
+
+
+def _reconcile_github_pages_release_plane(dst: str) -> list[str]:
+    """Hand the fork's release control plane from the R2 worker to GitHub Pages.
+
+    ``scripts/releases/ghpages.py`` (a fork-only file, so ``preserve_fork_files``
+    carries it) speaks the ``R2ChannelStore`` get/put/keys CAS surface against
+    the GitHub Contents API and commits channel records, per-channel pages and
+    release-candidate pointers into the repository tree.  Two things follow, and
+    every one of them lands in a file ``brand_tree`` re-derives:
+
+    * the public origin.  ``nastech_cli/source_releases.py`` published
+      ``https://nastech-assets.nastechresearch.workers.dev``, a worker deployment
+      whose dev domain does not decode percent-encoded keys; the fork's plane is
+      the project site ``https://nastechresearch.github.io/nastech-agent``.  A
+      Pages *project* site carries the repository in its path, so that origin is
+      host ``nastechresearch.github.io`` **and** prefix ``/nastech-agent`` --
+      naming three literals separately is how the desktop checkout sandbox came
+      to reject its own reader (nastech-agent#194, 3cc19e3e7).
+    * the yard selector.  ``RELEASE_CHANNEL_STORE`` picks ``github`` in the
+      release lanes while ``r2`` stays selectable for upstream carry, so the
+      reader and the publisher resolve the same base without a credential.
+
+    The rule re-applies all of it as one table: the Deploy Site workflow
+    publishes ``releases/`` into the Pages artifact, the smoke lane pins the
+    selector, the reader, both channel writers and the two R2 base resolvers
+    follow the selector, and the Python and electron tests assert against the
+    derived origin instead of a literal.  Nothing here deletes an R2 path or
+    relaxes a check -- the retired host is replaced where the fork publishes,
+    and ``r2`` remains the default when the selector is unset.
+
+    A file carrying none of the pre-hand-off shapes is left alone -- that is a
+    candidate whose tree does not have this part of the plane (or one that has
+    already moved).  A file carrying *some* of them but not all raises
+    :class:`PagesReleasePlaneAnchorError`, because upstream rewrote the release
+    plane and a half-applied table publishes pointers to one host while reading
+    them from another.  ``nastech_cli/source_releases.py`` is checked even when
+    it carries none: every other file derives its origin from that constant, so
+    a candidate whose reader still resolves to the retired worker stops the sync.
+    """
+    fixed: list[str] = []
+    for rel, edits in _PAGES_RELEASE_EDITS:
+        text = _reconcile_budget_read(dst, rel)
+        if text is None:
+            continue
+        if not any(old in text for old, _ in edits):
+            continue
+        updated = text
+        for old, new in edits:
+            if new in updated:
+                continue
+            if updated.count(old) != 1:
+                raise PagesReleasePlaneAnchorError(
+                    f"{rel} carries part of the release-plane shapes this rule rewrites but not "
+                    "all of them. Upstream moved the release plane: re-derive the table from its "
+                    "current text. Do not drop the rule to get a green sync -- a half-applied "
+                    "table publishes channel pointers to one host and reads them from another."
+                )
+            updated = updated.replace(old, new, 1)
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+    origin = _reconcile_budget_read(dst, _PAGES_SOURCE_RELEASES_REL)
+    if origin is not None and _PAGES_SOURCE_RELEASES_NEW_1 not in origin:
+        raise PagesReleasePlaneAnchorError(
+            f"{_PAGES_SOURCE_RELEASES_REL} publishes no such origin "
+            f"({_PAGES_SOURCE_RELEASES_NEW_1.strip()}), so the reader would resolve a base no "
+            "longer published. Upstream renamed the constant or moved the plane: re-derive the "
+            "table from its current text instead of dropping this rule."
+        )
+    return fixed
+
+
+# Fork desktop release legs: the Pages control plane, the unsigned-leg guards
+# and the flat Termux feed, all in one upstream-owned workflow.
+
+_BUNDLED_WORKFLOW_REL = ".github/workflows/desktop-bundled-release.yml"
+_BUNDLED_CHANNEL_STORE_OLD_1 = """\
+  R2_DISPOSABLE_RUN: ${{ inputs.disposable_run || (inputs.disposable_channel != '' && github.run_id) || '' }}
+  RELEASE_CLAIM_TAG: ${{ inputs.claim-tag }}
+"""
+_BUNDLED_CHANNEL_STORE_NEW_1 = """\
+  R2_DISPOSABLE_RUN: ${{ inputs.disposable_run || (inputs.disposable_channel != '' && github.run_id) || '' }}
+  # The control plane (channels, feeds, pages, APT indexes) is GitHub-native:
+  # scripts/releases/ghpages.py commits records to this repository tree and
+  # Deploy Site publishes them; the workers.dev origin is retired.
+  RELEASE_CHANNEL_STORE: github
+  RELEASE_CLAIM_TAG: ${{ inputs.claim-tag }}
+"""
+_BUNDLED_UNSIGNED_LEGS_OLD_1 = """\
+          key: ${{ steps.payload-signatures.outputs.cache-primary-key }}
+
+      - name: Audit bundle architecture
+        shell: bash
+        run: |
+          MATRIX_LABEL="${{ matrix.target.label }}"
+"""
+_BUNDLED_UNSIGNED_LEGS_NEW_1 = """\
+          key: ${{ steps.payload-signatures.outputs.cache-primary-key }}
+
+      - name: Audit bundle architecture
+        # Audit exactly the bytes this leg built, and never fewer: the leg builds no
+        # bundle at all when 'Build and package' skips both variants, which is where a
+        # skip-signed Windows leg stops -- there is no release directory to scan, so an
+        # unconditional audit only crashes on a missing root. The Store variant is built
+        # independently of signing, so a skip-signed leg that built it is still audited.
+        if: >-
+          inputs.skip-signed != true
+          || (inputs.skip-store != true && env.CHANNEL_BUILD == '' && env.NASTECH_BUILD_COMMIT == ''
+              && !contains(env.NASTECH_PAYLOAD_TAG, '+canary.'))
+        # A wedged runner must fail this step, not hold the release for the
+        # job's whole budget: measured 2026-10-29, the step sat 'running' for
+        # 113 minutes on a tree that audits in 14 seconds locally.
+        timeout-minutes: 25
+        shell: bash
+        run: |
+          MATRIX_LABEL="${{ matrix.target.label }}"
+"""
+_BUNDLED_UNSIGNED_LEGS_OLD_2 = (
+    '        run: |\n'
+    '          root="$GITHUB_WORKSPACE/apps/desktop/release"\n'
+    '          python -m scripts.bundles.release_artifacts record --platform windows --arch "${TARGET##*-}" \\\n'
+    '            --root "$root" --commit "$RELEASE_COMMIT" --channel-request "$RUNNER_TEMP/channel-request.json" \\\n'
+    '            --out "$root/metadata-windows-${TARGET##*-}.json"\n'
+    '          python -m scripts.releases.handoff stage --channel-request "$RUNNER_TEMP/channel-request.json" \\\n'
+    '            --name "$TARGET" --root "$root" --include \'*.msix\' --include \'metadata-*.json\'\n'
+)
+_BUNDLED_UNSIGNED_LEGS_NEW_2 = (
+    '          SKIP_SIGNED: ${{ inputs.skip-signed }}\n'
+    '        run: |\n'
+    '          root="$GITHUB_WORKSPACE/apps/desktop/release"\n'
+    "          args=(--include '*.msix')\n"
+    '          # The row reads the Authenticode-bound MSIX identity out of the signed\n'
+    '          # package, so an unsigned channel leg stages its bytes and writes no row.\n'
+    '          if [ "$SKIP_SIGNED" != true ]; then\n'
+    '            python -m scripts.bundles.release_artifacts record --platform windows --arch "${TARGET##*-}" \\\n'
+    '              --root "$root" --commit "$RELEASE_COMMIT" --channel-request "$RUNNER_TEMP/channel-request.json" \\\n'
+    '              --out "$root/metadata-windows-${TARGET##*-}.json"\n'
+    "            args+=(--include 'metadata-*.json')\n"
+    '          fi\n'
+    '          python -m scripts.releases.handoff stage --channel-request "$RUNNER_TEMP/channel-request.json" \\\n'
+    '            --name "$TARGET" --root "$root" "${args[@]}"\n'
+)
+_BUNDLED_UNSIGNED_LEGS_OLD_3 = (
+    '        run: |\n'
+    '          root="$GITHUB_WORKSPACE/apps/desktop/release"\n'
+    '          python -m scripts.bundles.release_artifacts record --platform macos --arch "${TARGET##*-}" \\\n'
+    '            --root "$root" --commit "$RELEASE_COMMIT" --channel-request "$RUNNER_TEMP/channel-request.json" \\\n'
+    '            --out "$root/metadata-macos-${TARGET##*-}.json"\n'
+    '          python -m scripts.releases.handoff stage --channel-request "$RUNNER_TEMP/channel-request.json" \\\n'
+    '            --name "$TARGET" --root "$root" --include \'*.dmg\' --include \'*.zip\' --include \'*.blockmap\' --include \'metadata-*.json\'\n'
+)
+_BUNDLED_UNSIGNED_LEGS_NEW_3 = (
+    '          SKIP_SIGNED: ${{ inputs.skip-signed }}\n'
+    '        run: |\n'
+    '          root="$GITHUB_WORKSPACE/apps/desktop/release"\n'
+    "          args=(--include '*.dmg' --include '*.zip' --include '*.blockmap')\n"
+    '          # Same contract as the tag branch below: the row records a Developer ID\n'
+    '          # team read out of the notarized signature, so an unsigned channel leg\n'
+    '          # stages its bytes and writes no row.\n'
+    '          if [ "$SKIP_SIGNED" != true ]; then\n'
+    '            python -m scripts.bundles.release_artifacts record --platform macos --arch "${TARGET##*-}" \\\n'
+    '              --root "$root" --commit "$RELEASE_COMMIT" --channel-request "$RUNNER_TEMP/channel-request.json" \\\n'
+    '              --out "$root/metadata-macos-${TARGET##*-}.json"\n'
+    "            args+=(--include 'metadata-*.json')\n"
+    '          fi\n'
+    '          python -m scripts.releases.handoff stage --channel-request "$RUNNER_TEMP/channel-request.json" \\\n'
+    '            --name "$TARGET" --root "$root" "${args[@]}"\n'
+)
+_BUNDLED_UNSIGNED_LEGS_OLD_4 = """\
+        # The feed input stays in the tag archive until the leg and its smoke pass.
+        run: |
+          args=(--include '*.dmg' --include '*.zip' --include '*.blockmap' --include '*-mac.yml')
+          if [ "$RELEASE_PHASE" = candidate ] || { [ "$NASTECH_DESKTOP_VARIANT" = bundled ] && [[ "$NASTECH_PAYLOAD_TAG" == *+canary.* ]]; }; then
+"""
+_BUNDLED_UNSIGNED_LEGS_NEW_4 = """\
+          SKIP_SIGNED: ${{ inputs.skip-signed }}
+        # The feed input stays in the tag archive until the leg and its smoke pass.
+        run: |
+          args=(--include '*.dmg' --include '*.zip' --include '*.blockmap' --include '*-mac.yml')
+          # The recorder reads the Developer ID signature an unsigned build cannot
+          # carry, so an unsigned leg writes no release row, exactly as the Windows
+          # leg refuses to describe bytes it did not Authenticode-sign.
+          if [ "$SKIP_SIGNED" != true ] && { [ "$RELEASE_PHASE" = candidate ] || { [ "$NASTECH_DESKTOP_VARIANT" = bundled ] && [[ "$NASTECH_PAYLOAD_TAG" == *+canary.* ]]; }; }; then
+"""
+_BUNDLED_UNSIGNED_LEGS_OLD_5 = """\
+    needs: [validate, build-darwin-arm64]
+    if: >-
+      !cancelled() && inputs.release-phase == 'candidate'
+      && needs.validate.result == 'success' && needs.validate.outputs.sha != ''
+"""
+_BUNDLED_UNSIGNED_LEGS_NEW_5 = """\
+    needs: [validate, build-darwin-arm64]
+    # A receipt is assembled from the recorder's signed-release rows, and a handoff
+    # fetch that matches nothing returns nothing: an unsigned leg writes no row (see
+    # 'Record and stage channel macos packages'), so its receipt would record zero
+    # packages. Same rule the win32-bundle receipt already follows.
+    if: >-
+      !cancelled() && inputs.release-phase == 'candidate'
+      && inputs.skip-signed != true
+      && needs.validate.result == 'success' && needs.validate.outputs.sha != ''
+"""
+_BUNDLED_UNSIGNED_LEGS_OLD_6 = """\
+    needs: [validate, build-darwin-arm64, smoke-darwin-arm64]
+    if: >-
+      !cancelled() && inputs.build_commit == '' && inputs.channel == '' && inputs.upload_release == true
+      && inputs.release-phase == ''
+      && needs.validate.outputs.darwin-arm64 == 'true'
+"""
+_BUNDLED_UNSIGNED_LEGS_NEW_6 = """\
+    needs: [validate, build-darwin-arm64, smoke-darwin-arm64]
+    # The feed is what every installed app auto-updates from, so it may point at
+    # signed bytes only. The Windows publisher gets that from its smoke gates, which
+    # an unsigned MSIX cannot pass; a darwin smoke happily installs and runs an
+    # unsigned dmg, so here the guard belongs on the publication itself.
+    if: >-
+      !cancelled() && inputs.build_commit == '' && inputs.channel == '' && inputs.upload_release == true
+      && inputs.release-phase == ''
+      && inputs.skip-signed != true
+      && needs.validate.outputs.darwin-arm64 == 'true'
+"""
+_BUNDLED_APT_FEED_OLD_1 = """\
+      - name: Stage the APT repo and publish to R2
+"""
+_BUNDLED_APT_FEED_NEW_1 = """\
+      - name: Stage the APT repo and publish the feed release
+"""
+_BUNDLED_APT_FEED_OLD_2 = """\
+          TERMUX_APT_GPG_PASSPHRASE: ${{ secrets.TERMUX_APT_GPG_PASSPHRASE }}
+        run: |
+"""
+_BUNDLED_APT_FEED_NEW_2 = """\
+          TERMUX_APT_GPG_PASSPHRASE: ${{ secrets.TERMUX_APT_GPG_PASSPHRASE }}
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+        run: |
+"""
+_BUNDLED_APT_FEED_OLD_3 = """\
+
+          debs=(termux-build/deb/*.deb)
+"""
+_BUNDLED_APT_FEED_NEW_3 = (
+    '\n'
+    '          # A release asset name is one path component, so the feed is published\n'
+    '          # FLAT: dists/<suite>/ and pool/ cannot exist as assets. Flattening\n'
+    '          # rewrites every path the signed Release describes, so the flat Release\n'
+    '          # is rebuilt and RE-SIGNED with the same key -- an unsigned feed would\n'
+    '          # need `[trusted=yes]` to install, which throws the signature away.\n'
+    '          python3 -m scripts.termux.release_apt flatten \\\n'
+    '            --staged termux-build/apt --out termux-build/apt-flat \\\n'
+    '            --gpg-key-file "$RUNNER_TEMP/termux-apt-gpg.asc"\n'
+    '\n'
+    '          debs=(termux-build/deb/*.deb)\n'
+)
+_BUNDLED_APT_FEED_OLD_4 = (
+    '          docker run --rm --platform linux/arm64 --user 1000:1000 --network none \\\n'
+    '            -v "$PWD/termux-build/apt:/apt:ro" \\\n'
+    '            -v "$PWD/scripts/termux/check_apt.sh:/tmp/check-apt.sh:ro" \\\n'
+    '            -v "$PWD/scripts/termux/validate_installed.py:/tmp/validate_installed.py:ro" \\\n'
+    '            "termux/termux-docker@$digest" bash /tmp/check-apt.sh "nastech-$CHANNEL" "$version"\n'
+)
+_BUNDLED_APT_FEED_NEW_4 = (
+    '          # Both apt proofs mount the FLAT tree, so what CI verifies is the bytes\n'
+    '          # a phone downloads and not the staged layout a phone never sees.\n'
+    '          docker run --rm --platform linux/arm64 --user 1000:1000 --network none \\\n'
+    '            -v "$PWD/termux-build/apt-flat:/apt:ro" \\\n'
+    '            -v "$PWD/scripts/termux/check_apt.sh:/tmp/check-apt.sh:ro" \\\n'
+    '            -v "$PWD/scripts/termux/validate_installed.py:/tmp/validate_installed.py:ro" \\\n'
+    '            "termux/termux-docker@$digest" bash /tmp/check-apt.sh "nastech-$CHANNEL" "$version" file:/apt\n'
+)
+_BUNDLED_APT_FEED_OLD_5 = (
+    '              -v "$PWD/termux-build/apt:/apt:ro" \\\n'
+    '              -v "$PWD/${previous[0]}:/previous.deb:ro" \\\n'
+    '              -v "$PWD/scripts/termux/check_apt.sh:/tmp/check-apt.sh:ro" \\\n'
+    '              -v "$PWD/scripts/termux/validate_installed.py:/tmp/validate_installed.py:ro" \\\n'
+    '              "termux/termux-docker@$digest" bash /tmp/check-apt.sh "nastech-$CHANNEL" "$version"\n'
+    '          fi\n'
+    '\n'
+    "          args=(--include 'deb/*.deb' --include 'apt/**/*')\n"
+)
+_BUNDLED_APT_FEED_NEW_5 = (
+    '              -v "$PWD/termux-build/apt-flat:/apt:ro" \\\n'
+    '              -v "$PWD/${previous[0]}:/previous.deb:ro" \\\n'
+    '              -v "$PWD/scripts/termux/check_apt.sh:/tmp/check-apt.sh:ro" \\\n'
+    '              -v "$PWD/scripts/termux/validate_installed.py:/tmp/validate_installed.py:ro" \\\n'
+    '              "termux/termux-docker@$digest" bash /tmp/check-apt.sh "nastech-$CHANNEL" "$version" file:/apt\n'
+    '          fi\n'
+    '\n'
+    "          args=(--include 'deb/*.deb')\n"
+)
+_BUNDLED_APT_FEED_OLD_6 = """\
+              --out termux-build/metadata-termux-aarch64.json
+            args+=(--include 'metadata-*.json')
+          fi
+"""
+_BUNDLED_APT_FEED_NEW_6 = """\
+              --out termux-build/metadata-termux-aarch64.json
+            # A candidate still hands its staged tree to the tag archive, because
+            # the sequencer's `advance_termux_apt` reads the signed index from
+            # there; a claim ref is written by exactly one run, so the immutable
+            # put round-trips. The published feed itself never comes from R2.
+            args+=(--include 'apt/**/*' --include 'metadata-*.json')
+          fi
+"""
+_BUNDLED_APT_FEED_OLD_7 = (
+    '          # --key-is-full is MANDATORY on every feed-dir upload: without it\n'
+    '          # scripts.releases.r2 re-prefixes the key into the tag archive\n'
+    '          # (releases/tag/<tag>/) and the APT feed never lands at\n'
+    '          # releases/termux/<channel>/.\n'
+    '          shopt -s globstar nullglob\n'
+    '          # cd into the staged repo for the glob, but resolve the r2 client\n'
+    '          # absolutely first -- after the cd, scripts/ is no longer in the\n'
+    '          # cwd and a bare `python -m scripts.releases.r2` would ENOENT.\n'
+    '          export PYTHONPATH="$GITHUB_WORKSPACE"\n'
+    '          cd termux-build/apt\n'
+    '          files=(pool/**/*.deb "dists/nastech-$CHANNEL"/main/binary-aarch64/by-hash/*/* key.asc\n'
+    '                 "dists/nastech-$CHANNEL/main/binary-aarch64/Packages"\n'
+    '                 "dists/nastech-$CHANNEL/main/binary-aarch64/Packages.gz"\n'
+    '                 "dists/nastech-$CHANNEL/Release"\n'
+    '                 "dists/nastech-$CHANNEL/Release.gpg"\n'
+    '                 "dists/nastech-$CHANNEL/InRelease")\n'
+    '          # APT reads InRelease first. Publish it only after every referenced\n'
+    '          # index and package has been uploaded and read back successfully.\n'
+    '          for f in "${files[@]}"; do\n'
+    '            test -f "$f"\n'
+    '            python3 -m scripts.releases.r2 put \\\n'
+    '              --tag "$NASTECH_PAYLOAD_TAG" \\\n'
+    '              --key "releases/termux/$CHANNEL/$f" \\\n'
+    '              --file "$f" \\\n'
+    '              --key-is-full\n'
+    '          done\n'
+    '\n'
+    '          # Verify the public CDN path, not only the object-store origin.\n'
+    '          public_repo="${CLOUDFLARE_R2_PUBLIC_URL%/}/releases/termux/$CHANNEL"\n'
+    '          curl --fail --silent --show-error "$public_repo/key.asc" -o "$RUNNER_TEMP/termux-public-key.asc"\n'
+    '          cmp key.asc "$RUNNER_TEMP/termux-public-key.asc"\n'
+    '          docker run --rm --platform linux/arm64 --user 1000:1000 \\\n'
+    '            -v "$PWD:/apt:ro" \\\n'
+    '            -v "$GITHUB_WORKSPACE/scripts/termux/check_apt.sh:/tmp/check-apt.sh:ro" \\\n'
+    '            -v "$GITHUB_WORKSPACE/scripts/termux/validate_installed.py:/tmp/validate_installed.py:ro" \\\n'
+    '            "termux/termux-docker@$digest" bash /tmp/check-apt.sh "nastech-$CHANNEL" "$version" "$public_repo"\n'
+)
+_BUNDLED_APT_FEED_NEW_7 = (
+    '\n'
+    "          # The feed is this channel's own fixed-tag release. apt needs a base URL\n"
+    '          # that does not move, and a mutable index cannot live in an object store\n'
+    '          # that promises "same key, same bytes" -- which is the 412 that killed\n'
+    '          # the R2 publish for every canary re-dispatched under one tag.\n'
+    '          report=$(python3 -m scripts.termux.release_apt publish \\\n'
+    '            --repo-dir termux-build/apt-flat --repository "$GITHUB_REPOSITORY" --channel "$CHANNEL")\n'
+    '          echo "$report"\n'
+    '          feed_tag=$(printf \'%s\' "$report" | python3 -c \'import json,sys; print(json.load(sys.stdin)["tag"])\')\n'
+    '          feed="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$feed_tag"\n'
+    '\n'
+    '          # Read the public feed back before calling the publish good. A REPLACED\n'
+    '          # asset keeps serving the previous bytes for a while (measured on this\n'
+    '          # repository) while a name published for the first time is visible at\n'
+    '          # once, so only the fixed-name index lags -- and a lagging index still\n'
+    '          # names packages that exist, which is why waiting here is correctness\n'
+    '          # and not a retry of a failure.\n'
+    '          for f in key.asc Packages Packages.gz Release InRelease; do\n'
+    '            deadline=$((SECONDS + 600))\n'
+    '            until curl --fail --silent --show-error --location "$feed/./$f" \\\n'
+    '                   -o "$RUNNER_TEMP/public-$f" &&\n'
+    '                  cmp -s "termux-build/apt-flat/$f" "$RUNNER_TEMP/public-$f"; do\n'
+    '              if [ "$SECONDS" -ge "$deadline" ]; then\n'
+    '                echo "::error::$feed/./$f still serves different bytes after 600s"\n'
+    '                exit 1\n'
+    '              fi\n'
+    '              sleep 15\n'
+    '            done\n'
+    '          done\n'
+    '\n'
+    '          # Every package the published index advertises has to answer: an index\n'
+    '          # naming a file the tag does not hold is the exact failure this\n'
+    '          # migration exists to end.\n'
+    '          while IFS= read -r name; do\n'
+    '            curl --fail --silent --show-error --location --head "$feed/./$name" -o /dev/null\n'
+    '          done < <(sed -n \'s/^Filename: //p\' "$RUNNER_TEMP/public-Packages")\n'
+    '\n'
+    '          docker run --rm --platform linux/arm64 --user 1000:1000 \\\n'
+    '            -v "$PWD/termux-build/apt-flat:/apt:ro" \\\n'
+    '            -v "$GITHUB_WORKSPACE/scripts/termux/check_apt.sh:/tmp/check-apt.sh:ro" \\\n'
+    '            -v "$GITHUB_WORKSPACE/scripts/termux/validate_installed.py:/tmp/validate_installed.py:ro" \\\n'
+    '            "termux/termux-docker@$digest" bash /tmp/check-apt.sh "nastech-$CHANNEL" "$version" "$feed"\n'
+)
+
+_BUNDLED_WORKFLOW_EDITS = (
+    (_BUNDLED_CHANNEL_STORE_OLD_1, _BUNDLED_CHANNEL_STORE_NEW_1),
+    (_BUNDLED_UNSIGNED_LEGS_OLD_1, _BUNDLED_UNSIGNED_LEGS_NEW_1),
+    (_BUNDLED_UNSIGNED_LEGS_OLD_2, _BUNDLED_UNSIGNED_LEGS_NEW_2),
+    (_BUNDLED_UNSIGNED_LEGS_OLD_3, _BUNDLED_UNSIGNED_LEGS_NEW_3),
+    (_BUNDLED_UNSIGNED_LEGS_OLD_4, _BUNDLED_UNSIGNED_LEGS_NEW_4),
+    (_BUNDLED_UNSIGNED_LEGS_OLD_5, _BUNDLED_UNSIGNED_LEGS_NEW_5),
+    (_BUNDLED_UNSIGNED_LEGS_OLD_6, _BUNDLED_UNSIGNED_LEGS_NEW_6),
+    (_BUNDLED_APT_FEED_OLD_1, _BUNDLED_APT_FEED_NEW_1),
+    (_BUNDLED_APT_FEED_OLD_2, _BUNDLED_APT_FEED_NEW_2),
+    (_BUNDLED_APT_FEED_OLD_3, _BUNDLED_APT_FEED_NEW_3),
+    (_BUNDLED_APT_FEED_OLD_4, _BUNDLED_APT_FEED_NEW_4),
+    (_BUNDLED_APT_FEED_OLD_5, _BUNDLED_APT_FEED_NEW_5),
+    (_BUNDLED_APT_FEED_OLD_6, _BUNDLED_APT_FEED_NEW_6),
+    (_BUNDLED_APT_FEED_OLD_7, _BUNDLED_APT_FEED_NEW_7),
+)
+
+_BUNDLED_STORE_MARKER = """\
+  RELEASE_CHANNEL_STORE: github
+"""
+
+_BUNDLED_UNSIGNED_MARKER = """\
+if [ "$SKIP_SIGNED" != true ]; then
+            python -m scripts.bundles.release_artifacts record"""
+
+_BUNDLED_FEED_MARKER = """\
+releases/download/$feed_tag"""
+
+_BUNDLED_LEG_MARKERS = (
+    ("the GitHub Pages control plane", _BUNDLED_STORE_MARKER),
+    ("the unsigned-leg recorder guards", _BUNDLED_UNSIGNED_MARKER),
+    ("the flat Termux feed publish", _BUNDLED_FEED_MARKER),
+)
+
+
+class DesktopReleaseLegAnchorError(ValueError):
+    """The desktop release workflow moved, so the fork's leg guards could not be re-applied."""
+
+
+def _reconcile_desktop_release_leg_guards(dst: str) -> list[str]:
+    """Keep the three fork-local layers on the desktop release workflow.
+
+    ``desktop-bundled-release.yml`` is upstream-owned, so ``brand_tree`` re-derives it every
+    candidate and each of the three fork PRs that touched it would vanish without a rule here.
+    They are one rule because they are one file's fork-local layer, and their hunks do not
+    overlap: the merged workflow is the three diffs applied in sequence, which the tests
+    reproduce byte for byte.
+
+    The Pages hand-off (fork PR #194) adds ``RELEASE_CHANNEL_STORE: github`` to the job
+    ``env``, because the control plane the leg publishes to -- channels, feeds, APT indexes --
+    is GitHub-native now; the reader and the publisher have to be pointed at the same store by
+    one value, which is what :func:`_reconcile_github_pages_release_plane` rewrites in the
+    nine files that carry it.
+
+    The unsigned-leg guards (fork PR #192) stop a ``skip-signed`` channel leg verifying and
+    recording what it never signed: the architecture audit is skipped when the leg built no
+    bundle at all, the Windows/macOS recorders run only for signed bytes (an ``.msix`` identity
+    is read out of the Authenticode signature and a release row records a Developer ID team, so
+    an unsigned build cannot produce either), and the darwin receipt and the macOS updater feed
+    stop before pointing devices at unsigned packages.  Skipping a receipt is not a lost check: the
+    job would assemble a receipt from rows that were never written, and the handoff fetch that
+    matches nothing returns nothing, so an unsigned leg would publish a receipt for zero
+    packages.
+
+    The Termux feed (fork PR #195) replaces the R2 object-by-object upload with a flatten plus
+    ``scripts.termux.release_apt publish`` and a read-back of every asset the published
+    index advertises, then mounts the FLAT tree in all three checker runs so what CI verifies is
+    the bytes a phone downloads.  A release asset name is one path component, so the feed cannot
+    keep ``dists/<suite>/`` and ``pool/`` as assets -- see
+    :func:`_reconcile_termux_apt_flat_feed` for what that does to the source line.
+
+    Raises :class:`DesktopReleaseLegAnchorError` when the workflow is present but carries
+    neither the shapes this rule rewrites nor the three markers it writes: a silent return would
+    ship a leg that audits and records unsigned bytes as if they were signed.
+    """
+    rel = _BUNDLED_WORKFLOW_REL
+    text = _reconcile_budget_read(dst, rel)
+    if text is None:
+        return []
+    updated = text
+    if any(old in updated for old, _ in _BUNDLED_WORKFLOW_EDITS):
+        for old, new in _BUNDLED_WORKFLOW_EDITS:
+            if new in updated:
+                continue
+            if updated.count(old) != 1:
+                raise DesktopReleaseLegAnchorError(
+                    f"{rel} carries part of the release-leg shapes this rule rewrites but not all "
+                    "of them. Upstream moved the legs: re-derive the table from its current text. "
+                    "Do not drop the rule to get a green sync -- a half-applied workflow stages "
+                    "bytes no receipt describes and points the channel reader at a store the "
+                    "publisher never wrote."
+                )
+            updated = updated.replace(old, new, 1)
+    missing = [label for label, marker in _BUNDLED_LEG_MARKERS if marker not in updated]
+    if missing:
+        raise DesktopReleaseLegAnchorError(
+            f"{rel} carries neither the shapes this rule rewrites nor "
+            f"{', '.join(missing)}, so the workflow moved. Upstream restructured the release legs: "
+            "re-derive the table against its current text instead of dropping this rule -- without "
+            "them an unsigned channel leg records release rows it cannot have signed, and the "
+            "control plane is published to a store nothing reads back."
+        )
+    if updated == text:
+        return []
+    _reconcile_budget_write(dst, rel, updated)
+    return [rel]
+
+
 class UnsignedDarwinBuildEnvError(ValueError):
     """The macOS bundle build step moved, so the unsigned guard could not apply."""
 
@@ -7236,6 +8480,12 @@ def reconcile_tree(
     for rel in _reconcile_free_runner_parallelism(dst):
         result.total += 1
         result.fixed.append(rel)
+    for rel in _reconcile_blobless_merge_base_jobs(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    for rel in _reconcile_windows_holder_clock_waits(dst):
+        result.total += 1
+        result.fixed.append(rel)
     for rel in _reconcile_free_runner_js_lane(dst):
         result.total += 1
         result.fixed.append(rel)
@@ -7440,6 +8690,24 @@ def reconcile_tree(
         result.fixed.append(rel)
     # The picker test upstream deleted is preserved from the fork, fake and all, so its
     # rewrite runs with the other preserved-file rules -- see ``_preserve`` below.
+    # The Termux feed is a flat repository published as release assets now; the
+    # checker and the install pages are upstream-owned, so the layout is a rule.
+    for rel in _reconcile_termux_apt_flat_feed(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    # The fork's release plane is GitHub Pages: nine upstream-owned files still
+    # name the retired worker origin after brand_tree, so the hand-off is a rule.
+    # Before the prompt-surface snapshot -- that step counts characters in the
+    # rendered text these edits rewrite.
+    for rel in _reconcile_github_pages_release_plane(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    # Three fork PRs write one upstream-owned workflow: the Pages store, the
+    # unsigned-leg guards and the flat Termux feed.  After the Pages and APT
+    # rules, whose files this workflow's new steps call into.
+    for rel in _reconcile_desktop_release_leg_guards(dst):
+        result.total += 1
+        result.fixed.append(rel)
     # Prompt-surface LAST: it counts characters in the rendered prompts, and
     # _reconcile_domains above rewrites the domain hosts inside those prompt
     # files.  Computing it any earlier leaves surfaces.json describing the
@@ -9321,7 +10589,7 @@ def _reconcile_unsigned_desktop_publish(dst: str) -> bool:
 
 
 # Every desktop leg of the stable release calls the bundled builder with its own ``with:``
-# block.  The two macOS legs never mention ``skip-signed`` at all -- so it defaults to false
+# block.  The macOS leg never mentions ``skip-signed`` at all -- so it defaults to false
 # and the gates above stay shut -- and the three Windows legs pass it inverted: upstream's
 # expression skips signing when the Windows lane is *off*, which is exactly when the leg does
 # not run.  A fork that ships unsigned has to say so at the call site, or the escape hatch
@@ -9338,11 +10606,30 @@ def _caller_leg(job: str) -> str:
 
 _UNSIGNED_DESKTOP_CALLER_EDITS = tuple(
     (job, _caller_leg(job), _caller_leg(job) + _UNSIGNED_CALLER_LINE)
-    for job in ("darwin-arm64", "darwin-x64")
+    for job in ("darwin-arm64",)
 ) + tuple(
     (job, _caller_leg(job) + _WINDOWS_SKIP_SIGNED, _caller_leg(job) + _UNSIGNED_CALLER_LINE)
     for job in ("win32-arm64", "win32-x64", "win32-bundle")
 )
+_UNSIGNED_DESKTOP_JOBS = tuple(job for job, _, _ in _UNSIGNED_DESKTOP_CALLER_EDITS)
+# The other job group the workflow hands to the bundled builder.  It builds nothing this
+# fork signs, so it takes no ``skip-signed`` -- but it is listed so the caller check below
+# can tell a leg it may leave alone from a leg it has never seen.
+_UNSIGNED_NON_DESKTOP_JOBS = ("termux",)
+_CALLER_JOB_RE = re.compile(r"^      jobs: (\S+)[ \t]*$", re.M)
+
+
+def _desktop_leg_retired(text: str, job: str) -> bool:
+    """True when upstream stopped building this job group, as opposed to rewording it.
+
+    Dropping the Intel Mac build deleted the ``jobs: darwin-x64`` line *and* every other
+    mention of the platform, so nothing in the release asks for it and there is no leg to
+    declare unsigned.  A leg that is still built under another shape keeps naming its
+    platform -- in its job id, its receipt, its smoke -- and that is a moved anchor: leave
+    it alone and the package ships signed-or-nothing again, which is the failure this whole
+    rule exists to prevent.
+    """
+    return f"jobs: {job}" not in text and job not in text
 
 
 class UnsignedDesktopCallerError(ValueError):
@@ -9360,6 +10647,14 @@ def _reconcile_unsigned_desktop_callers(dst: str) -> bool:
     they build nothing that this gate signs.  Idempotent, and a leg whose shape moved raises
     :class:`UnsignedDesktopCallerError` rather than shipping a release that silently reverts
     to signed-or-nothing.
+
+    A leg upstream no longer builds is not a moved anchor: upstream retired its Intel Mac
+    candidate outright, and a sync that stopped there would brick on a job nobody runs.  So
+    a leg counts as retired only when its platform name has left the workflow entirely, and
+    the caller legs the file actually contains are then checked against the set this rule
+    knows.  A reworded or newly added leg fails that check; so does a workflow that calls
+    the builder for no desktop leg at all, because the fork's default lane set would still
+    be asking for packages nothing builds.
     """
     text = _sgl_read(dst, _STABLE_RELEASE_WORKFLOW)
     if text is None or "desktop-bundled-release.yml" not in text:
@@ -9369,11 +10664,14 @@ def _reconcile_unsigned_desktop_callers(dst: str) -> bool:
         if new in text:
             continue
         if old not in text:
+            if _desktop_leg_retired(text, job):
+                continue
             raise UnsignedDesktopCallerError(
                 f"{_STABLE_RELEASE_WORKFLOW} no longer contains the {job} desktop caller leg "
-                f"{old!r}; upstream reworded the leg that builds this fork's desktop package. "
-                "Re-derive _UNSIGNED_DESKTOP_CALLER_EDITS against upstream's current workflow "
-                "before the next sync, or the desktop lanes ship signed-or-nothing again."
+                f"{old!r}, but still names {job}: upstream reworded the leg that builds this "
+                "fork's desktop package. Re-derive _UNSIGNED_DESKTOP_CALLER_EDITS against "
+                "upstream's current workflow before the next sync, or the desktop lanes ship "
+                "signed-or-nothing again."
             )
         if text.count(old) != 1:
             raise UnsignedDesktopCallerError(
@@ -9381,6 +10679,23 @@ def _reconcile_unsigned_desktop_callers(dst: str) -> bool:
                 f"caller leg, so which leg to declare unsigned is ambiguous"
             )
         text = text.replace(old, new, 1)
+    callers = set(_CALLER_JOB_RE.findall(text))
+    unknown = sorted(callers - {*_UNSIGNED_DESKTOP_JOBS, *_UNSIGNED_NON_DESKTOP_JOBS})
+    if unknown:
+        raise UnsignedDesktopCallerError(
+            f"{_STABLE_RELEASE_WORKFLOW} calls the bundled builder for the job group(s) "
+            f"{', '.join(unknown)}, which this rule does not know, so it cannot tell a desktop "
+            "leg that must declare itself unsigned from one that builds nothing signable. "
+            "Re-derive _UNSIGNED_DESKTOP_CALLER_EDITS against upstream's current workflow."
+        )
+    if not callers & {*_UNSIGNED_DESKTOP_JOBS}:
+        raise UnsignedDesktopCallerError(
+            f"{_STABLE_RELEASE_WORKFLOW} calls the bundled builder for no desktop job group, "
+            "while this fork's default lane set still names macos-arm64 and windows. Either "
+            "upstream moved every desktop leg (then re-derive _UNSIGNED_DESKTOP_CALLER_EDITS) "
+            "or the lane default moved with it (then retire the lanes here too); quietly "
+            "returning here would let the release ask for packages nothing builds."
+        )
     if text != before:
         _sgl_write(dst, _STABLE_RELEASE_WORKFLOW, text)
     return text != before
@@ -9492,16 +10807,16 @@ _RELEASE_LANES_TESTS_EDITS = (
         r'''from scripts.releases import lanes as lane_set
 
 
-def test_the_default_builds_everything_but_macos_intel_and_termux():
-    assert lane_set.DEFAULT == set(lane_set.NAMES) - {"macos-intel", "termux"}
+def test_the_default_builds_everything_but_termux():
+    assert lane_set.DEFAULT == set(lane_set.NAMES) - {"termux"}
 ''',
         r'''from scripts.releases import lanes as lane_set
 
 # NasTech contract: the fork publishes its desktop packages unsigned, so every lane it can
-# build is in the default set.  What stays out: macos-intel (upstream opts out; its runner
-# adds over an hour), windows-store (Partner Center needs the MS_STORE_* credentials this
-# fork has never had), and smoke and upgrade (they gate on a signed desktop channel).
-OUT_OF_DEFAULT = {"macos-intel", "windows-store", "smoke", "upgrade"}
+# build is in the default set.  What stays out: windows-store (Partner Center needs the
+# MS_STORE_* credentials this fork has never had), and smoke and upgrade (they gate on a
+# signed desktop channel).
+OUT_OF_DEFAULT = {"windows-store", "smoke", "upgrade"}
 
 
 def test_the_default_ships_every_lane_this_fork_publishes():
@@ -9509,9 +10824,10 @@ def test_the_default_ships_every_lane_this_fork_publishes():
 ''',
     ),
     (
-        r'''    ({"with_": ["macos-intel", "termux"]}, set(lane_set.NAMES)),
+        r'''    ({"with_": ["termux"]}, set(lane_set.NAMES)),
 ''',
-        r'''    ({"with_": ["macos-intel", "termux"]}, set(lane_set.DEFAULT) | {"macos-intel"}),
+        r'''    # Termux is already in this fork's default, so opting into it adds no lane.
+    ({"with_": ["termux"]}, set(lane_set.DEFAULT)),
 ''',
     ),
     (
@@ -9578,14 +10894,15 @@ _STABLE_RELEASE_TESTS_EDITS = (
 # The lane set a release must claim to build and smoke every desktop package —
 # the default once the fork's signing credentials are configured.
 SIGNED = frozenset(lane_set.NAMES)
-# Same, without Termux or macOS Intel: a claim over a desktop-only candidate
-# manifest (arm64 Mac + signed Windows rows).
+# Same, without Termux: a claim over a desktop-only candidate manifest (arm64 Mac
+# + signed Windows rows).
 DESKTOP_SIGNED = frozenset({"windows", "windows-store", "macos-arm64",
                             "smoke", "upgrade", "docker", "ci", "nix", "docker-tests",
                             "pm-bundle", "windows-live", "install-e2e", "bootstrap-version"})
-# Claims cut before lanes existed are read as the pre-lanes default: every lane
-# except the two that were then opt-in (scripts/releases/lanes.py legacy path).
-LEGACY_DEFAULT = frozenset(set(lane_set.NAMES) - {"macos-intel", "termux"})
+# Claims cut before lanes existed are read as the pre-lanes default: every lane but
+# Termux, which the legacy path spells out instead of importing DEFAULT, so a fork
+# default cannot silently reinterpret a published claim (lanes.claim_lanes).
+LEGACY_DEFAULT = frozenset(set(lane_set.NAMES) - {"termux"})
 
 ''',
     ),
@@ -9602,34 +10919,21 @@ LEGACY_DEFAULT = frozenset(set(lane_set.NAMES) - {"macos-intel", "termux"})
 ''',
     ),
     (
-        r'''def test_a_default_claim_builds_no_macos_intel_or_termux_and_lanes_restore_them(
+        r'''def test_a_default_claim_builds_no_termux_and_lanes_restore_it(
         tmp_path, r2_server, https_origin, monkeypatch):
     from scripts.releases import stable
 
-    off = {"candidates-darwin-x64", "transitions-darwin-x64", "macos-packaged-x64",
-           "candidates-termux", "termux-checks"}
+    off = {"candidates-termux", "termux-checks"}
 ''',
         r'''def test_a_default_claim_ships_unsigned_desktops_and_lanes_restore_them(
         tmp_path, r2_server, https_origin, monkeypatch):
-    """NasTech DEFAULT builds every desktop package, unsigned: what still leaves is the
-    Intel Mac candidate and the upgrade arms, which need a signed channel to upgrade."""
+    """NasTech DEFAULT builds every desktop package, unsigned.  What leaves are the arms
+    that upgrade the previously published signed channel: this fork's channel has never
+    carried one, and they wait for the `upgrade` lane."""
     from scripts.releases import stable
 
-    off = {"candidates-darwin-x64",
-           "transitions-darwin-arm64", "transitions-darwin-x64", "transitions-win32",
-           "macos-packaged-arm64", "macos-packaged-x64", "windows-packaged"}
-''',
-    ),
-    (
-        r'''    intel = stable.gate_expectations(required, lane_set.select(with_=["macos-intel"]))
-    assert {name for name, result in intel.items() if result == "skipped"} == \
-        {"candidates-termux", "termux-checks"}
-''',
-        r'''    intel = stable.gate_expectations(required, lane_set.select(with_=["macos-intel"]))
-    # Termux is on in this fork's default; restoring macos-intel builds its candidate,
-    # but the upgrade-gated transition arms wait for the `upgrade` lane too.
-    assert {name for name, result in intel.items() if result == "skipped"} == \
-        off - {"candidates-darwin-x64"}
+    off = {"transitions-darwin-arm64", "transitions-win32",
+           "macos-packaged-arm64", "windows-packaged"}
 ''',
     ),
     (
@@ -9681,12 +10985,12 @@ LEGACY_DEFAULT = frozenset(set(lane_set.NAMES) - {"macos-intel", "termux"})
 _RELEASE_ENTRYPOINT_TESTS_EDITS = (
     (
         r'''    # The default set names what it leaves out, and warns about no test lane.
-    assert "Not built: macos-intel, termux." in text
+    assert "Not built: termux." in text
     assert "Not tested" not in text
 ''',
-        r'''    # The default set names what it leaves out: this fork builds no Store bundle and no Intel
-    # macOS package, and it tests no desktop package it cannot sign.
-    assert "Not built: windows-store, macos-intel." in text
+        r'''    # The default set names what it leaves out: this fork submits no Store bundle, and it
+    # tests no desktop package it builds unsigned.
+    assert "Not built: windows-store." in text
     assert "Not tested: smoke, upgrade" in text
 ''',
     ),
@@ -9706,7 +11010,7 @@ _STABLE_RELEASE_GRAPH_TESTS_EDITS = (
     # NasTech ships every desktop package unsigned, so no candidate leg asks the shared
     # builder to sign one: the input is the literal ``true``.  A fork that has signing
     # credentials puts the lane-gated expression back on its own legs.
-    for name in ("candidates-darwin-arm64", "candidates-darwin-x64", "candidates-win32-arm64",
+    for name in ("candidates-darwin-arm64", "candidates-win32-arm64",
                  "candidates-win32-x64", "candidates-win32-bundle"):
         assert jobs[name]["with"]["skip-signed"] == "true", name
     for name in ("candidates-win32-arm64", "candidates-win32-x64", "candidates-win32-bundle"):
@@ -10195,23 +11499,27 @@ class FreeRunnerParallelismError(ValueError):
     """The branded CI no longer has the shape the free-runner split rewrites."""
 
 
-# Upstream runs the Python suite on two 32-core slices at 32 workers each and
+# Upstream runs the Python suite across 32-core slices at 32 workers each and
 # adds native arm64 Windows rows to the OS matrix. This repo has no Blacksmith
-# account, so every lane lands on a free 4-core hosted image. Eight 4-core
-# Python slices restore upstream's 32 cores at one worker per core. The
-# ``(arm64, ...)`` Windows rows stay: ``_normalize_runner`` sends them to the
+# account, so every lane lands on a free 4-core hosted image: eight 4-core
+# slices carry the same 32 cores one upstream box has, at one worker per core.
+# The ``(arm64, ...)`` Windows rows stay: ``_normalize_runner`` sends them to the
 # standard ``windows-11-arm`` image, so they run the marked set on real arm64
 # hardware instead of duplicating the x64 row the way they did while the label
 # normalised to ``windows-latest``. Both edits are exact literals, so a
 # normalised tree is a fixed point.
+#
+# The upstream side of the pair is read *after* branding, and the brand caps
+# ``NASTECH_TEST_WORKERS`` at 8 (`_TEST_WORKERS_CAP`), so the anchor is the capped
+# worker count, not the 32 upstream's file spells.
 _FREE_PYTHON_TEST_NAME = "    name: Run tests (${{ matrix.slice }}/8)\n"
 _FREE_PYTHON_SLICE_MATRIX = "        slice: [1, 2, 3, 4, 5, 6, 7, 8]\n"
 _FREE_PYTHON_SLICE_ENV = "          NASTECH_TEST_SLICE: ${{ matrix.slice }}/8\n"
 _FREE_PYTHON_TEST_WORKERS = "          NASTECH_TEST_WORKERS: 4\n"
 
-_UPSTREAM_PYTHON_TEST_NAME = "    name: Run tests (${{ matrix.slice }}/2)\n"
-_UPSTREAM_PYTHON_SLICE_MATRIX = "        slice: [1, 2]\n"
-_UPSTREAM_PYTHON_SLICE_ENV = "          NASTECH_TEST_SLICE: ${{ matrix.slice }}/2\n"
+_UPSTREAM_PYTHON_TEST_NAME = "    name: Run tests (${{ matrix.slice }}/3)\n"
+_UPSTREAM_PYTHON_SLICE_MATRIX = "        slice: [1, 2, 3]\n"
+_UPSTREAM_PYTHON_SLICE_ENV = "          NASTECH_TEST_SLICE: ${{ matrix.slice }}/3\n"
 _UPSTREAM_PYTHON_TEST_WORKERS = "          NASTECH_TEST_WORKERS: 8\n"
 
 _WINDOWS_ARM64_SLICE_ROWS = (
@@ -10278,7 +11586,7 @@ def _reconcile_free_runner_parallelism(dst: str) -> list[str]:
             fixed.append(rel)
         else:
             raise FreeRunnerParallelismError(
-                f"{rel} is neither the upstream two-slice/8-worker shape nor the "
+                f"{rel} is neither the upstream three-slice/8-worker shape nor the "
                 "fork's eight-slice/4-worker fixed point. The free 4-core runner "
                 "would keep 8 workers on 4 cores and the absolute-second probes "
                 "would stay red (PR #159: 0.90 s stall vs a 0.5 s budget). "

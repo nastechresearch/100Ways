@@ -26,6 +26,7 @@ from hundredways.updates import (
     STORE_REST_CREDENTIALS,
     AgentsChainCapError,
     AssetsWorkerIndexError,
+    BloblessCheckoutAnchorError,
     BrowseBudgetDdlError,
     BrowseBudgetFlockTestError,
     ChannelReaderUserAgentError,
@@ -76,6 +77,7 @@ from hundredways.updates import (
     _reconcile_assets_worker_index,
     _reconcile_anon_surface_copy,
     _reconcile_apt_pool_first_char,
+    _reconcile_blobless_merge_base_jobs,
     _reconcile_browse_budget_flock_tests,
     _reconcile_browse_ddl_budget_guard,
     _reconcile_channel_reader_user_agent,
@@ -184,6 +186,36 @@ from hundredways.updates import (
     _UI_SCOPE_ASSET_EVIDENCE,
     UiRegistryLookupError,
     UiScopePinError,
+    WindowsHolderClockWaitError,
+    _LIVE_HOLDER_EDITS,
+    _LIVE_HOLDER_JOIN_REL,
+    _R6_CHECKOUT_HOLDER_CLOCK,
+    _R6_CHECKOUT_HOLDER_EVENT,
+    _R6_CHECKOUT_HOLDER_REL,
+    PagesReleasePlaneAnchorError,
+    _PAGES_BUNDLE_SMOKE_REL,
+    _PAGES_CHANNEL_BUILD_REL,
+    _PAGES_CHANNEL_TESTS_REL,
+    _PAGES_DEPLOY_SITE_REL,
+    _PAGES_R2_HOST_REL,
+    _PAGES_R2_SCOPE_REL,
+    _PAGES_RELEASE_EDITS,
+    _PAGES_SOURCE_RELEASES_REL,
+    _PAGES_TS_CHECKOUT_SOURCE_REL,
+    TermuxAptFeedAnchorError,
+    _APT_CHECK_APT_REL,
+    _APT_FEED_EDITS,
+    _APT_STABLE_RELEASES_DOC_REL,
+    _APT_TERMUX_DOC_REL,
+    _APT_TERMUX_DOC_ZH_REL,
+    DesktopReleaseLegAnchorError,
+    _BUNDLED_LEG_MARKERS,
+    _BUNDLED_WORKFLOW_EDITS,
+    _BUNDLED_WORKFLOW_REL,
+    _reconcile_desktop_release_leg_guards,
+    _reconcile_termux_apt_flat_feed,
+    _reconcile_github_pages_release_plane,
+    _reconcile_windows_holder_clock_waits,
     _sigv4_vector_signature,
     _split_prompt_surface_tiers,
     brand_tree,
@@ -531,14 +563,14 @@ def _free_runner_workflow_tree(tmp_path):
     (wf / "tests.yml").write_text(
         "jobs:\n"
         "  test:\n"
-        "    name: Run tests (${{ matrix.slice }}/2)\n"
+        "    name: Run tests (${{ matrix.slice }}/3)\n"
         "    strategy:\n"
         "      matrix:\n"
-        "        slice: [1, 2]\n"
+        "        slice: [1, 2, 3]\n"
         "    steps:\n"
         "      - name: Run tests\n"
         "        env:\n"
-        "          NASTECH_TEST_SLICE: ${{ matrix.slice }}/2\n"
+        "          NASTECH_TEST_SLICE: ${{ matrix.slice }}/3\n"
         "          NASTECH_TEST_WORKERS: 8\n",
         encoding="utf-8",
     )
@@ -605,7 +637,7 @@ def test_free_runner_parallelism_stops_when_the_python_matrix_moves(tmp_path):
     candidate, wf = _free_runner_workflow_tree(tmp_path)
     path = wf / "tests.yml"
     path.write_text(
-        path.read_text(encoding="utf-8").replace("slice: [1, 2]", "slice: [1, 2, 3]"),
+        path.read_text(encoding="utf-8").replace("slice: [1, 2, 3]", "slice: [1, 2, 3, 4]"),
         encoding="utf-8",
     )
     with pytest.raises(FreeRunnerParallelismError, match="neither"):
@@ -621,6 +653,465 @@ def test_free_runner_parallelism_stops_when_the_windows_rows_move(tmp_path):
     )
     with pytest.raises(FreeRunnerParallelismError, match="arm64"):
         _reconcile_free_runner_parallelism(str(candidate))
+
+
+# The rationale sits above the fetch it explains and the filter is the key the rule
+# adds, so upstream's own ``fetch-depth`` line and its trailing comment stay untouched.
+_CHECKOUT_V7 = "      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1\n"
+
+
+def _blobless_checkout_tree(tmp_path):
+    """A branded candidate tree carrying upstream's merge-base checkouts, blobs and all."""
+    candidate = tmp_path / "candidate"
+    wf = candidate / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / "contributor-check.yml").write_text(
+        "jobs:\n"
+        "  contributor-check:\n"
+        "    timeout-minutes: 10\n"
+        "    steps:\n"
+        + _CHECKOUT_V7
+        + "        with:\n"
+        "          ref: ${{ inputs.commit }}\n"
+        "          fetch-depth: 0  # Full history needed for git log\n"
+        "\n"
+        "      - name: Check for unmapped contributor emails\n"
+        "        run: git log --format='%ae' $(git merge-base HEAD origin/main)..HEAD\n",
+        encoding="utf-8",
+    )
+    (wf / "lint.yml").write_text(
+        "jobs:\n"
+        "  ruff-ty-diff:\n"
+        "    timeout-minutes: 10\n"
+        "    steps:\n"
+        + _CHECKOUT_V7
+        + "        with:\n"
+        "          ref: ${{ inputs.commit }}\n"
+        "          fetch-depth: 0 # need full history for merge-base + worktree\n"
+        "      - uses: ./.github/actions/setup-pm\n"
+        "  pr-download-annotation:\n"
+        "    steps:\n"
+        + _CHECKOUT_V7
+        + "        with:\n"
+        "          ref: ${{ inputs.commit }}\n"
+        "          fetch-depth: 2 # the merge commit and its first parent\n"
+        "          persist-credentials: false\n",
+        encoding="utf-8",
+    )
+    (wf / "lockfile-diff.yml").write_text(
+        "jobs:\n"
+        "  lockfile-diff:\n"
+        "    timeout-minutes: 5\n"
+        "    steps:\n"
+        + _CHECKOUT_V7
+        + "        with:\n"
+        "          ref: ${{ inputs.commit }}\n"
+        "          # Blobless: the job reads the lockfile at two refs, never every blob in\n"
+        "          # the history. That blob fetch is what overran this job's budget.\n"
+        "          fetch-depth: 0 # need history for the merge base\n"
+        "          filter: blob:none\n",
+        encoding="utf-8",
+    )
+    (wf / "prompt-surface-diff.yml").write_text(
+        "jobs:\n"
+        "  prompt-surface-diff:\n"
+        "    timeout-minutes: 5\n"
+        "    steps:\n"
+        + _CHECKOUT_V7
+        + "        with:\n"
+        "          ref: ${{ inputs.commit }}\n"
+        "          fetch-depth: 0 # need history for the merge base\n"
+        "          filter: blob:none\n"
+        "          persist-credentials: false\n"
+        "  prompt-surface-restore:\n"
+        "    steps:\n"
+        + _CHECKOUT_V7
+        + "        with:\n"
+        "          ref: ${{ inputs.commit }}\n"
+        "          fetch-depth: 0 # the snapshots at both ends of the range\n",
+        encoding="utf-8",
+    )
+    return candidate, wf
+
+
+def test_blobless_merge_base_jobs_fetch_the_graph_not_the_blobs(tmp_path):
+    """A merge-base job needs the commit graph, so its blobs are pure overrun."""
+    candidate, wf = _blobless_checkout_tree(tmp_path)
+    lockfile_before = (wf / "lockfile-diff.yml").read_text(encoding="utf-8")
+
+    changed = _reconcile_blobless_merge_base_jobs(str(candidate))
+    assert changed == [
+        ".github/workflows/contributor-check.yml",
+        ".github/workflows/lint.yml",
+        ".github/workflows/prompt-surface-diff.yml",
+    ]
+    contributor = (wf / "contributor-check.yml").read_text(encoding="utf-8")
+    contributor_lines = contributor.splitlines()
+    at = contributor_lines.index("          fetch-depth: 0  # Full history needed for git log")
+    assert contributor_lines[at - 3].startswith("          # The commit graph, not the blobs:")
+    assert contributor_lines[at + 1] == "          filter: blob:none"
+    lint = (wf / "lint.yml").read_text(encoding="utf-8")
+    assert lint.count("filter: blob:none") == 1
+    # The merge-commit job asks for two commits, so there is no blob storm to stop.
+    assert (
+        "          fetch-depth: 2 # the merge commit and its first parent\n"
+        "          persist-credentials: false\n"
+    ) in lint
+    surface = (wf / "prompt-surface-diff.yml").read_text(encoding="utf-8")
+    # Per checkout site, not per file: the first job already carries the fork's own
+    # filter, and the second one must still get it.
+    assert surface.count("filter: blob:none") == 2
+    assert (
+        "          fetch-depth: 0 # need history for the merge base\n"
+        "          filter: blob:none\n"
+        "          persist-credentials: false\n"
+    ) in surface
+    # Fork PR #198's own shape (its comment above the fetch, filter right after) is
+    # already blobless and must survive byte-for-byte.
+    assert (wf / "lockfile-diff.yml").read_text(encoding="utf-8") == lockfile_before
+    for rel in changed:
+        text = (candidate / rel).read_text(encoding="utf-8")
+        assert "hermes" not in text.lower() and "nous" not in text.lower()
+        assert BrandingRules().transform_text(text) == text
+    assert _reconcile_blobless_merge_base_jobs(str(candidate)) == []
+
+
+def test_blobless_merge_base_jobs_explain_the_job_not_the_rule(tmp_path):
+    """Four jobs read four different pieces of the graph, so they get four rationales.
+
+    One shared sentence would overwrite the wording the fork wrote per job, and a
+    reader cannot tell from it why *this* job's blobs are safe to drop.
+    """
+    candidate, wf = _blobless_checkout_tree(tmp_path)
+    _reconcile_blobless_merge_base_jobs(str(candidate))
+    contributor = (wf / "contributor-check.yml").read_text(encoding="utf-8")
+    lint = (wf / "lint.yml").read_text(encoding="utf-8")
+    surface = (wf / "prompt-surface-diff.yml").read_text(encoding="utf-8")
+    assert "author emails out of git log" in contributor
+    assert "HEAD and the base" in lint
+    assert "the surface snapshots" in surface
+    for text in (lint, surface):
+        assert "author emails" not in text
+    assert "surface snapshots" not in contributor
+
+
+def test_blobless_merge_base_jobs_stop_when_the_checkout_moves(tmp_path):
+    """A full-history fetch that vanished is a moved anchor, not a fixed job.
+
+    Without the filter the four lanes are cancelled at their budgets with no
+    failing step, so the sync has to stop rather than re-brick them.
+    """
+    candidate, wf = _blobless_checkout_tree(tmp_path)
+    path = wf / "contributor-check.yml"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("fetch-depth: 0", "fetch-depth: 1"),
+        encoding="utf-8",
+    )
+    with pytest.raises(BloblessCheckoutAnchorError, match="no anchor"):
+        _reconcile_blobless_merge_base_jobs(str(candidate))
+    assert "filter: blob:none" not in (wf / "lint.yml").read_text(encoding="utf-8")
+
+
+def _windows_holder_clock_tree(tmp_path):
+    """A branded candidate tree carrying upstream's two clock-timed Windows holder fixtures."""
+    candidate = tmp_path / "candidate"
+    r6 = candidate.joinpath(*_R6_CHECKOUT_HOLDER_REL.split("/"))
+    live = candidate.joinpath(*_LIVE_HOLDER_JOIN_REL.split("/"))
+    r6.parent.mkdir(parents=True, exist_ok=True)
+    live.parent.mkdir(parents=True, exist_ok=True)
+    r6.write_text(_R6_CHECKOUT_HOLDER_CLOCK, encoding="utf-8")
+    live.write_text(
+        "import psutil\n\n" + _LIVE_HOLDER_EDITS[0][0] + "\n" + _LIVE_HOLDER_EDITS[1][0],
+        encoding="utf-8",
+    )
+    return candidate, r6, live
+
+
+def test_windows_holder_clock_waits_become_event_based(tmp_path):
+    """A holder that only sleeps cannot prove the wait it claims to cover ran."""
+    candidate, r6, live = _windows_holder_clock_tree(tmp_path)
+
+    changed = _reconcile_windows_holder_clock_waits(str(candidate))
+    assert set(changed) == {_R6_CHECKOUT_HOLDER_REL, _LIVE_HOLDER_JOIN_REL}
+    holder = r6.read_text(encoding="utf-8")
+    assert holder == _R6_CHECKOUT_HOLDER_EVENT
+    assert "time.sleep(float(sys.argv[2]))" not in holder
+    assert "'still holds the checkout' in handle.read()" in holder
+    assert "time.time() + 25" not in holder
+    joined = live.read_text(encoding="utf-8")
+    assert "from tests.waiting import wait_until" in joined
+    assert joined.count("wait_until(lambda: not [p.pid") == 1
+    assert joined.endswith(_LIVE_HOLDER_EDITS[1][1])
+    for text in (holder, joined):
+        assert "hermes" not in text.lower() and "nous" not in text.lower()
+        assert BrandingRules().transform_text(text) == text
+    assert _reconcile_windows_holder_clock_waits(str(candidate)) == []
+
+
+def test_windows_holder_clock_waits_stop_when_the_fixture_moves(tmp_path):
+    candidate, r6, live = _windows_holder_clock_tree(tmp_path)
+    r6.write_text(
+        _R6_CHECKOUT_HOLDER_EVENT.replace("print('locked', flush=True)\n", ""),
+        encoding="utf-8",
+    )
+    with pytest.raises(WindowsHolderClockWaitError, match="exactly one copy"):
+        _reconcile_windows_holder_clock_waits(str(candidate))
+    assert _LIVE_HOLDER_EDITS[1][0] in live.read_text(encoding="utf-8")
+
+
+def _pages_release_plane_tree(tmp_path, duplicate_permission=False):
+    """A branded candidate whose release-plane files still name the retired worker.
+
+    Each of the nine upstream-owned files is written from the exact spans the rule
+    reads, so the fixture is the pre-hand-off text and the expectation is the
+    post-hand-off text -- no paraphrase of either.
+    """
+    candidate = tmp_path / "candidate"
+    paths = {}
+    for rel, edits in _PAGES_RELEASE_EDITS:
+        path = candidate.joinpath(*rel.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        body = "\n".join(old for old, _ in edits)
+        if duplicate_permission and rel == _PAGES_BUNDLE_SMOKE_REL:
+            body = edits[0][0] + body
+        path.write_text(body, encoding="utf-8")
+        paths[rel] = path
+    return candidate, paths
+
+
+def test_github_pages_release_plane_serves_the_control_plane_from_pages(tmp_path):
+    """One origin, derived: the host, the site prefix and the sandbox allowlist agree.
+
+    nastech-agent#194 moves the control plane to the Pages project site, which
+    carries the repository in its path -- so a pointer path that omits it 404s, and
+    the retired worker origin must not survive a sync anywhere in these files.
+    """
+    candidate, paths = _pages_release_plane_tree(tmp_path)
+
+    changed = _reconcile_github_pages_release_plane(str(candidate))
+    assert changed == [rel for rel, _ in _PAGES_RELEASE_EDITS]
+
+    origin = "https://nastechresearch.github.io/nastech-agent"
+    for rel, edits in _PAGES_RELEASE_EDITS:
+        text = paths[rel].read_text(encoding="utf-8")
+        assert text == "\n".join(new for _, new in edits)
+        assert "workers.dev" not in text
+        assert "hermes" not in text.lower() and "nous" not in text.lower()
+        assert BrandingRules().transform_text(text) == text
+    assert f'_PUBLIC_BASE = "{origin}"' in paths[_PAGES_SOURCE_RELEASES_REL].read_text("utf-8")
+    typescript = paths[_PAGES_TS_CHECKOUT_SOURCE_REL].read_text("utf-8")
+    assert f"const pagesBase: string = '{origin}'" in typescript
+    assert "const pagesPrefix: string = pagesOrigin.pathname" in typescript
+    assert "'api.github.com'" in typescript
+    channel_tests = paths[_PAGES_CHANNEL_TESTS_REL].read_text("utf-8")
+    assert '"/releases/' not in channel_tests
+    assert 'os.environ.get("RELEASE_CHANNEL_STORE", "r2")' in paths[_PAGES_R2_HOST_REL].read_text("utf-8")
+    assert 'os.environ.get("RELEASE_CHANNEL_STORE", "r2")' in paths[_PAGES_R2_SCOPE_REL].read_text("utf-8")
+    assert 'os.environ.get("RELEASE_CHANNEL_STORE", "r2")' in paths[_PAGES_CHANNEL_BUILD_REL].read_text("utf-8")
+    assert "RELEASE_CHANNEL_STORE: github" in paths[_PAGES_BUNDLE_SMOKE_REL].read_text("utf-8")
+    assert "cp -r releases _site/releases" in paths[_PAGES_DEPLOY_SITE_REL].read_text("utf-8")
+
+    assert _reconcile_github_pages_release_plane(str(candidate)) == []
+
+
+def test_github_pages_release_plane_stops_when_an_anchor_is_ambiguous(tmp_path):
+    """Two copies of one anchor is a moved plane, not a licence to guess which to rewrite."""
+    candidate, paths = _pages_release_plane_tree(tmp_path, duplicate_permission=True)
+
+    with pytest.raises(PagesReleasePlaneAnchorError, match="not all"):
+        _reconcile_github_pages_release_plane(str(candidate))
+
+    smoke = paths[_PAGES_BUNDLE_SMOKE_REL].read_text("utf-8")
+    assert "RELEASE_CHANNEL_STORE" not in smoke
+    assert "workers.dev" in paths[_PAGES_SOURCE_RELEASES_REL].read_text("utf-8")
+
+
+def test_github_pages_release_plane_leaves_a_tree_without_the_plane_alone(tmp_path):
+    """A candidate whose Deploy Site job is not the Pages build is not this rule's business."""
+    stub = tmp_path / "candidate" / ".github" / "workflows" / "deploy-site.yml"
+    stub.parent.mkdir(parents=True)
+    stub.write_text(
+        "      - name: Stage deployment\n        run: |\n"
+        "          mkdir -p _site/docs\n          cp -r website/build/* _site/docs/\n",
+        encoding="utf-8",
+    )
+
+    assert _reconcile_github_pages_release_plane(str(tmp_path / "candidate")) == []
+
+
+def test_github_pages_release_plane_stops_when_the_reader_origin_does_not_move(tmp_path):
+    """Every other file derives from ``_PUBLIC_BASE``, so it cannot be left on the worker."""
+    candidate, paths = _pages_release_plane_tree(tmp_path)
+    origin = paths[_PAGES_SOURCE_RELEASES_REL]
+    origin.write_text(
+        '_PUBLIC_BASE = "https://downloads.example.test/source"\n', encoding="utf-8"
+    )
+
+    with pytest.raises(PagesReleasePlaneAnchorError, match="no such origin"):
+        _reconcile_github_pages_release_plane(str(candidate))
+
+
+def _termux_apt_flat_feed_tree(tmp_path):
+    """A branded candidate whose checker and install pages still describe the R2-prefix feed."""
+    candidate = tmp_path / "candidate"
+    paths = {}
+    for rel, edits in _APT_FEED_EDITS:
+        path = candidate.joinpath(*rel.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(old for old, _ in edits), encoding="utf-8")
+        paths[rel] = path
+    return candidate, paths
+
+
+def test_termux_apt_flat_feed_checks_and_documents_the_flat_repository(tmp_path):
+    """A feed published as release assets is flat, so the checker says ``./`` and names the suite.
+
+    nastech-agent#195 moves the Termux APT index out of the retired worker prefix;
+    a release asset name cannot hold ``/``, so nothing here may keep describing a
+    suite/component layout.
+    """
+    candidate, paths = _termux_apt_flat_feed_tree(tmp_path)
+
+    changed = _reconcile_termux_apt_flat_feed(str(candidate))
+    assert changed == [rel for rel, _ in _APT_FEED_EDITS]
+    for rel, edits in _APT_FEED_EDITS:
+        text = paths[rel].read_text(encoding="utf-8")
+        assert text == "\n".join(new for _, new in edits)
+        assert "workers.dev" not in text
+        assert "releases/termux/" not in text
+        assert BrandingRules().transform_text(text) == text
+    checker = paths[_APT_CHECK_APT_REL].read_text("utf-8")
+    assert "by-hash=force]" not in checker
+    assert 'printf \'deb [signed-by=/apt/key.asc] %s ./\\n\'' in checker
+    assert 'grep -qx "Suite: $suite" /apt/Release' in checker
+    assert "deb [signed-by=$PREFIX/etc/apt/keyrings/nastech-agent.asc] https://github.com/nastechresearch/nastech-agent/releases/download/termux-repo ./" in paths[
+        _APT_TERMUX_DOC_REL
+    ].read_text("utf-8")
+    assert "termux-repo-canary ./" in paths[_APT_TERMUX_DOC_ZH_REL].read_text("utf-8")
+
+    assert _reconcile_termux_apt_flat_feed(str(candidate)) == []
+
+
+def test_termux_apt_flat_feed_stops_when_the_checker_moves(tmp_path):
+    """A checker matching neither layout would grade a feed no device installs from."""
+    candidate, paths = _termux_apt_flat_feed_tree(tmp_path)
+    paths[_APT_CHECK_APT_REL].write_text("# upstream rewrote the whole checker\n", encoding="utf-8")
+
+    with pytest.raises(TermuxAptFeedAnchorError, match="checker moved"):
+        _reconcile_termux_apt_flat_feed(str(candidate))
+
+
+def test_termux_apt_flat_feed_stops_when_a_shape_is_partial(tmp_path):
+    candidate, paths = _termux_apt_flat_feed_tree(tmp_path)
+    doc = paths[_APT_TERMUX_DOC_REL]
+    first_old = _APT_FEED_EDITS[2][1][0][0]
+    doc.write_text(doc.read_text("utf-8").replace(first_old, "", 1), encoding="utf-8")
+
+    with pytest.raises(TermuxAptFeedAnchorError, match="not all"):
+        _reconcile_termux_apt_flat_feed(str(candidate))
+
+
+def _desktop_release_legs_tree(tmp_path):
+    """A branded candidate whose release workflow is upstream's, pre-fork-layers."""
+    candidate = tmp_path / "candidate"
+    path = candidate.joinpath(*_BUNDLED_WORKFLOW_REL.split("/"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(old for old, _ in _BUNDLED_WORKFLOW_EDITS), encoding="utf-8")
+    return candidate, path
+
+
+def test_desktop_release_leg_guards_write_the_merged_workflow(tmp_path):
+    """Three fork PRs edit one upstream-owned workflow, so the rule has to be their union.
+
+    nastech-agent#194 hands the control plane to GitHub Pages, #192 stops an unsigned
+    channel leg recording and receipting bytes it never signed, and #195 publishes the
+    Termux feed as one flat release.  Their hunks do not overlap, so a sequential pass
+    over these anchors is exactly the merged workflow -- and a half-applied table would
+    stage bytes no receipt describes.
+    """
+    candidate, path = _desktop_release_legs_tree(tmp_path)
+
+    changed = _reconcile_desktop_release_leg_guards(str(candidate))
+
+    assert changed == [_BUNDLED_WORKFLOW_REL]
+    text = path.read_text(encoding="utf-8")
+    assert text == "\n".join(new for _, new in _BUNDLED_WORKFLOW_EDITS)
+    assert BrandingRules().transform_text(text) == text
+    for _label, marker in _BUNDLED_LEG_MARKERS:
+        assert marker in text
+    assert text.count('if [ "$SKIP_SIGNED" != true ]; then') == 2
+    assert text.count("&& inputs.skip-signed != true") == 2
+    assert "timeout-minutes: 25" in text
+    assert "RELEASE_CHANNEL_STORE: github" in text
+    assert text.count('"$PWD/termux-build/apt-flat:/apt:ro"') == 3
+    assert "termux-build/apt:/apt:ro" not in text
+    assert "--key-is-full" not in text
+    assert "shopt -s globstar nullglob" not in text
+    assert "public_repo" not in text
+
+    assert _reconcile_desktop_release_leg_guards(str(candidate)) == []
+
+
+def test_desktop_release_leg_guards_stops_when_a_leg_moved(tmp_path):
+    candidate, path = _desktop_release_legs_tree(tmp_path)
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(_BUNDLED_WORKFLOW_EDITS[0][0], "", 1),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(DesktopReleaseLegAnchorError, match="not all"):
+        _reconcile_desktop_release_leg_guards(str(candidate))
+
+
+def test_desktop_release_leg_guards_stops_when_the_workflow_moves(tmp_path):
+    """A workflow matching neither layout would ship the fork's guards as absent."""
+    candidate, path = _desktop_release_legs_tree(tmp_path)
+    path.write_text("name: Desktop bundled release\njobs:\n  validate:\n    runs-on: ubuntu-latest\n",
+                    encoding="utf-8")
+
+    with pytest.raises(DesktopReleaseLegAnchorError, match="nor "):
+        _reconcile_desktop_release_leg_guards(str(candidate))
+
+
+def test_desktop_release_leg_guards_ignore_a_tree_without_the_workflow(tmp_path):
+    assert _reconcile_desktop_release_leg_guards(str(tmp_path / "absent")) == []
+
+
+# Upstream's release workflow as the sync actually sees it -- the branded bytes at 9302ba9e,
+# the commit that retired the macOS Intel leg.  The tree the tests above build from
+# ``_BUNDLED_WORKFLOW_EDITS`` is self-consistent by construction: it proves the table applies,
+# never that the table names bytes upstream still ships, which is how a retired leg could sit
+# in it unnoticed.  These two read the real file.
+BUNDLED_TIP_WORKFLOW = (
+    Path(__file__).parent / "fixtures" / "desktop_bundled" / "desktop-bundled-release.yml"
+)
+
+
+def test_every_release_leg_anchor_names_bytes_upstream_still_ships():
+    text = BUNDLED_TIP_WORKFLOW.read_text(encoding="utf-8")
+
+    for old, new in _BUNDLED_WORKFLOW_EDITS:
+        head = old.strip().splitlines()[0][:60]
+        assert text.count(old) == 1, f"anchor is absent or ambiguous in upstream's file: {head}"
+        assert new not in text, f"the fork's replacement is already upstream's text: {head}"
+
+
+def test_the_release_leg_guards_land_on_upstreams_real_workflow(tmp_path):
+    candidate = tmp_path / "candidate"
+    path = candidate.joinpath(*_BUNDLED_WORKFLOW_REL.split("/"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(BUNDLED_TIP_WORKFLOW.read_text(encoding="utf-8"), encoding="utf-8")
+
+    assert _reconcile_desktop_release_leg_guards(str(candidate)) == [_BUNDLED_WORKFLOW_REL]
+
+    text = path.read_text(encoding="utf-8")
+    for _label, marker in _BUNDLED_LEG_MARKERS:
+        assert marker in text
+    # Nothing this rule writes may re-name a leg upstream retired: the guard would then sit
+    # on a job that does not exist, and the sync would read its silence as a clean apply.
+    assert "darwin-x64" not in text
+    assert BrandingRules().transform_text(text) == text
+    assert _reconcile_desktop_release_leg_guards(str(candidate)) == []
 
 
 def _free_runner_js_lane_tree(tmp_path):
@@ -6918,7 +7409,6 @@ def test_the_release_graph_contract_names_every_unsigned_desktop_leg(tmp_path):
     text = path.read_text(encoding="utf-8")
     assert _quoted_in(_UNSIGNED_LEG_LOOP, text) == {
         "candidates-darwin-arm64",
-        "candidates-darwin-x64",
         "candidates-win32-arm64",
         "candidates-win32-x64",
         "candidates-win32-bundle",
@@ -6944,10 +7434,11 @@ def test_fork_lane_release_default_set_and_its_test_agree(tmp_path):
     ``_reconcile_signing_gated_defaults`` writes the fork's ``DEFAULT`` and this
     rule writes the test that asserts it; the lists are hand-typed in separate
     constants, and what the test names is the lane table's own exclusions **plus**
-    whatever upstream already leaves opt-in -- so ``macos-intel`` belongs in the
-    test without appearing in the fork's ``not in`` line.  A lane added to one and
-    not the other goes red in the fork's release suite with nothing pointing at the
-    pairing.
+    whatever upstream already leaves opt-in and this fork does not add back.  At
+    this revision that second set is empty -- Termux is upstream's only opt-out and
+    the fork ships it -- so the two lists have to agree lane for lane.  A lane added
+    to one and not the other goes red in the fork's release suite with nothing
+    pointing at the pairing.
     """
     root, path = _lane_release_tree(tmp_path, _RELEASE_LANES_TESTS, _RELEASE_LANES_TESTS_EDITS)
     assert _reconcile_fork_lane_release_surface(str(root)) == [_RELEASE_LANES_TESTS]
