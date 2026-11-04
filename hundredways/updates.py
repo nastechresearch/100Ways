@@ -4916,15 +4916,6 @@ _BUNDLED_UNSIGNED_LEGS_NEW_1 = """\
           key: ${{ steps.payload-signatures.outputs.cache-primary-key }}
 
       - name: Audit bundle architecture
-        # Audit exactly the bytes this leg built, and never fewer: the leg builds no
-        # bundle at all when 'Build and package' skips both variants, which is where a
-        # skip-signed Windows leg stops -- there is no release directory to scan, so an
-        # unconditional audit only crashes on a missing root. The Store variant is built
-        # independently of signing, so a skip-signed leg that built it is still audited.
-        if: >-
-          inputs.skip-signed != true
-          || (inputs.skip-store != true && env.CHANNEL_BUILD == '' && env.NASTECH_BUILD_COMMIT == ''
-              && !contains(env.NASTECH_PAYLOAD_TAG, '+canary.'))
         # A wedged runner must fail this step, not hold the release for the
         # job's whole budget: measured 2026-10-29, the step sat 'running' for
         # 113 minutes on a tree that audits in 14 seconds locally.
@@ -4932,6 +4923,42 @@ _BUNDLED_UNSIGNED_LEGS_NEW_1 = """\
         shell: bash
         run: |
           MATRIX_LABEL="${{ matrix.target.label }}"
+"""
+# A leg builds whether or not it can sign (see _BUNDLED_UNSIGNED_BUILD_EDITS), so the audit
+# that scans those bytes runs unconditionally too: gating it on signing turned the scan into a
+# publication guard, which is the one skip-signed decides.
+_BUNDLED_UNSIGNED_BUILD_OLD_1 = """\
+        run: |
+          if ($env:SKIP_SIGNED -ne 'true') {
+              python scripts/bundles/desktop.py --prepared "$env:RUNNER_TEMP/desktop-job/prepared.json" --variant bundled
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+"""
+_BUNDLED_UNSIGNED_BUILD_NEW_1 = """\
+        run: |
+          # The bundled package is built whether or not it can be signed: the lane ships
+          # these bytes, the architecture audit scans them and the handoff stages them.
+          # Signing is masked off above, so electron-builder's windowsSigning() gets no
+          # certificate and emits unsigned bytes -- the same way the macOS legs have always
+          # built without a Developer ID. What skip-signed gates is publication.
+          python scripts/bundles/desktop.py --prepared "$env:RUNNER_TEMP/desktop-job/prepared.json" --variant bundled
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+"""
+_BUNDLED_UNSIGNED_BUILD_OLD_2 = """\
+          args=()
+          if [ "$RELEASE_PHASE" = candidate ]; then args+=(--candidate); fi
+          if [ "$SKIP_SIGNED" != true ]; then
+            node scripts/stage-msixbundle.mjs --tag "$NASTECH_PAYLOAD_TAG" --variant bundled "${args[@]}"
+          fi
+"""
+_BUNDLED_UNSIGNED_BUILD_NEW_2 = """\
+          args=()
+          if [ "$RELEASE_PHASE" = candidate ]; then args+=(--candidate); fi
+          # Assembled whether or not it can be signed: stage-msixbundle.mjs signs only when
+          # AZURE_SIGN_* are set and otherwise warns and leaves the bundle unsigned, and the
+          # next step stages whatever bytes exist. Skipping it here would hand that step an
+          # empty release directory and a 'No files match *.msixbundle' refusal.
+          node scripts/stage-msixbundle.mjs --tag "$NASTECH_PAYLOAD_TAG" --variant bundled "${args[@]}"
 """
 _BUNDLED_UNSIGNED_LEGS_OLD_2 = (
     '        run: |\n'
@@ -5204,6 +5231,8 @@ _BUNDLED_APT_FEED_NEW_7 = (
 _BUNDLED_WORKFLOW_EDITS = (
     (_BUNDLED_CHANNEL_STORE_OLD_1, _BUNDLED_CHANNEL_STORE_NEW_1),
     (_BUNDLED_UNSIGNED_LEGS_OLD_1, _BUNDLED_UNSIGNED_LEGS_NEW_1),
+    (_BUNDLED_UNSIGNED_BUILD_OLD_1, _BUNDLED_UNSIGNED_BUILD_NEW_1),
+    (_BUNDLED_UNSIGNED_BUILD_OLD_2, _BUNDLED_UNSIGNED_BUILD_NEW_2),
     (_BUNDLED_UNSIGNED_LEGS_OLD_2, _BUNDLED_UNSIGNED_LEGS_NEW_2),
     (_BUNDLED_UNSIGNED_LEGS_OLD_3, _BUNDLED_UNSIGNED_LEGS_NEW_3),
     (_BUNDLED_UNSIGNED_LEGS_OLD_4, _BUNDLED_UNSIGNED_LEGS_NEW_4),
@@ -5229,8 +5258,12 @@ if [ "$SKIP_SIGNED" != true ]; then
 _BUNDLED_FEED_MARKER = """\
 releases/download/$feed_tag"""
 
+_BUNDLED_BUILD_MARKER = """\
+# built without a Developer ID. What skip-signed gates is publication."""
+
 _BUNDLED_LEG_MARKERS = (
     ("the GitHub Pages control plane", _BUNDLED_STORE_MARKER),
+    ("the unsigned legs' bundled build", _BUNDLED_BUILD_MARKER),
     ("the unsigned-leg recorder guards", _BUNDLED_UNSIGNED_MARKER),
     ("the flat Termux feed publish", _BUNDLED_FEED_MARKER),
 )
@@ -5255,15 +5288,18 @@ def _reconcile_desktop_release_leg_guards(dst: str) -> list[str]:
     one value, which is what :func:`_reconcile_github_pages_release_plane` rewrites in the
     nine files that carry it.
 
-    The unsigned-leg guards (fork PR #192) stop a ``skip-signed`` channel leg verifying and
-    recording what it never signed: the architecture audit is skipped when the leg built no
-    bundle at all, the Windows/macOS recorders run only for signed bytes (an ``.msix`` identity
-    is read out of the Authenticode signature and a release row records a Developer ID team, so
-    an unsigned build cannot produce either), and the darwin receipt and the macOS updater feed
-    stop before pointing devices at unsigned packages.  Skipping a receipt is not a lost check: the
-    job would assemble a receipt from rows that were never written, and the handoff fetch that
-    matches nothing returns nothing, so an unsigned leg would publish a receipt for zero
-    packages.
+    The unsigned-leg guards (fork PRs #192 and #199) make ``skip-signed`` decide *publication*,
+    never *production*: the Windows leg and the universal-bundle assembly drop upstream's
+    signing precondition and build the bundled package unsigned the way the macOS legs always
+    have, the architecture audit scans whatever the leg built, and only the recorders that read
+    a signature stops (an ``.msix`` identity comes out of the Authenticode signature and a
+    release row records a Developer ID team, so an unsigned build can produce neither), along
+    with the darwin receipt and the macOS updater feed.  Skipping a receipt is not a lost check:
+    the job would assemble a receipt from rows that were never written, and the handoff fetch
+    that matches nothing returns nothing, so an unsigned leg would publish a receipt for zero
+    packages.  Building nothing is the worse failure: run 41776230035 showed a skip-signed
+    canary leg whose empty release directory made the architecture audit crash and
+    ``handoff stage --include '*.msix'`` refuse with ``No files match``.
 
     The Termux feed (fork PR #195) replaces the R2 object-by-object upload with a flatten plus
     ``scripts.termux.release_apt publish`` and a read-back of every asset the published
@@ -10854,13 +10890,15 @@ def test_the_default_ships_every_lane_this_fork_publishes():
 
 _RELEASE_CHANNELS_TESTS_EDITS = (
     (
-        r'''from scripts.releases import lanes as lane_set
+        r'''from scripts.releases import desktop_targets, lanes as lane_set
+
 
 ''',
-        r'''from scripts.releases import lanes as lane_set
+        r'''from scripts.releases import desktop_targets, lanes as lane_set
 
 # A claim that built and smoked every desktop package (see test_stable_release.py).
 SIGNED = frozenset(lane_set.NAMES)
+
 
 ''',
     ),

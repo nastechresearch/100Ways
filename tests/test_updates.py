@@ -1042,6 +1042,11 @@ def test_desktop_release_leg_guards_write_the_merged_workflow(tmp_path):
     assert text.count('if [ "$SKIP_SIGNED" != true ]; then') == 2
     assert text.count("&& inputs.skip-signed != true") == 2
     assert "timeout-minutes: 25" in text
+    # skip-signed decides publication, never production: nothing may keep the bundled
+    # package (or its scan) behind a signing precondition.
+    assert "if ($env:SKIP_SIGNED -ne 'true') {" not in text
+    assert 'node scripts/stage-msixbundle.mjs --tag "$NASTECH_PAYLOAD_TAG" --variant bundled' in text
+    assert "!contains(env.NASTECH_PAYLOAD_TAG, '+canary.')" not in text
     assert "RELEASE_CHANNEL_STORE: github" in text
     assert text.count('"$PWD/termux-build/apt-flat:/apt:ro"') == 3
     assert "termux-build/apt:/apt:ro" not in text
@@ -1110,6 +1115,10 @@ def test_the_release_leg_guards_land_on_upstreams_real_workflow(tmp_path):
     # Nothing this rule writes may re-name a leg upstream retired: the guard would then sit
     # on a job that does not exist, and the sync would read its silence as a clean apply.
     assert "darwin-x64" not in text
+    # The table applying is not the same as the guard being gone: upstream puts the signing
+    # precondition on the build itself, and only this rule's replacement lifts it.
+    assert "if ($env:SKIP_SIGNED -ne 'true') {" not in text
+    assert "if [ \"$SKIP_SIGNED\" != true ]; then\n            node scripts/stage-msixbundle.mjs" not in text
     assert BrandingRules().transform_text(text) == text
     assert _reconcile_desktop_release_leg_guards(str(candidate)) == []
 
