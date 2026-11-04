@@ -9321,7 +9321,7 @@ def _reconcile_unsigned_desktop_publish(dst: str) -> bool:
 
 
 # Every desktop leg of the stable release calls the bundled builder with its own ``with:``
-# block.  The two macOS legs never mention ``skip-signed`` at all -- so it defaults to false
+# block.  The macOS leg never mentions ``skip-signed`` at all -- so it defaults to false
 # and the gates above stay shut -- and the three Windows legs pass it inverted: upstream's
 # expression skips signing when the Windows lane is *off*, which is exactly when the leg does
 # not run.  A fork that ships unsigned has to say so at the call site, or the escape hatch
@@ -9338,11 +9338,30 @@ def _caller_leg(job: str) -> str:
 
 _UNSIGNED_DESKTOP_CALLER_EDITS = tuple(
     (job, _caller_leg(job), _caller_leg(job) + _UNSIGNED_CALLER_LINE)
-    for job in ("darwin-arm64", "darwin-x64")
+    for job in ("darwin-arm64",)
 ) + tuple(
     (job, _caller_leg(job) + _WINDOWS_SKIP_SIGNED, _caller_leg(job) + _UNSIGNED_CALLER_LINE)
     for job in ("win32-arm64", "win32-x64", "win32-bundle")
 )
+_UNSIGNED_DESKTOP_JOBS = tuple(job for job, _, _ in _UNSIGNED_DESKTOP_CALLER_EDITS)
+# The other job group the workflow hands to the bundled builder.  It builds nothing this
+# fork signs, so it takes no ``skip-signed`` -- but it is listed so the caller check below
+# can tell a leg it may leave alone from a leg it has never seen.
+_UNSIGNED_NON_DESKTOP_JOBS = ("termux",)
+_CALLER_JOB_RE = re.compile(r"^      jobs: (\S+)[ \t]*$", re.M)
+
+
+def _desktop_leg_retired(text: str, job: str) -> bool:
+    """True when upstream stopped building this job group, as opposed to rewording it.
+
+    Dropping the Intel Mac build deleted the ``jobs: darwin-x64`` line *and* every other
+    mention of the platform, so nothing in the release asks for it and there is no leg to
+    declare unsigned.  A leg that is still built under another shape keeps naming its
+    platform -- in its job id, its receipt, its smoke -- and that is a moved anchor: leave
+    it alone and the package ships signed-or-nothing again, which is the failure this whole
+    rule exists to prevent.
+    """
+    return f"jobs: {job}" not in text and job not in text
 
 
 class UnsignedDesktopCallerError(ValueError):
@@ -9360,6 +9379,14 @@ def _reconcile_unsigned_desktop_callers(dst: str) -> bool:
     they build nothing that this gate signs.  Idempotent, and a leg whose shape moved raises
     :class:`UnsignedDesktopCallerError` rather than shipping a release that silently reverts
     to signed-or-nothing.
+
+    A leg upstream no longer builds is not a moved anchor: upstream retired its Intel Mac
+    candidate outright, and a sync that stopped there would brick on a job nobody runs.  So
+    a leg counts as retired only when its platform name has left the workflow entirely, and
+    the caller legs the file actually contains are then checked against the set this rule
+    knows.  A reworded or newly added leg fails that check; so does a workflow that calls
+    the builder for no desktop leg at all, because the fork's default lane set would still
+    be asking for packages nothing builds.
     """
     text = _sgl_read(dst, _STABLE_RELEASE_WORKFLOW)
     if text is None or "desktop-bundled-release.yml" not in text:
@@ -9369,11 +9396,14 @@ def _reconcile_unsigned_desktop_callers(dst: str) -> bool:
         if new in text:
             continue
         if old not in text:
+            if _desktop_leg_retired(text, job):
+                continue
             raise UnsignedDesktopCallerError(
                 f"{_STABLE_RELEASE_WORKFLOW} no longer contains the {job} desktop caller leg "
-                f"{old!r}; upstream reworded the leg that builds this fork's desktop package. "
-                "Re-derive _UNSIGNED_DESKTOP_CALLER_EDITS against upstream's current workflow "
-                "before the next sync, or the desktop lanes ship signed-or-nothing again."
+                f"{old!r}, but still names {job}: upstream reworded the leg that builds this "
+                "fork's desktop package. Re-derive _UNSIGNED_DESKTOP_CALLER_EDITS against "
+                "upstream's current workflow before the next sync, or the desktop lanes ship "
+                "signed-or-nothing again."
             )
         if text.count(old) != 1:
             raise UnsignedDesktopCallerError(
@@ -9381,6 +9411,23 @@ def _reconcile_unsigned_desktop_callers(dst: str) -> bool:
                 f"caller leg, so which leg to declare unsigned is ambiguous"
             )
         text = text.replace(old, new, 1)
+    callers = set(_CALLER_JOB_RE.findall(text))
+    unknown = sorted(callers - {*_UNSIGNED_DESKTOP_JOBS, *_UNSIGNED_NON_DESKTOP_JOBS})
+    if unknown:
+        raise UnsignedDesktopCallerError(
+            f"{_STABLE_RELEASE_WORKFLOW} calls the bundled builder for the job group(s) "
+            f"{', '.join(unknown)}, which this rule does not know, so it cannot tell a desktop "
+            "leg that must declare itself unsigned from one that builds nothing signable. "
+            "Re-derive _UNSIGNED_DESKTOP_CALLER_EDITS against upstream's current workflow."
+        )
+    if not callers & {*_UNSIGNED_DESKTOP_JOBS}:
+        raise UnsignedDesktopCallerError(
+            f"{_STABLE_RELEASE_WORKFLOW} calls the bundled builder for no desktop job group, "
+            "while this fork's default lane set still names macos-arm64 and windows. Either "
+            "upstream moved every desktop leg (then re-derive _UNSIGNED_DESKTOP_CALLER_EDITS) "
+            "or the lane default moved with it (then retire the lanes here too); quietly "
+            "returning here would let the release ask for packages nothing builds."
+        )
     if text != before:
         _sgl_write(dst, _STABLE_RELEASE_WORKFLOW, text)
     return text != before
@@ -9492,16 +9539,16 @@ _RELEASE_LANES_TESTS_EDITS = (
         r'''from scripts.releases import lanes as lane_set
 
 
-def test_the_default_builds_everything_but_macos_intel_and_termux():
-    assert lane_set.DEFAULT == set(lane_set.NAMES) - {"macos-intel", "termux"}
+def test_the_default_builds_everything_but_termux():
+    assert lane_set.DEFAULT == set(lane_set.NAMES) - {"termux"}
 ''',
         r'''from scripts.releases import lanes as lane_set
 
 # NasTech contract: the fork publishes its desktop packages unsigned, so every lane it can
-# build is in the default set.  What stays out: macos-intel (upstream opts out; its runner
-# adds over an hour), windows-store (Partner Center needs the MS_STORE_* credentials this
-# fork has never had), and smoke and upgrade (they gate on a signed desktop channel).
-OUT_OF_DEFAULT = {"macos-intel", "windows-store", "smoke", "upgrade"}
+# build is in the default set.  What stays out: windows-store (Partner Center needs the
+# MS_STORE_* credentials this fork has never had), and smoke and upgrade (they gate on a
+# signed desktop channel).
+OUT_OF_DEFAULT = {"windows-store", "smoke", "upgrade"}
 
 
 def test_the_default_ships_every_lane_this_fork_publishes():
@@ -9509,9 +9556,10 @@ def test_the_default_ships_every_lane_this_fork_publishes():
 ''',
     ),
     (
-        r'''    ({"with_": ["macos-intel", "termux"]}, set(lane_set.NAMES)),
+        r'''    ({"with_": ["termux"]}, set(lane_set.NAMES)),
 ''',
-        r'''    ({"with_": ["macos-intel", "termux"]}, set(lane_set.DEFAULT) | {"macos-intel"}),
+        r'''    # Termux is already in this fork's default, so opting into it adds no lane.
+    ({"with_": ["termux"]}, set(lane_set.DEFAULT)),
 ''',
     ),
     (
@@ -9578,14 +9626,15 @@ _STABLE_RELEASE_TESTS_EDITS = (
 # The lane set a release must claim to build and smoke every desktop package —
 # the default once the fork's signing credentials are configured.
 SIGNED = frozenset(lane_set.NAMES)
-# Same, without Termux or macOS Intel: a claim over a desktop-only candidate
-# manifest (arm64 Mac + signed Windows rows).
+# Same, without Termux: a claim over a desktop-only candidate manifest (arm64 Mac
+# + signed Windows rows).
 DESKTOP_SIGNED = frozenset({"windows", "windows-store", "macos-arm64",
                             "smoke", "upgrade", "docker", "ci", "nix", "docker-tests",
                             "pm-bundle", "windows-live", "install-e2e", "bootstrap-version"})
-# Claims cut before lanes existed are read as the pre-lanes default: every lane
-# except the two that were then opt-in (scripts/releases/lanes.py legacy path).
-LEGACY_DEFAULT = frozenset(set(lane_set.NAMES) - {"macos-intel", "termux"})
+# Claims cut before lanes existed are read as the pre-lanes default: every lane but
+# Termux, which the legacy path spells out instead of importing DEFAULT, so a fork
+# default cannot silently reinterpret a published claim (lanes.claim_lanes).
+LEGACY_DEFAULT = frozenset(set(lane_set.NAMES) - {"termux"})
 
 ''',
     ),
@@ -9602,34 +9651,21 @@ LEGACY_DEFAULT = frozenset(set(lane_set.NAMES) - {"macos-intel", "termux"})
 ''',
     ),
     (
-        r'''def test_a_default_claim_builds_no_macos_intel_or_termux_and_lanes_restore_them(
+        r'''def test_a_default_claim_builds_no_termux_and_lanes_restore_it(
         tmp_path, r2_server, https_origin, monkeypatch):
     from scripts.releases import stable
 
-    off = {"candidates-darwin-x64", "transitions-darwin-x64", "macos-packaged-x64",
-           "candidates-termux", "termux-checks"}
+    off = {"candidates-termux", "termux-checks"}
 ''',
         r'''def test_a_default_claim_ships_unsigned_desktops_and_lanes_restore_them(
         tmp_path, r2_server, https_origin, monkeypatch):
-    """NasTech DEFAULT builds every desktop package, unsigned: what still leaves is the
-    Intel Mac candidate and the upgrade arms, which need a signed channel to upgrade."""
+    """NasTech DEFAULT builds every desktop package, unsigned.  What leaves are the arms
+    that upgrade the previously published signed channel: this fork's channel has never
+    carried one, and they wait for the `upgrade` lane."""
     from scripts.releases import stable
 
-    off = {"candidates-darwin-x64",
-           "transitions-darwin-arm64", "transitions-darwin-x64", "transitions-win32",
-           "macos-packaged-arm64", "macos-packaged-x64", "windows-packaged"}
-''',
-    ),
-    (
-        r'''    intel = stable.gate_expectations(required, lane_set.select(with_=["macos-intel"]))
-    assert {name for name, result in intel.items() if result == "skipped"} == \
-        {"candidates-termux", "termux-checks"}
-''',
-        r'''    intel = stable.gate_expectations(required, lane_set.select(with_=["macos-intel"]))
-    # Termux is on in this fork's default; restoring macos-intel builds its candidate,
-    # but the upgrade-gated transition arms wait for the `upgrade` lane too.
-    assert {name for name, result in intel.items() if result == "skipped"} == \
-        off - {"candidates-darwin-x64"}
+    off = {"transitions-darwin-arm64", "transitions-win32",
+           "macos-packaged-arm64", "windows-packaged"}
 ''',
     ),
     (
@@ -9681,12 +9717,12 @@ LEGACY_DEFAULT = frozenset(set(lane_set.NAMES) - {"macos-intel", "termux"})
 _RELEASE_ENTRYPOINT_TESTS_EDITS = (
     (
         r'''    # The default set names what it leaves out, and warns about no test lane.
-    assert "Not built: macos-intel, termux." in text
+    assert "Not built: termux." in text
     assert "Not tested" not in text
 ''',
-        r'''    # The default set names what it leaves out: this fork builds no Store bundle and no Intel
-    # macOS package, and it tests no desktop package it cannot sign.
-    assert "Not built: windows-store, macos-intel." in text
+        r'''    # The default set names what it leaves out: this fork submits no Store bundle, and it
+    # tests no desktop package it builds unsigned.
+    assert "Not built: windows-store." in text
     assert "Not tested: smoke, upgrade" in text
 ''',
     ),
@@ -9706,7 +9742,7 @@ _STABLE_RELEASE_GRAPH_TESTS_EDITS = (
     # NasTech ships every desktop package unsigned, so no candidate leg asks the shared
     # builder to sign one: the input is the literal ``true``.  A fork that has signing
     # credentials puts the lane-gated expression back on its own legs.
-    for name in ("candidates-darwin-arm64", "candidates-darwin-x64", "candidates-win32-arm64",
+    for name in ("candidates-darwin-arm64", "candidates-win32-arm64",
                  "candidates-win32-x64", "candidates-win32-bundle"):
         assert jobs[name]["with"]["skip-signed"] == "true", name
     for name in ("candidates-win32-arm64", "candidates-win32-x64", "candidates-win32-bundle"):
@@ -10195,23 +10231,27 @@ class FreeRunnerParallelismError(ValueError):
     """The branded CI no longer has the shape the free-runner split rewrites."""
 
 
-# Upstream runs the Python suite on two 32-core slices at 32 workers each and
+# Upstream runs the Python suite across 32-core slices at 32 workers each and
 # adds native arm64 Windows rows to the OS matrix. This repo has no Blacksmith
-# account, so every lane lands on a free 4-core hosted image. Eight 4-core
-# Python slices restore upstream's 32 cores at one worker per core. The
-# ``(arm64, ...)`` Windows rows stay: ``_normalize_runner`` sends them to the
+# account, so every lane lands on a free 4-core hosted image: eight 4-core
+# slices carry the same 32 cores one upstream box has, at one worker per core.
+# The ``(arm64, ...)`` Windows rows stay: ``_normalize_runner`` sends them to the
 # standard ``windows-11-arm`` image, so they run the marked set on real arm64
 # hardware instead of duplicating the x64 row the way they did while the label
 # normalised to ``windows-latest``. Both edits are exact literals, so a
 # normalised tree is a fixed point.
+#
+# The upstream side of the pair is read *after* branding, and the brand caps
+# ``NASTECH_TEST_WORKERS`` at 8 (`_TEST_WORKERS_CAP`), so the anchor is the capped
+# worker count, not the 32 upstream's file spells.
 _FREE_PYTHON_TEST_NAME = "    name: Run tests (${{ matrix.slice }}/8)\n"
 _FREE_PYTHON_SLICE_MATRIX = "        slice: [1, 2, 3, 4, 5, 6, 7, 8]\n"
 _FREE_PYTHON_SLICE_ENV = "          NASTECH_TEST_SLICE: ${{ matrix.slice }}/8\n"
 _FREE_PYTHON_TEST_WORKERS = "          NASTECH_TEST_WORKERS: 4\n"
 
-_UPSTREAM_PYTHON_TEST_NAME = "    name: Run tests (${{ matrix.slice }}/2)\n"
-_UPSTREAM_PYTHON_SLICE_MATRIX = "        slice: [1, 2]\n"
-_UPSTREAM_PYTHON_SLICE_ENV = "          NASTECH_TEST_SLICE: ${{ matrix.slice }}/2\n"
+_UPSTREAM_PYTHON_TEST_NAME = "    name: Run tests (${{ matrix.slice }}/3)\n"
+_UPSTREAM_PYTHON_SLICE_MATRIX = "        slice: [1, 2, 3]\n"
+_UPSTREAM_PYTHON_SLICE_ENV = "          NASTECH_TEST_SLICE: ${{ matrix.slice }}/3\n"
 _UPSTREAM_PYTHON_TEST_WORKERS = "          NASTECH_TEST_WORKERS: 8\n"
 
 _WINDOWS_ARM64_SLICE_ROWS = (
@@ -10278,7 +10318,7 @@ def _reconcile_free_runner_parallelism(dst: str) -> list[str]:
             fixed.append(rel)
         else:
             raise FreeRunnerParallelismError(
-                f"{rel} is neither the upstream two-slice/8-worker shape nor the "
+                f"{rel} is neither the upstream three-slice/8-worker shape nor the "
                 "fork's eight-slice/4-worker fixed point. The free 4-core runner "
                 "would keep 8 workers on 4 cores and the absolute-second probes "
                 "would stay red (PR #159: 0.90 s stall vs a 0.5 s budget). "

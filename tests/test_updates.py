@@ -531,14 +531,14 @@ def _free_runner_workflow_tree(tmp_path):
     (wf / "tests.yml").write_text(
         "jobs:\n"
         "  test:\n"
-        "    name: Run tests (${{ matrix.slice }}/2)\n"
+        "    name: Run tests (${{ matrix.slice }}/3)\n"
         "    strategy:\n"
         "      matrix:\n"
-        "        slice: [1, 2]\n"
+        "        slice: [1, 2, 3]\n"
         "    steps:\n"
         "      - name: Run tests\n"
         "        env:\n"
-        "          NASTECH_TEST_SLICE: ${{ matrix.slice }}/2\n"
+        "          NASTECH_TEST_SLICE: ${{ matrix.slice }}/3\n"
         "          NASTECH_TEST_WORKERS: 8\n",
         encoding="utf-8",
     )
@@ -605,7 +605,7 @@ def test_free_runner_parallelism_stops_when_the_python_matrix_moves(tmp_path):
     candidate, wf = _free_runner_workflow_tree(tmp_path)
     path = wf / "tests.yml"
     path.write_text(
-        path.read_text(encoding="utf-8").replace("slice: [1, 2]", "slice: [1, 2, 3]"),
+        path.read_text(encoding="utf-8").replace("slice: [1, 2, 3]", "slice: [1, 2, 3, 4]"),
         encoding="utf-8",
     )
     with pytest.raises(FreeRunnerParallelismError, match="neither"):
@@ -6918,7 +6918,6 @@ def test_the_release_graph_contract_names_every_unsigned_desktop_leg(tmp_path):
     text = path.read_text(encoding="utf-8")
     assert _quoted_in(_UNSIGNED_LEG_LOOP, text) == {
         "candidates-darwin-arm64",
-        "candidates-darwin-x64",
         "candidates-win32-arm64",
         "candidates-win32-x64",
         "candidates-win32-bundle",
@@ -6944,10 +6943,11 @@ def test_fork_lane_release_default_set_and_its_test_agree(tmp_path):
     ``_reconcile_signing_gated_defaults`` writes the fork's ``DEFAULT`` and this
     rule writes the test that asserts it; the lists are hand-typed in separate
     constants, and what the test names is the lane table's own exclusions **plus**
-    whatever upstream already leaves opt-in -- so ``macos-intel`` belongs in the
-    test without appearing in the fork's ``not in`` line.  A lane added to one and
-    not the other goes red in the fork's release suite with nothing pointing at the
-    pairing.
+    whatever upstream already leaves opt-in and this fork does not add back.  At
+    this revision that second set is empty -- Termux is upstream's only opt-out and
+    the fork ships it -- so the two lists have to agree lane for lane.  A lane added
+    to one and not the other goes red in the fork's release suite with nothing
+    pointing at the pairing.
     """
     root, path = _lane_release_tree(tmp_path, _RELEASE_LANES_TESTS, _RELEASE_LANES_TESTS_EDITS)
     assert _reconcile_fork_lane_release_surface(str(root)) == [_RELEASE_LANES_TESTS]

@@ -777,7 +777,7 @@ CALLER_FIXTURE = Path(__file__).parent / "fixtures" / "unsigned_callers" / "stab
 
 
 def _caller_tree(tmp_path, body=None):
-    """A branded tree carrying upstream's six bundled-builder caller legs verbatim."""
+    """A branded tree carrying upstream's five bundled-builder caller legs verbatim."""
     dst = tmp_path / "branded"
     workflows = dst / ".github" / "workflows"
     workflows.mkdir(parents=True)
@@ -800,7 +800,7 @@ def test_the_store_lane_stays_out_until_partner_center_credentials_exist(lane_tr
     assert "windows-store" not in _default_of(lane_tree)
 
 
-# Upstream's own lane module, transcribed at 9b904dcc (see the fixture header).  The fork's
+# Upstream's own lane module, transcribed at 9302ba9e (see the fixture header).  The fork's
 # release tests assert exact lane and job sets, so they are checked against the code that
 # computes those sets rather than against a restatement of it: a lane policy change that
 # moves the skipped jobs moves these literals too, instead of going red only in the fork.
@@ -828,16 +828,19 @@ def _skipped_jobs(namespace: dict, lanes) -> set:
     return {job for job, does_run in runs.items() if not does_run}
 
 
-def test_the_fixture_default_skips_what_upstream_does_not_opt_in():
-    """A restated baseline would hide the fork's own change; this one cannot."""
+def test_the_fork_default_builds_every_package_and_skips_only_the_upgrade_arms():
+    """A restated baseline would hide the fork's own change; this one cannot.
+
+    Every candidate and every bundle is built, unsigned.  What leaves the default release is
+    the pair of arms that only make sense against a signed channel -- the transition install
+    and the packaged-app upgrade -- because this fork's channel has never carried a signed
+    package to upgrade from.
+    """
     namespace = _fork_lane_table()
 
     assert _skipped_jobs(namespace, namespace["DEFAULT"]) == {
-        "candidates-darwin-x64",
         "macos-packaged-arm64",
-        "macos-packaged-x64",
         "transitions-darwin-arm64",
-        "transitions-darwin-x64",
         "transitions-win32",
         "windows-packaged",
     }
@@ -885,13 +888,17 @@ def test_the_stable_release_test_names_exactly_the_jobs_the_fork_default_skips()
     assert _quoted_names(tail) == _skipped_jobs(namespace, namespace["DEFAULT"])
 
 
-def test_restoring_macos_intel_builds_only_its_candidate():
-    """The fork's lane test pairs the default set with ``off - {"candidates-darwin-x64"}``."""
-    namespace = _fork_lane_table()
-    default = _skipped_jobs(namespace, namespace["DEFAULT"])
-    with_intel = namespace["select"](with_=["macos-intel"])
+def test_opting_into_termux_adds_no_lane_to_the_fork_default():
+    """The fork's lane test claims ``--with termux`` is a no-op; Termux is already in DEFAULT.
 
-    assert _skipped_jobs(namespace, with_intel) == default - {"candidates-darwin-x64"}
+    Upstream leaves Termux opt-in, so its own ``select`` adds the lane.  This fork's default
+    turned it on, and the rewrite keeps upstream's ``default=False`` row -- so the opt-in has
+    to resolve to the same set, or the fork's release tests would assert a lane list the
+    engine's own default never produces.
+    """
+    namespace = _fork_lane_table()
+
+    assert namespace["select"](with_=["termux"]) == namespace["DEFAULT"]
 
 
 def test_a_full_lane_set_skips_nothing():
@@ -903,7 +910,8 @@ def test_a_full_lane_set_skips_nothing():
 def test_the_entrypoint_note_names_the_lanes_the_fork_leaves_out():
     """Upstream's "Not built:" line is a computed list, and the fork's test quotes it."""
     note = updates._RELEASE_ENTRYPOINT_TESTS_EDITS[0][1]
-    assert '"Not built: windows-store, macos-intel." in text' in note
+    assert '"Not built: windows-store." in text' in note
+    assert '"Not tested: smoke, upgrade" in text' in note
 
 
 def test_every_desktop_caller_leg_declares_the_build_unsigned(tmp_path):
@@ -912,9 +920,9 @@ def test_every_desktop_caller_leg_declares_the_build_unsigned(tmp_path):
     assert _callers(dst) is True
 
     text = (dst / updates._STABLE_RELEASE_WORKFLOW).read_text(encoding="utf-8")
-    # The two macOS legs never passed the input at all, and the three Windows legs passed
-    # it inverted (skip when the lane is *off*), so no leg shipped unsigned before this.
-    assert text.count("      skip-signed: true\n") == 5
+    # The macOS leg never passed the input at all, and the three Windows legs passed it
+    # inverted (skip when the lane is *off*), so no leg shipped unsigned before this.
+    assert text.count("      skip-signed: true\n") == 4
     assert "!fromJSON(needs.admit.outputs.lanes).windows }}" not in text
     # The Store leg is untouched: its lane stays off, so it still skips submission.
     store_leg = "      skip-store: ${{ !fromJSON(needs.admit.outputs.lanes)['windows-store'] }}\n"
@@ -933,11 +941,56 @@ def test_the_unsigned_caller_edits_are_written_once(tmp_path):
 
 def test_a_desktop_leg_that_moved_stops_the_sync(tmp_path):
     body = CALLER_FIXTURE.read_text(encoding="utf-8").replace(
-        "      jobs: darwin-x64\n", "      groups: darwin-x64\n"
+        "      jobs: darwin-arm64\n", "      groups: darwin-arm64\n"
     )
     dst = _caller_tree(tmp_path, body=body)
 
-    with pytest.raises(updates.UnsignedDesktopCallerError, match="darwin-x64"):
+    with pytest.raises(updates.UnsignedDesktopCallerError, match="darwin-arm64"):
+        _callers(dst)
+
+
+def test_a_leg_upstream_stopped_building_does_not_stop_the_sync(tmp_path):
+    """Retiring a whole job group is not a moved anchor: there is no leg left to declare.
+
+    Upstream dropped its Intel Mac candidate that way -- the caller line and every other
+    mention went together.  Treating that as a moved anchor would brick the next sync on a
+    job nobody runs, so the rule tells the two apart by whether the platform still appears.
+    """
+    fixture = CALLER_FIXTURE.read_text(encoding="utf-8")
+    retired = (fixture[: fixture.index("  candidates-win32-bundle:")]
+               + fixture[fixture.index("  candidates-termux:"):])
+    dst = _caller_tree(tmp_path, body=retired)
+
+    assert _callers(dst) is True
+
+    text = (dst / updates._STABLE_RELEASE_WORKFLOW).read_text(encoding="utf-8")
+    assert "win32-bundle" not in text
+    assert text.count("      skip-signed: true\n") == 3
+
+
+def test_a_caller_leg_this_rule_has_never_seen_stops_the_sync(tmp_path):
+    """A job group nobody has judged has to stop the sync, not pass through it silently."""
+    body = CALLER_FIXTURE.read_text(encoding="utf-8").replace(
+        "      jobs: termux\n", "      jobs: win32-universal\n"
+    )
+    dst = _caller_tree(tmp_path, body=body)
+
+    with pytest.raises(updates.UnsignedDesktopCallerError, match="does not know"):
+        _callers(dst)
+
+
+def test_a_release_that_builds_no_desktop_stops_the_sync(tmp_path):
+    """Every desktop leg gone, while the fork's own lane default still asks for them."""
+    leg = (
+        "jobs:\n"
+        "  candidates-termux:\n"
+        "    uses: ./.github/workflows/desktop-bundled-release.yml\n"
+        "    with:\n"
+        "      jobs: termux\n"
+    )
+    dst = _caller_tree(tmp_path, body=leg)
+
+    with pytest.raises(updates.UnsignedDesktopCallerError, match="no desktop job group"):
         _callers(dst)
 
 
