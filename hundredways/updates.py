@@ -5163,9 +5163,9 @@ _BUNDLED_UNSIGNED_LEGS_OLD_6 = """\
 _BUNDLED_UNSIGNED_LEGS_NEW_6 = """\
     needs: [validate, build-darwin-arm64, smoke-darwin-arm64]
     # The feed is what every installed app auto-updates from, so it may point at
-    # signed bytes only. The Windows publisher gets that from its smoke gates, which
-    # an unsigned MSIX cannot pass; a darwin smoke happily installs and runs an
-    # unsigned dmg, so here the guard belongs on the publication itself.
+    # signed bytes only. The Windows publisher gets this from its smoke gates,
+    # which an unsigned MSIX cannot install; a dmg runs unsigned, so the guard
+    # belongs on the publication itself.
     if: >-
       !cancelled() && inputs.build_commit == '' && inputs.channel == '' && inputs.upload_release == true
       && inputs.release-phase == ''
@@ -5397,7 +5397,7 @@ def _reconcile_desktop_release_leg_guards(dst: str) -> list[str]:
     one value, which is what :func:`_reconcile_github_pages_release_plane` rewrites in the
     nine files that carry it.
 
-    The unsigned-leg guards (fork PRs #192 and #199) make ``skip-signed`` decide *publication*,
+    The unsigned-leg guards (fork PRs #192 and #202) make ``skip-signed`` decide *publication*,
     never *production*: the Windows leg and the universal-bundle assembly drop upstream's
     signing precondition and build the bundled package unsigned the way the macOS legs always
     have, the architecture audit scans whatever the leg built, and only the recorders that read
@@ -5512,6 +5512,563 @@ def _reconcile_unsigned_darwin_build_env(dst: str) -> list[str]:
             "sync.")
     _reconcile_budget_write(dst, rel, text.replace(anchor, replacement))
     return [rel]
+
+
+_HANDOFF_MODULE_OLD_1 = """\
+from scripts.releases import r2
+from scripts.releases.semver import is_release_version
+"""
+_HANDOFF_MODULE_NEW_1 = '''\
+from scripts.releases import gh_transport, r2
+from scripts.releases.semver import is_release_version
+
+
+def store(public_base: str | None = None):
+    """Which store a handoff read or write goes through: R2 while it is configured, GitHub releases after.
+
+    A handoff key is identical in both, so nothing above this function changes.
+
+    Three signals, in order of authority. `RELEASE_HANDOFF_STORE` is the plane-wide
+    lever and pins a run so its staging and its fetching cannot disagree; every
+    workflow that both stages and fetches sets it. Then an explicit archive origin
+    names the store itself, because a public read needs no credential to survive and
+    can only come from the archive it points at. Finally the bucket decides: R2 stays
+    selected while it can be addressed at all, so an in-flight release is never
+    repointed mid-publish, and deleting it moves the plane.
+    """
+    chosen = os.environ.get("RELEASE_HANDOFF_STORE", "")
+    if chosen not in ("", "github", "r2"):
+        raise ValueError(f"Unknown release handoff store: {chosen}")
+    if chosen:
+        return gh_transport if chosen == "github" else r2
+    if public_base:
+        return gh_transport if gh_transport.owns_origin(public_base) else r2
+    return r2 if os.environ.get("CLOUDFLARE_R2_BUCKET") else gh_transport
+'''
+_HANDOFF_MODULE_OLD_2 = """\
+    key = channel_prefix(request) + receipt_name(name)
+    try:
+        if public_base is not None:
+            receipt = r2.read_public_receipt(public_base, key)
+"""
+_HANDOFF_MODULE_NEW_2 = """\
+    key = channel_prefix(request) + receipt_name(name)
+    try:
+        if public_base is not None:
+            receipt = store(public_base).read_public_receipt(public_base, key)
+"""
+_HANDOFF_MODULE_OLD_3 = """\
+            creds, base, bucket = r2.credentials()
+            text = r2.get_object(creds, base, bucket, key, r2.amz_timestamp())
+            if text is None:
+                raise MissingReceipt(f"Missing channel handoff: {name}")
+"""
+_HANDOFF_MODULE_NEW_3 = """\
+            creds, base, bucket = store().credentials()
+            text = store().get_object(creds, base, bucket, key, r2.amz_timestamp())
+            if text is None:
+                raise MissingReceipt(f"Missing channel handoff: {name}")
+"""
+_HANDOFF_MODULE_OLD_4 = """\
+        r2.put(tag=receipt.get("tag", ""), key=prefix + row["path"],
+"""
+_HANDOFF_MODULE_NEW_4 = """\
+        store().put(tag=receipt.get("tag", ""), key=prefix + row["path"],
+"""
+_HANDOFF_MODULE_OLD_5 = """\
+        r2.put(tag=receipt.get("tag", ""), key=prefix + file.name,
+"""
+_HANDOFF_MODULE_NEW_5 = """\
+        store().put(tag=receipt.get("tag", ""), key=prefix + file.name,
+"""
+_HANDOFF_MODULE_OLD_6 = """\
+        receipt = r2.read_public_receipt(public_base, key)
+    else:
+        creds, base, bucket = r2.credentials()
+        text = r2.get_object(creds, base, bucket, key, r2.amz_timestamp())
+"""
+_HANDOFF_MODULE_NEW_6 = """\
+        receipt = store(public_base).read_public_receipt(public_base, key)
+    else:
+        creds, base, bucket = store().credentials()
+        text = store().get_object(creds, base, bucket, key, r2.amz_timestamp())
+"""
+_HANDOFF_MODULE_OLD_7 = """\
+    key = r2.commit_key_for(commit, receipt_name(name))
+    try:
+        if public_base is not None:
+            receipt = r2.read_public_receipt(public_base, key)
+"""
+_HANDOFF_MODULE_NEW_7 = """\
+    key = r2.commit_key_for(commit, receipt_name(name))
+    try:
+        if public_base is not None:
+            receipt = store(public_base).read_public_receipt(public_base, key)
+"""
+_HANDOFF_MODULE_OLD_8 = """\
+            creds, base, bucket = r2.credentials()
+            text = r2.get_object(creds, base, bucket, key, r2.amz_timestamp())
+            if text is None:
+                raise MissingReceipt(f"Missing commit handoff: {name}")
+"""
+_HANDOFF_MODULE_NEW_8 = """\
+            creds, base, bucket = store().credentials()
+            text = store().get_object(creds, base, bucket, key, r2.amz_timestamp())
+            if text is None:
+                raise MissingReceipt(f"Missing commit handoff: {name}")
+"""
+_HANDOFF_MODULE_OLD_9 = """\
+    credentials = r2.credentials() if public_base is None else None
+"""
+_HANDOFF_MODULE_NEW_9 = """\
+    # One store decision for the whole fetch: the receipt that names the bytes and
+    # the bytes themselves must come from the same archive.
+    chosen = store(public_base)
+    credentials = chosen.credentials() if public_base is None else None
+"""
+_HANDOFF_MODULE_OLD_10 = """\
+            r2.download_object(creds, base, bucket, key,
+"""
+_HANDOFF_MODULE_NEW_10 = """\
+            chosen.download_object(creds, base, bucket, key,
+"""
+_HANDOFF_MODULE_OLD_11 = """\
+            r2.download_public_object(public_base, key, root / row["path"],
+"""
+_HANDOFF_MODULE_NEW_11 = """\
+            chosen.download_public_object(public_base, key, root / row["path"],
+"""
+_HANDOFF_MODULE_EDITS = (
+    (_HANDOFF_MODULE_OLD_1, _HANDOFF_MODULE_NEW_1),
+    (_HANDOFF_MODULE_OLD_2, _HANDOFF_MODULE_NEW_2),
+    (_HANDOFF_MODULE_OLD_3, _HANDOFF_MODULE_NEW_3),
+    (_HANDOFF_MODULE_OLD_4, _HANDOFF_MODULE_NEW_4),
+    (_HANDOFF_MODULE_OLD_5, _HANDOFF_MODULE_NEW_5),
+    (_HANDOFF_MODULE_OLD_6, _HANDOFF_MODULE_NEW_6),
+    (_HANDOFF_MODULE_OLD_7, _HANDOFF_MODULE_NEW_7),
+    (_HANDOFF_MODULE_OLD_8, _HANDOFF_MODULE_NEW_8),
+    (_HANDOFF_MODULE_OLD_9, _HANDOFF_MODULE_NEW_9),
+    (_HANDOFF_MODULE_OLD_10, _HANDOFF_MODULE_NEW_10),
+    (_HANDOFF_MODULE_OLD_11, _HANDOFF_MODULE_NEW_11),
+)
+
+_HANDOFF_SMOKE_WORKFLOW_OLD_1 = """\
+  RELEASE_CHANNEL_STORE: github
+
+"""
+_HANDOFF_SMOKE_WORKFLOW_NEW_1 = """\
+  RELEASE_CHANNEL_STORE: github
+  # The staged bytes this lane reads come from the same handoff plane the release
+  # legs wrote, so it must resolve to the same store. Draft release assets are not
+  # public, so a smoke fetch reads them with the job's own token -- which is why
+  # the fetch below carries no `--public-base`.
+  RELEASE_HANDOFF_STORE: github
+
+"""
+_HANDOFF_SMOKE_WORKFLOW_OLD_2 = """\
+    env: &smoke-env
+"""
+_HANDOFF_SMOKE_WORKFLOW_NEW_2 = """\
+    env: &smoke-env
+      GH_TOKEN: ${{ github.token }}
+"""
+_HANDOFF_SMOKE_WORKFLOW_OLD_3 = """\
+          python -m scripts.releases.handoff fetch --public-base "$PUBLIC_BASE" "${args[@]}" \\
+"""
+_HANDOFF_SMOKE_WORKFLOW_NEW_3 = """\
+          python -m scripts.releases.handoff fetch "${args[@]}" \\
+"""
+_HANDOFF_SMOKE_WORKFLOW_EDITS = (
+    (_HANDOFF_SMOKE_WORKFLOW_OLD_1, _HANDOFF_SMOKE_WORKFLOW_NEW_1),
+    (_HANDOFF_SMOKE_WORKFLOW_OLD_2, _HANDOFF_SMOKE_WORKFLOW_NEW_2),
+    (_HANDOFF_SMOKE_WORKFLOW_OLD_3, _HANDOFF_SMOKE_WORKFLOW_NEW_3),
+)
+
+_HANDOFF_BUNDLED_WORKFLOW_OLD_1 = """\
+  RELEASE_CHANNEL_STORE: github
+  RELEASE_CLAIM_TAG: ${{ inputs.claim-tag }}
+"""
+_HANDOFF_BUNDLED_WORKFLOW_NEW_1 = """\
+  RELEASE_CHANNEL_STORE: github
+  # The handoff plane (each leg's packages, blockmaps and receipts) is pinned the
+  # same way, so staging and fetching cannot disagree inside one run. Keys,
+  # receipts and write-once rules are identical in either store; without this pin
+  # the bucket still wins while it is configured.
+  RELEASE_HANDOFF_STORE: github
+  RELEASE_CLAIM_TAG: ${{ inputs.claim-tag }}
+"""
+_HANDOFF_BUNDLED_WORKFLOW_OLD_2 = """\
+    env: &win32-env
+"""
+_HANDOFF_BUNDLED_WORKFLOW_NEW_2 = """\
+    env: &win32-env
+      GH_TOKEN: ${{ github.token }}
+"""
+_HANDOFF_BUNDLED_WORKFLOW_OLD_3 = """\
+    env: &darwin-env
+"""
+_HANDOFF_BUNDLED_WORKFLOW_NEW_3 = """\
+    env: &darwin-env
+      GH_TOKEN: ${{ github.token }}
+"""
+_HANDOFF_BUNDLED_WORKFLOW_OLD_4 = """\
+      receipt-sha256: ${{ steps.receipt.outputs.receipt-sha256 }}
+    env:
+      CHANNEL_BUILD: ${{ needs.validate.outputs.channel-build }}
+"""
+_HANDOFF_BUNDLED_WORKFLOW_NEW_4 = """\
+      receipt-sha256: ${{ steps.receipt.outputs.receipt-sha256 }}
+    env:
+      # Staged handoff bytes live in release assets, so reading and writing them
+      # is an authenticated API call -- the run's own token, never a secret.
+      GH_TOKEN: ${{ github.token }}
+      CHANNEL_BUILD: ${{ needs.validate.outputs.channel-build }}
+"""
+_HANDOFF_BUNDLED_WORKFLOW_OLD_5 = """\
+      group: win32-updater-feed-canary
+      cancel-in-progress: false
+    env:
+"""
+_HANDOFF_BUNDLED_WORKFLOW_NEW_5 = """\
+      group: win32-updater-feed-canary
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+"""
+_HANDOFF_BUNDLED_WORKFLOW_OLD_6 = """\
+      group: darwin-updater-feed-${{ needs.validate.outputs.channel }}
+      cancel-in-progress: false
+    env:
+"""
+_HANDOFF_BUNDLED_WORKFLOW_NEW_6 = """\
+      group: darwin-updater-feed-${{ needs.validate.outputs.channel }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+"""
+_HANDOFF_BUNDLED_WORKFLOW_EDITS = (
+    (_HANDOFF_BUNDLED_WORKFLOW_OLD_1, _HANDOFF_BUNDLED_WORKFLOW_NEW_1),
+    (_HANDOFF_BUNDLED_WORKFLOW_OLD_2, _HANDOFF_BUNDLED_WORKFLOW_NEW_2),
+    (_HANDOFF_BUNDLED_WORKFLOW_OLD_3, _HANDOFF_BUNDLED_WORKFLOW_NEW_3),
+    (_HANDOFF_BUNDLED_WORKFLOW_OLD_4, _HANDOFF_BUNDLED_WORKFLOW_NEW_4),
+    (_HANDOFF_BUNDLED_WORKFLOW_OLD_5, _HANDOFF_BUNDLED_WORKFLOW_NEW_5),
+    (_HANDOFF_BUNDLED_WORKFLOW_OLD_6, _HANDOFF_BUNDLED_WORKFLOW_NEW_6),
+)
+
+_HANDOFF_STAGING_TEST_OLD_1 = """\
+from tests.ci.desktop_release_roles import (
+"""
+_HANDOFF_STAGING_TEST_NEW_1 = """\
+from tests.ci import gh_release_store
+from tests.ci.desktop_release_roles import (
+"""
+_HANDOFF_STAGING_TEST_OLD_2 = """\
+def shell_step(tmp_path, r2_server, job, name, env, *, script=None):
+"""
+_HANDOFF_STAGING_TEST_NEW_2 = """\
+def shell_step(tmp_path, object_store, job, name, env, *, script=None, store=None):
+"""
+_HANDOFF_STAGING_TEST_OLD_3 = """\
+    driver = helper / 'python-driver.py'
+    driver.write_text(
+"""
+_HANDOFF_STAGING_TEST_NEW_3 = """\
+    if store is not None:
+        # The release store is reached the way production reaches it: as a `gh` on
+        # PATH, so the step script itself is unchanged by which store it lands on.
+        gh_release_store.install_shim(helper)
+        env = {**env, **store.env()}
+    driver = helper / 'python-driver.py'
+    # A step that talks to the release store has no object endpoint to redirect.
+    redirect = ('' if object_store is None else
+                f'r2.s3_endpoint=lambda _: "http://127.0.0.1:{object_store.server_port}"\\n')
+    driver.write_text(
+"""
+_HANDOFF_STAGING_TEST_OLD_4 = """\
+        f'r2.s3_endpoint=lambda _: "http://127.0.0.1:{r2_server.server_port}"\\n'
+"""
+_HANDOFF_STAGING_TEST_NEW_4 = """\
+        f'{redirect}'
+"""
+_HANDOFF_STAGING_TEST_EDITS = (
+    (_HANDOFF_STAGING_TEST_OLD_1, _HANDOFF_STAGING_TEST_NEW_1),
+    (_HANDOFF_STAGING_TEST_OLD_2, _HANDOFF_STAGING_TEST_NEW_2),
+    (_HANDOFF_STAGING_TEST_OLD_3, _HANDOFF_STAGING_TEST_NEW_3),
+    (_HANDOFF_STAGING_TEST_OLD_4, _HANDOFF_STAGING_TEST_NEW_4),
+)
+
+_HANDOFF_SMOKE_TEST_OLD_1 = '''\
+"""Replay artifact handoffs and publication against a fake R2."""
+'''
+_HANDOFF_SMOKE_TEST_NEW_1 = '''\
+"""Replay the artifact handoffs and publication a desktop release run performs.
+
+The legs that move packages between jobs are replayed against the release store (a fake
+`gh`, see `tests/ci/gh_release_store.py`); the legs that publish to the download origins
+still run against the fake object store, which is what a run with the bucket configured
+does today.
+"""
+'''
+_HANDOFF_SMOKE_TEST_OLD_2 = """\
+from tests.ci.desktop_release_roles import (
+"""
+_HANDOFF_SMOKE_TEST_NEW_2 = """\
+from tests.ci import gh_release_store
+from tests.ci.desktop_release_roles import (
+"""
+_HANDOFF_SMOKE_TEST_OLD_3 = """\
+@pytest.mark.parametrize('commit', [False, True])
+"""
+_HANDOFF_SMOKE_TEST_NEW_3 = '''\
+def handoff_env(tmp_path, store, *, commit=False):
+    """A smoke job's own environment against the release store: run token, no storage credential.
+
+    A staged package is a draft release asset, invisible to the world, so the fetch that
+    reads it is authenticated -- with the identity the runner already has. Everything the
+    bucket needed is emptied here, which is what makes that the tested property rather
+    than an unused credential sitting in the job.
+    """
+    return dict(store.env(), NASTECH_PAYLOAD_TAG='' if commit else TAG,
+                NASTECH_BUILD_COMMIT=SHA if commit else '',
+                RELEASE_TAG='' if commit else TAG, RELEASE_COMMIT=SHA, COMMIT_BUILD=str(commit).lower(),
+                PUBLIC_BASE='', CLOUDFLARE_R2_PUBLIC_URL='', CLOUDFLARE_R2_ACCOUNT_ID='',
+                CLOUDFLARE_R2_ACCESS_KEY_ID='', CLOUDFLARE_R2_SECRET_ACCESS_KEY='',
+                CLOUDFLARE_R2_BUCKET='', RELEASE_PHASE='',
+                SMOKE_ROOT=str(tmp_path / 'smoke'), GITHUB_OUTPUT=str(tmp_path / 'output'))
+
+
+@pytest.fixture
+def release_store(tmp_path):
+    return gh_release_store.ReleaseStore(tmp_path / 'gh')
+
+
+@pytest.mark.parametrize('commit', [False, True])
+'''
+_HANDOFF_SMOKE_TEST_OLD_4 = """\
+def test_public_smoke_fetches_the_receipt_bound_native_format(tmp_path, r2_server, commit, platform, fmt, arch):
+    env = transport_env(tmp_path, r2_server, commit=commit)
+"""
+_HANDOFF_SMOKE_TEST_NEW_4 = """\
+def test_smoke_fetches_the_receipt_bound_native_format(tmp_path, release_store, commit, platform, fmt, arch):
+    env = handoff_env(tmp_path, release_store, commit=commit)
+"""
+_HANDOFF_SMOKE_TEST_OLD_5 = """\
+    staged = shell_step(tmp_path, r2_server, '', '', {**env, 'TARGET': f'{platform}-{arch}'},
+                        script=stage_step(jobs[producer])['run'])
+"""
+_HANDOFF_SMOKE_TEST_NEW_5 = """\
+    staged = shell_step(tmp_path, None, '', '', {**env, 'TARGET': f'{platform}-{arch}'},
+                        script=stage_step(jobs[producer])['run'], store=release_store)
+"""
+_HANDOFF_SMOKE_TEST_OLD_6 = """\
+    assert all('/canary/' not in key for key in r2_server.store)
+"""
+_HANDOFF_SMOKE_TEST_NEW_6 = """\
+    assert all('/canary/' not in key for key in release_store.keys())
+"""
+_HANDOFF_SMOKE_TEST_OLD_7 = """\
+    # Deliberately remove every storage credential before executing public fetch.
+    public_env = {key: '' if key.startswith('CLOUDFLARE_') else value for key, value in env.items()}
+    public_env.update(PLATFORM=platform, ARCH=arch, FORMAT=fmt)
+    r2_server.requests.clear()
+    result = shell_step(tmp_path, r2_server, '', '', public_env, script=script)
+"""
+_HANDOFF_SMOKE_TEST_NEW_7 = """\
+    fetch_env = {**env, 'PLATFORM': platform, 'ARCH': arch, 'FORMAT': fmt}
+    before = len(release_store.calls())
+    result = shell_step(tmp_path, None, '', '', fetch_env, script=script, store=release_store)
+"""
+_HANDOFF_SMOKE_TEST_OLD_8 = """\
+    assert all(method == 'GET' and 'Authorization' not in headers for method, _, headers in r2_server.requests)
+"""
+_HANDOFF_SMOKE_TEST_NEW_8 = """\
+    # The fetch consulted the store, and consulted it as a reader: nothing was
+    # staged, replaced or deleted by a leg that only came for its package.
+    reads = release_store.calls()[before:]
+    assert reads, 'the smoke fetch never reached the release store'
+    assert all('-X' not in call for call in reads), reads
+"""
+_HANDOFF_SMOKE_TEST_OLD_9 = """\
+def test_download_faults_never_export_an_accepted_artifact(tmp_path, r2_server, fault):
+    env = transport_env(tmp_path, r2_server, commit=True)
+"""
+_HANDOFF_SMOKE_TEST_NEW_9 = """\
+def test_download_faults_never_export_an_accepted_artifact(tmp_path, release_store, fault):
+    env = handoff_env(tmp_path, release_store, commit=True)
+"""
+_HANDOFF_SMOKE_TEST_OLD_10 = """\
+    r2_server.store[prefix + filename] = (b'corrupted' if fault == 'corrupt' else payload, '"e"')
+"""
+_HANDOFF_SMOKE_TEST_NEW_10 = """\
+    release_store.seed(prefix + filename, b'corrupted' if fault == 'corrupt' else payload)
+"""
+_HANDOFF_SMOKE_TEST_OLD_11 = """\
+        r2_server.store[prefix + second] = (payload, '"e"')
+    r2_server.store[prefix + 'handoff-win32-x64.json'] = (json.dumps(receipt).encode(), '"e"')
+"""
+_HANDOFF_SMOKE_TEST_NEW_11 = """\
+        release_store.seed(prefix + second, payload)
+    release_store.seed(prefix + 'handoff-win32-x64.json', json.dumps(receipt).encode())
+"""
+_HANDOFF_SMOKE_TEST_OLD_12 = """\
+    result = shell_step(tmp_path, r2_server, '', '', {**env, 'PLATFORM': 'win32', 'ARCH': 'x64', 'FORMAT': 'msix'}, script=script)
+"""
+_HANDOFF_SMOKE_TEST_NEW_12 = """\
+    result = shell_step(tmp_path, None, '', '',
+                        {**env, 'PLATFORM': 'win32', 'ARCH': 'x64', 'FORMAT': 'msix'},
+                        script=script, store=release_store)
+"""
+_HANDOFF_SMOKE_TEST_OLD_13 = """\
+    assert not (tmp_path / 'smoke/out/download.json').exists()
+"""
+_HANDOFF_SMOKE_TEST_NEW_13 = """\
+    assert not (tmp_path / 'smoke/out/download.json').exists()
+
+
+def runs_handoff(step):
+    return 'scripts.releases.handoff' in (step.get('run') or '')
+
+
+def test_one_store_serves_the_whole_desktop_run():
+    jobs = _workflow()['jobs']
+    # Both halves of the plane that moves packages between jobs resolve the same store,
+    # from the workflow rather than per job: a leg that staged to one archive and a leg
+    # that fetched from another is a broken release, not a mismatched test.
+    assert _workflow()['env']['RELEASE_HANDOFF_STORE'] == 'github'
+    assert smoke_workflow()['env']['RELEASE_HANDOFF_STORE'] == 'github'
+    # A release-asset read is an authenticated call, and the runner's own token is the
+    # only credential it needs, so every leg that touches the handoff carries it.
+    for job in [name for name, job in jobs.items() if any(runs_handoff(s) for s in job.get('steps', []))]:
+        assert jobs[job].get('env', {}).get('GH_TOKEN'), job
+    # The staged bytes are draft assets, so the fetch that reads them names no public
+    # origin. (The channel request is a different plane and still arrives by URL.)
+    lines = smoke_fetch_script().splitlines()
+    start = next(index for index, text in enumerate(lines) if 'scripts.releases.handoff fetch' in text)
+    command = lines[start:start + 2]
+    assert not any('--public-base' in text for text in command), command
+"""
+_HANDOFF_SMOKE_TEST_EDITS = (
+    (_HANDOFF_SMOKE_TEST_OLD_1, _HANDOFF_SMOKE_TEST_NEW_1),
+    (_HANDOFF_SMOKE_TEST_OLD_2, _HANDOFF_SMOKE_TEST_NEW_2),
+    (_HANDOFF_SMOKE_TEST_OLD_3, _HANDOFF_SMOKE_TEST_NEW_3),
+    (_HANDOFF_SMOKE_TEST_OLD_4, _HANDOFF_SMOKE_TEST_NEW_4),
+    (_HANDOFF_SMOKE_TEST_OLD_5, _HANDOFF_SMOKE_TEST_NEW_5),
+    (_HANDOFF_SMOKE_TEST_OLD_6, _HANDOFF_SMOKE_TEST_NEW_6),
+    (_HANDOFF_SMOKE_TEST_OLD_7, _HANDOFF_SMOKE_TEST_NEW_7),
+    (_HANDOFF_SMOKE_TEST_OLD_8, _HANDOFF_SMOKE_TEST_NEW_8),
+    (_HANDOFF_SMOKE_TEST_OLD_9, _HANDOFF_SMOKE_TEST_NEW_9),
+    (_HANDOFF_SMOKE_TEST_OLD_10, _HANDOFF_SMOKE_TEST_NEW_10),
+    (_HANDOFF_SMOKE_TEST_OLD_11, _HANDOFF_SMOKE_TEST_NEW_11),
+    (_HANDOFF_SMOKE_TEST_OLD_12, _HANDOFF_SMOKE_TEST_NEW_12),
+    (_HANDOFF_SMOKE_TEST_OLD_13, _HANDOFF_SMOKE_TEST_NEW_13),
+)
+
+# Fork GitHub-native handoff plane: the store that moves artifacts between jobs.
+# Five upstream-owned files carry it -- the resolver, the two desktop release
+# workflows, and the two tests that replay the legs those workflows run -- so all
+# five are re-derived by ``brand_tree`` every candidate.
+
+_HANDOFF_MODULE_REL = "scripts/releases/handoff.py"
+_HANDOFF_SMOKE_WORKFLOW_REL = ".github/workflows/desktop-bundle-smoke.yml"
+_HANDOFF_STAGING_TEST_REL = "tests/ci/test_commit_build_staging.py"
+_HANDOFF_SMOKE_TEST_REL = "tests/ci/test_desktop_bundle_smoke.py"
+
+_HANDOFF_MODULE_MARKER = "def store(public_base: str | None = None):"
+_HANDOFF_WORKFLOW_MARKER = "  RELEASE_HANDOFF_STORE: github\n"
+_HANDOFF_STAGING_TEST_MARKER = (
+    "def shell_step(tmp_path, object_store, job, name, env, *, script=None, store=None):")
+_HANDOFF_SMOKE_TEST_MARKER = "def handoff_env(tmp_path, store, *, commit=False):"
+
+_HANDOFF_SURFACES = (
+    (_HANDOFF_MODULE_REL, _HANDOFF_MODULE_EDITS, _HANDOFF_MODULE_MARKER,
+     "the store resolver every handoff call site routes through"),
+    (_HANDOFF_SMOKE_WORKFLOW_REL, _HANDOFF_SMOKE_WORKFLOW_EDITS, _HANDOFF_WORKFLOW_MARKER,
+     "the smoke lane's handoff-store pin, job token, and credential-free fetch"),
+    (_BUNDLED_WORKFLOW_REL, _HANDOFF_BUNDLED_WORKFLOW_EDITS, _HANDOFF_WORKFLOW_MARKER,
+     "the release legs' handoff-store pin and per-job token"),
+    (_HANDOFF_STAGING_TEST_REL, _HANDOFF_STAGING_TEST_EDITS, _HANDOFF_STAGING_TEST_MARKER,
+     "the staging test's release-store shim"),
+    (_HANDOFF_SMOKE_TEST_REL, _HANDOFF_SMOKE_TEST_EDITS, _HANDOFF_SMOKE_TEST_MARKER,
+     "the smoke test's store-bound environment"),
+)
+
+
+class GitHubReleaseHandoffAnchorError(ValueError):
+    """The handoff plane moved, so the fork's GitHub-release store could not be re-applied."""
+
+
+def _reconcile_github_release_handoff_plane(dst: str) -> list[str]:
+    """Point the desktop release plane's handoff at GitHub releases instead of R2.
+
+    The handoff is the layer that moves built artifacts between jobs: a build leg stages a
+    package and a receipt under one key, a later leg fetches them by that same key.  The key
+    grammar is identical in both stores -- ``releases/tag/<tag>/…``, ``releases/commit/<sha>/…``,
+    channel, and ``ci-disposable/…`` -- and the release-store transport is the fork-only
+    ``scripts/releases/gh_transport.py`` plus the fake ``tests/ci/gh_release_store.py``, so
+    ``preserve_fork_files`` carries those and this rule carries only what ``brand_tree``
+    re-derives: the resolver inside upstream's ``scripts/releases/handoff.py``, both desktop
+    workflows, and the two tests that replay those legs.
+
+    ``handoff.store()`` resolves in three signals, in order of authority.
+    ``RELEASE_HANDOFF_STORE`` pins a whole run so a workflow's staging leg and its fetching leg
+    cannot disagree -- both desktop workflows set it at the top ``env``, which every job
+    inherits.  Next an explicit archive origin names the store itself, since a public read
+    needs no credential and can only come from the archive it points at.  Last the bucket
+    decides: R2 stays selected while it is addressable at all, so an in-flight release is
+    never repointed mid-publish, and deleting the bucket moves the plane.
+
+    One consequence of the store is not cosmetic and is why the workflows are part of this
+    table rather than left to the default: a staged package is a *draft* release asset, which
+    is not world-readable, so every leg that touches the handoff needs ``GH_TOKEN`` and the
+    smoke fetch must stop passing ``--public-base``.  The two tests follow the workflows
+    because a test that only ever redirects the R2 endpoint would keep passing while the
+    lane it describes could not reach the store CI actually pins -- the fork's own
+    no-fake-tests rule.  ``r2`` stays selectable for upstream carry; nothing here deletes an
+    R2 path or relaxes a check.
+
+    Order matters and is deliberate.  ``RELEASE_CHANNEL_STORE: github`` in the smoke workflow
+    is written by :func:`_reconcile_github_pages_release_plane`, and the unsigned-leg and flat
+    feed guards reshape the bundled workflow's ``env`` and recorder steps -- both run before
+    this rule, and their output is part of the text the anchors here were derived against.
+    It still runs before the prompt-surface snapshot, which counts characters in files these
+    edits rewrite.
+
+    A file carrying none of the pre-migration shapes is left alone: that is a candidate whose
+    tree does not have this part of the plane, or one that has already moved.  A file carrying
+    *some* of them but not all, or one that ends without its marker, raises
+    :class:`GitHubReleaseHandoffAnchorError`.  A silent return there would stage packages to
+    one archive and fetch them from another, which is a broken release rather than a red test.
+    """
+    fixed: list[str] = []
+    for rel, edits, marker, what in _HANDOFF_SURFACES:
+        text = _reconcile_budget_read(dst, rel)
+        if text is None:
+            continue
+        updated = text
+        if any(old in updated for old, _ in edits):
+            for old, new in edits:
+                if new in updated:
+                    continue
+                if updated.count(old) != 1:
+                    raise GitHubReleaseHandoffAnchorError(
+                        f"{rel} carries part of the handoff shapes this rule rewrites but not all "
+                        "of them. Upstream moved the handoff plane: re-derive the table against "
+                        "its current text. Do not drop the rule to get a green sync -- a leg that "
+                        "stages to one archive and fetches from another publishes a release whose "
+                        "packages nobody can download."
+                    )
+                updated = updated.replace(old, new, 1)
+        if marker not in updated:
+            raise GitHubReleaseHandoffAnchorError(
+                f"{rel} carries neither the shapes this rule rewrites nor {what}, so the plane "
+                "moved. Re-derive the table from the file's current text instead of dropping this "
+                "rule: without the pin a release run stages to the bucket it no longer has, and "
+                "without the token every draft-asset read 404s."
+            )
+        if updated != text:
+            _reconcile_budget_write(dst, rel, updated)
+            fixed.append(rel)
+    return fixed
 
 
 # The branded Python lane's slice job name is templated
@@ -8851,6 +9408,14 @@ def reconcile_tree(
     # unsigned-leg guards and the flat Termux feed.  After the Pages and APT
     # rules, whose files this workflow's new steps call into.
     for rel in _reconcile_desktop_release_leg_guards(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    # The handoff plane (fork PRs #203 and #204) is a fourth layer over the same
+    # workflow, plus the smoke lane, the resolver and the two tests.  After the
+    # leg guards: its first anchor in each workflow is the ``RELEASE_CHANNEL_STORE``
+    # line the Pages and leg rules write, so this table is derived against their
+    # output, not against the branded upstream text.
+    for rel in _reconcile_github_release_handoff_plane(dst):
         result.total += 1
         result.fixed.append(rel)
     # Prompt-surface LAST: it counts characters in the rendered prompts, and
