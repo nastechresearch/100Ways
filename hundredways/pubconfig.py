@@ -59,6 +59,7 @@ __all__ = [
     "UNGATED_CONSUMED",
     "LIVE_MISSING",
     "PublisherConfigurationError",
+    "OPTIONAL_SETTINGS",
     "CredentialReference",
     "CredentialGate",
     "ActionsInventory",
@@ -98,6 +99,16 @@ CREDENTIAL_CONTEXTS = ("secrets", "vars")
 # ``GH_TOKEN`` is the fork's name for a PAT the workflow may or may not use.  Both
 # would otherwise appear in every report forever.
 _IGNORED_NAMES = frozenset({"GITHUB_TOKEN", "GH_TOKEN"})
+
+# A lane setting whose *absence* is the documented behaviour rather than a gap.  An
+# unset ``MS_STORE_HOLD`` commits the Store submission Immediate; setting it to
+# ``true`` is what holds one back for ``Publish now`` (upstream ``d6c98faab``,
+# 2026-11-03).  Reporting it would tell the owner to configure something that is
+# correct as it stands, and gating it would refuse every run that auto-publishes.
+# Only a ``vars.`` read is exempt: a name reached through ``secrets.`` is a
+# credential, and if upstream ever moves this one there, the report carries it again
+# instead of quietly excusing an empty secret.
+OPTIONAL_SETTINGS = frozenset({"MS_STORE_HOLD"})
 
 # GitHub's own shape rule for an Actions secret or variable name.  Used to keep a
 # stray stdout line out of the inventory, not to judge whether a name is real.
@@ -320,6 +331,9 @@ def workflow_references(
     at ``#`` cannot be done safely inside ``${{ }}`` or a quoted shell string, and a
     name named only in prose is harmless, since it is reported as a reference the
     owner can check in one second.
+
+    :data:`OPTIONAL_SETTINGS` reads are dropped, because a name whose unset value is
+    the lane's documented default has no verdict worth acting on.
     """
     found: dict[tuple[str, str, str], CredentialReference] = {}
     for job, start, _end, guard in _job_blocks(workflow_text):
@@ -330,6 +344,8 @@ def workflow_references(
             kind = match.group("kind")
             name = match.group("name")
             if name in _IGNORED_NAMES:
+                continue
+            if name in OPTIONAL_SETTINGS and kind == "vars":
                 continue
             line = offset + body[: match.start()].count("\n")
             key = (name, job, environment)
