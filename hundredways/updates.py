@@ -4888,6 +4888,441 @@ def _reconcile_github_pages_release_plane(dst: str) -> list[str]:
     return fixed
 
 
+# Fork desktop release legs: the Pages control plane, the unsigned-leg guards
+# and the flat Termux feed, all in one upstream-owned workflow.
+
+_BUNDLED_WORKFLOW_REL = ".github/workflows/desktop-bundled-release.yml"
+_BUNDLED_CHANNEL_STORE_OLD_1 = """\
+  R2_DISPOSABLE_RUN: ${{ inputs.disposable_run || (inputs.disposable_channel != '' && github.run_id) || '' }}
+  RELEASE_CLAIM_TAG: ${{ inputs.claim-tag }}
+"""
+_BUNDLED_CHANNEL_STORE_NEW_1 = """\
+  R2_DISPOSABLE_RUN: ${{ inputs.disposable_run || (inputs.disposable_channel != '' && github.run_id) || '' }}
+  # The control plane (channels, feeds, pages, APT indexes) is GitHub-native:
+  # scripts/releases/ghpages.py commits records to this repository tree and
+  # Deploy Site publishes them; the workers.dev origin is retired.
+  RELEASE_CHANNEL_STORE: github
+  RELEASE_CLAIM_TAG: ${{ inputs.claim-tag }}
+"""
+_BUNDLED_UNSIGNED_LEGS_OLD_1 = """\
+          key: ${{ steps.payload-signatures.outputs.cache-primary-key }}
+
+      - name: Audit bundle architecture
+        shell: bash
+        run: |
+          MATRIX_LABEL="${{ matrix.target.label }}"
+"""
+_BUNDLED_UNSIGNED_LEGS_NEW_1 = """\
+          key: ${{ steps.payload-signatures.outputs.cache-primary-key }}
+
+      - name: Audit bundle architecture
+        # Audit exactly the bytes this leg built, and never fewer: the leg builds no
+        # bundle at all when 'Build and package' skips both variants, which is where a
+        # skip-signed Windows leg stops -- there is no release directory to scan, so an
+        # unconditional audit only crashes on a missing root. The Store variant is built
+        # independently of signing, so a skip-signed leg that built it is still audited.
+        if: >-
+          inputs.skip-signed != true
+          || (inputs.skip-store != true && env.CHANNEL_BUILD == '' && env.NASTECH_BUILD_COMMIT == ''
+              && !contains(env.NASTECH_PAYLOAD_TAG, '+canary.'))
+        # A wedged runner must fail this step, not hold the release for the
+        # job's whole budget: measured 2026-10-29, the step sat 'running' for
+        # 113 minutes on a tree that audits in 14 seconds locally.
+        timeout-minutes: 25
+        shell: bash
+        run: |
+          MATRIX_LABEL="${{ matrix.target.label }}"
+"""
+_BUNDLED_UNSIGNED_LEGS_OLD_2 = (
+    '        run: |\n'
+    '          root="$GITHUB_WORKSPACE/apps/desktop/release"\n'
+    '          python -m scripts.bundles.release_artifacts record --platform windows --arch "${TARGET##*-}" \\\n'
+    '            --root "$root" --commit "$RELEASE_COMMIT" --channel-request "$RUNNER_TEMP/channel-request.json" \\\n'
+    '            --out "$root/metadata-windows-${TARGET##*-}.json"\n'
+    '          python -m scripts.releases.handoff stage --channel-request "$RUNNER_TEMP/channel-request.json" \\\n'
+    '            --name "$TARGET" --root "$root" --include \'*.msix\' --include \'metadata-*.json\'\n'
+)
+_BUNDLED_UNSIGNED_LEGS_NEW_2 = (
+    '          SKIP_SIGNED: ${{ inputs.skip-signed }}\n'
+    '        run: |\n'
+    '          root="$GITHUB_WORKSPACE/apps/desktop/release"\n'
+    "          args=(--include '*.msix')\n"
+    '          # The row reads the Authenticode-bound MSIX identity out of the signed\n'
+    '          # package, so an unsigned channel leg stages its bytes and writes no row.\n'
+    '          if [ "$SKIP_SIGNED" != true ]; then\n'
+    '            python -m scripts.bundles.release_artifacts record --platform windows --arch "${TARGET##*-}" \\\n'
+    '              --root "$root" --commit "$RELEASE_COMMIT" --channel-request "$RUNNER_TEMP/channel-request.json" \\\n'
+    '              --out "$root/metadata-windows-${TARGET##*-}.json"\n'
+    "            args+=(--include 'metadata-*.json')\n"
+    '          fi\n'
+    '          python -m scripts.releases.handoff stage --channel-request "$RUNNER_TEMP/channel-request.json" \\\n'
+    '            --name "$TARGET" --root "$root" "${args[@]}"\n'
+)
+_BUNDLED_UNSIGNED_LEGS_OLD_3 = (
+    '        run: |\n'
+    '          root="$GITHUB_WORKSPACE/apps/desktop/release"\n'
+    '          python -m scripts.bundles.release_artifacts record --platform macos --arch "${TARGET##*-}" \\\n'
+    '            --root "$root" --commit "$RELEASE_COMMIT" --channel-request "$RUNNER_TEMP/channel-request.json" \\\n'
+    '            --out "$root/metadata-macos-${TARGET##*-}.json"\n'
+    '          python -m scripts.releases.handoff stage --channel-request "$RUNNER_TEMP/channel-request.json" \\\n'
+    '            --name "$TARGET" --root "$root" --include \'*.dmg\' --include \'*.zip\' --include \'*.blockmap\' --include \'metadata-*.json\'\n'
+)
+_BUNDLED_UNSIGNED_LEGS_NEW_3 = (
+    '          SKIP_SIGNED: ${{ inputs.skip-signed }}\n'
+    '        run: |\n'
+    '          root="$GITHUB_WORKSPACE/apps/desktop/release"\n'
+    "          args=(--include '*.dmg' --include '*.zip' --include '*.blockmap')\n"
+    '          # Same contract as the tag branch below: the row records a Developer ID\n'
+    '          # team read out of the notarized signature, so an unsigned channel leg\n'
+    '          # stages its bytes and writes no row.\n'
+    '          if [ "$SKIP_SIGNED" != true ]; then\n'
+    '            python -m scripts.bundles.release_artifacts record --platform macos --arch "${TARGET##*-}" \\\n'
+    '              --root "$root" --commit "$RELEASE_COMMIT" --channel-request "$RUNNER_TEMP/channel-request.json" \\\n'
+    '              --out "$root/metadata-macos-${TARGET##*-}.json"\n'
+    "            args+=(--include 'metadata-*.json')\n"
+    '          fi\n'
+    '          python -m scripts.releases.handoff stage --channel-request "$RUNNER_TEMP/channel-request.json" \\\n'
+    '            --name "$TARGET" --root "$root" "${args[@]}"\n'
+)
+_BUNDLED_UNSIGNED_LEGS_OLD_4 = """\
+        # Per-arch feed inputs stay in the tag archive until both legs pass.
+        run: |
+          args=(--include '*.dmg' --include '*.zip' --include '*.blockmap' --include '*-mac.yml')
+          if [ "$RELEASE_PHASE" = candidate ] || { [ "$NASTECH_DESKTOP_VARIANT" = bundled ] && [[ "$NASTECH_PAYLOAD_TAG" == *+canary.* ]]; }; then
+"""
+_BUNDLED_UNSIGNED_LEGS_NEW_4 = """\
+          SKIP_SIGNED: ${{ inputs.skip-signed }}
+        # Per-arch feed inputs stay in the tag archive until both legs pass.
+        run: |
+          args=(--include '*.dmg' --include '*.zip' --include '*.blockmap' --include '*-mac.yml')
+          # The recorder reads the Developer ID signature an unsigned build cannot
+          # carry, so an unsigned leg writes no release row, exactly as the Windows
+          # leg refuses to describe bytes it did not Authenticode-sign.
+          if [ "$SKIP_SIGNED" != true ] && { [ "$RELEASE_PHASE" = candidate ] || { [ "$NASTECH_DESKTOP_VARIANT" = bundled ] && [[ "$NASTECH_PAYLOAD_TAG" == *+canary.* ]]; }; }; then
+"""
+_BUNDLED_UNSIGNED_LEGS_OLD_5 = """\
+    needs: [validate, build-darwin-arm64]
+    if: >-
+      !cancelled() && inputs.release-phase == 'candidate'
+      && needs.validate.result == 'success' && needs.validate.outputs.sha != ''
+"""
+_BUNDLED_UNSIGNED_LEGS_NEW_5 = """\
+    needs: [validate, build-darwin-arm64]
+    # A receipt is assembled from the recorder's signed-release rows, and a handoff
+    # fetch that matches nothing returns nothing: an unsigned leg writes no row (see
+    # 'Record and stage channel macos packages'), so its receipt would record zero
+    # packages. Same rule the win32-bundle receipt already follows.
+    if: >-
+      !cancelled() && inputs.release-phase == 'candidate'
+      && inputs.skip-signed != true
+      && needs.validate.result == 'success' && needs.validate.outputs.sha != ''
+"""
+_BUNDLED_UNSIGNED_LEGS_OLD_6 = """\
+    if: >-
+      !cancelled() && inputs.release-phase == 'candidate'
+      && needs.validate.result == 'success' && needs.validate.outputs.sha != ''
+      && needs.validate.outputs.darwin-x64 == 'true'
+"""
+_BUNDLED_UNSIGNED_LEGS_NEW_6 = """\
+    if: >-
+      !cancelled() && inputs.release-phase == 'candidate'
+      && inputs.skip-signed != true
+      && needs.validate.result == 'success' && needs.validate.outputs.sha != ''
+      && needs.validate.outputs.darwin-x64 == 'true'
+"""
+_BUNDLED_UNSIGNED_LEGS_OLD_7 = """\
+    needs: [validate, build-darwin-arm64, build-darwin-x64, smoke-darwin-arm64, smoke-darwin-x64]
+    if: >-
+      !cancelled() && inputs.build_commit == '' && inputs.channel == '' && inputs.upload_release == true
+      && inputs.release-phase == ''
+      && needs.validate.outputs.darwin-arm64 == 'true' && needs.validate.outputs.darwin-x64 == 'true'
+"""
+_BUNDLED_UNSIGNED_LEGS_NEW_7 = """\
+    needs: [validate, build-darwin-arm64, build-darwin-x64, smoke-darwin-arm64, smoke-darwin-x64]
+    # The feed is what every installed app auto-updates from, so it may point at
+    # signed bytes only. The Windows publisher gets this from its smoke gates,
+    # which an unsigned MSIX cannot install; a dmg runs unsigned, so the guard
+    # belongs on the publication itself.
+    if: >-
+      !cancelled() && inputs.build_commit == '' && inputs.channel == '' && inputs.upload_release == true
+      && inputs.release-phase == ''
+      && inputs.skip-signed != true
+      && needs.validate.outputs.darwin-arm64 == 'true' && needs.validate.outputs.darwin-x64 == 'true'
+"""
+_BUNDLED_APT_FEED_OLD_1 = """\
+      - name: Stage the APT repo and publish to R2
+"""
+_BUNDLED_APT_FEED_NEW_1 = """\
+      - name: Stage the APT repo and publish the feed release
+"""
+_BUNDLED_APT_FEED_OLD_2 = """\
+          TERMUX_APT_GPG_PASSPHRASE: ${{ secrets.TERMUX_APT_GPG_PASSPHRASE }}
+        run: |
+"""
+_BUNDLED_APT_FEED_NEW_2 = """\
+          TERMUX_APT_GPG_PASSPHRASE: ${{ secrets.TERMUX_APT_GPG_PASSPHRASE }}
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+        run: |
+"""
+_BUNDLED_APT_FEED_OLD_3 = """\
+
+          debs=(termux-build/deb/*.deb)
+"""
+_BUNDLED_APT_FEED_NEW_3 = (
+    '\n'
+    '          # A release asset name is one path component, so the feed is published\n'
+    '          # FLAT: dists/<suite>/ and pool/ cannot exist as assets. Flattening\n'
+    '          # rewrites every path the signed Release describes, so the flat Release\n'
+    '          # is rebuilt and RE-SIGNED with the same key -- an unsigned feed would\n'
+    '          # need `[trusted=yes]` to install, which throws the signature away.\n'
+    '          python3 -m scripts.termux.release_apt flatten \\\n'
+    '            --staged termux-build/apt --out termux-build/apt-flat \\\n'
+    '            --gpg-key-file "$RUNNER_TEMP/termux-apt-gpg.asc"\n'
+    '\n'
+    '          debs=(termux-build/deb/*.deb)\n'
+)
+_BUNDLED_APT_FEED_OLD_4 = (
+    '          docker run --rm --platform linux/arm64 --user 1000:1000 --network none \\\n'
+    '            -v "$PWD/termux-build/apt:/apt:ro" \\\n'
+    '            -v "$PWD/scripts/termux/check_apt.sh:/tmp/check-apt.sh:ro" \\\n'
+    '            -v "$PWD/scripts/termux/validate_installed.py:/tmp/validate_installed.py:ro" \\\n'
+    '            "termux/termux-docker@$digest" bash /tmp/check-apt.sh "nastech-$CHANNEL" "$version"\n'
+)
+_BUNDLED_APT_FEED_NEW_4 = (
+    '          # Both apt proofs mount the FLAT tree, so what CI verifies is the bytes\n'
+    '          # a phone downloads and not the staged layout a phone never sees.\n'
+    '          docker run --rm --platform linux/arm64 --user 1000:1000 --network none \\\n'
+    '            -v "$PWD/termux-build/apt-flat:/apt:ro" \\\n'
+    '            -v "$PWD/scripts/termux/check_apt.sh:/tmp/check-apt.sh:ro" \\\n'
+    '            -v "$PWD/scripts/termux/validate_installed.py:/tmp/validate_installed.py:ro" \\\n'
+    '            "termux/termux-docker@$digest" bash /tmp/check-apt.sh "nastech-$CHANNEL" "$version" file:/apt\n'
+)
+_BUNDLED_APT_FEED_OLD_5 = (
+    '              -v "$PWD/termux-build/apt:/apt:ro" \\\n'
+    '              -v "$PWD/${previous[0]}:/previous.deb:ro" \\\n'
+    '              -v "$PWD/scripts/termux/check_apt.sh:/tmp/check-apt.sh:ro" \\\n'
+    '              -v "$PWD/scripts/termux/validate_installed.py:/tmp/validate_installed.py:ro" \\\n'
+    '              "termux/termux-docker@$digest" bash /tmp/check-apt.sh "nastech-$CHANNEL" "$version"\n'
+    '          fi\n'
+    '\n'
+    "          args=(--include 'deb/*.deb' --include 'apt/**/*')\n"
+)
+_BUNDLED_APT_FEED_NEW_5 = (
+    '              -v "$PWD/termux-build/apt-flat:/apt:ro" \\\n'
+    '              -v "$PWD/${previous[0]}:/previous.deb:ro" \\\n'
+    '              -v "$PWD/scripts/termux/check_apt.sh:/tmp/check-apt.sh:ro" \\\n'
+    '              -v "$PWD/scripts/termux/validate_installed.py:/tmp/validate_installed.py:ro" \\\n'
+    '              "termux/termux-docker@$digest" bash /tmp/check-apt.sh "nastech-$CHANNEL" "$version" file:/apt\n'
+    '          fi\n'
+    '\n'
+    "          args=(--include 'deb/*.deb')\n"
+)
+_BUNDLED_APT_FEED_OLD_6 = """\
+              --out termux-build/metadata-termux-aarch64.json
+            args+=(--include 'metadata-*.json')
+          fi
+"""
+_BUNDLED_APT_FEED_NEW_6 = """\
+              --out termux-build/metadata-termux-aarch64.json
+            # A candidate still hands its staged tree to the tag archive, because
+            # the sequencer's `advance_termux_apt` reads the signed index from
+            # there; a claim ref is written by exactly one run, so the immutable
+            # put round-trips. The published feed itself never comes from R2.
+            args+=(--include 'apt/**/*' --include 'metadata-*.json')
+          fi
+"""
+_BUNDLED_APT_FEED_OLD_7 = (
+    '          # --key-is-full is MANDATORY on every feed-dir upload: without it\n'
+    '          # scripts.releases.r2 re-prefixes the key into the tag archive\n'
+    '          # (releases/tag/<tag>/) and the APT feed never lands at\n'
+    '          # releases/termux/<channel>/.\n'
+    '          shopt -s globstar nullglob\n'
+    '          # cd into the staged repo for the glob, but resolve the r2 client\n'
+    '          # absolutely first -- after the cd, scripts/ is no longer in the\n'
+    '          # cwd and a bare `python -m scripts.releases.r2` would ENOENT.\n'
+    '          export PYTHONPATH="$GITHUB_WORKSPACE"\n'
+    '          cd termux-build/apt\n'
+    '          files=(pool/**/*.deb "dists/nastech-$CHANNEL"/main/binary-aarch64/by-hash/*/* key.asc\n'
+    '                 "dists/nastech-$CHANNEL/main/binary-aarch64/Packages"\n'
+    '                 "dists/nastech-$CHANNEL/main/binary-aarch64/Packages.gz"\n'
+    '                 "dists/nastech-$CHANNEL/Release"\n'
+    '                 "dists/nastech-$CHANNEL/Release.gpg"\n'
+    '                 "dists/nastech-$CHANNEL/InRelease")\n'
+    '          # APT reads InRelease first. Publish it only after every referenced\n'
+    '          # index and package has been uploaded and read back successfully.\n'
+    '          for f in "${files[@]}"; do\n'
+    '            test -f "$f"\n'
+    '            python3 -m scripts.releases.r2 put \\\n'
+    '              --tag "$NASTECH_PAYLOAD_TAG" \\\n'
+    '              --key "releases/termux/$CHANNEL/$f" \\\n'
+    '              --file "$f" \\\n'
+    '              --key-is-full\n'
+    '          done\n'
+    '\n'
+    '          # Verify the public CDN path, not only the object-store origin.\n'
+    '          public_repo="${CLOUDFLARE_R2_PUBLIC_URL%/}/releases/termux/$CHANNEL"\n'
+    '          curl --fail --silent --show-error "$public_repo/key.asc" -o "$RUNNER_TEMP/termux-public-key.asc"\n'
+    '          cmp key.asc "$RUNNER_TEMP/termux-public-key.asc"\n'
+    '          docker run --rm --platform linux/arm64 --user 1000:1000 \\\n'
+    '            -v "$PWD:/apt:ro" \\\n'
+    '            -v "$GITHUB_WORKSPACE/scripts/termux/check_apt.sh:/tmp/check-apt.sh:ro" \\\n'
+    '            -v "$GITHUB_WORKSPACE/scripts/termux/validate_installed.py:/tmp/validate_installed.py:ro" \\\n'
+    '            "termux/termux-docker@$digest" bash /tmp/check-apt.sh "nastech-$CHANNEL" "$version" "$public_repo"\n'
+)
+_BUNDLED_APT_FEED_NEW_7 = (
+    '\n'
+    "          # The feed is this channel's own fixed-tag release. apt needs a base URL\n"
+    '          # that does not move, and a mutable index cannot live in an object store\n'
+    '          # that promises "same key, same bytes" -- which is the 412 that killed\n'
+    '          # the R2 publish for every canary re-dispatched under one tag.\n'
+    '          report=$(python3 -m scripts.termux.release_apt publish \\\n'
+    '            --repo-dir termux-build/apt-flat --repository "$GITHUB_REPOSITORY" --channel "$CHANNEL")\n'
+    '          echo "$report"\n'
+    '          feed_tag=$(printf \'%s\' "$report" | python3 -c \'import json,sys; print(json.load(sys.stdin)["tag"])\')\n'
+    '          feed="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$feed_tag"\n'
+    '\n'
+    '          # Read the public feed back before calling the publish good. A REPLACED\n'
+    '          # asset keeps serving the previous bytes for a while (measured on this\n'
+    '          # repository) while a name published for the first time is visible at\n'
+    '          # once, so only the fixed-name index lags -- and a lagging index still\n'
+    '          # names packages that exist, which is why waiting here is correctness\n'
+    '          # and not a retry of a failure.\n'
+    '          for f in key.asc Packages Packages.gz Release InRelease; do\n'
+    '            deadline=$((SECONDS + 600))\n'
+    '            until curl --fail --silent --show-error --location "$feed/./$f" \\\n'
+    '                   -o "$RUNNER_TEMP/public-$f" &&\n'
+    '                  cmp -s "termux-build/apt-flat/$f" "$RUNNER_TEMP/public-$f"; do\n'
+    '              if [ "$SECONDS" -ge "$deadline" ]; then\n'
+    '                echo "::error::$feed/./$f still serves different bytes after 600s"\n'
+    '                exit 1\n'
+    '              fi\n'
+    '              sleep 15\n'
+    '            done\n'
+    '          done\n'
+    '\n'
+    '          # Every package the published index advertises has to answer: an index\n'
+    '          # naming a file the tag does not hold is the exact failure this\n'
+    '          # migration exists to end.\n'
+    '          while IFS= read -r name; do\n'
+    '            curl --fail --silent --show-error --location --head "$feed/./$name" -o /dev/null\n'
+    '          done < <(sed -n \'s/^Filename: //p\' "$RUNNER_TEMP/public-Packages")\n'
+    '\n'
+    '          docker run --rm --platform linux/arm64 --user 1000:1000 \\\n'
+    '            -v "$PWD/termux-build/apt-flat:/apt:ro" \\\n'
+    '            -v "$GITHUB_WORKSPACE/scripts/termux/check_apt.sh:/tmp/check-apt.sh:ro" \\\n'
+    '            -v "$GITHUB_WORKSPACE/scripts/termux/validate_installed.py:/tmp/validate_installed.py:ro" \\\n'
+    '            "termux/termux-docker@$digest" bash /tmp/check-apt.sh "nastech-$CHANNEL" "$version" "$feed"\n'
+)
+
+_BUNDLED_WORKFLOW_EDITS = (
+    (_BUNDLED_CHANNEL_STORE_OLD_1, _BUNDLED_CHANNEL_STORE_NEW_1),
+    (_BUNDLED_UNSIGNED_LEGS_OLD_1, _BUNDLED_UNSIGNED_LEGS_NEW_1),
+    (_BUNDLED_UNSIGNED_LEGS_OLD_2, _BUNDLED_UNSIGNED_LEGS_NEW_2),
+    (_BUNDLED_UNSIGNED_LEGS_OLD_3, _BUNDLED_UNSIGNED_LEGS_NEW_3),
+    (_BUNDLED_UNSIGNED_LEGS_OLD_4, _BUNDLED_UNSIGNED_LEGS_NEW_4),
+    (_BUNDLED_UNSIGNED_LEGS_OLD_5, _BUNDLED_UNSIGNED_LEGS_NEW_5),
+    (_BUNDLED_UNSIGNED_LEGS_OLD_6, _BUNDLED_UNSIGNED_LEGS_NEW_6),
+    (_BUNDLED_UNSIGNED_LEGS_OLD_7, _BUNDLED_UNSIGNED_LEGS_NEW_7),
+    (_BUNDLED_APT_FEED_OLD_1, _BUNDLED_APT_FEED_NEW_1),
+    (_BUNDLED_APT_FEED_OLD_2, _BUNDLED_APT_FEED_NEW_2),
+    (_BUNDLED_APT_FEED_OLD_3, _BUNDLED_APT_FEED_NEW_3),
+    (_BUNDLED_APT_FEED_OLD_4, _BUNDLED_APT_FEED_NEW_4),
+    (_BUNDLED_APT_FEED_OLD_5, _BUNDLED_APT_FEED_NEW_5),
+    (_BUNDLED_APT_FEED_OLD_6, _BUNDLED_APT_FEED_NEW_6),
+    (_BUNDLED_APT_FEED_OLD_7, _BUNDLED_APT_FEED_NEW_7),
+)
+
+_BUNDLED_STORE_MARKER = """\
+  RELEASE_CHANNEL_STORE: github
+"""
+
+_BUNDLED_UNSIGNED_MARKER = """\
+if [ "$SKIP_SIGNED" != true ]; then
+            python -m scripts.bundles.release_artifacts record"""
+
+_BUNDLED_FEED_MARKER = """\
+releases/download/$feed_tag"""
+
+_BUNDLED_LEG_MARKERS = (
+    ("the GitHub Pages control plane", _BUNDLED_STORE_MARKER),
+    ("the unsigned-leg recorder guards", _BUNDLED_UNSIGNED_MARKER),
+    ("the flat Termux feed publish", _BUNDLED_FEED_MARKER),
+)
+
+
+class DesktopReleaseLegAnchorError(ValueError):
+    """The desktop release workflow moved, so the fork's leg guards could not be re-applied."""
+
+
+def _reconcile_desktop_release_leg_guards(dst: str) -> list[str]:
+    """Keep the three fork-local layers on the desktop release workflow.
+
+    ``desktop-bundled-release.yml`` is upstream-owned, so ``brand_tree`` re-derives it every
+    candidate and each of the three fork PRs that touched it would vanish without a rule here.
+    They are one rule because they are one file's fork-local layer, and their hunks do not
+    overlap: the merged workflow is the three diffs applied in sequence, which the tests
+    reproduce byte for byte.
+
+    The Pages hand-off (fork PR #194) adds ``RELEASE_CHANNEL_STORE: github`` to the job
+    ``env``, because the control plane the leg publishes to -- channels, feeds, APT indexes --
+    is GitHub-native now; the reader and the publisher have to be pointed at the same store by
+    one value, which is what :func:`_reconcile_github_pages_release_plane` rewrites in the
+    nine files that carry it.
+
+    The unsigned-leg guards (fork PR #192) stop a ``skip-signed`` channel leg verifying and
+    recording what it never signed: the architecture audit is skipped when the leg built no
+    bundle at all, the Windows/macOS recorders run only for signed bytes (an ``.msix`` identity
+    is read out of the Authenticode signature and a release row records a Developer ID team, so
+    an unsigned build cannot produce either), and the darwin receipts and the updater feed stop
+    before pointing devices at unsigned packages.  Skipping a receipt is not a lost check: the
+    job would assemble a receipt from rows that were never written, and the handoff fetch that
+    matches nothing returns nothing, so an unsigned leg would publish a receipt for zero
+    packages.
+
+    The Termux feed (fork PR #195) replaces the R2 object-by-object upload with a flatten plus
+    ``scripts.termux.release_apt publish`` and a read-back of every asset the published
+    index advertises, then mounts the FLAT tree in all three checker runs so what CI verifies is
+    the bytes a phone downloads.  A release asset name is one path component, so the feed cannot
+    keep ``dists/<suite>/`` and ``pool/`` as assets -- see
+    :func:`_reconcile_termux_apt_flat_feed` for what that does to the source line.
+
+    Raises :class:`DesktopReleaseLegAnchorError` when the workflow is present but carries
+    neither the shapes this rule rewrites nor the three markers it writes: a silent return would
+    ship a leg that audits and records unsigned bytes as if they were signed.
+    """
+    rel = _BUNDLED_WORKFLOW_REL
+    text = _reconcile_budget_read(dst, rel)
+    if text is None:
+        return []
+    updated = text
+    if any(old in updated for old, _ in _BUNDLED_WORKFLOW_EDITS):
+        for old, new in _BUNDLED_WORKFLOW_EDITS:
+            if new in updated:
+                continue
+            if updated.count(old) != 1:
+                raise DesktopReleaseLegAnchorError(
+                    f"{rel} carries part of the release-leg shapes this rule rewrites but not all "
+                    "of them. Upstream moved the legs: re-derive the table from its current text. "
+                    "Do not drop the rule to get a green sync -- a half-applied workflow stages "
+                    "bytes no receipt describes and points the channel reader at a store the "
+                    "publisher never wrote."
+                )
+            updated = updated.replace(old, new, 1)
+    missing = [label for label, marker in _BUNDLED_LEG_MARKERS if marker not in updated]
+    if missing:
+        raise DesktopReleaseLegAnchorError(
+            f"{rel} carries neither the shapes this rule rewrites nor "
+            f"{', '.join(missing)}, so the workflow moved. Upstream restructured the release legs: "
+            "re-derive the table against its current text instead of dropping this rule -- without "
+            "them an unsigned channel leg records release rows it cannot have signed, and the "
+            "control plane is published to a store nothing reads back."
+        )
+    if updated == text:
+        return []
+    _reconcile_budget_write(dst, rel, updated)
+    return [rel]
+
+
 class UnsignedDarwinBuildEnvError(ValueError):
     """The macOS bundle build step moved, so the unsigned guard could not apply."""
 
@@ -8279,6 +8714,12 @@ def reconcile_tree(
     # Before the prompt-surface snapshot -- that step counts characters in the
     # rendered text these edits rewrite.
     for rel in _reconcile_github_pages_release_plane(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    # Three fork PRs write one upstream-owned workflow: the Pages store, the
+    # unsigned-leg guards and the flat Termux feed.  After the Pages and APT
+    # rules, whose files this workflow's new steps call into.
+    for rel in _reconcile_desktop_release_leg_guards(dst):
         result.total += 1
         result.fixed.append(rel)
     # Prompt-surface LAST: it counts characters in the rendered prompts, and

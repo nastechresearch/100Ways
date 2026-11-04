@@ -208,6 +208,11 @@ from hundredways.updates import (
     _APT_STABLE_RELEASES_DOC_REL,
     _APT_TERMUX_DOC_REL,
     _APT_TERMUX_DOC_ZH_REL,
+    DesktopReleaseLegAnchorError,
+    _BUNDLED_LEG_MARKERS,
+    _BUNDLED_WORKFLOW_EDITS,
+    _BUNDLED_WORKFLOW_REL,
+    _reconcile_desktop_release_leg_guards,
     _reconcile_termux_apt_flat_feed,
     _reconcile_github_pages_release_plane,
     _reconcile_windows_holder_clock_waits,
@@ -1004,6 +1009,72 @@ def test_termux_apt_flat_feed_stops_when_a_shape_is_partial(tmp_path):
 
     with pytest.raises(TermuxAptFeedAnchorError, match="not all"):
         _reconcile_termux_apt_flat_feed(str(candidate))
+
+
+def _desktop_release_legs_tree(tmp_path):
+    """A branded candidate whose release workflow is upstream's, pre-fork-layers."""
+    candidate = tmp_path / "candidate"
+    path = candidate.joinpath(*_BUNDLED_WORKFLOW_REL.split("/"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(old for old, _ in _BUNDLED_WORKFLOW_EDITS), encoding="utf-8")
+    return candidate, path
+
+
+def test_desktop_release_leg_guards_write_the_merged_workflow(tmp_path):
+    """Three fork PRs edit one upstream-owned workflow, so the rule has to be their union.
+
+    nastech-agent#194 hands the control plane to GitHub Pages, #192 stops an unsigned
+    channel leg recording and receipting bytes it never signed, and #195 publishes the
+    Termux feed as one flat release.  Their hunks do not overlap, so a sequential pass
+    over these anchors is exactly the merged workflow -- and a half-applied table would
+    stage bytes no receipt describes.
+    """
+    candidate, path = _desktop_release_legs_tree(tmp_path)
+
+    changed = _reconcile_desktop_release_leg_guards(str(candidate))
+
+    assert changed == [_BUNDLED_WORKFLOW_REL]
+    text = path.read_text(encoding="utf-8")
+    assert text == "\n".join(new for _, new in _BUNDLED_WORKFLOW_EDITS)
+    assert BrandingRules().transform_text(text) == text
+    for _label, marker in _BUNDLED_LEG_MARKERS:
+        assert marker in text
+    assert text.count('if [ "$SKIP_SIGNED" != true ]; then') == 2
+    assert text.count("&& inputs.skip-signed != true") == 3
+    assert "timeout-minutes: 25" in text
+    assert "RELEASE_CHANNEL_STORE: github" in text
+    assert text.count('"$PWD/termux-build/apt-flat:/apt:ro"') == 3
+    assert "termux-build/apt:/apt:ro" not in text
+    assert "--key-is-full" not in text
+    assert "shopt -s globstar nullglob" not in text
+    assert "public_repo" not in text
+
+    assert _reconcile_desktop_release_leg_guards(str(candidate)) == []
+
+
+def test_desktop_release_leg_guards_stops_when_a_leg_moved(tmp_path):
+    candidate, path = _desktop_release_legs_tree(tmp_path)
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(_BUNDLED_WORKFLOW_EDITS[0][0], "", 1),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(DesktopReleaseLegAnchorError, match="not all"):
+        _reconcile_desktop_release_leg_guards(str(candidate))
+
+
+def test_desktop_release_leg_guards_stops_when_the_workflow_moves(tmp_path):
+    """A workflow matching neither layout would ship the fork's guards as absent."""
+    candidate, path = _desktop_release_legs_tree(tmp_path)
+    path.write_text("name: Desktop bundled release\njobs:\n  validate:\n    runs-on: ubuntu-latest\n",
+                    encoding="utf-8")
+
+    with pytest.raises(DesktopReleaseLegAnchorError, match="nor "):
+        _reconcile_desktop_release_leg_guards(str(candidate))
+
+
+def test_desktop_release_leg_guards_ignore_a_tree_without_the_workflow(tmp_path):
+    assert _reconcile_desktop_release_leg_guards(str(tmp_path / "absent")) == []
 
 
 def _free_runner_js_lane_tree(tmp_path):
