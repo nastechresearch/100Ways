@@ -6819,6 +6819,11 @@ def _reconcile_macos_intel_desktop_plane(dst: str) -> list[str]:
 # tree the earlier rules leave behind rather than transcribed: each anchor is unique in that
 # text and applying every hunk reproduces the fork's file exactly, which is what
 # ``tests/test_updates.py`` re-proves from fixtures on every engine run.
+#
+# Each anchor carries only the lines the hunk needs to land in the right place.  Upstream
+# ``79c1648300`` moved ``NATIVE_LEGS``/``REQUIRED_JOBS`` into ``scripts/releases/desktop_targets.py``,
+# and the two hunks that had quoted those tuples for uniqueness broke the sync while the ones
+# that quoted only their own insertion point did not.
 
 _CHANNELS_PY_OLD_1 = """\
 from copy import deepcopy
@@ -6887,9 +6892,7 @@ _CHANNEL_PUBLISH_PY_OLD_1 = """\
 
 from nastech_cli.release_channels import ChannelReader, build_prefix, canonical_json, decode_json, require_sha256, validate_request
 from scripts.releases import commit_build, handoff, r2
-
-NATIVE_LEGS = ("darwin-arm64", "darwin-x64", "win32-arm64", "win32-x64", "windows-universal")
-REQUIRED_JOBS = ("validate", "build-darwin-arm64", "build-darwin-x64",
+from scripts.releases.desktop_targets import MANIFEST_PLATFORM, NATIVE_LEGS, TARGETS
 """
 
 
@@ -6898,9 +6901,7 @@ _CHANNEL_PUBLISH_PY_NEW_1 = """\
 from nastech_cli.release_channels import ChannelReader, build_prefix, canonical_json, decode_json, require_sha256, validate_request
 from scripts.releases import commit_build, handoff, r2
 from scripts.releases.channels import write_immutable_feeds
-
-NATIVE_LEGS = ("darwin-arm64", "darwin-x64", "win32-arm64", "win32-x64", "windows-universal")
-REQUIRED_JOBS = ("validate", "build-darwin-arm64", "build-darwin-x64",
+from scripts.releases.desktop_targets import MANIFEST_PLATFORM, NATIVE_LEGS, TARGETS
 """
 
 
@@ -7007,35 +7008,16 @@ import argparse
 
 
 _CHANNEL_RELEASES_PY_OLD_2 = """\
-from datetime import datetime, timezone, UTC
-
 from nastech_cli.release_channels import (
     ChannelError, build_prefix, canonical_json, validate_identity,
 )
-from scripts.bundles.channel_artifacts import assemble
-from scripts.releases import handoff, lanes as lane_set, r2, stable
-from scripts.releases.channels import ChannelPublisher, R2ChannelStore
-from scripts.releases.progress import log
-from scripts.releases.versioning import parse_attempt_ref
-
-NATIVE_LEGS = ("darwin-arm64", "darwin-x64", "win32-arm64", "win32-x64", "windows-universal")
 """
 
 
 _CHANNEL_RELEASES_PY_NEW_2 = """\
-from datetime import datetime, timezone, UTC
-
 from nastech_cli.release_channels import (
     ChannelError, build_prefix, canonical_json, validate_identity, validate_repository,
 )
-from scripts.bundles.channel_artifacts import assemble
-from scripts.releases import handoff, lanes as lane_set, r2, stable
-from scripts.releases.channels import ChannelPublisher, write_immutable_feeds
-from scripts.releases.progress import log
-from scripts.releases.r2_scope import channel_public_base
-from scripts.releases.versioning import parse_attempt_ref
-
-NATIVE_LEGS = ("darwin-arm64", "darwin-x64", "win32-arm64", "win32-x64", "windows-universal")
 """
 
 
@@ -7253,6 +7235,21 @@ _CHANNEL_RELEASES_PY_NEW_10 = """\
 """
 
 
+_CHANNEL_RELEASES_PY_OLD_11 = """\
+from scripts.releases.channels import ChannelPublisher, R2ChannelStore
+from scripts.releases.progress import log
+from scripts.releases.versioning import parse_attempt_ref
+"""
+
+
+_CHANNEL_RELEASES_PY_NEW_11 = """\
+from scripts.releases.channels import ChannelPublisher, write_immutable_feeds
+from scripts.releases.progress import log
+from scripts.releases.r2_scope import channel_public_base
+from scripts.releases.versioning import parse_attempt_ref
+"""
+
+
 _CHANNEL_RELEASES_PY_EDITS = (
     (_CHANNEL_RELEASES_PY_OLD_1, _CHANNEL_RELEASES_PY_NEW_1),
     (_CHANNEL_RELEASES_PY_OLD_2, _CHANNEL_RELEASES_PY_NEW_2),
@@ -7264,6 +7261,7 @@ _CHANNEL_RELEASES_PY_EDITS = (
     (_CHANNEL_RELEASES_PY_OLD_8, _CHANNEL_RELEASES_PY_NEW_8),
     (_CHANNEL_RELEASES_PY_OLD_9, _CHANNEL_RELEASES_PY_NEW_9),
     (_CHANNEL_RELEASES_PY_OLD_10, _CHANNEL_RELEASES_PY_NEW_10),
+    (_CHANNEL_RELEASES_PY_OLD_11, _CHANNEL_RELEASES_PY_NEW_11),
 )
 
 
