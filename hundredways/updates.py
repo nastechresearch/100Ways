@@ -10446,12 +10446,18 @@ def reconcile_tree(
     *,
     fork_root: str | None = None,
     rules: BrandingRules | None = None,
+    upstream_src: str = "",
 ) -> ReconcileResult:
     """Apply known post-brand fixes to the branded tree in place.
 
     ``fork_root`` is the fork checkout the pipeline preserves fork-local files
     from; the reconcilers that carry fork-first code in a shared path read it
     there so the engine never duplicates the fork's implementation.
+
+    ``upstream_src`` is the fresh upstream clone ``pull_hermes`` made and that
+    ``dst`` was branded from; the seed reconciler reads the stable tags that
+    clone has merged into its head -- the only offline answer to which version
+    line the synced tree carries.
 
     Returns which paths were fixed so the caller can (a) report them and
     (b) feed them to ``verify_branded`` / ``compare_trees``, which must
@@ -10485,6 +10491,13 @@ def reconcile_tree(
     # holds the source project's releases; those cannot be updated from, so the
     # sampling that the install/update gate is built on is re-derived here too.
     for rel in _reconcile_fork_release_baselines(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    # Upstream's seed constant is dead code upstream -- a published head has
+    # overridden it on every read -- but with zero fork stables published it IS
+    # this fork's version line, so it is re-derived from the stable tags the
+    # synced clone carries on every brand.
+    for rel in _reconcile_fork_seed_from_upstream_line(dst, upstream_src):
         result.total += 1
         result.fixed.append(rel)
     name = _root_package_name(dst, "pyproject.toml", "package.json")
@@ -11333,7 +11346,8 @@ class UpdateManager:
         )
 
         def _reconcile() -> ReconcileResult:
-            result = reconcile_tree(dest, fork_root=self.fork_root, rules=self.rules)
+            result = reconcile_tree(dest, fork_root=self.fork_root, rules=self.rules,
+                                    upstream_src=src)
             return result
         reconcile = stage("reconcile", _reconcile,
                           "sync lockfile root records + apply fork-local content fixes")
@@ -13536,6 +13550,149 @@ def _reconcile_fork_release_baselines(dst: str) -> list[str]:
         _sgl_write(dst, rel, text.replace(anchor, block + anchor, 1))
         changed.append(rel)
     return changed
+
+
+# ---------------------------------------------------------------------------
+# The seed that is only dead code upstream
+# ---------------------------------------------------------------------------
+# ``scripts/releases/versioning.py`` falls back to its ``SEED`` constant while
+# the repository has published no stable release.  Upstream never reads it --
+# its published head has overridden the seed on every read for years, so
+# upstream could leave it naming the last CalVer-era release.  The fork has
+# published zero stables, so the seed IS the version line: every canary is
+# stamped from it, and a tree synced from an upstream commit that already
+# carries ``v0.22.7`` shipped ``v0.21.5+canary.<stamp>`` while Hermes published
+# the same code as ``v0.22.7+canary.<stamp>`` (nastech-agent PR #213).
+#
+# The file is upstream-owned, so branding re-derives it on every sync and the
+# hand-fixed value is lost; this rule is the durable half.  Its source of truth
+# is the fresh upstream clone ``pull_hermes`` made and the tree was branded
+# from: ``git clone`` with no ``--no-tags``/``--depth``/``--filter`` carries
+# every tag, so ``git tag --merged HEAD`` answers offline which stables the
+# synced tree actually contains -- a tag on an unmerged branch is not in the
+# tree, and neither is a prerelease or a CalVer stamp, which the fork's
+# ``STABLE_TAG_RE`` (``nastech_cli/update_channel.py``) refuses to read as a
+# version.
+
+_VERSIONING_PY = "scripts/releases/versioning.py"
+# Mirrors ``STABLE_TAG_RE``: ``v<major>.<minor>.<patch>``, major capped at
+# three digits so ``v2026.9.18`` can never qualify, and no suffix so a
+# ``+canary.<stamp>`` or ``-rc`` identity never qualifies either.
+_SEED_STABLE_TAG_RE = re.compile(r"^v(0|[1-9]\d{0,2})\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+_SEED_ASSIGNMENT_RE = re.compile(r'^SEED = "([0-9]+\.[0-9]+\.[0-9]+)"$', re.MULTILINE)
+# Upstream's comment above its seed, verbatim, naming a CalVer line the fork's
+# rewrite contradicts; it is the anchor the fork comment replaces, so a moved
+# comment stops the sync instead of leaving two comments above one constant.
+_UPSTREAM_SEED_COMMENT = (
+    "# The legacy CalVer line published up to 0.21.5 (v2026.9.24); "
+    "the pipeline continues it.\n"
+)
+# The last line of the replacement comment, verbatim: its presence means a
+# previous pass of this rule already owns the block above ``SEED``, so a later
+# pass rewrites only the value and never duplicates the explanation PR #213
+# wrote.  Deliberately version-free prose -- every seed value is rewritten on
+# every sync, so nothing but the assignment may name one.
+_SEED_SYNC_MARK = "# the sync whenever the tree moves onto a newer upstream stable."
+_FORK_SEED_COMMENT = (
+    "# The head of the line before any release is published from here. Upstream's own\n"
+    "# seed named its last CalVer-era release because a published head has overridden\n"
+    "# it on every read since; a fork with zero published releases keeps reading the\n"
+    "# seed, so it must name the newest upstream stable the tree carries. Rewritten by\n"
+    "# the sync whenever the tree moves onto a newer upstream stable.\n"
+)
+
+
+class ForkSeedLineError(ValueError):
+    """The seed assignment moved, or the synced clone's tags cannot be read to re-derive it."""
+
+
+def _newest_upstream_stable(upstream_src: str) -> str:
+    """Newest stable version merged into HEAD of the clone the tree was synced from.
+
+    Reading the clone rather than the network keeps the answer offline, matches
+    exactly the commits the branded tree contains (``--merged`` excludes a tag
+    on a branch that never landed), and reproduces bit-for-bit in conformance,
+    which passes the same clone it branded from.
+    """
+    if not upstream_src or not os.path.isdir(upstream_src):
+        raise ForkSeedLineError(
+            f"{_VERSIONING_PY} seeds the fork's only version line and the sync cannot "
+            f"re-derive it: {upstream_src or '(no upstream clone passed)'} is not the "
+            "fresh upstream checkout the tree was branded from. Point the sync at the "
+            "clone pull_hermes made, tags and all; shipping a seed nothing checked "
+            "against the tree's upstream content is the defect this rule exists to stop.")
+    listing = _run(["git", "-C", upstream_src, "tag", "--merged", "HEAD"])
+    if listing.returncode != 0:
+        raise ForkSeedLineError(
+            f"{_VERSIONING_PY} cannot be re-derived: reading merged tags from "
+            f"{upstream_src} failed: {listing.stderr.strip() or listing.stdout.strip()}. "
+            "Until the fork publishes a stable, the seed is the whole version line, so "
+            "the sync stops here rather than stamping canaries from an unchecked one.")
+    newest: tuple[int, int, int] | None = None
+    for line in listing.stdout.splitlines():
+        match = _SEED_STABLE_TAG_RE.fullmatch(line.strip())
+        if match:
+            core = tuple(int(group) for group in match.groups())
+            if newest is None or core > newest:
+                newest = core
+    if newest is None:
+        raise ForkSeedLineError(
+            f"{_VERSIONING_PY} cannot be re-derived: no stable ``vX.Y.Z`` tag is merged "
+            f"into HEAD of {upstream_src}. The seed names the newest upstream stable the "
+            "tree carries and there is no such stable to name; verify the upstream clone "
+            "was fetched with its tags instead of inventing a version for the canary line.")
+    return ".".join(str(part) for part in newest)
+
+
+def _reconcile_fork_seed_from_upstream_line(dst: str, upstream_src: str) -> list[str]:
+    """Rewrite the release seed to the newest upstream stable the synced tree carries.
+
+    A tree without ``_VERSIONING_PY`` (no release plane yet) is left alone.  The
+    rewritten comment is the explanation PR #213 wrote -- minus the example
+    versions, which only the sync can know -- so the comment above ``SEED``
+    stays true for every value the rule rewrites it to, and a second pass on
+    the same tree finds its own mark and reports nothing.
+    """
+    text = _sgl_read(dst, _VERSIONING_PY)
+    if text is None:
+        return []
+    assignments = list(_SEED_ASSIGNMENT_RE.finditer(text))
+    if not assignments and _SEED_SYNC_MARK not in text:
+        # A release plane that derives the version only from published releases
+        # has no seed constant to re-derive, and can stamp no stale canary from
+        # one; only a module that does have (or had) the line is this rule's.
+        return []
+    if len(assignments) != 1:
+        raise ForkSeedLineError(
+            f"{_VERSIONING_PY} no longer holds exactly one ``SEED = \"x.y.z\"`` "
+            f"assignment (found {len(assignments)}); the sync rewrites the seeded "
+            "version line at that assignment and will not guess where it moved, or "
+            "the canary line ships from a seed no rule re-derives.")
+    seed = assignments[0].group(1)
+    newest = _newest_upstream_stable(upstream_src)
+    if _SEED_SYNC_MARK in text:
+        if seed == newest:
+            return []
+        _sgl_write(dst, _VERSIONING_PY,
+                   _SEED_ASSIGNMENT_RE.sub(f'SEED = "{newest}"', text, count=1))
+        return [_VERSIONING_PY]
+    if text.count(_UPSTREAM_SEED_COMMENT) != 1:
+        raise ForkSeedLineError(
+            f"{_VERSIONING_PY} no longer carries upstream's seed comment "
+            f"{_UPSTREAM_SEED_COMMENT.strip()!r} exactly once, and this rule's mark "
+            f"({_SEED_SYNC_MARK!r}) is absent, so nothing owns the block above the "
+            "seed; re-derive the rule against the current file or the rewritten value "
+            "ships under a comment that still promises the CalVer line.")
+    comment_start = text.index(_UPSTREAM_SEED_COMMENT)
+    if text[comment_start + len(_UPSTREAM_SEED_COMMENT):assignments[0].start()]:
+        raise ForkSeedLineError(
+            f"{_VERSIONING_PY}: the seed assignment no longer sits directly under "
+            "upstream's seed comment; the block this rule replaces moved, and rewriting "
+            "past it would leave a stale comment promising a different version line.")
+    _sgl_write(dst, _VERSIONING_PY,
+               text[:comment_start] + _FORK_SEED_COMMENT + f'SEED = "{newest}"'
+               + text[assignments[0].end():])
+    return [_VERSIONING_PY]
 
 
 # ---------------------------------------------------------------------------

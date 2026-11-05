@@ -177,6 +177,7 @@ def verify_final_candidate(
                 str(expected),
                 fork_root=str(fork_root_path) if fork_root_path else None,
                 rules=rules,
+                upstream_src=str(source_path),
             )
             preserved = _replay_fork_preservation(
                 str(expected),
