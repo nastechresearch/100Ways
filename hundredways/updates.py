@@ -1186,50 +1186,6 @@ def _reconcile_credential_display_test(dst: str) -> int:
     return 1
 
 
-def _reconcile_compression_fallback_admission(dst: str) -> int:
-    """Allow the configured compression fallback to start while a stalled primary winds down.
-
-    The upstream timeout pool deliberately refuses queued jobs.  A stalled primary is fenced and
-    cannot publish, but it can still occupy an executor admission slot long enough to make the
-    one configured fallback retry fail before it starts.  The generated candidate therefore gives
-    only that fallback call an explicit admission bypass; normal compression calls retain the
-    bounded-pool guard.
-    """
-    path = os.path.join(dst, "agent", "conversation_compression.py")
-    if not os.path.isfile(path):
-        return 0
-    try:
-        text = open(path, encoding="utf-8").read()
-    except OSError:
-        return 0
-    replacements = (
-        (
-            "stall_fallback: bool = True,\n    new_fence: Optional[Callable[[], CompressionCommitFence]] = None,",
-            "stall_fallback: bool = True, bypass_admission: bool = False,\n    new_fence: Optional[Callable[[], CompressionCommitFence]] = None,",
-        ),
-        (
-            "if not _try_admit_compression_job():",
-            "if not bypass_admission and not _try_admit_compression_job():",
-        ),
-        (
-            "    except BaseException:\n        _release_compression_admission()\n        raise\n    future.add_done_callback(_release_compression_admission)",
-            "    except BaseException:\n        if not bypass_admission:\n            _release_compression_admission()\n        raise\n    if not bypass_admission:\n        future.add_done_callback(_release_compression_admission)",
-        ),
-        (
-            "                stall_fallback=False,\n            )",
-            "                stall_fallback=False, bypass_admission=True,\n            )",
-        ),
-    )
-    new_text = text
-    for old, new in replacements:
-        new_text = new_text.replace(old, new, 1)
-    if new_text == text:
-        return 0
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(new_text)
-    return 1
-
-
 def _reconcile_plugin_search_table(dst: str) -> int:
     """Widen the ``cmd_search`` Name column so branded names render fully.
 
@@ -9882,9 +9838,6 @@ def reconcile_tree(
     if _reconcile_credential_display_test(dst):
         result.total += 1
         result.fixed.append("tests/nastech_cli/test_show_config_credential.py")
-    if _reconcile_compression_fallback_admission(dst):
-        result.total += 1
-        result.fixed.append("agent/conversation_compression.py")
     if _reconcile_plugin_search_table(dst):
         result.total += 1
         result.fixed.append("nastech_cli/plugins_cmd.py")
