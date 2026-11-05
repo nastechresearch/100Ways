@@ -7611,6 +7611,39 @@ def test_nastech_home_env_prefix_fails_loudly_when_the_slice_moved(tmp_path):
     assert "_reconcile_nastech_home_env_prefix" in str(excinfo.value)
 
 
+def test_nastech_home_env_prefix_steps_aside_when_the_slice_is_gone(tmp_path):
+    """Upstream moved the scan to psutil, so there is no offset left to bind.
+
+    ``proc.environ()`` answers a named variable instead of slicing a NUL-split
+    buffer, so branding can no longer misplace an offset here. The rule has to
+    recognise that and do nothing: a sync that stops to protect a deleted defect
+    blocks every landing for a hazard that cannot occur.
+    """
+    root = _suite_tree(tmp_path)
+    path = root / _CONFTEST
+    path.write_text(
+        "import os\nimport sys\nfrom pathlib import Path\n"
+        + '''
+def _processes_with_nastech_home_under(roots) -> list[int]:
+    import psutil
+
+    found = []
+    for proc in psutil.process_iter():
+        try:
+            home = proc.environ().get("NASTECH_HOME")
+        except (psutil.Error, OSError):
+            continue
+        if home:
+            found.append(proc.pid)
+    return found
+''',
+        encoding="utf-8",
+    )
+
+    assert _reconcile_nastech_home_env_prefix(str(root)) is False
+    assert path.read_text(encoding="utf-8").count("_NASTECH_HOME_PREFIX") == 0
+
+
 _GUEST_PRE = '''
 
 def _server(tmp_path, monkeypatch):

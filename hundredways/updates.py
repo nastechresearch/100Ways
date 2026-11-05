@@ -9887,6 +9887,12 @@ _CONFTEST = "tests/conftest.py"
 _ENDPOINT_PIN_MARK = "_NASTECH_TEST_ENDPOINTS = {"
 _ENDPOINT_PIN_ANCHOR = '_PRE_SANDBOX_NASTECH_HOME = os.environ.get("NASTECH_HOME", "")\n'
 _NASTECH_HOME_PREFIX_MARK = "_NASTECH_HOME_PREFIX = "
+# The defect is an offset into a NUL-split ``/proc`` buffer, so the loop that slices
+# it is what this rule still owes a correct bind to. Upstream replaced that scan with
+# psutil's exec-time environment, which answers a named variable directly: with no
+# slice there is no offset branding moved, and demanding one would stop the sync to
+# protect code that no longer exists.
+_NASTECH_HOME_SLICE_LOOP = "for item in environ"
 _GUEST_IDENTITY_TESTS = "tests/tui_gateway/test_legacy_fallback_ticket_profile_verbs.py"
 _GUEST_IDENTITY_MARK = "ensure_guest_identity', lambda: None)"
 
@@ -10015,11 +10021,15 @@ def _reconcile_nastech_home_env_prefix(dst: str) -> bool:
     Branding lengthened ``b"HERMES_HOME="`` to ``b"NASTECH_HOME="`` and left the
     hard-coded ``[12:]`` behind, so the guard that keeps pytest off a real
     ``NASTECH_HOME`` sliced a leading ``=`` and matched no path -- it fails by
-    finding nothing, which is why this needs a rule and not a fix-once.  True when
-    ``tests/conftest.py`` changed.
+    finding nothing, which is why this needs a rule and not a fix-once.  A tree
+    whose scan no longer slices an ``environ`` buffer has nothing to bind, so the
+    rule steps aside there and only a moved-but-still-slicing guard raises.  True
+    when ``tests/conftest.py`` changed.
     """
     text = _sgl_read(dst, _CONFTEST)
     if text is None or _NASTECH_HOME_PREFIX_MARK in text:
+        return False
+    if _NASTECH_HOME_SLICE_LOOP not in text:
         return False
     return _marker_edits(
         dst, _CONFTEST, _NASTECH_HOME_PREFIX_MARK, _NASTECH_HOME_EDITS,
