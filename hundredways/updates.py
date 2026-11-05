@@ -6821,9 +6821,9 @@ def _reconcile_macos_intel_desktop_plane(dst: str) -> list[str]:
 # ``tests/test_updates.py`` re-proves from fixtures on every engine run.
 #
 # Each anchor carries only the lines the hunk needs to land in the right place.  Upstream
-# ``79c1648300`` moved ``NATIVE_LEGS``/``REQUIRED_JOBS`` into ``scripts/releases/desktop_targets.py``,
-# and the two hunks that had quoted those tuples for uniqueness broke the sync while the ones
-# that quoted only their own insertion point did not.
+# 79c1648300 moved NATIVE_LEGS and REQUIRED_JOBS into scripts/releases/desktop_targets.py,
+# and the two hunks that had quoted those tuples for uniqueness broke the sync while the
+# ones that quoted only their own insertion point did not.
 
 _CHANNELS_PY_OLD_1 = """\
 from copy import deepcopy
