@@ -29,6 +29,7 @@ from .rules import (
     preserved_catalog_subdir_spans,
     preserved_external_url_spans,
     preserved_identifier_names,
+    preserved_npm_package_spans,
     preserved_repo_url_spans,
     preserved_url_link_label_spans,
     token_only_inside,
@@ -367,8 +368,12 @@ def _allowed_brand_occurrence(
         for match in preserved_catalog_subdir_spans(line)
     ):
         return True
-    if path == "package-lock.json" and token == "hermes":
-        return "hermes-parser" in lower or "hermes-estree" in lower
+    # A registry package the fork has never published is named by its lockfile
+    # key, and the digest beside that key is the bytes the name resolves to.
+    # Renaming only the key yields a lockfile whose name and bytes disagree, so
+    # the inherited word inside the name is theirs.  Mirrors brandscan._allowed.
+    if any(token.lower() in m.group(0).lower() for m in preserved_npm_package_spans(line)):
+        return True
     if path in {"website/package-lock.json", "website/.npmrc"} and token in {"nous", "nousresearch"}:
         return "@nous-research/image-size" in lower
     if path == "reports/SYNC-SUMMARY.md" and token in {"nous", "nousresearch"}:

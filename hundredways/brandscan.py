@@ -39,6 +39,7 @@ from .rules import (
     preserved_catalog_subdir_spans,
     preserved_external_url_spans,
     preserved_identifier_names,
+    preserved_npm_package_spans,
     preserved_repo_url_spans,
     preserved_url_link_label_spans,
     token_only_inside,
@@ -147,9 +148,14 @@ def _allowed(
         for match in preserved_catalog_subdir_spans(line)
     ):
         return True
+    # A registry package the fork has never published is named by its lockfile
+    # key, and the digest beside that key is the bytes the name resolves to.
+    # Renaming only the key yields a lockfile whose name and bytes disagree, so
+    # the inherited word inside the name is theirs, not a leak we can fix.
+    # Mirrors the preservation BrandingRules.transform_text makes of the span.
+    if any(word in match.group(0).lower() for match in preserved_npm_package_spans(line)):
+        return True
     lower = line.lower()
-    if path == "package-lock.json" and word == "hermes":
-        return "hermes-parser" in lower or "hermes-estree" in lower
     if path in {"website/package-lock.json", "website/.npmrc"} and word in {"nous", "nousresearch"}:
         return "@nous-research/image-size" in lower
     if path == "reports/SYNC-SUMMARY.md" and word in {"nous", "nousresearch"}:

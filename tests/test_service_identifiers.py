@@ -16,6 +16,7 @@ from hundredways.rules import (
     BrandingRules,
     preserved_algolia_index_spans,
     preserved_external_url_spans,
+    preserved_npm_package_spans,
     preserved_url_link_label_spans,
     provisioned_algolia_indices,
     transform_strict_metadata_text,
@@ -332,3 +333,89 @@ def test_the_label_exemption_is_the_same_in_both_brand_audits():
     # the same word in prose is still a leak
     prose = "[the hermes integration](https://docs.honcho.dev/v3/x)"
     assert _allowed("README.md", "hermes", prose) is False
+
+
+# ---------------------------------------------------------------------------
+# Registry packages the fork does not publish.
+# ---------------------------------------------------------------------------
+
+# Copied from upstream's pnpm lock at the seed the candidate syncs from.  The
+# digest is Meta's, published 2024-11-12 as ``hermes-parser@0.25.1``; the only
+# place either name appears anywhere in the tree is this one file.
+PARSER_KEY = "  hermes-parser@0.25.1:"
+PARSER_DIGEST = (
+    "    resolution: {integrity: sha512-6pEjquH3rqaI6cYAXYPcz9MS4rY6R4ngRgrgf"
+    "DshRptUZIc3lw0MCIJIGDj9++mfySOuPTHB4nrSW99BCvOPIA==}"
+)
+ESTREE_EMPTY = "  hermes-estree@0.25.1: {}"
+SOLVER_PIN = "      hermes-parser: 0.25.1"
+
+WORKSPACE_KEY = "      '@hermes/ink':"
+WORKSPACE_LINK = "        version: link:packages/hermes-ink"
+WORKSPACE_IMPORTER = "  ui-tui/packages/hermes-ink:"
+
+
+@pytest.mark.parametrize("line", [PARSER_KEY, ESTREE_EMPTY, SOLVER_PIN])
+def test_a_package_the_fork_does_not_publish_keeps_its_registry_name(line):
+    assert preserved_npm_package_spans(line)
+    assert BrandingRules().transform_text(line) == line
+
+
+def test_the_lockfile_key_and_the_digest_beside_it_stay_one_object():
+    """Renaming the key while keeping upstream's digest is a broken lockfile.
+
+    ``pnpm install --frozen-lockfile`` fetches the tarball the key names and
+    verifies it against the ``resolution:`` on the next line, so the pair is one
+    fact: the fork has never published ``hermes-parser``, so the digest can only
+    ever belong to the name beside it.
+    """
+    lock = f"{PARSER_KEY}\n{PARSER_DIGEST}\n"
+
+    branded = BrandingRules().transform_text(lock)
+
+    assert branded == lock
+    assert "nastech-parser" not in branded
+
+
+def test_a_workspace_package_beside_the_foreign_one_still_brands():
+    """The exemption is the published name, not the file: our own packages move."""
+    lock = "\n".join([WORKSPACE_KEY, WORKSPACE_LINK, WORKSPACE_IMPORTER]) + "\n"
+
+    branded = BrandingRules().transform_text(lock)
+
+    assert "@nastech/ink" in branded
+    assert "link:packages/nastech-ink" in branded
+    assert "  ui-tui/packages/nastech-ink:" in branded
+
+
+def test_a_package_the_owner_does_publish_is_still_branded(monkeypatch):
+    """With a fork-owned package hooked in, the inherited name is a leak again."""
+    monkeypatch.setenv("HUNDREDWAYS_FORK_NPM_PACKAGES", "nastech-parser")
+    line = PARSER_KEY
+
+    assert preserved_npm_package_spans(line) == ()
+    assert "nastech-parser" in BrandingRules().transform_text(line)
+
+
+def test_the_exemption_is_a_package_name_not_every_prefixed_path():
+    """``packages/hermes-parser`` would be a directory of ours, so it brands."""
+    line = "  ui-tui/packages/hermes-parser:"
+
+    assert preserved_npm_package_spans(line) == ()
+    assert "nastech-parser" in BrandingRules().transform_text(line)
+
+
+@pytest.mark.parametrize("path", ["pnpm-lock.yaml", "package-lock.json"])
+def test_the_two_brand_audits_agree_that_a_foreign_package_is_not_a_leak(path):
+    word = "hermes"
+
+    allowed = _allowed(path, word, SOLVER_PIN)
+    assert allowed is True
+    assert allowed is _allowed_brand_occurrence(word, SOLVER_PIN, path)
+
+
+def test_the_two_brand_audits_still_flag_a_brand_word_outside_a_package():
+    line = "      hermes docs index for the site"
+
+    assert _allowed("pnpm-lock.yaml", "hermes", line) is False
+    assert _allowed_brand_occurrence("hermes", line, "pnpm-lock.yaml") is False
