@@ -439,6 +439,74 @@ def preserved_algolia_index_spans(
     return tuple(spans)
 
 
+# Registry packages the fork has never published.
+#
+# A pnpm lock states one fact twice: the ``<name>@<version>:`` key names the
+# tarball the installer fetches, and the ``resolution:`` digest on the next line
+# is the bytes that tarball carries.  Branding the key alone asks the registry
+# for a package under a different name and checks it against the digest of the
+# original, so ``pnpm install --frozen-lockfile`` dies with
+# ``ERR_PNPM_TARBALL_INTEGRITY`` for every user.  ``hermes-parser`` and
+# ``hermes-estree`` are Meta's (published 2024-11-12); the fork publishes
+# nothing under either name, so neither can be renamed.  Measured on candidate
+# ``85d5680b``, where the branded ``nastech-parser@0.25.1`` key still carried
+# Meta's ``sha512-6pEjquH3...`` against the ``sha512-D0h9X5Er...`` the registry
+# actually serves, red in every lane that installs.
+#
+# ``@nastech-research/ui`` is deliberately absent: the fork does publish that
+# scope, and ``_reconcile_pnpm_ui_integrity`` repoints its digest at the
+# fork's own tarball, which is the second half of the pair this rule lacks.
+# ``HUNDREDWAYS_FORK_NPM_PACKAGES`` is where an owner declares a package of
+# their own, exactly as ``HUNDREDWAYS_ALGOLIA_INDICES`` is for an index.
+UNPUBLISHED_FOREIGN_NPM_PACKAGES: frozenset[str] = frozenset(
+    {"hermes-parser", "hermes-estree"}
+)
+
+
+def fork_published_npm_packages() -> frozenset[str]:
+    """Package names the fork owns a tarball for, so branding may claim them.
+
+    ``HUNDREDWAYS_FORK_NPM_PACKAGES`` is a comma list an owner fills in once
+    they publish a rebranded package of their own AND the sync carries a rule
+    that repoints the lockfile digest at it -- ``_reconcile_pnpm_ui_integrity``
+    does that for ``@nastech-research/ui``.  Until then the only tarballs these
+    version numbers resolve to are the inherited ones.
+    """
+    raw = os.environ.get("HUNDREDWAYS_FORK_NPM_PACKAGES", "")
+    return {item.strip().lower() for item in raw.split(",") if item.strip()}
+
+
+NPM_PACKAGE_KEY_RE = re.compile(
+    # Both spellings a pnpm lock uses for the same package: the top-level
+    # definition key (``name@version:``) and the unversioned dependency pin
+    # inside a snapshot (``name: version``).  ``(?<![\w./@-])`` is what stops
+    # ``packages/hermes-ink``, whose ``hermes-`` prefix is a directory of ours
+    # that branding must really rename.
+    r"(?<![\w./@-])(?P<name>"
+    + "|".join(re.escape(n) for n in sorted(UNPUBLISHED_FOREIGN_NPM_PACKAGES))
+    + r")(?![\w.-])"
+)
+
+
+def preserved_npm_package_spans(
+    line: str, rules: "BrandingRules | None" = None
+) -> tuple[re.Match, ...]:
+    """Registry package names in ``line`` that branding must leave verbatim.
+
+    A name is preserved while the fork has no tarball published under the
+    branded spelling; once an owner publishes one and hooks its name into
+    ``HUNDREDWAYS_FORK_NPM_PACKAGES``, ordinary branding applies again.
+    """
+    rules = rules if rules is not None else BrandingRules()
+    published = fork_published_npm_packages()
+    spans: list[re.Match] = []
+    for match in NPM_PACKAGE_KEY_RE.finditer(line):
+        if rules.brand_service_name(match.group("name")).lower() in published:
+            continue
+        spans.append(match)
+    return tuple(spans)
+
+
 # A whole URL whose host somebody else runs is the same object in a bigger
 # namespace: ``docs.honcho.dev/v3/guides/integrations/hermes`` is *their* page
 # about the integration, and the branded spelling is a page that has never
@@ -872,6 +940,16 @@ class BrandingRules:
             return _mask(len(spans) - 1)
 
         working = ALGOLIA_INDEX_NAME_RE.sub(_stash_index, working)
+
+        def _stash_package(match: re.Match) -> str:
+            name = match.group("name")
+            if self.brand_service_name(name).lower() in fork_published_npm_packages():
+                return match.group(0)
+            spans.append(match.group(0))
+            identifiers.append(None)
+            return _mask(len(spans) - 1)
+
+        working = NPM_PACKAGE_KEY_RE.sub(_stash_package, working)
 
         def _stash_url(match: re.Match) -> str:
             url = match.group(0)
