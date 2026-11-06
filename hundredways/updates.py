@@ -10933,13 +10933,6 @@ def reconcile_tree(
     for rel in _reconcile_fork_release_baselines(dst):
         result.total += 1
         result.fixed.append(rel)
-    # Upstream's seed constant is dead code upstream -- a published head has
-    # overridden it on every read -- but with zero fork stables published it IS
-    # this fork's version line, so it is re-derived from the stable tags the
-    # synced clone carries on every brand.
-    for rel in _reconcile_fork_seed_from_upstream_line(dst, upstream_src):
-        result.total += 1
-        result.fixed.append(rel)
     name = _root_package_name(dst, "pyproject.toml", "package.json")
     if name:
         if _reconcile_uv_lock(dst, name):
@@ -11268,6 +11261,21 @@ def reconcile_tree(
         result.total += 1
         result.fixed.append(rel)
     result.unresolved = _collided
+    # Upstream's seed constant is dead code upstream -- a published head has
+    # overridden it on every read -- but with zero fork stables published it IS
+    # this fork's version line, so it is re-derived from the stable tags the
+    # synced clone carries on every brand.
+    #
+    # After the replay above, on purpose: the seed block is fork PR #213's own
+    # work, and rewriting it first made the merge see one region changed on both
+    # sides, call the whole file collided, and discard it -- taking #213's ``_gh``
+    # rate-limit retry seam with it, so the branded tree handed
+    # ``tests/scripts/test_release_version_from_ref.py`` a ``_gh`` with no ``run=``
+    # or ``sleep=`` to inject.  Merged first, the fork owns the block and this
+    # rule moves only the number.
+    for rel in _reconcile_fork_seed_from_upstream_line(dst, upstream_src):
+        result.total += 1
+        result.fixed.append(rel)
     # Prompt-surface LAST: it counts characters in the rendered prompts, and
     # _reconcile_domains above rewrites the domain hosts inside those prompt
     # files.  Computing it any earlier leaves surfaces.json describing the
@@ -14045,12 +14053,16 @@ _UPSTREAM_SEED_COMMENT = (
     "# The legacy CalVer line published up to 0.21.5 (v2026.9.24); "
     "the pipeline continues it.\n"
 )
-# The last line of the replacement comment, verbatim: its presence means a
-# previous pass of this rule already owns the block above ``SEED``, so a later
-# pass rewrites only the value and never duplicates the explanation PR #213
-# wrote.  Deliberately version-free prose -- every seed value is rewritten on
-# every sync, so nothing but the assignment may name one.
-_SEED_SYNC_MARK = "# the sync whenever the tree moves onto a newer upstream stable."
+# The first line of the seed block the fork owns, verbatim.  Fork PR #213 wrote
+# it and rewords it as it likes, so this rule claims the block from its opening
+# line rather than its whole text -- and then touches only the value, because
+# the prose is the fork's.  The engine's own replacement comment below starts
+# with the same line, so a tree this rule already wrote is recognised the same
+# way, and one seed block is never stacked under two.
+_FORK_SEED_HEAD = "# The head of the line before any release is published from here."
+# The block this rule writes when the tree still carries upstream's CalVer
+# comment: #213's explanation, version-free so it stays true of whatever number
+# the next sync re-derives.
 _FORK_SEED_COMMENT = (
     "# The head of the line before any release is published from here. Upstream's own\n"
     "# seed named its last CalVer-era release because a published head has overridden\n"
@@ -14106,16 +14118,18 @@ def _reconcile_fork_seed_from_upstream_line(dst: str, upstream_src: str) -> list
     """Rewrite the release seed to the newest upstream stable the synced tree carries.
 
     A tree without ``_VERSIONING_PY`` (no release plane yet) is left alone.  The
-    rewritten comment is the explanation PR #213 wrote -- minus the example
-    versions, which only the sync can know -- so the comment above ``SEED``
-    stays true for every value the rule rewrites it to, and a second pass on
-    the same tree finds its own mark and reports nothing.
+    block above ``SEED`` is the fork's, not this rule's: once fork PR #213's
+    comment has been replayed onto the tree, only the value moves, because the
+    prose is the fork's and every sync re-derives the number.  Upstream's own
+    CalVer comment is the one exception -- it contradicts a seeded semver line,
+    so the first pass replaces it with the explanation #213 wrote, minus the
+    example versions that only the sync can know.
     """
     text = _sgl_read(dst, _VERSIONING_PY)
     if text is None:
         return []
     assignments = list(_SEED_ASSIGNMENT_RE.finditer(text))
-    if not assignments and _SEED_SYNC_MARK not in text:
+    if not assignments and _FORK_SEED_HEAD not in text:
         # A release plane that derives the version only from published releases
         # has no seed constant to re-derive, and can stamp no stale canary from
         # one; only a module that does have (or had) the line is this rule's.
@@ -14128,7 +14142,7 @@ def _reconcile_fork_seed_from_upstream_line(dst: str, upstream_src: str) -> list
             "the canary line ships from a seed no rule re-derives.")
     seed = assignments[0].group(1)
     newest = _newest_upstream_stable(upstream_src)
-    if _SEED_SYNC_MARK in text:
+    if _FORK_SEED_HEAD in text:
         if seed == newest:
             return []
         _sgl_write(dst, _VERSIONING_PY,
@@ -14137,10 +14151,10 @@ def _reconcile_fork_seed_from_upstream_line(dst: str, upstream_src: str) -> list
     if text.count(_UPSTREAM_SEED_COMMENT) != 1:
         raise ForkSeedLineError(
             f"{_VERSIONING_PY} no longer carries upstream's seed comment "
-            f"{_UPSTREAM_SEED_COMMENT.strip()!r} exactly once, and this rule's mark "
-            f"({_SEED_SYNC_MARK!r}) is absent, so nothing owns the block above the "
-            "seed; re-derive the rule against the current file or the rewritten value "
-            "ships under a comment that still promises the CalVer line.")
+            f"{_UPSTREAM_SEED_COMMENT.strip()!r} exactly once, and the seed block "
+            f"fork PR #213 wrote ({_FORK_SEED_HEAD!r}) is absent, so nothing owns the "
+            "block above the seed; re-derive the rule against the current file or the "
+            "rewritten value ships under a comment that still promises the CalVer line.")
     comment_start = text.index(_UPSTREAM_SEED_COMMENT)
     if text[comment_start + len(_UPSTREAM_SEED_COMMENT):assignments[0].start()]:
         raise ForkSeedLineError(
