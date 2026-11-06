@@ -8682,27 +8682,30 @@ _MERGE_FORK = _MERGE_UPSTREAM_BASE.replace(
 )
 
 
-def _merge_tree(tmp_path, upstream_text, fork_text):
+def _merge_tree(tmp_path, upstream_text, fork_text,
+                rel="scripts/releases/stable.py", base_text=None):
     """The three trees the merge reads: upstream with history, the candidate, the fork."""
+    base_text = _MERGE_UPSTREAM_BASE if base_text is None else base_text
     hermes = tmp_path / "hermes-agent"
     hermes.mkdir()
     subprocess.run(["git", "init", "-q", str(hermes)], check=True)
     subprocess.run(["git", "-C", str(hermes), "config", "user.email", "t@t"], check=True)
     subprocess.run(["git", "-C", str(hermes), "config", "user.name", "t"], check=True)
     hermes = str(hermes)
-    baseline = commit(hermes, {"scripts/releases/stable.py": _MERGE_UPSTREAM_BASE},
+    baseline = commit(hermes, {rel: base_text},
                       "upstream writes the bucket feed")
-    tip = commit(hermes, {"scripts/releases/stable.py": upstream_text},
+    tip = commit(hermes, {rel: upstream_text},
                  "upstream adds a dry-run to promote()")
     assert tip != baseline
 
+    parts = Path(rel).parts
     dst = tmp_path / "branded"
-    (dst / "scripts" / "releases").mkdir(parents=True)
-    (dst / "scripts" / "releases" / "stable.py").write_text(upstream_text)
+    (dst.joinpath(*parts[:-1])).mkdir(parents=True)
+    (dst.joinpath(*parts)).write_text(upstream_text)
 
     fork = tmp_path / "nastech-agent"
-    (fork / "scripts" / "releases").mkdir(parents=True)
-    (fork / "scripts" / "releases" / "stable.py").write_text(fork_text)
+    (fork.joinpath(*parts[:-1])).mkdir(parents=True)
+    (fork.joinpath(*parts)).write_text(fork_text)
     (fork / "manifest.json").write_text(json.dumps({"upstream_sha": baseline}))
     return str(dst), str(fork), hermes
 
@@ -8722,6 +8725,52 @@ def test_the_forks_release_fix_survives_upstreams_rewrite_of_the_same_file(tmp_p
     # ... and everything upstream added since the sync the fork is on.
     assert "dry_run: bool = False" in text
     assert 'print("would promote", channel)' in text
+
+
+_MERGE_WORKFLOW_BASE = """name: Canary release
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  mint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: bash ci/mint-canary.sh
+"""
+
+# Upstream rewrites the job around the step; the fork's divergence is the
+# checkout the release scripts' history reads need -- a different statement, so
+# the union merge has an honest answer for both.
+_MERGE_WORKFLOW_TIP = _MERGE_WORKFLOW_BASE.replace(
+    "    runs-on: ubuntu-latest\n",
+    "    runs-on: ubuntu-latest\n    permissions:\n      contents: write\n",
+)
+
+_MERGE_WORKFLOW_FORK = _MERGE_WORKFLOW_BASE.replace(
+    "      - uses: actions/checkout@v5\n",
+    "      # A blobless checkout strands the history reads.\n"
+    "      - uses: actions/checkout@v5\n        with:\n          fetch-depth: 0\n",
+)
+
+
+def test_a_fork_workflow_edit_survives_upstreams_rewrite_of_the_same_job(tmp_path):
+    """The CI plane is replayed like the release scripts it drives."""
+    dst, fork, hermes = _merge_tree(
+        tmp_path, _MERGE_WORKFLOW_TIP, _MERGE_WORKFLOW_FORK,
+        rel=".github/workflows/canary-release.yml", base_text=_MERGE_WORKFLOW_BASE)
+
+    fixed, unresolved = _reconcile_fork_release_divergence(
+        dst, fork_root=fork, upstream_src=hermes)
+
+    text = (Path(dst) / ".github/workflows/canary-release.yml").read_text()
+    assert fixed == [".github/workflows/canary-release.yml"]
+    assert unresolved == []
+    assert "fetch-depth: 0" in text
+    assert "permissions:" in text
+    assert "contents: write" in text
 
 
 _MERGE_QUOTE_BASE = """FEED = "https://cdn.example.test/feed"
