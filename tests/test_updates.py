@@ -8724,6 +8724,74 @@ def test_the_forks_release_fix_survives_upstreams_rewrite_of_the_same_file(tmp_p
     assert 'print("would promote", channel)' in text
 
 
+_MERGE_QUOTE_BASE = """FEED = "https://cdn.example.test/feed"
+
+
+def publish(tag: str) -> str:
+    return f"{FEED}/{tag}"
+
+
+def promote(channel: str) -> None:
+    print("promoting", channel)
+"""
+
+# The fork retires the feed and reaps the channel it promoted; upstream moves
+# the download path in a region the fork never touched.
+_MERGE_QUOTE_FORK = _MERGE_QUOTE_BASE.replace(
+    'FEED = "https://cdn.example.test/feed"',
+    "# The bucket is retired: assets are read back from the release they were staged on.\n"
+    'FEED = "https://github.com/nastechresearch/nastech-agent/releases/download"',
+).replace(
+    '    print("promoting", channel)\n',
+    '    print("promoting", channel)\n    _reap(channel)\n',
+)
+
+_MERGE_QUOTE_TIP = _MERGE_QUOTE_BASE.replace(
+    '    return f"{FEED}/{tag}"',
+    '    return f"{FEED}/{tag}/download"',
+)
+
+
+def test_a_stale_span_quote_yields_to_the_forks_own_file(tmp_path):
+    """A table that quoted part of the fork's fix into the line the fork itself
+    moved collides with that file -- while the same fix merges cleanly against
+    the text branding produced. The retry takes it, but only because every line
+    the table added is in the fork's file too."""
+    hermes = tmp_path / "hermes-agent"
+    hermes.mkdir()
+    subprocess.run(["git", "init", "-q", str(hermes)], check=True)
+    subprocess.run(["git", "-C", str(hermes), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(hermes), "config", "user.name", "t"], check=True)
+    baseline = commit(str(hermes), {"scripts/releases/r2.py": _MERGE_QUOTE_BASE},
+                      "upstream writes the bucket feed")
+    tip = commit(str(hermes), {"scripts/releases/r2.py": _MERGE_QUOTE_TIP},
+                 "upstream spells the download path")
+    assert tip != baseline
+
+    # A span table quoted only the feed line -- the quote the fork has since grown.
+    quoted = _MERGE_QUOTE_TIP.replace(
+        'FEED = "https://cdn.example.test/feed"',
+        'FEED = "https://github.com/nastechresearch/nastech-agent/releases/download"',
+    )
+    dst = tmp_path / "branded"
+    (dst / "scripts" / "releases").mkdir(parents=True)
+    (dst / "scripts" / "releases" / "r2.py").write_text(quoted)
+
+    fork = tmp_path / "nastech-agent"
+    (fork / "scripts" / "releases").mkdir(parents=True)
+    (fork / "scripts" / "releases" / "r2.py").write_text(_MERGE_QUOTE_FORK)
+    (fork / "manifest.json").write_text(json.dumps({"upstream_sha": baseline}))
+
+    fixed, unresolved = _reconcile_fork_release_divergence(
+        str(dst), fork_root=str(fork), upstream_src=str(hermes))
+
+    assert unresolved == []
+    text = (dst / "scripts" / "releases" / "r2.py").read_text()
+    assert fixed == ["scripts/releases/r2.py"]
+    assert "# The bucket is retired" in text                  # the fork's own comment
+    assert 'f"{FEED}/{tag}/download"' in text                 # upstream's change
+    assert "_reap(channel)" in text                           # the fork's other edit
+
 def test_a_collision_is_reported_not_guessed_at(tmp_path):
     """Both sides rewrote the same line: keeping either alone is a silent
     decision about what users download, so the run says which file it is."""

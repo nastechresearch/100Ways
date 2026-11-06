@@ -10766,6 +10766,53 @@ def _merge_fork_edits(base: str, ours: str, theirs: str) -> tuple[str, bool]:
     return proc.stdout, proc.returncode > 0
 
 
+def _upstream_head(upstream_src: str) -> str:
+    """The commit ``brand_tree`` branded the candidate from, or ``""``."""
+    if not upstream_src:
+        return ""
+    try:
+        proc = subprocess.run(["git", "-C", upstream_src, "rev-parse", "HEAD"],
+                              capture_output=True, text=True, check=False)
+    except OSError:
+        return ""
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def _table_added_lines(ours: str, branded_tip: str) -> list[str]:
+    """Lines the candidate has that branding alone did not produce.
+
+    Those are the span tables' own work: engine-side corrections the fork has
+    never held a copy of, so a merge that drops them is a regression however
+    well it carries the fork.
+    """
+    branding = {line.rstrip() for line in branded_tip.splitlines()}
+    return [line.rstrip() for line in ours.splitlines()
+            if line.strip() and line.rstrip() not in branding]
+
+
+def _retry_from_branded(ancestor: str, ours: str, theirs: str, upstream_src: str,
+                        rel: str, rules: BrandingRules) -> str | None:
+    """Merge the fork's file against the text branding produced, before any table ran.
+
+    A table quotes the fork's fix into upstream's old region. When upstream
+    moves that region, the quote and the fork's own file collide and the merge
+    refuses -- even though the fork's edit merges cleanly against the unquoted
+    text, which is what the tables were quoting in the first place. Retrying
+    there recovers the fix, but only when the result still holds every line the
+    tables added. ``None`` means no better answer than what is on disk.
+    """
+    tip = _upstream_text_at(upstream_src, _upstream_head(upstream_src), rel)
+    if tip is None:
+        return None
+    branded_tip = rules.transform_text(tip)
+    merged, conflict = _merge_fork_edits(ancestor, branded_tip, theirs)
+    if conflict:
+        return None
+    if any(line not in merged for line in _table_added_lines(ours, branded_tip)):
+        return None
+    return merged
+
+
 def _reconcile_fork_release_divergence(
     dst: str,
     fork_root: str | None = None,
@@ -10813,16 +10860,20 @@ def _reconcile_fork_release_divergence(
         ancestor = _upstream_text_at(upstream_src, baseline, rel)
         if ancestor is None:
             continue
-        merged, conflict = _merge_fork_edits(rules.transform_text(ancestor),
-                                             ours, theirs)
+        ancestor = rules.transform_text(ancestor)
+        merged, conflict = _merge_fork_edits(ancestor, ours, theirs)
         if conflict:
-            collided.append(rel)
-            continue
+            merged = _retry_from_branded(ancestor, ours, theirs, upstream_src,
+                                         rel, rules)
+            if merged is None:
+                collided.append(rel)
+                continue
         if merged != ours:
             with open(ours_path, "w", encoding="utf-8") as fh:
                 fh.write(merged)
             fixed.append(rel)
     return sorted(fixed), sorted(collided)
+
 
 def reconcile_tree(
     dst: str,
