@@ -7847,18 +7847,45 @@ def _quoted_in(pattern: str, text: str, flags: int = 0) -> set:
     return set(re.findall(r'"([a-z0-9-]+)"', found.group(1)))
 
 
+_UPSTREAM_LANES_SEED = Path(__file__).parent / "fixtures" / "upstream_lanes" / "lanes.txt"
+
+
+def _opt_in_lane_rows(text: str) -> set:
+    """The lane names a lane-table module declares as opt-in (``default=False``)."""
+    return set(re.findall(r'Lane\("([a-z0-9-]+)", False,', text))
+
+
+def _opt_in_lanes_added_by_the_fork(root: Path) -> set:
+    """Opt-in lane rows the fork's own rule puts into upstream's lane table.
+
+    ``_reconcile_signing_gated_defaults`` is the only rule that edits the table, so
+    running it on upstream's module at the seed and subtracting the rows the seed
+    already opts out of leaves exactly the rows the fork authored.  It reads the
+    module the rule emits, never the rule's source: a rule that re-inserted a lane
+    upstream retired would appear here as a name, not as a line of text.
+    """
+    seed = _UPSTREAM_LANES_SEED.read_text(encoding="utf-8")
+    released = root / "scripts" / "releases"
+    released.mkdir(parents=True)
+    (released / "lanes.py").write_text(seed, encoding="utf-8")
+
+    assert updates._reconcile_signing_gated_defaults(str(root)) is True
+
+    produced = (released / "lanes.py").read_text(encoding="utf-8")
+    return _opt_in_lane_rows(produced) - _opt_in_lane_rows(seed)
+
+
 def test_fork_lane_release_default_set_and_its_test_agree(tmp_path):
     """The lane test may not name a lane set the lane table does not exclude.
 
     ``_reconcile_signing_gated_defaults`` writes the fork's ``DEFAULT`` and this
     rule writes the test that asserts it; the lists are hand-typed in separate
     constants, and what the test names is the lane table's own exclusions **plus**
-    whatever upstream already leaves opt-in and this fork does not add back **plus**
-    any lane this fork itself adds as an opt-in row.  At this revision the second set
-    is empty -- Termux is upstream's only opt-out and the fork ships it -- and the
-    third is ``macos-intel``, which ``_reconcile_macos_intel_lane`` re-adds with
-    ``default=False``.  A lane added to one and not the other goes red in the fork's
-    release suite with nothing pointing at the pairing.
+    whatever upstream already leaves opt-in and this fork does not add back.  At
+    this revision that second set is empty -- Termux is upstream's only opt-out and
+    the fork ships it, and upstream dropped the macOS Intel lane entirely, so the
+    fork adds no opt-in row of its own.  A lane added to one and not the other goes
+    red in the fork's release suite with nothing pointing at the pairing.
     """
     root, path = _lane_release_tree(tmp_path, _RELEASE_LANES_TESTS, _RELEASE_LANES_TESTS_EDITS)
     assert _reconcile_fork_lane_release_surface(str(root)) == [_RELEASE_LANES_TESTS]
@@ -7870,14 +7897,18 @@ def test_fork_lane_release_default_set_and_its_test_agree(tmp_path):
     # Upstream's own opt-outs, read off the before-text this pair rewrites.
     upstream = _RELEASE_LANES_TESTS_EDITS[0][0].split("set(lane_set.NAMES) - ")[1]
     upstream_opt_in = set(re.findall(r'"([a-z0-9-]+)"', upstream))
-    # Lanes this fork adds as opt-in rows, read off the lane rule's own text.
-    fork_opt_in = {name for _, new in updates._MACOS_INTEL_LANE_EDITS
-                   for name in re.findall(r'Lane\("([a-z0-9-]+)", False', new)}
+    # Lanes this fork puts into the lane table as opt-in rows of its own, read off
+    # the module the lane rule actually produces: seed upstream's table, run the
+    # rule that owns the fork's one rewrite to it, and subtract the rows the seed
+    # already declared opt-in.  What remains is only what the fork added -- nothing,
+    # because the macOS Intel lane is upstream's to retire and the sync carries that
+    # deletion instead of re-growing the row.
+    fork_opt_in = _opt_in_lanes_added_by_the_fork(tmp_path / "lane-seed")
     assert test_names == source_names | (upstream_opt_in - added) | fork_opt_in
     # Termux is the one lane both sides put back in: it needs no signing.
     assert added == {"termux"}
     assert "termux" not in test_names
-    assert fork_opt_in == {"macos-intel"}
+    assert fork_opt_in == set()
 
 
 @pytest.mark.parametrize("drop", [1, 4])
