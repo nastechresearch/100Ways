@@ -31,6 +31,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -400,11 +401,19 @@ class ReconcileResult:
     """
     total: int = 0
     fixed: list[str] = field(default_factory=list)
+    unresolved: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
-        if not self.fixed:
-            return "no files needed reconciliation"
-        return f"{len(self.fixed)} files reconciled: {', '.join(self.fixed)}"
+        parts = []
+        parts.append("no files needed reconciliation" if not self.fixed
+                     else f"{len(self.fixed)} files reconciled: {', '.join(self.fixed)}")
+        if self.unresolved:
+            # Named in the stage detail so a release-plane collision is visible
+            # in the run that produced the candidate, not only in the fork's CI.
+            parts.append("fork release-plane edits that collide with upstream's "
+                         f"rewrite and were left to the span tables: "
+                         f"{', '.join(self.unresolved)}")
+        return "; ".join(parts)
 
 
 def _root_package_name(dst: str, manifest: str, lockfile: str) -> str | None:
@@ -10669,6 +10678,203 @@ def _reconcile_pnpm_ui_integrity(dst: str) -> list[str]:
     return fixed
 
 
+# ---------------------------------------------------------------------------
+# The fork's release-plane edits, replayed as a merge
+# ---------------------------------------------------------------------------
+
+#: Paths where the fork owns the behaviour of a file upstream also edits.  This
+#: is the release plane: what makes a Nastech release land on GitHub releases
+#: instead of the retired bucket, how the version line follows Hermes, and the
+#: tests that hold those contracts.
+#:
+#: The span tables above quote the fork's fix into the engine.  A quote goes
+#: stale the moment upstream rewrites the region it sits in -- which is how
+#: three published release fixes were regenerated away once (fork #214 restores
+#: them).  These paths are instead replayed: the fork's divergence from the
+#: upstream commit the last sync started at is merged onto the freshly branded
+#: tree, so the carry covers the fixes the fork has written and the ones it
+#: writes next, without an engine edit in between.
+_FORK_MERGE_PREFIXES = (
+    "scripts/release.py",
+    "scripts/releases/",
+    "scripts/bundles/",
+    "scripts/termux/",
+    "tests/scripts/",
+)
+
+
+class ForkDivergenceMergeError(ValueError):
+    """The fork and upstream changed the same release-plane region differently.
+
+    Raised by ``reconcile_tree`` so ``conformance`` reports it and the candidate
+    is not published: a silent choice here either regenerates the fork's release
+    fix away or drops upstream's, and both change what users download.
+    """
+
+
+def _upstream_text_at(upstream_src: str, commit: str, rel: str) -> str | None:
+    """Upstream's own text for ``rel`` at ``commit``, or ``None`` if unknown.
+
+    ``None`` means the sync cannot see a baseline for this file -- upstream
+    never had the path, or the clone lacks the commit -- so there is nothing to
+    merge against and the fork's file needs no replay here.
+    """
+    if not upstream_src or not commit:
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", upstream_src, "show", f"{commit}:{rel}"],
+            capture_output=True, text=True, check=False,
+        )
+    except OSError:
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def _merge_fork_edits(base: str, ours: str, theirs: str) -> tuple[str, bool]:
+    """Merge the fork's file over ``ours`` using ``base`` as the common ancestor.
+
+    ``git merge-file`` is used rather than a hand-written diff walk: its result
+    is what a developer would get running the same merge, and it never produces
+    output that silently mixes both sides' edits without saying so.  ``-p``
+    keeps the tree read-only until the merge is known to be clean.
+
+    The boolean is ``True`` when the two sides collided (or git could not say)
+    -- callers must treat that as unresolved, never as "keep either side".
+    """
+    workdir = tempfile.mkdtemp(prefix="fork-merge-")
+    try:
+        paths = {}
+        for name, text in (("ours", ours), ("base", base), ("theirs", theirs)):
+            paths[name] = os.path.join(workdir, name)
+            with open(paths[name], "w", encoding="utf-8") as fh:
+                fh.write(text)
+        proc = subprocess.run(
+            ["git", "merge-file", "-p", "-q",
+             "-L", "branded upstream tip",
+             "-L", "upstream at the last sync",
+             "-L", "the fork",
+             paths["ours"], paths["base"], paths["theirs"]],
+            capture_output=True, text=True, check=False,
+        )
+    except OSError:
+        return ours, True
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+    if proc.returncode < 0:
+        return ours, True
+    return proc.stdout, proc.returncode > 0
+
+
+def _upstream_head(upstream_src: str) -> str:
+    """The commit ``brand_tree`` branded the candidate from, or ``""``."""
+    if not upstream_src:
+        return ""
+    try:
+        proc = subprocess.run(["git", "-C", upstream_src, "rev-parse", "HEAD"],
+                              capture_output=True, text=True, check=False)
+    except OSError:
+        return ""
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def _table_added_lines(ours: str, branded_tip: str) -> list[str]:
+    """Lines the candidate has that branding alone did not produce.
+
+    Those are the span tables' own work: engine-side corrections the fork has
+    never held a copy of, so a merge that drops them is a regression however
+    well it carries the fork.
+    """
+    branding = {line.rstrip() for line in branded_tip.splitlines()}
+    return [line.rstrip() for line in ours.splitlines()
+            if line.strip() and line.rstrip() not in branding]
+
+
+def _retry_from_branded(ancestor: str, ours: str, theirs: str, upstream_src: str,
+                        rel: str, rules: BrandingRules) -> str | None:
+    """Merge the fork's file against the text branding produced, before any table ran.
+
+    A table quotes the fork's fix into upstream's old region. When upstream
+    moves that region, the quote and the fork's own file collide and the merge
+    refuses -- even though the fork's edit merges cleanly against the unquoted
+    text, which is what the tables were quoting in the first place. Retrying
+    there recovers the fix, but only when the result still holds every line the
+    tables added. ``None`` means no better answer than what is on disk.
+    """
+    tip = _upstream_text_at(upstream_src, _upstream_head(upstream_src), rel)
+    if tip is None:
+        return None
+    branded_tip = rules.transform_text(tip)
+    merged, conflict = _merge_fork_edits(ancestor, branded_tip, theirs)
+    if conflict:
+        return None
+    if any(line not in merged for line in _table_added_lines(ours, branded_tip)):
+        return None
+    return merged
+
+
+def _reconcile_fork_release_divergence(
+    dst: str,
+    fork_root: str | None = None,
+    upstream_src: str = "",
+    rules: BrandingRules | None = None,
+    baseline: str = "",
+) -> tuple[list[str], list[str]]:
+    """Replay the fork's release-plane edits onto the branded upstream tip.
+
+    Three texts per file: the upstream the fork last synced (branded, because
+    the fork's file is branded), the candidate ``brand_tree`` and the span
+    tables produced, and the fork's own file.  A clean merge is a union -- it
+    keeps every line upstream added since that sync and re-adds every line the
+    fork wrote -- so it can only improve on what the tables carried.
+
+    Returns the paths it changed and the paths that collided.  Run last so the
+    tables' anchors are the text they were derived against.
+    """
+    if not fork_root:
+        return [], []
+    rules = rules or BrandingRules()
+    baseline = baseline or fork_manifest_upstream_sha(fork_root)
+    fixed, collided = [], []
+    for rel in _walk_files(dst):
+        if not rel.startswith(_FORK_MERGE_PREFIXES):
+            continue
+        if rules.transform_path(rel) != rel:
+            # A branded path is reached through its upstream name, which is not
+            # this one; merging on the fork's spelling would read a missing
+            # baseline and silently skip the file's real divergence.
+            continue
+        theirs_path = os.path.join(fork_root, rel)
+        if not os.path.isfile(theirs_path):
+            continue
+        ours_path = os.path.join(dst, rel)
+        try:
+            with open(ours_path, encoding="utf-8") as fh:
+                ours = fh.read()
+            with open(theirs_path, encoding="utf-8") as fh:
+                theirs = fh.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        if ours == theirs:
+            continue
+        ancestor = _upstream_text_at(upstream_src, baseline, rel)
+        if ancestor is None:
+            continue
+        ancestor = rules.transform_text(ancestor)
+        merged, conflict = _merge_fork_edits(ancestor, ours, theirs)
+        if conflict:
+            merged = _retry_from_branded(ancestor, ours, theirs, upstream_src,
+                                         rel, rules)
+            if merged is None:
+                collided.append(rel)
+                continue
+        if merged != ours:
+            with open(ours_path, "w", encoding="utf-8") as fh:
+                fh.write(merged)
+            fixed.append(rel)
+    return sorted(fixed), sorted(collided)
+
+
 def reconcile_tree(
     dst: str,
     *,
@@ -11045,6 +11251,17 @@ def reconcile_tree(
     for rel in _reconcile_channel_store_selection(dst):
         result.total += 1
         result.fixed.append(rel)
+    # The fork's release-plane divergence, replayed rather than quoted.  After
+    # every table above on purpose: the tables carry the fixes they know about,
+    # and this merge only adds what they missed -- a collision is reported, never
+    # guessed at.  Before the prompt snapshot, which reads files outside this
+    # scope, and before the credential audit, which reads workflows.
+    _merged, _collided = _reconcile_fork_release_divergence(
+        dst, fork_root=fork_root, upstream_src=upstream_src, rules=rules)
+    for rel in _merged:
+        result.total += 1
+        result.fixed.append(rel)
+    result.unresolved = _collided
     # Prompt-surface LAST: it counts characters in the rendered prompts, and
     # _reconcile_domains above rewrites the domain hosts inside those prompt
     # files.  Computing it any earlier leaves surfaces.json describing the
