@@ -217,6 +217,8 @@ from hundredways.updates import (
     _reconcile_github_pages_release_plane,
     GitHubReleaseHandoffAnchorError,
     _HANDOFF_MODULE_REL,
+    _HANDOFF_R2_REL,
+    _HANDOFF_ADMISSION_TEST_REL,
     _HANDOFF_SMOKE_TEST_REL,
     _HANDOFF_SMOKE_WORKFLOW_REL,
     _HANDOFF_STAGING_TEST_REL,
@@ -1168,6 +1170,8 @@ HANDOFF_FIXTURES = Path(__file__).parent / "fixtures" / "desktop_handoff"
 _HANDOFF_SURFACE_RELS = [rel for rel, _, _, _ in _HANDOFF_SURFACES]
 _HANDOFF_FIXTURE_PATHS = {
     _HANDOFF_MODULE_REL: HANDOFF_FIXTURES / "handoff.py",
+    _HANDOFF_R2_REL: HANDOFF_FIXTURES / "r2.py",
+    _HANDOFF_ADMISSION_TEST_REL: HANDOFF_FIXTURES / "desktop_release_commit_admission.sample.py",
     _HANDOFF_SMOKE_WORKFLOW_REL: HANDOFF_FIXTURES / "desktop-bundle-smoke.yml",
     _BUNDLED_WORKFLOW_REL: BUNDLED_TIP_WORKFLOW,
     _HANDOFF_STAGING_TEST_REL: HANDOFF_FIXTURES / "commit_build_staging.sample.py",
@@ -1224,6 +1228,50 @@ def test_the_handoff_plane_lands_on_upstreams_real_files(tmp_path):
     assert _reconcile_github_release_handoff_plane(str(candidate)) == []
 
 
+def test_the_archive_origin_a_run_publishes_is_the_pinned_stores_and_nothing_else(tmp_path):
+    """One run, one origin: the store answers it, and no leg interpolates the bucket variable.
+
+    ``public-root``/``public-base`` reach every later leg's artifact URL, so a run pinned to
+    the release store that names them from ``CLOUDFLARE_R2_PUBLIC_URL`` publishes URLs at an
+    origin it does not have -- and with that variable unset, at no origin at all, which is how
+    the plane is meant to end up. The byte-level guard against a caller trusting a URL it was
+    handed is ``r2.read_public_text``: a digest check only means something if the read it
+    digested refused to be redirected away from the origin that names the bytes.
+    """
+    candidate = _handoff_plane_tree(tmp_path)
+    assert _reconcile_github_release_handoff_plane(str(candidate)) == _HANDOFF_SURFACE_RELS
+
+    workflow = (candidate / _BUNDLED_WORKFLOW_REL).read_text(encoding="utf-8")
+    assert 'printf \'public-root=%s\\npublic-base=%s\\n\' "$origin"' in workflow
+    assert '"$CLOUDFLARE_R2_PUBLIC_URL" "$CLOUDFLARE_R2_PUBLIC_URL"' not in workflow
+    assert "from scripts.releases.handoff import archive_origin" in workflow
+
+    resolver = (candidate / _HANDOFF_MODULE_REL).read_text(encoding="utf-8")
+    assert "def archive_origin(explicit: str | None = None) -> str:" in resolver
+    assert "    return r2 if os.environ.get(\"CLOUDFLARE_R2_BUCKET\") else gh_transport" in resolver
+    assert "chosen = store(origin)" in resolver
+
+    store = (candidate / _HANDOFF_R2_REL).read_text(encoding="utf-8")
+    assert "def read_public_text(base: str, key: str) -> str:" in store
+    assert "def read_public_receipt(base: str, key: str) -> dict:\n" \
+           "    return json.loads(read_public_text(base, key))" in store
+
+    # Admission resolves the origin for the whole run, so it reaches the plane the same way
+    # the legs it gates do -- and a draft asset read without the run's token is a 404.
+    validate_job = workflow.split("\n  validate:", 1)[1].split("\n  build-", 1)[0]
+    assert "GH_TOKEN: ${{ github.token }}" in validate_job
+
+    step = (candidate / _HANDOFF_ADMISSION_TEST_REL).read_text(encoding="utf-8")
+    assert "PYTHONPATH=str(Path(__file__).resolve().parents[2])," in step
+    assert "release-content-types.json" in step
+
+    assert BrandingRules().transform_text(resolver) == resolver
+    assert BrandingRules().transform_text(store) == store
+    assert BrandingRules().transform_text(step) == step
+
+    assert _reconcile_github_release_handoff_plane(str(candidate)) == []
+
+
 def _handoff_plane_union_tree(tmp_path):
     candidate = tmp_path / "candidate"
     paths = {}
@@ -1236,10 +1284,11 @@ def _handoff_plane_union_tree(tmp_path):
 
 
 def test_the_handoff_plane_writes_the_merged_plane(tmp_path):
-    """Five upstream-owned files carry one plane, so the rule has to be their union.
+    """Seven upstream-owned files carry one plane, so the rule has to be their union.
 
-    ``handoff.py`` resolves the store, the two workflows pin it and carry the token the draft
-    assets need, and the two tests replay those legs.  A hunk landing in the wrong file, or two
+    ``handoff.py`` resolves the store, ``r2.py`` answers the pinned metadata read the
+    store selects, the two workflows pin it and carry the token the draft assets need,
+    and the three tests replay those legs.  A hunk landing in the wrong file, or two
     overlapping, is a release that stages to one archive and fetches from another.
     """
     candidate, paths = _handoff_plane_union_tree(tmp_path)

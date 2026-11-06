@@ -5500,6 +5500,20 @@ def store(public_base: str | None = None):
     if public_base:
         return gh_transport if gh_transport.owns_origin(public_base) else r2
     return r2 if os.environ.get("CLOUDFLARE_R2_BUCKET") else gh_transport
+
+
+def archive_origin(explicit: str | None = None) -> str:
+    """Where the store that holds the bytes serves them from -- never a separate setting.
+
+    A run needs one origin for every URL it publishes and reads back, and only the
+    store can name it: a bucket answers with its public domain and a release archive
+    with this repository's download route. Reading it from the bucket's variable
+    instead leaves a GitHub-pinned run naming URLs at an origin that does not exist --
+    and, with that variable unset, at no origin at all.
+    """
+    origin = explicit or None
+    chosen = store(origin)
+    return chosen.public_base_url(origin)
 '''
 _HANDOFF_MODULE_OLD_2 = """\
     key = channel_prefix(request) + receipt_name(name)
@@ -5608,6 +5622,59 @@ _HANDOFF_MODULE_EDITS = (
     (_HANDOFF_MODULE_OLD_11, _HANDOFF_MODULE_NEW_11),
 )
 
+# The metadata read both stores answer.  ``handoff.store()`` picks the store, but the
+# caller that verifies bytes has to be told *where* they came from, and only a read that
+# refuses a redirect can be pinned to the origin its receipt names.
+_HANDOFF_R2_OLD_1 = """\
+def read_public_receipt(base: str, key: str) -> dict:
+    url = public_artifact_url(base, key)
+    parsed = urlparse(url)
+    conn = _connection(url, timeout=60.0)
+    try:
+        conn.request('GET', parsed.path)
+        response = conn.getresponse()
+        if response.status != 200:
+            raise R2RequestError('GET', parsed.path, response.status)
+        # Receipts are metadata, never an unbounded binary download.
+        body = response.read(4 * 1024 * 1024 + 1)
+        if len(body) > 4 * 1024 * 1024:
+            raise ValueError('Public handoff receipt exceeds metadata limit')
+        return json.loads(body)
+    finally:
+        conn.close()
+"""
+_HANDOFF_R2_NEW_1 = '''\
+def read_public_text(base: str, key: str) -> str:
+    """One metadata object, read from the archive that holds it and nowhere else.
+
+    The connection is pinned to this store's own origin and a redirect is a failure
+    rather than a hop, so a caller that verifies the bytes it gets back can trust the
+    address it asked for.
+    """
+    url = public_artifact_url(base, key)
+    parsed = urlparse(url)
+    conn = _connection(url, timeout=60.0)
+    try:
+        conn.request('GET', parsed.path)
+        response = conn.getresponse()
+        if response.status != 200:
+            raise R2RequestError('GET', parsed.path, response.status)
+        # Receipts are metadata, never an unbounded binary download.
+        body = response.read(4 * 1024 * 1024 + 1)
+        if len(body) > 4 * 1024 * 1024:
+            raise ValueError('Public handoff receipt exceeds metadata limit')
+        return body.decode("utf-8-sig")
+    finally:
+        conn.close()
+
+
+def read_public_receipt(base: str, key: str) -> dict:
+    return json.loads(read_public_text(base, key))
+'''
+_HANDOFF_R2_EDITS = (
+    (_HANDOFF_R2_OLD_1, _HANDOFF_R2_NEW_1),
+)
+
 _HANDOFF_SMOKE_WORKFLOW_OLD_1 = """\
   RELEASE_CHANNEL_STORE: github
 
@@ -5702,6 +5769,32 @@ _HANDOFF_BUNDLED_WORKFLOW_NEW_6 = """\
     env:
       GH_TOKEN: ${{ github.token }}
 """
+# Admission resolves the store from its own job, so it carries the token like the
+# legs it gates.
+_HANDOFF_BUNDLED_WORKFLOW_OLD_7 = """\
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+"""
+_HANDOFF_BUNDLED_WORKFLOW_NEW_7 = """\
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      # Admission resolves which store this run's handoff goes through, so this leg
+      # touches the plane every other handoff leg does and carries the same token.
+      GH_TOKEN: ${{ github.token }}
+    outputs:
+"""
+# The origin every later leg reads is the pinned store's, not the bucket's variable.
+_HANDOFF_BUNDLED_WORKFLOW_OLD_8 = """\
+          printf 'public-root=%s\\npublic-base=%s\\n' \"$CLOUDFLARE_R2_PUBLIC_URL\" \"$CLOUDFLARE_R2_PUBLIC_URL\" >> \"$GITHUB_OUTPUT\"\n"""
+_HANDOFF_BUNDLED_WORKFLOW_NEW_8 = """\
+          # The archive origin is whichever store this run pins serves from -- not a
+          # bucket variable the GitHub-pinned plane never sets.
+          origin=$(python -c 'import os; from scripts.releases.handoff import archive_origin; print(archive_origin(os.environ.get("CLOUDFLARE_R2_PUBLIC_URL")))')
+          printf 'public-root=%s\\npublic-base=%s\\n' \"$origin\" \"$origin\" >> \"$GITHUB_OUTPUT\"\n"""
 _HANDOFF_BUNDLED_WORKFLOW_EDITS = (
     (_HANDOFF_BUNDLED_WORKFLOW_OLD_1, _HANDOFF_BUNDLED_WORKFLOW_NEW_1),
     (_HANDOFF_BUNDLED_WORKFLOW_OLD_2, _HANDOFF_BUNDLED_WORKFLOW_NEW_2),
@@ -5709,6 +5802,8 @@ _HANDOFF_BUNDLED_WORKFLOW_EDITS = (
     (_HANDOFF_BUNDLED_WORKFLOW_OLD_4, _HANDOFF_BUNDLED_WORKFLOW_NEW_4),
     (_HANDOFF_BUNDLED_WORKFLOW_OLD_5, _HANDOFF_BUNDLED_WORKFLOW_NEW_5),
     (_HANDOFF_BUNDLED_WORKFLOW_OLD_6, _HANDOFF_BUNDLED_WORKFLOW_NEW_6),
+    (_HANDOFF_BUNDLED_WORKFLOW_OLD_7, _HANDOFF_BUNDLED_WORKFLOW_NEW_7),
+    (_HANDOFF_BUNDLED_WORKFLOW_OLD_8, _HANDOFF_BUNDLED_WORKFLOW_NEW_8),
 )
 
 _HANDOFF_STAGING_TEST_OLD_1 = """\
@@ -5919,17 +6014,50 @@ _HANDOFF_SMOKE_TEST_EDITS = (
     (_HANDOFF_SMOKE_TEST_OLD_13, _HANDOFF_SMOKE_TEST_NEW_13),
 )
 
-# Fork GitHub-native handoff plane: the store that moves artifacts between jobs.
-# Five upstream-owned files carry it -- the resolver, the two desktop release
-# workflows, and the two tests that replay the legs those workflows run -- so all
-# five are re-derived by ``brand_tree`` every candidate.
+# The admission test runs the real step in a fake clone, so the clone has to carry
+# everything the step's import closure now reaches through the store seam.
+_HANDOFF_ADMISSION_TEST_OLD_1 = """\
+    source = Path(__file__).resolve().parents[2] / 'scripts/releases'
+    shutil.copytree(source, clone / 'scripts/releases', ignore=shutil.ignore_patterns('__pycache__'))
+"""
+_HANDOFF_ADMISSION_TEST_NEW_1 = """\
+    scripts = Path(__file__).resolve().parents[2] / 'scripts'
+    shutil.copytree(scripts / 'releases', clone / 'scripts/releases', ignore=shutil.ignore_patterns('__pycache__'))
+    # The step names its archive origin through the store seam, which resolves r2 at
+    # import, and r2 reads its content-type map from scripts/ -- the CI checkout the
+    # step runs against has always carried that file, so the fake clone must too.
+    shutil.copy(scripts / 'release-content-types.json', clone / 'scripts/release-content-types.json')
+"""
+_HANDOFF_ADMISSION_TEST_OLD_2 = """\
+        GIT_ALLOW_PROTOCOL='file', PYTHONUTF8='1',
+    )
+"""
+_HANDOFF_ADMISSION_TEST_NEW_2 = """\
+        GIT_ALLOW_PROTOCOL='file', PYTHONUTF8='1',
+        # The step resolves its archive origin through the store seam, and that module
+        # graph reaches scripts.releases.semver -> nastech_cli.update_channel. CI runs
+        # the step in a checkout carrying those top-level packages; the fake clone
+        # carries only scripts/, so the repo root joins the child path as it does in
+        # tests/ci/test_desktop_release_tag_admission.py.
+        PYTHONPATH=str(Path(__file__).resolve().parents[2]),
+    )
+"""
+_HANDOFF_ADMISSION_TEST_EDITS = (
+    (_HANDOFF_ADMISSION_TEST_OLD_1, _HANDOFF_ADMISSION_TEST_NEW_1),
+    (_HANDOFF_ADMISSION_TEST_OLD_2, _HANDOFF_ADMISSION_TEST_NEW_2),
+)
 
 _HANDOFF_MODULE_REL = "scripts/releases/handoff.py"
+_HANDOFF_R2_REL = "scripts/releases/r2.py"
+_HANDOFF_ADMISSION_TEST_REL = "tests/ci/test_desktop_release_commit_admission.py"
 _HANDOFF_SMOKE_WORKFLOW_REL = ".github/workflows/desktop-bundle-smoke.yml"
 _HANDOFF_STAGING_TEST_REL = "tests/ci/test_commit_build_staging.py"
 _HANDOFF_SMOKE_TEST_REL = "tests/ci/test_desktop_bundle_smoke.py"
 
 _HANDOFF_MODULE_MARKER = "def store(public_base: str | None = None):"
+_HANDOFF_R2_MARKER = "def read_public_text(base: str, key: str) -> str:"
+_HANDOFF_ADMISSION_TEST_MARKER = (
+    "PYTHONPATH=str(Path(__file__).resolve().parents[2]),")
 _HANDOFF_WORKFLOW_MARKER = "  RELEASE_HANDOFF_STORE: github\n"
 _HANDOFF_STAGING_TEST_MARKER = (
     "def shell_step(tmp_path, object_store, job, name, env, *, script=None, store=None):")
@@ -5938,6 +6066,11 @@ _HANDOFF_SMOKE_TEST_MARKER = "def handoff_env(tmp_path, store, *, commit=False):
 _HANDOFF_SURFACES = (
     (_HANDOFF_MODULE_REL, _HANDOFF_MODULE_EDITS, _HANDOFF_MODULE_MARKER,
      "the store resolver every handoff call site routes through"),
+    (_HANDOFF_R2_REL, _HANDOFF_R2_EDITS, _HANDOFF_R2_MARKER,
+     "the pinned read that lets a caller verify the metadata it fetched"),
+    (_HANDOFF_ADMISSION_TEST_REL, _HANDOFF_ADMISSION_TEST_EDITS,
+     _HANDOFF_ADMISSION_TEST_MARKER,
+     "the admission test's store-seam import closure"),
     (_HANDOFF_SMOKE_WORKFLOW_REL, _HANDOFF_SMOKE_WORKFLOW_EDITS, _HANDOFF_WORKFLOW_MARKER,
      "the smoke lane's handoff-store pin, job token, and credential-free fetch"),
     (_BUNDLED_WORKFLOW_REL, _HANDOFF_BUNDLED_WORKFLOW_EDITS, _HANDOFF_WORKFLOW_MARKER,
@@ -5962,8 +6095,17 @@ def _reconcile_github_release_handoff_plane(dst: str) -> list[str]:
     channel, and ``ci-disposable/…`` -- and the release-store transport is the fork-only
     ``scripts/releases/gh_transport.py`` plus the fake ``tests/ci/gh_release_store.py``, so
     ``preserve_fork_files`` carries those and this rule carries only what ``brand_tree``
-    re-derives: the resolver inside upstream's ``scripts/releases/handoff.py``, both desktop
-    workflows, and the two tests that replay those legs.
+    re-derives: the resolver inside upstream's ``scripts/releases/handoff.py``, its public
+    metadata read in ``scripts/releases/r2.py``, both desktop workflows, and the three tests
+    that replay those legs.
+
+    ``handoff.archive_origin()`` is the second half of the same decision.  Every leg that
+    names an artifact asks the store where it serves bytes, so a GitHub-pinned run cannot
+    emit a URL at a bucket origin it does not have -- and cannot emit an empty one when
+    ``CLOUDFLARE_R2_PUBLIC_URL`` is unset, which is the state this plane is moving toward.
+    The admission job resolves it too, so it carries the same ``GH_TOKEN`` as the legs it
+    gates, and its CI test runs that step in a fake clone that has to carry the import
+    closure the resolver now pulls in.
 
     ``handoff.store()`` resolves in three signals, in order of authority.
     ``RELEASE_HANDOFF_STORE`` pins a whole run so a workflow's staging leg and its fetching leg
