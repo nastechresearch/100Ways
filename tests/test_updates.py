@@ -127,6 +127,7 @@ from hundredways.updates import (
     _reconcile_sigv4_vectors,
     _reconcile_skill_description_hardline,
     _reconcile_skill_docs_order,
+    _reconcile_pnpm_ui_integrity,
     _reconcile_store_gate_covers_the_lane,
     _reconcile_telegram_mention_context_lengths,
     _reconcile_dead_api_defaults,
@@ -8612,6 +8613,114 @@ def test_reconcile_ui_scope_pins_still_fails_closed_without_verified_target(tmp_
     )
     with pytest.raises(UiScopePinError):
         _reconcile_ui_scope_pins(str(tmp_path))
+
+
+def test_a_pnpm_peer_suffix_is_not_part_of_the_version_it_names(tmp_path, monkeypatch):
+    """A lock key spells its peers beside its version; the version stops there.
+
+    Upstream's tip key is ``'@nastech-research/ui@0.19.1(@observablehq/plot@0.6.17)
+    (react@19.3.0)'``.  Reading the version past the first ``(`` asks npm for a
+    version that cannot exist -- ``0.19.1(@observablehq`` -- and then reports a
+    pin the fork does publish as unpublished, which is the answer that stopped
+    the pipeline lane.
+    """
+    registry = _registry_publishes_the_new_version(monkeypatch)
+    lock = tmp_path / "pnpm-lock.yaml"
+    text = (
+        "  '@nastech-research/ui@0.19.1(@observablehq/plot@0.6.17)(react@19.3.0)':\n"
+        "    dependencies:\n"
+        "      react: 19.3.0\n"
+    )
+    lock.write_text(text)
+
+    assert _reconcile_ui_scope_pins(str(tmp_path)) == []
+    assert lock.read_text() == text
+    # the version asked of the registry is the one the key declares
+    assert registry.urls == [updates._NASTECH_UI_REGISTRY_URL]
+
+
+# ---------------------------------------------------------------------------
+# A pnpm lock's ui digest, which branding renames the key over but cannot move
+# ---------------------------------------------------------------------------
+
+# The bytes one scope serves for a version are not the bytes the other does,
+# so a lock that names the fork's package and carries upstream's digest makes
+# ``pnpm install --frozen-lockfile`` fail for every user of the fork.
+_UPSTREAM_UI_DIGEST = "sha512-" + "U" * 86 + "=="
+_OTHER_PACKAGE_DIGEST = "sha512-" + "O" * 86 + "=="
+
+
+def _pnpm_lock(tmp_path, version: str) -> Path:
+    """A lock in the shape upstream's tip writes: package, snapshot, one other."""
+    lock = tmp_path / "pnpm-lock.yaml"
+    lock.write_text(
+        "lockfileVersion: '9.0'\n"
+        "\n"
+        "packages:\n"
+        "\n"
+        f"  '@nastech-research/ui@{version}':\n"
+        f"    resolution: {{integrity: {_UPSTREAM_UI_DIGEST}}}\n"
+        "    peerDependencies:\n"
+        "      react: ^19.0.0\n"
+        "\n"
+        "  react@19.3.0:\n"
+        f"    resolution: {{integrity: {_OTHER_PACKAGE_DIGEST}}}\n"
+        "\n"
+        "snapshots:\n"
+        "\n"
+        f"  '@nastech-research/ui@{version}(react@19.3.0)':\n"
+        "    dependencies:\n"
+        "      react: 19.3.0\n"
+    )
+    return lock
+
+
+def test_pnpm_lock_ui_digest_describes_the_forks_tarball(tmp_path):
+    """Branding renamed the key, so the digest beside it has to follow."""
+    version = "0.18.4"
+    assert version in _NASTECH_UI_INTEGRITY
+    lock = _pnpm_lock(tmp_path, version)
+
+    assert _reconcile_pnpm_ui_integrity(str(tmp_path)) == ["pnpm-lock.yaml"]
+
+    text = lock.read_text()
+    assert f"    resolution: {{integrity: {_NASTECH_UI_INTEGRITY[version]}}}" in text
+    assert _UPSTREAM_UI_DIGEST not in text
+    # no other package's bytes are this rule's business
+    assert _OTHER_PACKAGE_DIGEST in text
+    # a snapshot repeats the key with its peer set and carries no digest
+    assert text.count(f"'@nastech-research/ui@{version}(react@19.3.0)':") == 1
+
+    # idempotent: the fork's own digest is already there
+    assert _reconcile_pnpm_ui_integrity(str(tmp_path)) == []
+    assert lock.read_text() == text
+
+
+def test_pnpm_lock_ui_digest_for_a_newer_publish_needs_no_engine_edit(
+        tmp_path, monkeypatch):
+    """The registry answers for a version the table predates; nothing answers alone.
+
+    Upstream moved its ui package to 0.19.1, so that is the key branding
+    writes.  The fork has to publish the same version, and then the lock's
+    digest comes from the registry's ``dist.integrity`` for the fork's own
+    tarball -- never a value copied from upstream and never one typed into the
+    engine, which is why an unpublished version stops the sync instead.
+    """
+    registry = _table_answer(monkeypatch)
+    lock = _pnpm_lock(tmp_path, "0.19.1")
+
+    with pytest.raises(UiScopePinError) as excinfo:
+        _reconcile_pnpm_ui_integrity(str(tmp_path))
+    assert "0.19.1" in str(excinfo.value)
+    assert "Publish that version" in str(excinfo.value)
+    # fail closed means the lock keeps the bytes it had, wrong as they are
+    assert lock.read_text().count(_UPSTREAM_UI_DIGEST) == 1
+
+    _registry_publishes_the_new_version(monkeypatch)
+    assert _reconcile_pnpm_ui_integrity(str(tmp_path)) == ["pnpm-lock.yaml"]
+    assert _FORK_NEW_DIGEST in lock.read_text()
+    assert _UPSTREAM_UI_DIGEST not in lock.read_text()
+    assert registry.urls == [updates._NASTECH_UI_REGISTRY_URL]
 
 
 # ---------------------------------------------------------------------------

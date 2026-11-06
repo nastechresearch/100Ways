@@ -599,6 +599,10 @@ _NASTECH_UI_INTEGRITY: dict[str, str] = {
 #: this gate is that its digest must never reach a lock or a manifest.
 _NASTECH_UI_REGISTRY_URL = "https://registry.npmjs.org/@nastech-research%2Fui"
 
+#: The scope half of the fork's package name, for the locks that spell it in
+#: parts (a pnpm key is ``'@nastech-research/ui@0.19.1'``, not a JSON record).
+_FORK_UI_SCOPE = "nastech-research"
+
 
 class UiRegistryLookupError(ValueError):
     """The registry could not be asked cleanly whether a ui version is published.
@@ -10262,9 +10266,14 @@ def _reconcile_security_contact(dst: str) -> list[str]:
     return fixed
 
 
+# A pnpm lock key spells a peer-resolved dependency as
+# ``@scope/ui@1.2.3(@observablehq/plot@0.6.17)(react@19.3.0)``, so its version
+# ends at the first ``(``.  Reading past it asks the registry for a version that
+# cannot exist, and a pin the fork does publish then fails as unpublished.
 _UI_SCOPE_REF_RE = re.compile(
-    r"@(?P<scope>[A-Za-z0-9_.\-]+)/ui@(?P<version>[^/\"'\s<)]+)"
+    r"@(?P<scope>[A-Za-z0-9_.\-]+)/ui@(?P<version>[^/\"'\s<(]+)"
     r"(?P<tail>/[^\"'\s<)]*)?")
+
 
 # Byte-identity evidence that authorises a single class of repin: a reference
 # to a version the fork does NOT publish may be moved to a published version
@@ -10583,6 +10592,83 @@ def _reconcile_ui_scope_pins(dst: str) -> list[str]:
     return fixed
 
 
+#: A pnpm lock identifies a registry package by its quoted
+#: ``'@scope/ui@version':`` key -- optionally with a ``(peer@1.2.3)(...)``
+#: suffix -- and stores the bytes it expects under ``resolution:``.  Branding
+#: renames the key, so pnpm fetches the FORK's tarball and verifies it against
+#: the digest copied from upstream's; the two scopes hold different bytes at
+#: the same version, so ``pnpm install --frozen-lockfile`` fails for every user
+#: who installs the fork.  The package-lock sibling is ``_reconcile_lock_record``.
+_PNPM_LOCK_FILENAME = "pnpm-lock.yaml"
+_PNPM_UI_KEY_RE = re.compile(
+    r"^([ ]*)'@(?P<scope>[A-Za-z0-9_.\-]+)/ui@(?P<version>\d+\.\d+\.\d+)[^']*':$")
+_PNPM_RESOLUTION_RE = re.compile(
+    r"^([ ]*)resolution: \{integrity: (?P<digest>sha512-[A-Za-z0-9+/=]+)\}?,?$")
+
+
+def _ui_fork_digest(rel: str, version: str) -> str:
+    """The ``dist.integrity`` of the fork's own ``@nastech-research/ui`` tarball.
+
+    The reviewed table answers offline for the versions it carries; a newer
+    publish is asked of the registry, and neither answer present stops the sync
+    rather than writing a digest nothing verified.
+    """
+    digest = _NASTECH_UI_INTEGRITY.get(version)
+    if digest is None:
+        digest = _registry_ui_integrity(version)
+    if digest is None:
+        raise UiScopePinError(
+            f"{rel} pins @{_FORK_UI_SCOPE}/ui@{version}, which the fork has "
+            f"not published (the registry lists "
+            f"{', '.join(sorted(_registry_ui_versions()))}). Publish that version, "
+            f"then the sync reads its dist.integrity off the registry -- the "
+            f"digest can only ever come from the fork's own tarball, because "
+            f"upstream's bytes for the same version number fail the install"
+        )
+    return digest
+
+
+def _reconcile_pnpm_ui_integrity(dst: str) -> list[str]:
+    """Repoint every ui digest in a pnpm lock at the fork's published tarball."""
+    fixed: list[str] = []
+    for rel in _walk_files(dst):
+        if os.path.basename(rel) != _PNPM_LOCK_FILENAME:
+            continue
+        if is_locked_path(rel) or is_immutable_path(rel):
+            continue
+        path = os.path.join(dst, rel)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                lines = fh.read().splitlines(keepends=True)
+        except (OSError, UnicodeDecodeError):
+            continue
+        changed = False
+        for index, line in enumerate(lines):
+            key = _PNPM_UI_KEY_RE.match(line.rstrip("\n"))
+            if key is None or key.group("scope") != _FORK_UI_SCOPE:
+                continue
+            # A pnpm snapshot repeats the key with its peer set and no
+            # resolution of its own; the line above is the one holding bytes.
+            raw_line = lines[index + 1] if index + 1 < len(lines) else ""
+            resolution = _PNPM_RESOLUTION_RE.match(raw_line.rstrip("\n"))
+            if resolution is None:
+                continue
+            expected = _ui_fork_digest(rel, key.group("version"))
+            if resolution.group("digest") == expected:
+                continue
+            lines[index + 1] = (
+                raw_line[:resolution.start("digest")] + expected
+                + raw_line[resolution.end("digest"):]
+            )
+            changed = True
+        if not changed:
+            continue
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("".join(lines))
+        fixed.append(rel)
+    return fixed
+
+
 def reconcile_tree(
     dst: str,
     *,
@@ -10845,6 +10931,13 @@ def reconcile_tree(
     # a reference that would resolve to a different package stops the sync
     # instead of reaching the fork.
     for rel in _reconcile_ui_scope_pins(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    # Branding renames a pnpm lock's ui key to the fork's scope, which points
+    # the install at the fork's tarball while the digest beside it still
+    # describes upstream's bytes for the same version -- an install that fails
+    # for every user.  The value only ever comes from the fork's own publish.
+    for rel in _reconcile_pnpm_ui_integrity(dst):
         result.total += 1
         result.fixed.append(rel)
     if _reconcile_plugin_guard_trusted_installer_hosts(dst) and "tools/plugin_guard_context.py" not in result.fixed:
