@@ -10694,12 +10694,18 @@ def _reconcile_pnpm_ui_integrity(dst: str) -> list[str]:
 #: upstream commit the last sync started at is merged onto the freshly branded
 #: tree, so the carry covers the fixes the fork has written and the ones it
 #: writes next, without an engine edit in between.
+#:
+#: The workflows are the same plane: the publication legs, the runner lanes, and
+#: the store a job resolves all live in ``.github/workflows/``, and measured
+#: against the fork's own files the tables keep 1 of 14 divergent lines in
+#: ``stable-release-publication.yml`` -- the rest is regenerated away every sync.
 _FORK_MERGE_PREFIXES = (
     "scripts/release.py",
     "scripts/releases/",
     "scripts/bundles/",
     "scripts/termux/",
     "tests/scripts/",
+    ".github/workflows/",
 )
 
 
