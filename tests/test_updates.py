@@ -127,6 +127,7 @@ from hundredways.updates import (
     _reconcile_sigv4_vectors,
     _reconcile_skill_description_hardline,
     _reconcile_skill_docs_order,
+    _reconcile_fork_release_divergence,
     _reconcile_pnpm_ui_integrity,
     _reconcile_store_gate_covers_the_lane,
     _reconcile_telegram_mention_context_lengths,
@@ -246,7 +247,7 @@ from hundredways.updates import (
     verify_branded,
 )
 from hundredways.rules import BrandingRules, collision_safe_path_map
-from tests.conftest import git, git_repo
+from tests.conftest import commit, git, git_repo
 
 
 def _hermes_repo(tmp_path):
@@ -8638,6 +8639,108 @@ def test_a_pnpm_peer_suffix_is_not_part_of_the_version_it_names(tmp_path, monkey
     # the version asked of the registry is the one the key declares
     assert registry.urls == [updates._NASTECH_UI_REGISTRY_URL]
 
+
+
+# ---------------------------------------------------------------------------
+# The fork's release-plane edits replayed as a merge, not quoted as a span
+# ---------------------------------------------------------------------------
+
+_MERGE_UPSTREAM_BASE = '''"""Publish one release."""
+
+FEED = "https://cdn.example.test/feed"
+
+
+def publish(tag: str) -> str:
+    url = f"{FEED}/{tag}/nastech-agent.deb"
+    return url
+
+
+def promote(channel: str) -> None:
+    print("promoting", channel)
+    _touch(channel)
+
+
+def _touch(channel: str) -> None:
+    return None
+'''
+
+# Upstream rewrites the tail of the file; the fork's fix is in its head.  Two
+# regions, so the merge has an honest answer for both.
+_MERGE_UPSTREAM_TIP = _MERGE_UPSTREAM_BASE.replace(
+    'def promote(channel: str) -> None:\n    print("promoting", channel)\n    _touch(channel)\n',
+    'def promote(channel: str, dry_run: bool = False) -> None:\n'
+    '    if dry_run:\n        print("would promote", channel)\n        return\n'
+    '    print("promoting", channel)\n    _touch(channel)\n',
+)
+
+# The fork moved the feed onto GitHub releases -- the fix PR #211 landed.
+_MERGE_FORK = _MERGE_UPSTREAM_BASE.replace(
+    'FEED = "https://cdn.example.test/feed"',
+    '# The bucket is retired: every asset is read back from the release it was\n'
+    '# staged on, so the origin is GitHub and the store the run pins decides.\n'
+    'FEED = "https://github.com/nastechresearch/nastech-agent/releases/download"',
+)
+
+
+def _merge_tree(tmp_path, upstream_text, fork_text):
+    """The three trees the merge reads: upstream with history, the candidate, the fork."""
+    hermes = tmp_path / "hermes-agent"
+    hermes.mkdir()
+    subprocess.run(["git", "init", "-q", str(hermes)], check=True)
+    subprocess.run(["git", "-C", str(hermes), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(hermes), "config", "user.name", "t"], check=True)
+    hermes = str(hermes)
+    baseline = commit(hermes, {"scripts/releases/stable.py": _MERGE_UPSTREAM_BASE},
+                      "upstream writes the bucket feed")
+    tip = commit(hermes, {"scripts/releases/stable.py": upstream_text},
+                 "upstream adds a dry-run to promote()")
+    assert tip != baseline
+
+    dst = tmp_path / "branded"
+    (dst / "scripts" / "releases").mkdir(parents=True)
+    (dst / "scripts" / "releases" / "stable.py").write_text(upstream_text)
+
+    fork = tmp_path / "nastech-agent"
+    (fork / "scripts" / "releases").mkdir(parents=True)
+    (fork / "scripts" / "releases" / "stable.py").write_text(fork_text)
+    (fork / "manifest.json").write_text(json.dumps({"upstream_sha": baseline}))
+    return str(dst), str(fork), hermes
+
+
+def test_the_forks_release_fix_survives_upstreams_rewrite_of_the_same_file(tmp_path):
+    """A quoted span dies when upstream edits around it; a merge does not."""
+    dst, fork, hermes = _merge_tree(tmp_path, _MERGE_UPSTREAM_TIP, _MERGE_FORK)
+
+    fixed, unresolved = _reconcile_fork_release_divergence(
+        dst, fork_root=fork, upstream_src=hermes)
+
+    text = (Path(dst) / "scripts" / "releases" / "stable.py").read_text()
+    assert fixed == ["scripts/releases/stable.py"]
+    assert unresolved == []
+    # the fork's fix ...
+    assert "github.com/nastechresearch/nastech-agent/releases/download" in text
+    # ... and everything upstream added since the sync the fork is on.
+    assert "dry_run: bool = False" in text
+    assert 'print("would promote", channel)' in text
+
+
+def test_a_collision_is_reported_not_guessed_at(tmp_path):
+    """Both sides rewrote the same line: keeping either alone is a silent
+    decision about what users download, so the run says which file it is."""
+    theirs = _MERGE_FORK
+    ours = _MERGE_UPSTREAM_BASE.replace(
+        'FEED = "https://cdn.example.test/feed"',
+        'FEED = "https://pages.nastech.test/feed"',
+    )
+    dst, fork, hermes = _merge_tree(tmp_path, ours, theirs)
+
+    fixed, unresolved = _reconcile_fork_release_divergence(
+        dst, fork_root=fork, upstream_src=hermes)
+
+    assert unresolved == ["scripts/releases/stable.py"]
+    assert fixed == []
+    # The candidate is left exactly as branding and the span tables produced it.
+    assert (Path(dst) / "scripts" / "releases" / "stable.py").read_text() == ours
 
 # ---------------------------------------------------------------------------
 # A pnpm lock's ui digest, which branding renames the key over but cannot move
