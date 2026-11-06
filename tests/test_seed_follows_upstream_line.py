@@ -27,6 +27,7 @@ What they guarantee:
 """
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -113,7 +114,7 @@ def test_seed_rewritten_to_newest_qualifying_stable(tree, src):
     # -- which would contradict the rewritten value -- is gone.
     assert "2026.9.18" not in text and "0.99.0" not in text and "0.23.0" not in text
     assert updates._UPSTREAM_SEED_COMMENT not in text
-    assert text.count(updates._SEED_SYNC_MARK) == 1
+    assert text.count(updates._FORK_SEED_HEAD) == 1
     # The lines beside the assignment are untouched: only the block the rule
     # owns moved.
     assert 'BUMPS = ("major", "minor", "patch")' in text
@@ -137,14 +138,14 @@ def test_second_pass_reports_nothing_and_changes_no_bytes(tree, src):
 
 
 def test_remarked_tree_only_moves_the_value(tree, src):
-    """A tree already carrying the sync-owned comment never gets a second one."""
+    """A tree already carrying the fork's seed comment never gets a second one."""
     (tree / _VERSIONING).write_text(
         _UPSTREAM_SHAPE.replace(updates._UPSTREAM_SEED_COMMENT, updates._FORK_SEED_COMMENT),
         encoding="utf-8")
     assert updates._reconcile_fork_seed_from_upstream_line(str(tree), str(src)) == [_VERSIONING]
     text = (tree / _VERSIONING).read_text(encoding="utf-8")
     assert _seed_of(tree) == "0.22.7"
-    assert text.count(updates._SEED_SYNC_MARK) == 1
+    assert text.count(updates._FORK_SEED_HEAD) == 1
 
 
 def test_dispatched_by_reconcile_tree_and_recorded(tree, src):
@@ -222,3 +223,122 @@ def test_versioning_module_without_a_seed_is_left_alone(tree, src):
         '"""The line comes only from published releases; there is no seed."""\n',
         encoding="utf-8")
     assert updates._reconcile_fork_seed_from_upstream_line(str(tree), str(src)) == []
+
+
+# --- the seed block and the release-plane merge are one region ---------------
+#
+# Candidate 6acd9332: ``scripts/releases/versioning.py`` regenerated to
+# upstream's one-line ``_gh``, while its test still injected ``run=`` and
+# ``sleep=``.  Fork PR #213 wrote both halves into the same file; the merge that
+# replays the fork's release plane refused the whole file because this rule had
+# already re-written the six lines above ``SEED``, and the retry seam went with
+# it -- two reds in ``Python tests (1/8)`` plus ``HX006  _gh  subprocess/urlopen
+# without timeout`` in ``Python lints``, on every sync from here.
+
+_PLANE_BASE = '''import json
+import subprocess
+
+
+# The legacy CalVer line published up to 0.21.5 (v2026.9.24); the pipeline continues it.
+SEED = "0.21.5"
+
+
+BUMPS = ("major", "minor", "patch")
+
+
+def published_stable_version(repository: str) -> str:
+    return max(repository, SEED)
+
+
+def compare(a: str, b: str) -> int:
+    return (a > b) - (a < b)
+
+
+def _gh(argv: list[str]) -> str:
+    return subprocess.check_output(argv, text=True, encoding="utf-8")
+'''
+
+# Upstream keeps working in the middle of the file -- far from both regions the
+# fork edits, because that is what upstream does between two syncs.
+_PLANE_TIP = _PLANE_BASE.replace(
+    "    return max(repository, SEED)",
+    "    return max(repository, SEED, key=lambda value: value)",
+)
+
+# Fork PR #213 rewrote the seed block, and the one shared ``gh api`` call under
+# it: every check on the repository spends one Actions installation's request
+# budget, so a 403 here is a queue position, and the tests inject ``run=`` and
+# ``sleep=`` to watch it retried.
+_PLANE_FORK = _PLANE_TIP.replace(
+    "# The legacy CalVer line published up to 0.21.5 (v2026.9.24); the pipeline continues it.\n"
+    'SEED = "0.21.5"',
+    "# The head of the line before any release is published from here. Upstream's own\n"
+    "# seed named its last CalVer-era release, and the canary is stamped from it\n"
+    "# until a stable publishes.\n"
+    'SEED = "0.22.7"',
+).replace(
+    "def _gh(argv: list[str]) -> str:\n"
+    '    return subprocess.check_output(argv, text=True, encoding="utf-8")\n',
+    "def _gh(argv: list[str], *, run=subprocess.run, sleep=None, tries: int = 5) -> str:\n"
+    "    for attempt in range(1, tries + 1):\n"
+    '        done = run(argv, text=True, encoding="utf-8", capture_output=True)\n'
+    "        if done.returncode == 0:\n"
+    "            return done.stdout\n"
+    "    raise subprocess.CalledProcessError(done.returncode, argv)\n",
+)
+
+
+def _plane(tmp_path, *, ours_text, fork_text):
+    """The three trees the sync reads: upstream with history, candidate, fork."""
+    origin = tmp_path / "plane-origin.git"
+    seed = tmp_path / "plane-seed"
+    _git(tmp_path, "init", "--bare", "-b", "main", str(origin))
+    _git(tmp_path, "init", "-b", "main", str(seed))
+    _git(seed, "config", "user.name", "fixture")
+    _git(seed, "config", "user.email", "fixture@example.invalid")
+    for text, tag in ((_PLANE_BASE, "v0.22.7"), (_PLANE_TIP, "")):
+        path = seed / _VERSIONING
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        _git(seed, "add", "-A")
+        _git(seed, "commit", "-m", "upstream works on the release plane")
+        if tag:
+            _git(seed, "tag", tag)
+    baseline = _git(seed, "rev-parse", "v0.22.7").stdout.strip()
+    _git(seed, "push", "--quiet", str(origin), "main", "refs/tags/*:refs/tags/*")
+
+    src = tmp_path / "plane-src"
+    _git(tmp_path, "clone", "--quiet", "--no-local", str(origin), str(src))
+
+    dst = tmp_path / "candidate"
+    (dst.joinpath(*Path(_VERSIONING).parts[:-1])).mkdir(parents=True)
+    (dst / _VERSIONING).write_text(ours_text, encoding="utf-8")
+
+    fork = tmp_path / "nastech-agent"
+    (fork.joinpath(*Path(_VERSIONING).parts[:-1])).mkdir(parents=True)
+    (fork / _VERSIONING).write_text(fork_text, encoding="utf-8")
+    (fork / "manifest.json").write_text(json.dumps({"upstream_sha": baseline}),
+                                        encoding="utf-8")
+    return str(dst), str(fork), str(src)
+
+
+def test_the_seed_rule_leaves_the_forks_seed_comment_to_the_fork(tmp_path):
+    """Rewriting #213's prose is what made the merge refuse the whole file."""
+    dst, fork, src = _plane(tmp_path, ours_text=_PLANE_TIP, fork_text=_PLANE_FORK)
+    result = updates.reconcile_tree(dst, fork_root=fork, upstream_src=src)
+    text = Path(dst, _VERSIONING).read_text(encoding="utf-8")
+    assert result.unresolved == []
+    assert text.count(updates._FORK_SEED_HEAD) == 1
+    assert updates._UPSTREAM_SEED_COMMENT not in text
+
+
+def test_the_forks_gh_retry_seam_survives_the_seed_rewrite(tmp_path):
+    """One file, two owners: the merge carries the seam, the rule moves the number."""
+    dst, fork, src = _plane(tmp_path, ours_text=_PLANE_TIP, fork_text=_PLANE_FORK)
+    result = updates.reconcile_tree(dst, fork_root=fork, upstream_src=src)
+    text = Path(dst, _VERSIONING).read_text(encoding="utf-8")
+    assert "run=subprocess.run, sleep=None, tries: int = 5" in text
+    assert "subprocess.check_output" not in text
+    assert _seed_of(Path(dst)) == "0.22.7"
+    assert "key=lambda value: value" in text
+    assert _VERSIONING in result.fixed
