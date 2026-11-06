@@ -7856,20 +7856,25 @@ def _opt_in_lane_rows(text: str) -> set:
 
 
 def _opt_in_lanes_added_by_the_fork(root: Path) -> set:
-    """Opt-in lane rows the fork's own rule puts into upstream's lane table.
+    """Opt-in lane rows the sync puts into upstream's lane table that it did not ship.
 
-    ``_reconcile_signing_gated_defaults`` is the only rule that edits the table, so
-    running it on upstream's module at the seed and subtracting the rows the seed
-    already opts out of leaves exactly the rows the fork authored.  It reads the
-    module the rule emits, never the rule's source: a rule that re-inserted a lane
-    upstream retired would appear here as a name, not as a line of text.
+    The whole ``reconcile_tree`` chain runs over upstream's module at the seed -- not
+    one rule -- so whichever rule authored a row, the row appears here; subtracting
+    what the seed itself opts out of leaves only what the fork added.  It reads the
+    module the sync emits, never the engine's source text: a rule that re-inserted a
+    lane upstream retired would return its name, and the name would then have to be
+    justified in the pairing below rather than in a comment.
     """
     seed = _UPSTREAM_LANES_SEED.read_text(encoding="utf-8")
     released = root / "scripts" / "releases"
     released.mkdir(parents=True)
     (released / "lanes.py").write_text(seed, encoding="utf-8")
+    # The lane table owns this tree's signing gate only when the release script
+    # imports it, which is the shape the seed ships.
+    (released / "stable.py").write_text(
+        "from scripts.releases import lanes as lane_set\n", encoding="utf-8")
 
-    assert updates._reconcile_signing_gated_defaults(str(root)) is True
+    updates.reconcile_tree(str(root))
 
     produced = (released / "lanes.py").read_text(encoding="utf-8")
     return _opt_in_lane_rows(produced) - _opt_in_lane_rows(seed)
@@ -7898,11 +7903,11 @@ def test_fork_lane_release_default_set_and_its_test_agree(tmp_path):
     upstream = _RELEASE_LANES_TESTS_EDITS[0][0].split("set(lane_set.NAMES) - ")[1]
     upstream_opt_in = set(re.findall(r'"([a-z0-9-]+)"', upstream))
     # Lanes this fork puts into the lane table as opt-in rows of its own, read off
-    # the module the lane rule actually produces: seed upstream's table, run the
-    # rule that owns the fork's one rewrite to it, and subtract the rows the seed
-    # already declared opt-in.  What remains is only what the fork added -- nothing,
-    # because the macOS Intel lane is upstream's to retire and the sync carries that
-    # deletion instead of re-growing the row.
+    # the module the sync produces: run the reconcile chain over upstream's table at
+    # the seed and subtract the rows the seed already declared opt-in.  What remains
+    # is only what the fork added -- nothing, because the macOS Intel lane is
+    # upstream's to retire and the sync carries that deletion instead of re-growing
+    # the row.
     fork_opt_in = _opt_in_lanes_added_by_the_fork(tmp_path / "lane-seed")
     assert test_names == source_names | (upstream_opt_in - added) | fork_opt_in
     # Termux is the one lane both sides put back in: it needs no signing.
