@@ -1,7 +1,8 @@
 """Fail-closed, input-pinned release migration conflict policy.
 
-This is deliberately not a general release merger.  A decision is enabled only
-for a recorded AST fingerprint triple; every other collision stays unresolved.
+This is deliberately not a general release merger. The public entry requires
+exact complete-file input/output pins. AST fingerprints only select conflicts
+inside those reviewed inputs; every other collision stays unresolved.
 """
 
 from __future__ import annotations
@@ -117,12 +118,26 @@ REVIEWED_SURFACES = {
     ),
 }
 
-_OWNERS = {
-    "scripts/releases/versioning.py": {"assign:SEED": "ours"},
-    "scripts/releases/channel_releases.py": {"member:publish_release": "ours"},
-    "scripts/bundles/release_artifacts.py": {"member:promote": "theirs"},
-    "scripts/releases/darwin.py": {"member:merge_mac_feeds": "ours", "member:finalize": "ours"},
-    "scripts/bundles/channel_artifacts.py": {"member:assemble": "ours"},
+# Legacy member policies require exact complete-file inputs AND the reviewed output.
+REVIEWED_LEGACY_MERGES: dict[str, tuple[str, str, str, str]] = {
+    "scripts/bundles/release_artifacts.py": (
+        "022138363d9a19efe5ee887ff0279272f5963e22310230ce65d008db54272076",
+        "8240a64043c04d7627fa8a2491c178b2ecffff617c6a03ad2d415c2443acc01a",
+        "217234c215ca30f2f4d2c833a6207a1cb5fdb11038ee30a92ebfc13c286ff3cb",
+        "8b65c8273ab0ea67107916277e123376b75869cfbba6603da16e097b5f63ccd9",
+    ),
+    "scripts/releases/channel_releases.py": (
+        "3a4b221f1b3abf5e13d547109877b782b09135ab6fb2150284902e828e4168f1",
+        "2bf4059496eabc5917b0f7823e17b52b432d7cf466b100fe8e5e86f246bb0ec3",
+        "d110020fc8cbb78f99a9b95d1683743e034d512871f398595f0e64df1688f2d5",
+        "046fb637dc2ce7031c1c825e372c0c267522be0af1e46f815d70008ef9063eac",
+    ),
+    "scripts/releases/versioning.py": (
+        "898f997d940b011a3db1f72ce461e3fb946908e2e9525979b2f938420ea0aec4",
+        "0e14d6eb596444dd7ecbabadef0d054e5f415b97862c7c916ca4437ed416de7b",
+        "5ac449cb479c1503e4bd7585dbaada9bafc0fa4f8200b78a9d7e686856a680c3",
+        "0e14d6eb596444dd7ecbabadef0d054e5f415b97862c7c916ca4437ed416de7b",
+    ),
 }
 
 
@@ -208,17 +223,17 @@ def reviewed_release_surface(rel: str, ancestor: str, ours: str, theirs: str) ->
 # Exact complete-input/output pins for two audited member merges.
 # Unlike the member ownership table, no future inputs at these paths are accepted.
 REVIEWED_MEMBER_MERGES: dict[str, tuple[str, str, str, str]] = {
-    'scripts/releases/channel_publish.py': (
-        'abc9f7718e0c590c0d78814d1ec2ae7931ac1d1ba547bc2fa31835515a4c7110',
-        '8d23fad075ea0422a9e8769d3bd49d1d49bf75f9cb34ef0c67259a6187ca9e5c',
-        '392c8dd4c02fe04de7d4a58aefe6fc3315736e33d867e274693677d50302a6c3',
-        '8d23fad075ea0422a9e8769d3bd49d1d49bf75f9cb34ef0c67259a6187ca9e5c',
+    "scripts/releases/channel_publish.py": (
+        "abc9f7718e0c590c0d78814d1ec2ae7931ac1d1ba547bc2fa31835515a4c7110",
+        "8d23fad075ea0422a9e8769d3bd49d1d49bf75f9cb34ef0c67259a6187ca9e5c",
+        "392c8dd4c02fe04de7d4a58aefe6fc3315736e33d867e274693677d50302a6c3",
+        "8d23fad075ea0422a9e8769d3bd49d1d49bf75f9cb34ef0c67259a6187ca9e5c",
     ),
-    'tests/scripts/test_release_artifacts.py': (
-        'cc2ebd7e5539527ed397ac0203b475d2a389a35bada1e9287adf05db86a418c7',
-        'be5bb74f0c79e77a510ff6365a7a411c895b9292b31b53725d97ee5f182dda08',
-        'ed3f78b8d608cbb3348c467d50d2192cb385bb431ba0fb588b853dad86c0ddaa',
-        '1fb63b5e399ecc84fde0aebfb4675756920ae2a9a936ca9aaf688b4e19cfde9a',
+    "tests/scripts/test_release_artifacts.py": (
+        "cc2ebd7e5539527ed397ac0203b475d2a389a35bada1e9287adf05db86a418c7",
+        "be5bb74f0c79e77a510ff6365a7a411c895b9292b31b53725d97ee5f182dda08",
+        "ed3f78b8d608cbb3348c467d50d2192cb385bb431ba0fb588b853dad86c0ddaa",
+        "1fb63b5e399ecc84fde0aebfb4675756920ae2a9a936ca9aaf688b4e19cfde9a",
     ),
 }
 
@@ -253,7 +268,15 @@ def replay_release_module(rel: str, ancestor: str, ours: str, theirs: str) -> st
     pinned = _reviewed_member_merge(rel, ancestor, ours, theirs)
     if pinned is not None:
         return pinned
-    if rel not in _OWNERS:
+    frozen = REVIEWED_LEGACY_MERGES.get(rel)
+    if frozen is None:
+        return None
+    digests = tuple(
+        hashlib.sha256(text.encode("utf-8")).hexdigest() for text in (ancestor, ours, theirs)
+    )
+    if digests == (frozen[0], frozen[3], frozen[2]):
+        return ours
+    if digests != frozen[:3]:
         return None
     if rel == "scripts/bundles/release_artifacts.py":
         # Normalise the fork side before merging. This makes a second replay a
@@ -262,7 +285,10 @@ def replay_release_module(rel: str, ancestor: str, ours: str, theirs: str) -> st
         theirs = _adapt_promotion_helpers(theirs)
         if theirs is None:
             return None
-    return merge_python_members(ancestor, ours, theirs, resolve=_resolver(rel))
+    merged = merge_python_members(ancestor, ours, theirs, resolve=_resolver(rel))
+    if merged is None or hashlib.sha256(merged.encode("utf-8")).hexdigest() != frozen[3]:
+        return None
+    return merged
 
 
 def _adapt_promotion_helpers(source: str) -> str | None:
