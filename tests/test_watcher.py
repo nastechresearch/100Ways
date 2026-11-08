@@ -26,6 +26,12 @@ def _watcher(repo, notifier, state_file):
     )
 
 
+def test_watcher_builds_default_notifier(tmp_path):
+    watcher = Watcher(WatcherConfig(repo=str(tmp_path)))
+    assert isinstance(watcher.notifier, Notifier)
+    assert watcher.cfg.repo == str(tmp_path)
+
+
 def test_cycle_reports_new_commits(git_repo, tmp_path):
     _make_fork_with_upstream_lead(git_repo)
     notifier = FakeNotifier()

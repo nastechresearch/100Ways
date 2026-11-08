@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .analyzer import GapReport, analyze
-from .notifier import Notification, Notifier
+from .notifier import Notification, Notifier, NotifyConfig
 from .rules import BrandingRules
 from .verify import _git, _git_ok
 
