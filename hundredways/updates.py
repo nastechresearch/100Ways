@@ -930,11 +930,11 @@ def _reconcile_domains(dst: str) -> list[str]:
             continue
         if not is_text(data):
             continue
-        text = data.decode("utf-8")
-        if not any(needle in text for needle, _ in _DOMAIN_FIXES):
+        original = data.decode("utf-8")
+        if not any(needle in original for needle, _ in _DOMAIN_FIXES):
             continue
         # Before the bare-domain rule, so the apex does not become the 404 root.
-        text = _fix_bare_apex(text)
+        text = _fix_bare_apex(original)
         for needle, replacement in _DOMAIN_FIXES:
             if needle in text:
                 text = text.replace(needle, replacement)
@@ -945,6 +945,11 @@ def _reconcile_domains(dst: str) -> list[str]:
         # occurrences in 8 files at fork 8a7b0eb5d).  A ``.com`` address is at
         # least a mailbox whose domain the owner may register.
         text = text.replace(*_MAILBOX_UNDO)
+        # A mailbox-only file can trip the broad domain detector, be rewritten,
+        # then be restored by the mailbox guard above. Do not report or touch a
+        # byte-identical file: the next reconciliation must be a fixed point.
+        if text == original:
+            continue
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(text)
         fixed.append(rel)
@@ -4938,6 +4943,17 @@ def _reconcile_github_pages_release_plane(dst: str) -> list[str]:
         text = _reconcile_budget_read(dst, rel)
         if text is None:
             continue
+        # The handoff reconciler extends this workflow's top-level Pages-store
+        # environment immediately after this rule. Its explanatory comment
+        # means the exact multi-line replacement below is no longer contiguous,
+        # although the required setting is already present. Recognize that
+        # completed semantic shape rather than injecting a second transient env
+        # block which fork replay then removes.
+        if (
+            rel == _PAGES_BUNDLE_SMOKE_REL
+            and "\nenv:\n  RELEASE_CHANNEL_STORE: github\n" in text
+        ):
+            continue
         if not any(old in text for old, _ in edits):
             continue
         updated = text
@@ -5393,6 +5409,17 @@ def _reconcile_desktop_release_leg_guards(dst: str) -> list[str]:
     rel = _BUNDLED_WORKFLOW_REL
     text = _reconcile_budget_read(dst, rel)
     if text is None:
+        return []
+    # The reviewed ARM-only output changed the store declaration's surrounding
+    # context. An old feed anchor also occurs inside its replacement, so the
+    # legacy partial-input detector must not reject these exact approved bytes.
+    # This is not a marker-only exemption: changed or unknown complete inputs
+    # still run the fail-closed checks below.
+    from hundredways.release_replay import is_reviewed_current_surface
+
+    if is_reviewed_current_surface(rel, text) and all(
+        marker in text for _, marker in _BUNDLED_LEG_MARKERS
+    ):
         return []
     updated = text
     if any(old in updated for old, _ in _BUNDLED_WORKFLOW_EDITS):
@@ -8162,6 +8189,61 @@ def _reconcile_install_ps1_store_guard_test(dst: str) -> bool:
 # generator's byte output without running Node.
 
 
+def _reconcile_serve_handler_ledger(dst: str) -> bool:
+    """Re-sort the generated handler table after route-name branding.
+
+    Match the generator's ordering and serialization without importing or
+    executing application code during a sync. This changes ordering only: live
+    route discovery and handler/decision validation remain the application's
+    responsibility. Unknown or damaged generated schemas must stop the sync,
+    not silently turn into a supposedly verified repair.
+    """
+    rel = "tests/nastech_cli/serve_handler_ledger.json"
+    text = _reconcile_budget_read(dst, rel)
+    if text is None:
+        return False
+    try:
+        document = json.loads(text)
+    except ValueError as exc:
+        raise ValueError(f"{rel}: invalid generated ledger JSON") from exc
+    if (
+        not isinstance(document, dict)
+        or document.get("generated_by") != "scripts/gen_serve_handler_ledger.py"
+        or not isinstance(document.get("handlers"), list)
+    ):
+        raise ValueError(f"{rel}: unsupported generated ledger schema")
+    handlers = document["handlers"]
+    if any(
+        not isinstance(row, dict)
+        or not isinstance(row.get("handler"), str)
+        or not row["handler"]
+        or not isinstance(row.get("kind"), str)
+        or not row["kind"]
+        for row in handlers
+    ):
+        raise ValueError(f"{rel}: invalid generated handler row")
+    if len({row["handler"] for row in handlers}) != len(handlers):
+        raise ValueError(f"{rel}: duplicate handler names")
+    ordered = sorted(handlers, key=lambda row: (row["kind"] == "rpc", row["handler"]))
+    if ordered == handlers:
+        return False
+    # Keep all generator-owned metadata and every row field. Reproduce
+    # gen_serve_handler_ledger.render's format, not generic JSON pretty-printing.
+    head = json.dumps(
+        {key: value for key, value in document.items() if key != "handlers"},
+        indent=1,
+        sort_keys=True,
+    )
+    rendered = (
+        head[:-2]
+        + ',\n "handlers": [\n'
+        + ",\n".join("  " + json.dumps(row, sort_keys=True) for row in ordered)
+        + "\n ]\n}\n"
+    )
+    _reconcile_budget_write(dst, rel, rendered)
+    return True
+
+
 def _reconcile_locale_key_order(dst: str) -> list[str]:
     """Re-sort the committed Desktop/TUI locale key lists in place.
 
@@ -10140,10 +10222,16 @@ def _reconcile_fork_release_divergence(
         if ancestor is None:
             continue
         ancestor = rules.transform_text(ancestor)
+        from .release_replay import reviewed_release_surface
+        if reviewed_release_surface(rel, ancestor, ours, theirs) is not None:
+            continue
         merged, conflict = _merge_fork_edits(ancestor, ours, theirs)
         if conflict:
             merged = _retry_from_branded(ancestor, ours, theirs, upstream_src,
                                          rel, rules)
+            if merged is None:
+                from .release_replay import replay_release_module
+                merged = replay_release_module(rel, ancestor, ours, theirs)
             if merged is None:
                 collided.append(rel)
                 continue
@@ -10251,6 +10339,9 @@ def reconcile_tree(
     if _reconcile_desktop_notification_timer_teardown(dst):
         result.total += 1
         result.fixed.append("apps/desktop/src/store/notifications.ts")
+    if _reconcile_serve_handler_ledger(dst):
+        result.total += 1
+        result.fixed.append("tests/nastech_cli/serve_handler_ledger.json")
     for rel in _reconcile_locale_key_order(dst):
         result.total += 1
         result.fixed.append(rel)
@@ -10524,6 +10615,10 @@ def reconcile_tree(
         result.total += 1
         result.fixed.append(rel)
     result.unresolved = _collided
+    from .release_surface import reconcile_release_surface
+    for rel in reconcile_release_surface(dst, unresolved=result.unresolved):
+        result.total += 1
+        result.fixed.append(rel)
     # Upstream's seed constant is dead code upstream -- a published head has
     # overridden it on every read -- but with zero fork stables published it IS
     # this fork's version line, so it is re-derived from the stable tags the
@@ -10546,6 +10641,31 @@ def reconcile_tree(
     for rel in _reconcile_prompt_surface_snapshot(dst):
         result.total += 1
         result.fixed.append(rel)
+    # A reviewed upstream fixture set predates the runtime tool registry.  The
+    # deterministic renderer's replacement is data-only and bound to every actual
+    # runtime/skill/config input, not merely a fork commit label.  Unknown source
+    # or partial snapshot changes remain conflicts instead of being overwritten.
+    from .prompt_surface import (
+        REVIEWED_RENDERED_TREE, REVIEWED_STALE_TREE, SNAPSHOT_REL,
+        _tree_digest as prompt_tree_digest,
+        reconcile_prompt_surface, source_matches_reviewed_manifest,
+    )
+    prompt_root = Path(dst) / SNAPSHOT_REL
+    if prompt_root.exists() and (
+        prompt_tree_digest(prompt_root) in {REVIEWED_STALE_TREE, REVIEWED_RENDERED_TREE}
+        or source_matches_reviewed_manifest(dst)
+    ):
+        for rel in reconcile_prompt_surface(dst, unresolved=result.unresolved):
+            if rel not in result.fixed:
+                result.total += 1
+                result.fixed.append(rel)
+    # Preserve the updater API in the exact reviewed minimal installer fixture.
+    from .installer_fixture import reconcile_installer_fixture
+    fixture_changes = reconcile_installer_fixture(dst, unresolved=result.unresolved)
+    if fixture_changes:
+        result.total += len(fixture_changes)
+        result.fixed.extend(fixture_changes)
+
     # Credential-gate completeness LAST, after every rule above has finished writing
     # the workflows it audits: the Store lane's gate has to list every name the lane
     # consumes or a pubconfig pre-flight admits a run that then reads an empty
