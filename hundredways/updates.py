@@ -3122,6 +3122,50 @@ def _reconcile_preserved_brand_text(dst: str, preserved: list[str]) -> list[str]
     return changed
 
 
+
+def _reconcile_npmrc_comment_brand_text(dst: str) -> list[str]:
+    """Brand only full-line comments in locked ``.npmrc`` files.
+
+    npm configuration is deliberately locked: registry, scope, and package
+    manager directives are operational data and must survive an update byte
+    for byte. Hermes' root ``.npmrc`` nevertheless has explanatory comments
+    that name its own checkout path (``/opt/hermes``). Because the normal
+    brand stage correctly skips locked package-manager files, those comments
+    otherwise reach the weekly first-party-brand audit unchanged.
+
+    Reconcile only lines whose first non-whitespace character is ``#``. The
+    canonical branding transform then makes that prose a fixed point without
+    changing any directive, inline comment, whitespace, or newline outside
+    those complete comment lines.
+    """
+    rules = BrandingRules()
+    changed: list[str] = []
+    for root, _dirs, names in os.walk(dst):
+        if ".npmrc" not in names:
+            continue
+        path = os.path.join(root, ".npmrc")
+        rel = os.path.relpath(path, dst).replace(os.sep, "/")
+        try:
+            with open(path, encoding="utf-8", newline="") as fh:
+                text = fh.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        fixed = "".join(
+            _candidate_text_for(rel, line, rules)
+            if line.lstrip().startswith("#")
+            else line
+            for line in text.splitlines(keepends=True)
+        )
+        if fixed == text:
+            continue
+        try:
+            with open(path, "w", encoding="utf-8", newline="") as fh:
+                fh.write(fixed)
+        except OSError:
+            continue
+        changed.append(rel)
+    return sorted(changed)
+
 # ---------------------------------------------------------------------------
 # Fork-local Cloudflare Worker config (scripts/cloudflare/assets-worker)
 # ---------------------------------------------------------------------------
@@ -11169,6 +11213,17 @@ class UpdateManager:
             # canonical transform the brand stage uses so preserved text is a
             # fixed point too, and register the changed files as reconciled.
             for rel in _reconcile_preserved_brand_text(dest, preserved):
+                rel_path = os.path.join(dest, rel)
+                if os.path.isfile(rel_path):
+                    try:
+                        with open(rel_path, "rb") as fh:
+                            reconciled_map[rel] = fh.read()
+                    except OSError:
+                        pass
+            # Package-manager configuration is locked because its directives
+            # are runtime data. Reconcile only full-line explanatory comments
+            # so upstream checkout prose cannot bypass the strict brand gate.
+            for rel in _reconcile_npmrc_comment_brand_text(dest):
                 rel_path = os.path.join(dest, rel)
                 if os.path.isfile(rel_path):
                     try:
