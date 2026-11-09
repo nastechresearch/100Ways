@@ -150,7 +150,7 @@ def pull_hermes(updates_dir: str, hermes_url: str = DEFAULT_HERMES_URL) -> str:
         shutil.rmtree(dest)
     last_error = ""
     for attempt in range(1, 6):
-        proc = _run(["git", "-c", "http.version=HTTP/1.1", "clone", "--no-local", url, dest])
+        proc = _run(["git", "-c", "http.version=HTTP/1.1", "clone", url, dest])
         if proc.returncode == 0:
             break
         last_error = proc.stderr.strip() or proc.stdout.strip()
