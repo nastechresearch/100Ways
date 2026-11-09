@@ -1562,6 +1562,23 @@ def test_free_runner_js_lane_shards_the_one_long_unit(tmp_path):
     assert _reconcile_free_runner_js_lane(str(candidate)) == []
 
 
+def test_free_runner_js_lane_preserves_just_launcher(tmp_path):
+    candidate, workflows, _scripts = _free_runner_js_lane_tree(tmp_path)
+    workflow = workflows / "js-tests.yml"
+    workflow.write_text(
+        workflow.read_text(encoding="utf-8").replace(
+            "run: node .github/scripts/run-workspace-checks.mjs",
+            "run: just check-js-ci",
+        ),
+        encoding="utf-8",
+    )
+    _reconcile_free_runner_js_lane(str(candidate))
+    text = workflow.read_text(encoding="utf-8")
+    assert "        run: just check-js-ci\n" in text
+    assert "        run: node .github/scripts/run-workspace-checks.mjs\n" not in text
+    assert _reconcile_free_runner_js_lane(str(candidate)) == []
+
+
 def test_free_runner_js_lane_stops_when_the_skip_seam_is_missing(tmp_path):
     """Legs without the seam re-run every unit, which is the original timeout."""
     candidate, workflows, scripts = _free_runner_js_lane_tree(tmp_path)
