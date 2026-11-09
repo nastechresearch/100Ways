@@ -92,6 +92,7 @@ from hundredways.updates import (
     _reconcile_install_ps1_store_guard_test,
     _reconcile_js_test_timeouts,
     _reconcile_locale_key_order,
+    _reconcile_npmrc_comment_brand_text,
     _reconcile_preserved_brand_text,
     _reconcile_python_slow_runner_wait_budgets,
     _reconcile_python_test_timeout,
@@ -5572,6 +5573,45 @@ def test_reconcile_preserved_brand_text_brands_fork_only_text(tmp_path):
         )
         == []
     )
+
+
+def test_reconcile_npmrc_comment_brand_text_keeps_directives_byte_exact(tmp_path):
+    """Only complete ``.npmrc`` comments are branded, never its directives."""
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    npmrc = candidate / ".npmrc"
+    npmrc.write_bytes(
+        b"# Docker's /opt/hermes): npx refuses, not warns.
+"
+        b"engine-strict=true
+"
+        b"@nous-research:registry=https://registry.npmjs.org
+"
+        b"cache=/opt/hermes-cache # Hermes inline comment
+"
+    )
+    nested = candidate / "website" / ".npmrc"
+    nested.parent.mkdir()
+    nested.write_text("# Hermes website note
+engine-strict=false
+", encoding="utf-8")
+
+    assert _reconcile_npmrc_comment_brand_text(str(candidate)) == [".npmrc", "website/.npmrc"]
+
+    root_bytes = npmrc.read_bytes()
+    assert b"/opt/nastech" in root_bytes
+    assert b"engine-strict=true
+" in root_bytes
+    assert b"@nous-research:registry=https://registry.npmjs.org
+" in root_bytes
+    assert b"cache=/opt/hermes-cache # Hermes inline comment
+" in root_bytes
+    assert b"
+" in root_bytes
+    assert "Hermes" not in nested.read_text(encoding="utf-8")
+    assert nested.read_text(encoding="utf-8").endswith("engine-strict=false
+")
+    assert _reconcile_npmrc_comment_brand_text(str(candidate)) == []
 
 
 def test_reconcile_uv_lock_rewrites_misaki_source_to_the_fork(tmp_path):
