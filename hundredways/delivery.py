@@ -721,7 +721,10 @@ def _families(result: Plan) -> str:
 
 def _gh_read(repo: str, path: str, *flags: str, run: Callable[..., Any] = subprocess.run) -> str:
     """One read-only ``gh api`` call, with a failure that is not allowed to look empty."""
-    if shutil.which("gh") is None:
+    # An injected runner is the command boundary in tests and integrations. It may
+    # emulate ``gh`` on a host without the executable, so preflight only the real
+    # subprocess runner.
+    if run is subprocess.run and shutil.which("gh") is None:
         raise DeliveryError("gh is not on PATH: the open list cannot be read")
     try:
         result = run(
@@ -808,7 +811,9 @@ def create_discussions(
             }
             for draft in drafts
         ]
-    if shutil.which("gh") is None:
+    # Retain the operator-facing guard for real delivery, but let an injected runner
+    # emulate the command without requiring the host to install ``gh``.
+    if run is subprocess.run and shutil.which("gh") is None:
         return [
             {"key": draft.key, "title": draft.title, "error": "gh CLI not on PATH"}
             for draft in drafts
