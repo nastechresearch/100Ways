@@ -5723,10 +5723,11 @@ _HANDOFF_SMOKE_WORKFLOW_EDITS = (
     (_HANDOFF_SMOKE_WORKFLOW_OLD_3, _HANDOFF_SMOKE_WORKFLOW_NEW_3),
 )
 
-_HANDOFF_BUNDLED_WORKFLOW_OLD_1 = """\
-  RELEASE_CHANNEL_STORE: github
-  RELEASE_CLAIM_TAG: ${{ inputs.claim-tag }}
-"""
+# This rule runs after _reconcile_github_pages_release_plane, whose insertion
+# includes the control-plane explanation between the two env keys. Keep that full
+# predecessor shape as the anchor: a shorter prefix would match neither the exact
+# bytes this rule receives nor a moved partial layout.
+_HANDOFF_BUNDLED_WORKFLOW_OLD_1 = _BUNDLED_CHANNEL_STORE_NEW_1
 _HANDOFF_BUNDLED_WORKFLOW_NEW_1 = """\
   RELEASE_CHANNEL_STORE: github
   # The handoff plane (each leg's packages, blockmaps and receipts) is pinned the
@@ -5787,14 +5788,17 @@ _HANDOFF_BUNDLED_WORKFLOW_NEW_6 = """\
 """
 # Admission resolves the store from its own job, so it carries the token like the
 # legs it gates.
+# The upstream admission leg was extended to 60 minutes after real archive
+# verification regularly exceeded the former 30-minute cap. Anchor that current
+# job shape, rather than silently treating its changed timeout as the old leg.
 _HANDOFF_BUNDLED_WORKFLOW_OLD_7 = """\
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       contents: read
     outputs:
 """
 _HANDOFF_BUNDLED_WORKFLOW_NEW_7 = """\
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       contents: read
     env:
