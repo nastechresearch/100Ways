@@ -5898,7 +5898,7 @@ def test_pipeline_preserves_registered_brand_art_without_fork_only_files(tmp_pat
                            owned=OwnedAssets(root=str(registry)), fork_root=str(fork)).run()
     assert result.gate
     assert result.fork.entries == []
-    assert open(os.path.join(result.dir, "static", "img", "banner.png"), "rb").read() == b"ENGINE-BANNER"
+    assert Path(result.dir, "static", "img", "banner.png").read_bytes() == b"ENGINE-BANNER"
     assert not os.path.exists(os.path.join(result.dir, "fork-only.txt"))
     assert not os.path.exists(os.path.join(result.dir, "config", "owned-assets"))
 

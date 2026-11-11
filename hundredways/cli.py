@@ -1513,7 +1513,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--updates-dir", default="", help="Updates-Commits dir (default: sibling of the repo)")
     p.add_argument("--hermes-url", default=DEFAULT_HERMES_URL, help="Hermes remote or local path")
     p.add_argument("--source-provenance-url", default="", help="approved HTTPS source URL recorded in the candidate manifest")
-    p.add_argument("--zip", default="", help="also build a branded upstream ZIP with registered Nastech visuals")
+    p.add_argument(
+        "--zip",
+        default="",
+        help="also build a branded upstream ZIP with registered Nastech visuals",
+    )
     p.add_argument("--project-name", default="nastech-agent", help="name of the project folder inside the zip")
     p.add_argument("--state-dir", default="", help="state dir (default: repo-sibling 100ways-state)")
     p.add_argument("--fork-root", default="",

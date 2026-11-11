@@ -11121,7 +11121,8 @@ class UpdateManager:
 
         stages.append(StageResult(
             "preserve", "skip",
-            "no arbitrary fork-only files are preserved; registered visual brand assets are handled separately",
+            "no arbitrary fork-only files are preserved; "
+            "registered visual brand assets are handled separately",
             0,
         ))
 
