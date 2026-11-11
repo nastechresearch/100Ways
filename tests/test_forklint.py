@@ -538,7 +538,8 @@ def test_banned_api_entries_are_read_from_every_spelling(tmp_path):
     """
     root = tmp_path / "configured"
     _write(root / "ruff.toml", """[lint]
-select = ["TID251"]
+select = ["TID251", "RUF100"]
+ignore = ["E501"]
 
 [lint.flake8-tidy-imports.banned-api]
 "pm.uv".msg = "inline"
@@ -551,9 +552,11 @@ msg = "bare subtable"
 msg = "quoted subtable"
 """)
 
-    assert read_fork_ruff_config(str(root)).banned_api == (
+    config = read_fork_ruff_config(str(root))
+    assert config.banned_api == (
         "pm.uv", "pm._uv", "pm.environment", "pm.runtime_stage",
     )
+    assert config.ignore == ("E501",)
 
 
 @pytest.mark.skipif(
@@ -603,9 +606,10 @@ def test_the_candidate_lints_under_the_config_its_ci_reads_not_a_stale_fork_copy
 def test_a_candidate_config_that_loosens_the_fork_guard_blocks(tmp_path):
     """Using the candidate's config must never mean accepting a weaker guard.
 
-    Three independent narrowings, one finding each: a rule the fork selects and the
-    candidate does not, a per-file-ignore that did not exist, and an import ban that
-    disappeared.  The fork's own config is what runs, so a green run cannot hide them.
+    Four independent narrowings, one finding each: a rule the fork selects and the
+    candidate does not, a global ignore the candidate adds, a per-file-ignore that did
+    not exist, and an import ban that disappeared.  The fork's own config is what runs,
+    so a green run cannot hide them.
     """
     fork = _fork(tmp_path, ruff_select=("F401", "TID251"),
                  per_file_ignores=(("website/*", ("F401",)),))
@@ -616,7 +620,7 @@ def test_a_candidate_config_that_loosens_the_fork_guard_blocks(tmp_path):
     ))
     candidate = tmp_path / "candidate"
     _write(candidate / "ruff.toml",
-           '[lint]\nselect = ["F401"]\n'
+           '[lint]\nselect = ["F401"]\nignore = ["RUF100"]\n'
            '[lint.per-file-ignores]\n"website/*" = ["F401"]\n"pm/**" = ["TID251"]\n'
            '[lint.flake8-tidy-imports.banned-api]\n'
            '"pm.uv".msg = "private"\n')
@@ -628,6 +632,7 @@ def test_a_candidate_config_that_loosens_the_fork_guard_blocks(tmp_path):
     details = sorted(issue.detail for issue in issues)
     assert all("weakens the fork's ruff guard" in detail for detail in details)
     assert any("selects TID251" in detail for detail in details)
+    assert any("ignores RUF100" in detail for detail in details)
     assert any('per-file-ignores adds TID251 for "pm/**"' in detail for detail in details)
     assert any('banned-api entry "pm.environment" is missing' in detail for detail in details)
 

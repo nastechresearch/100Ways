@@ -592,6 +592,7 @@ class ForkRuffConfig:
     source: str
     preview: bool
     select: tuple[str, ...]
+    ignore: tuple[str, ...]
     per_file_ignores: tuple[tuple[str, tuple[str, ...]], ...]
     banned_api: tuple[str, ...]
     config_text: str
@@ -608,6 +609,11 @@ FORK_RUFF_CONFIGS = ("ruff.toml", ".ruff.toml", FORK_PYPROJECT)
 _TABLE_RE = re.compile(r"^\[\s*(?P<table>[A-Za-z0-9_.\-]+)\s*\][ \t]*(?:#.*)?$")
 _SELECT_RE = re.compile(
     r"^[ \t]*select[ \t]*=[ \t]*(?P<value>\[.*?\])[ \t]*(?:#.*)?$", re.MULTILINE | re.DOTALL
+)
+# ``ignore`` is ruff's other global switch, and a candidate that adds one silences a
+# rule in every file without touching ``select``.  Read it so the guard can see it.
+_IGNORE_RE = re.compile(
+    r"^[ \t]*ignore[ \t]*=[ \t]*(?P<value>\[.*?\])[ \t]*(?:#.*)?$", re.MULTILINE | re.DOTALL
 )
 _PREVIEW_RE = re.compile(r"^[ \t]*preview[ \t]*=[ \t]*(?P<value>\S+)[ \t]*(?:#.*)?$", re.MULTILINE)
 # TOML spells the same pattern in either quote style and ruff accepts both, so the
@@ -729,7 +735,8 @@ def read_fork_ruff_config(fork_root: str) -> ForkRuffConfig:
                 f"{path} is the config the fork's ruff reads but names no select list"
             )
         preview = _PREVIEW_RE.search("\n".join(top)) or _PREVIEW_RE.search(lint)
-        ignores = tuple(
+        ignore = _IGNORE_RE.search(lint) or _IGNORE_RE.search("\n".join(top))
+        per_file_ignores = tuple(
             (entry.group("pattern"), _codes(entry.group("body")))
             for entry in _ENTRY_RE.finditer(bodies.get("lint.per-file-ignores", ""))
         )
@@ -740,7 +747,8 @@ def read_fork_ruff_config(fork_root: str) -> ForkRuffConfig:
             source=name,
             preview=preview is not None and preview.group("value") == "true",
             select=_codes(select.group("value")),
-            per_file_ignores=ignores,
+            ignore=_codes(ignore.group("value")) if ignore else (),
+            per_file_ignores=per_file_ignores,
             banned_api=_banned_api_paths(tables),
             config_text=config_text,
         )
@@ -860,6 +868,10 @@ def ruff_guard_weakenings(fork: ForkRuffConfig, candidate: ForkRuffConfig) -> li
     it may be used as long as it never LOOSENS what the fork declares.  This is the
     test for that, and every entry it returns is a blocking finding rather than a
     silently accepted narrowing.
+
+    Four vectors, because any one of them silences a rule for every file: a ``select``
+    the candidate drops, an ``ignore`` it adds, a ``per-file-ignores`` entry that did
+    not exist, and a ``banned-api`` entry that disappeared.
     """
     weaker: list[str] = []
     if fork.preview and not candidate.preview:
@@ -867,6 +879,9 @@ def ruff_guard_weakenings(fork: ForkRuffConfig, candidate: ForkRuffConfig) -> li
     for code in fork.select:
         if not _covers(candidate.select, code):
             weaker.append(f"the fork selects {code} and the candidate does not")
+    for code in candidate.ignore:
+        if not _covers(fork.ignore, code):
+            weaker.append(f"the candidate ignores {code} and the fork does not")
     fork_ignores = _ignore_map(fork)
     for pattern, codes in _ignore_map(candidate).items():
         allowed = fork_ignores.get(pattern, ())
