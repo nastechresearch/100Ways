@@ -32,6 +32,7 @@ from .rules import (
     preserved_npm_package_spans,
     preserved_repo_url_spans,
     preserved_url_link_label_spans,
+    token_only_inside_url,
     token_only_inside,
 )
 from .skill_policy import SkillPolicyIssue, audit_skill_firewall
@@ -317,6 +318,10 @@ def _allowed_brand_occurrence(
     """Return True only for the user's explicit, path-scoped exceptions."""
     lower = line.lower()
     if path.startswith("contributors/names/"):
+        return True
+    # Pure branding leaves URLs byte-for-byte unchanged, so a brand that occurs
+    # only inside an address is an intentional inherited identifier.
+    if token_only_inside_url(line, token):
         return True
     # Vendored third-party content is content-addressed by its origin: the
     # sibling checksum manifest and ``SOURCE.json`` pin the bytes and name the

@@ -523,7 +523,7 @@ def _link_tree(tmp_path, url: str) -> Path:
     return root
 
 
-def test_urls_fails_on_a_link_the_brand_map_still_rewrites(tmp_path, capsys):
+def test_urls_preserves_a_hermes_link_while_reporting_host_policy(tmp_path, capsys):
     root = _link_tree(tmp_path, "https://hermes-agent.nousresearch.com/docs")
     cli = invoke(["--repo", str(tmp_path), "urls", "--tree", str(root)])
 
@@ -533,7 +533,8 @@ def test_urls_fails_on_a_link_the_brand_map_still_rewrites(tmp_path, capsys):
     assert stop.value.code == 1
     out = capsys.readouterr().out
     assert "BRAND_VIOLATION" in out
-    assert "nastech-agent.nastechresearch.com" in out  # the fix it names
+    assert "https://hermes-agent.nousresearch.com/docs" in out
+    assert "nastech-agent.nastechresearch.com" not in out
 
 
 def test_urls_calls_an_offline_run_offline_instead_of_a_pass(tmp_path, capsys):

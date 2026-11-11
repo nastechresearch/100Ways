@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from hundredways.rules import BrandingRules
 from hundredways.urlcheck import (
     BRAND_VIOLATION,
     BROKEN,
@@ -187,12 +188,12 @@ def test_a_placeholder_host_is_a_placeholder_with_a_suggestion():
         "https://github.com/NousResearch/hermes-agent",
     ],
 )
-def test_an_unbranded_link_is_named_with_the_branded_form(url):
+def test_upstream_host_warning_does_not_rewrite_hermes_or_nous_urls(url):
     finding = classify(make_link(url), policy())
-    assert finding.status == BRAND_VIOLATION
-    assert "nous" not in finding.suggestion.lower()
-    assert "hermes" not in finding.suggestion.lower()
-    assert "nastech" in finding.suggestion.lower()
+    assert finding.status in {BRAND_VIOLATION, UNREACHABLE}
+    if finding.status == BRAND_VIOLATION:
+        assert "nastech" in finding.suggestion.lower()
+    assert BrandingRules().transform_text(url) == url
 
 
 @pytest.mark.parametrize(

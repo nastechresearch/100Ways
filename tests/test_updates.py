@@ -313,7 +313,7 @@ def test_folder_and_file_names_are_branded(tmp_path):
     assert "nastech_cli/nastech_runner.py" in renamed
 
 
-def test_case_colliding_contributor_records_are_disambiguated_without_data_loss(tmp_path):
+def test_case_colliding_contributor_records_keep_exact_upstream_paths(tmp_path):
     src = tmp_path / "hermes-agent"
     dst = tmp_path / "candidate"
     emails = src / "contributors" / "emails"
@@ -329,14 +329,14 @@ def test_case_colliding_contributor_records_are_disambiguated_without_data_loss(
         "contributors/emails/agent@Agents-Mac-mini.local",
     ]
     path_map = collision_safe_path_map(paths, rules)
-    assert len({target.casefold() for target in path_map.values()}) == 2
-    assert all("--case-" in target for target in path_map.values())
+    assert path_map == {path: path for path in paths}
+    assert len(set(path_map.values())) == 2
 
     brand_tree(str(src), str(dst), rules)
     assert (dst / path_map[paths[0]]).read_text() == lower.read_text()
     assert (dst / path_map[paths[1]]).read_text() == title.read_text()
     assert verify_branded(str(src), str(dst), rules).failed == []
-    assert not [issue for issue in audit_candidate_tree(dst) if issue.code == "case-collision"]
+    assert [issue for issue in audit_candidate_tree(dst) if issue.code == "case-collision"]
 
 
 def test_desktop_export_order_is_reconciled_after_nastech_rename(tmp_path):
@@ -3417,7 +3417,7 @@ def test_partial_run_dir_does_not_skip_numbering(tmp_path):
     hermes = _hermes_repo(tmp_path)
     updates_dir = str(tmp_path / "Updates-Commits")
     os.makedirs(updates_dir)
-    # an interrupted run leaves a dir without manifest.json
+    # An interrupted run without either a root or sidecar manifest is partial.
     orphan = update_path(updates_dir, 1)
     os.makedirs(orphan)
     with open(os.path.join(orphan, "README.md"), "w") as fh:
@@ -3425,7 +3425,7 @@ def test_partial_run_dir_does_not_skip_numbering(tmp_path):
     assert next_update_number(updates_dir) == 1
     res = UpdateManager(updates_dir, hermes_url=hermes).run()
     assert res.number == 1
-    assert os.path.isfile(os.path.join(res.dir, "manifest.json"))
+    assert os.path.isfile(res.manifest_path)
 
 
 def test_zip_has_project_folder_and_reports_outside(tmp_path):
@@ -3439,18 +3439,21 @@ def test_zip_has_project_folder_and_reports_outside(tmp_path):
         names = zf.namelist()
     assert "nastech-agent/README.md" in names
     assert "nastech-agent/nastech_cli/nastech_runner.py" in names
-    assert "UPDATE-REPORT.md" in names
-    assert "GATE-REPORT.md" in names
-    assert not any(n.startswith("nastech-agent/") and n.endswith("REPORT.md") for n in names)
+    assert "UPDATE-REPORT.md" not in names
+    assert "GATE-REPORT.md" not in names
+    assert set(names) == {
+        "nastech-agent/README.md",
+        "nastech-agent/nastech_cli/nastech_runner.py",
+    }
 
 
-def test_reports_written_in_snapshot(tmp_path):
+def test_reports_written_beside_snapshot(tmp_path):
     hermes = _hermes_repo(tmp_path)
     updates_dir = str(tmp_path / "Updates-Commits")
     res = UpdateManager(updates_dir, hermes_url=hermes).run()
-    assert os.path.isfile(os.path.join(res.dir, "UPDATE-REPORT.md"))
-    assert os.path.isfile(os.path.join(res.dir, "GATE-REPORT.md"))
-    with open(os.path.join(res.dir, "UPDATE-REPORT.md"), encoding="utf-8") as fh:
+    assert os.path.isfile(res.report_path)
+    assert os.path.isfile(res.gate_report_path)
+    with open(res.report_path, encoding="utf-8") as fh:
         report = fh.read()
     assert "# Nastech Update Report #1" in report
     assert "## Stages" in report
@@ -3500,11 +3503,14 @@ def test_manifest_records_pipeline(tmp_path):
     assert manifest["source_provenance"]["acquisition"] == "fresh-direct-clone"
     assert manifest["source_provenance"]["remote_url"] == str(hermes).replace("hermes", "nastech")
     assert manifest["source_provenance"]["fetched_at"].endswith("+00:00")
-    assert manifest["commit_subjects_file"] == "commit-subjects.jsonl"
+    assert manifest["commit_subjects_file"].endswith(".meta/commit-subjects.jsonl")
     assert manifest["commit_subject_count"] >= 0
     assert isinstance(read_manifest_with_subjects(res.manifest_path)["commit_subjects"], list)
     assert isinstance(manifest["changed_areas"], dict)
     assert manifest["reconciliation_actions"] == []
+    assert os.path.isfile(res.report_path)
+    assert not os.path.exists(os.path.join(res.dir, "UPDATE-REPORT.md"))
+    assert not os.path.exists(os.path.join(res.dir, "manifest.json"))
 
 
 def test_compare_trees_reports_missing(tmp_path):
@@ -3530,7 +3536,7 @@ def test_brand_tree_renames_folders_and_files(tmp_path):
     assert (dst / "nastech_cli" / "nastech_main.py").read_text() == "NASTECH\n"
 
 
-def test_package_zip_excludes_reports_from_project(tmp_path):
+def test_package_zip_excludes_generated_reports_entirely(tmp_path):
     snapshot = tmp_path / "snap"
     os.makedirs(snapshot / "app")
     (snapshot / "app" / "main.py").write_text("x\n")
@@ -3541,8 +3547,9 @@ def test_package_zip_excludes_reports_from_project(tmp_path):
     with zipfile.ZipFile(out) as zf:
         names = zf.namelist()
     assert "nastech-agent/app/main.py" in names
-    assert "UPDATE-REPORT.md" in names
-    assert not any(n.startswith("nastech-agent/") and n.endswith("REPORT.md") for n in names)
+    assert "UPDATE-REPORT.md" not in names
+    assert "GATE-REPORT.md" not in names
+    assert set(names) == {"nastech-agent/app/main.py"}
 
 
 def test_contributor_emails_are_mapped_without_data_loss(tmp_path):
@@ -3699,7 +3706,7 @@ def test_owned_assets_flagged_in_compare(tmp_path):
     assert owned_entries[0].mapped_path == "static/img/banner.png"
 
 
-def test_update_manager_threads_owned_into_all_stages(tmp_path):
+def test_update_manager_does_not_overlay_owned_assets(tmp_path):
     hermes = _hermes_repo(tmp_path)
     src = os.path.join(str(tmp_path), "hermes-agent")
     img_dir = os.path.join(src, "static", "img")
@@ -3715,8 +3722,8 @@ def test_update_manager_threads_owned_into_all_stages(tmp_path):
     assert res.gate
     snap_banner = os.path.join(res.dir, "static", "img", "banner.png")
     assert os.path.isfile(snap_banner)
-    assert open(snap_banner, "rb").read() == b"OUR-BANNER-BYTES"
-    assert res.brand.owned == 1
+    assert open(snap_banner, "rb").read() == b"HERMES-BANNER-BYTES"
+    assert res.brand.owned == 0
 
 
 def _hermes_repo_with_reconcile_patterns(tmp_path):
@@ -3765,165 +3772,45 @@ def _hermes_repo_with_reconcile_patterns(tmp_path):
     return hermes
 
 
-def test_reconcile_fixes_lockfile_roots_and_dockerfile_trigram(tmp_path):
+def test_pipeline_preserves_upstream_ci_and_lock_content(tmp_path):
     hermes = _hermes_repo_with_reconcile_patterns(tmp_path)
     updates_dir = str(tmp_path / "Updates-Commits")
     res = UpdateManager(updates_dir, hermes_url=hermes).run()
-    assert res.gate, f"gate FAILED: {[s for s in res.stages if s.status == 'fail']}"
-    assert set(res.reconcile.fixed) == {
-        "Dockerfile",
-        "package-lock.json",
-        "tests/docker/test_sqlite_runtime.py",
-        "uv.lock",
-    }
+    assert res.gate
+    assert res.reconcile.fixed == []
+    source = os.path.join(updates_dir, "hermes-agent")
+    rules = BrandingRules()
+    for rel in ("Dockerfile", "tests/docker/test_sqlite_runtime.py"):
+        source_text = open(os.path.join(source, rel), encoding="utf-8").read()
+        target_rel = rules.transform_path(rel)
+        actual = open(os.path.join(res.dir, *target_rel.split("/")), encoding="utf-8").read()
+        assert actual == rules.transform_text(source_text)
+    for rel in ("package-lock.json", "uv.lock"):
+        src_path = os.path.join(source, rel)
+        if os.path.isfile(src_path):
+            assert open(os.path.join(res.dir, rel), "rb").read() == open(src_path, "rb").read()
+    stages = {stage.name: stage for stage in res.stages}
+    assert stages["reconcile"].status == "skip"
+    assert stages["preserve"].status == "skip"
 
-    root_record = [l.strip() for l in open(os.path.join(res.dir, "uv.lock"), encoding="utf-8")
-                   if l.strip().startswith("name =")]
-    assert root_record[:1] == ['name = "nastech-agent"']
-
-    with open(os.path.join(res.dir, "package-lock.json"), encoding="utf-8") as fh:
-        plock = fh.read()
-    assert '"name": "nastech-agent"' in plock
-    assert "hermes" not in plock
-
-    with open(os.path.join(res.dir, "Dockerfile"), encoding="utf-8") as fh:
-        dockerfile = fh.read()
-    assert "MATCH 'erm'" not in dockerfile
-    assert "'nastech'" in dockerfile
-    trigrams = {"nas", "ast", "ste", "tec", "ech"}
-    import re
-    match = re.search(r"MATCH '([^']{3})'", dockerfile)
-    assert match and match.group(1) in trigrams, dockerfile
-    runtime = open(os.path.join(res.dir, "tests", "docker", "test_sqlite_runtime.py"), encoding="utf-8").read()
-    runtime_match = re.search(r"MATCH '([^']{3})'", runtime)
-    assert runtime_match and runtime_match.group(1) in trigrams, runtime
-    assert "MATCH 'erm'" not in runtime
-
-    # every stage is green and counted
-    assert [s.name for s in res.stages] == STAGES
-    assert all(s.status in {"ok", "skip"} for s in res.stages)
-    by_name = {s.name: s for s in res.stages}
-    assert by_name["report"].status == "ok"
-    assert by_name["manifest"].status == "ok"
-
-
-def test_reconcile_renames_workspace_and_registry_lock_records(tmp_path):
-    """package-lock.json workspace/symlink/registry records follow branding.
-
-    The lock is a LOCKED file (byte-copied from upstream), so branding
-    leaves workspace names like ``@hermes/shared``, symlink keys like
-    ``node_modules/hermes-tui`` and the republished ``@nous-research/ui``
-    record intact - and npm ci then fails with "Missing ... from lock file"
-    for every renamed workspace.  Reconcile must rename all of them by exact
-    match while leaving real registry packages (``hermes-parser``,
-    ``hermes-estree``) untouched.
-    """
+def test_pipeline_does_not_reconcile_package_lockfile(tmp_path):
     hermes = _hermes_repo(tmp_path)
-    import pathlib
-    hermes_path = pathlib.Path(hermes)
-
-    def _mkdir(p):
-        (hermes_path / p).mkdir(parents=True, exist_ok=True)
-
-    workspaces = [
-        ("apps/bootstrap-installer", "package.json", '{"name": "@hermes/bootstrap-installer", "version": "0.0.1"}'),
-        ("apps/desktop", "package.json", '{"name": "hermes", "version": "0.17.0"}'),
-        ("apps/shared", "package.json", '{"name": "@hermes/shared", "version": "0.0.0"}'),
-        ("tests-js", "package.json", '{"name": "@hermes/root-tests", "version": "0.0.1"}'),
-        ("ui-tui", "package.json", '{"name": "hermes-tui", "version": "0.0.1"}'),
-        ("ui-tui/packages/hermes-ink", "package.json", '{"name": "@hermes/ink", "version": "0.0.1"}'),
-        ("web", "package.json", '{"name": "web", "version": "0.0.0"}'),
-    ]
-    for dirpath, fname, content in workspaces:
-        _mkdir(dirpath)
-        (hermes_path / dirpath / fname).write_text(content)
-
-    (hermes_path / "package.json").write_text(
-        '{"name": "hermes-agent", "version": "1.0.0", "workspaces": ['
-        '"apps/*", "ui-tui", "ui-tui/packages/*", "web", "tests-js"]}'
-    )
-    lock = {
-        "name": "hermes-agent",
-        "version": "1.0.0",
-        "lockfileVersion": 3,
-        "packages": {
-            "": {"name": "hermes-agent", "version": "1.0.0", "workspaces": ["apps/*", "ui-tui", "ui-tui/packages/*", "web", "tests-js"]},
-            "apps/bootstrap-installer": {"name": "@hermes/bootstrap-installer", "version": "0.0.1", "dependencies": {"@nous-research/ui": "0.18.2"}},
-            "apps/desktop": {"name": "hermes", "version": "0.17.0", "dependencies": {"@hermes/shared": "file:../shared", "@nous-research/ui": "0.18.2"}},
-            "apps/shared": {"name": "@hermes/shared", "version": "0.0.0"},
-            "tests-js": {"name": "@hermes/root-tests", "version": "0.0.1"},
-            "ui-tui": {"name": "hermes-tui", "version": "0.0.1", "dependencies": {"@hermes/ink": "file:./packages/hermes-ink", "@hermes/shared": "file:../apps/shared"}},
-            "ui-tui/packages/hermes-ink": {"name": "@hermes/ink", "version": "0.0.1"},
-            "web": {"name": "web", "version": "0.0.0", "dependencies": {"@hermes/shared": "file:../apps/shared", "@nous-research/ui": "0.18.2"}},
-            "node_modules/@hermes/bootstrap-installer": {"resolved": "apps/bootstrap-installer", "link": True},
-            "node_modules/@hermes/ink": {"resolved": "ui-tui/packages/hermes-ink", "link": True},
-            "node_modules/@hermes/root-tests": {"resolved": "tests-js", "link": True},
-            "node_modules/@hermes/shared": {"resolved": "apps/shared", "link": True},
-            "node_modules/hermes": {"resolved": "apps/desktop", "link": True},
-            "node_modules/hermes-tui": {"resolved": "ui-tui", "link": True},
-            "node_modules/@nous-research/ui": {"version": "0.18.2", "resolved": "https://registry.npmjs.org/@nous-research/ui/-/ui-0.18.2.tgz", "integrity": "sha512-OLDUPSTREAM=="},
-            "node_modules/hermes-parser": {"version": "0.25.1", "resolved": "https://registry.npmjs.org/hermes-parser/-/hermes-parser-0.25.1.tgz", "integrity": "sha512-REALHERMES==A", "dependencies": {"hermes-estree": "0.25.1"}},
-            "node_modules/hermes-estree": {"version": "0.25.1", "resolved": "https://registry.npmjs.org/hermes-estree/-/hermes-estree-0.25.1.tgz", "integrity": "sha512-REALESTREE==B"},
-        },
-    }
-    (hermes_path / "package-lock.json").write_text(json.dumps(lock, indent=2))
-
+    source = Path(hermes)
+    (source / "package.json").write_text('{"name":"hermes-agent","dependencies":{"hermes-parser":"1.0.0"}}')
+    lock = {"name":"hermes-agent","lockfileVersion":3,"packages":{"":{"name":"hermes-agent"},"node_modules/hermes-parser":{"version":"1.0.0","resolved":"https://registry.npmjs.org/hermes-parser/-/hermes-parser.tgz"}}}
+    (source / "package-lock.json").write_text(json.dumps(lock, indent=2))
     subprocess.run(["git", "-C", hermes, "add", "-A"], check=True)
-    subprocess.run(["git", "-C", hermes, "commit", "-q", "-m", "add npm workspaces"], check=True)
-
+    subprocess.run(["git", "-C", hermes, "commit", "-q", "-m", "add npm lock"], check=True)
     updates_dir = str(tmp_path / "Updates-Commits")
     res = UpdateManager(updates_dir, hermes_url=hermes).run()
-    assert res.gate, f"gate FAILED: {[s for s in res.stages if s.status == 'fail']}"
-    assert "package-lock.json" in res.reconcile.fixed
-
-    with open(os.path.join(res.dir, "package-lock.json"), encoding="utf-8") as fh:
-        plock = json.load(fh)
-    packages = plock["packages"]
-    assert plock["name"] == "nastech-agent"
-    assert packages[""]["name"] == "nastech-agent"
-
-    # workspace records renamed by exact match
-    assert packages["apps/bootstrap-installer"]["name"] == "@nastech/bootstrap-installer"
-    assert packages["apps/desktop"]["name"] == "nastech"
-    assert packages["apps/shared"]["name"] == "@nastech/shared"
-    assert packages["tests-js"]["name"] == "@nastech/root-tests"
-    assert packages["ui-tui"]["name"] == "nastech-tui"
-    assert packages["ui-tui/packages/nastech-ink"]["name"] == "@nastech/ink"
-    assert "ui-tui/packages/hermes-ink" not in packages
-
-    # symlink keys renamed, resolved paths followed
-    assert "node_modules/@nastech/bootstrap-installer" in packages
-    assert "node_modules/@nastech/ink" in packages
-    assert "node_modules/@nastech/root-tests" in packages
-    assert "node_modules/@nastech/shared" in packages
-    assert "node_modules/nastech" in packages
-    assert "node_modules/nastech-tui" in packages
-    assert packages["node_modules/@nastech/ink"]["resolved"] == "ui-tui/packages/nastech-ink"
-
-    # dependency references renamed, including file: paths to the renamed dir
-    desktop = packages["apps/desktop"]["dependencies"]
-    assert desktop == {"@nastech/shared": "file:../shared", "@nastech-research/ui": "0.18.2"}
-    tui = packages["ui-tui"]["dependencies"]
-    assert tui == {"@nastech/ink": "file:./packages/nastech-ink", "@nastech/shared": "file:../apps/shared"}
-
-    # registry record republished by the fork: key + tarball + integrity
-    ui = packages.get("node_modules/@nastech-research/ui")
-    assert ui is not None
-    assert "node_modules/@nous-research/ui" not in packages
-    assert ui["version"] == "0.18.2"
-    assert ui["resolved"] == "https://registry.npmjs.org/@nastech-research/ui/-/ui-0.18.2.tgz"
-    assert ui["integrity"].startswith("sha512-P7H8")
-
-    # real registry packages are never touched
-    assert "node_modules/hermes-parser" in packages
-    assert "node_modules/hermes-estree" in packages
-    assert packages["node_modules/hermes-parser"]["dependencies"] == {"hermes-estree": "0.25.1"}
-
-    assert all(s.status in {"ok", "skip"} for s in res.stages)
-    by_name = {s.name: s for s in res.stages}
-    assert by_name["report"].status == "ok"
-    assert by_name["manifest"].status == "ok"
-
+    assert res.gate
+    assert res.reconcile.fixed == []
+    cloned = os.path.join(updates_dir, "hermes-agent")
+    assert open(os.path.join(res.dir, "package-lock.json"), "rb").read() == open(os.path.join(cloned, "package-lock.json"), "rb").read()
+    rules = BrandingRules()
+    expected = rules.transform_text(open(os.path.join(cloned, "package.json"), encoding="utf-8").read())
+    actual = open(os.path.join(res.dir, "package.json"), encoding="utf-8").read()
+    assert actual == expected
 
 def test_reconcile_noop_when_no_patterns(tmp_path):
     hermes = _hermes_repo(tmp_path)
@@ -3955,49 +3842,20 @@ def _hermes_repo_with_domains(tmp_path):
     return hermes
 
 
-def test_reconcile_migrates_com_domains_to_github_io(tmp_path):
+def test_pipeline_preserves_urls_while_branding_non_url_names(tmp_path):
     hermes = _hermes_repo_with_domains(tmp_path)
     updates_dir = str(tmp_path / "Updates-Commits")
     res = UpdateManager(updates_dir, hermes_url=hermes).run()
-    assert res.gate, f"gate FAILED: {[s for s in res.stages if s.status == 'fail']}"
-    assert "README.md" in res.reconcile.fixed
-
-    with open(os.path.join(res.dir, "README.md"), encoding="utf-8") as fh:
-        text = fh.read()
-
-    # No .com *URL* survives; a mailbox keeps its domain, because an address
-    # is not a website and ``@nastechresearch.github.io`` has no MX record.
-    assert "https://nastechresearch.com" not in text
-    assert "nastechresearch.com/" not in text
-    assert "NastechResearch.com/" not in text
-
-    # docs compound (org/repo path style, not a subdomain)
-    assert "https://nastechresearch.github.io/nastech-agent/docs" in text
-    # subdomain forms keep their prefix on github.io
-    assert "https://portal.nastechresearch.github.io" in text
-    assert "https://inference-api.nastechresearch.github.io/v1" in text
-    # An address is not a website: ``github.io`` has no MX record, so a
-    # mailbox must not be dragged onto it (this used to be asserted as the
-    # desired migration -- see ``.mailmap`` and the electron-builder author
-    # field, where a dead address silently breaks attribution).
-    assert "nastech@nastechresearch.com" in text
-    assert "nastech@nastechresearch.github.io" not in text
-    # regex-escaped hostnames follow the same migration as literal URLs.
-    assert r"ares-3009\.agents\.nastechresearch\.github\.io" in text
-    assert r"ares-3009\.agents\.nastechresearch\.com" not in text
-    # assets compound migrates to the R2-backed worker, never to github.io
-    # (the Pages assets subdomain is a dead TLS origin)
-    assert "https://nastech-assets.nastechresearch.workers.dev/upstream/sha256/abc" in text
-    assert "nastech-assets.nastechresearch.com" not in text
-    assert "nastech-assets.nastechresearch.github.io" not in text
-    # lookalike fixture keeps its attacker suffix and stays a different host
-    assert "https://inference-api.nastechresearch.github.io.attacker.test/v1" in text
-
-    assert all(s.status in {"ok", "skip"} for s in res.stages)
-    by_name = {s.name: s for s in res.stages}
-    assert by_name["report"].status == "ok"
-    assert by_name["manifest"].status == "ok"
-
+    assert res.gate
+    assert res.reconcile.fixed == []
+    rules = BrandingRules()
+    source = open(os.path.join(updates_dir, "hermes-agent", "README.md"), encoding="utf-8").read()
+    actual = open(os.path.join(res.dir, "README.md"), encoding="utf-8").read()
+    assert actual == rules.transform_text(source)
+    assert "https://hermes-agent.nousresearch.com/docs" in actual
+    assert "https://portal.nousresearch.com" in actual
+    assert "https://inference-api.nousresearch.com/v1" in actual
+    assert "Nastech Research" in actual
 
 def _hermes_repo_with_plugin_search_table(tmp_path):
     """A fake hermes repo whose plugins_cmd builds a Name column without a
@@ -4016,23 +3874,17 @@ def _hermes_repo_with_plugin_search_table(tmp_path):
     return hermes
 
 
-def test_reconcile_gives_plugin_search_name_column_min_width(tmp_path):
+def test_pipeline_does_not_reconcile_plugin_search_layout(tmp_path):
     hermes = _hermes_repo_with_plugin_search_table(tmp_path)
     updates_dir = str(tmp_path / "Updates-Commits")
     res = UpdateManager(updates_dir, hermes_url=hermes).run()
-    assert res.gate, f"gate FAILED: {[s for s in res.stages if s.status == 'fail']}"
-    assert "nastech_cli/plugins_cmd.py" in res.reconcile.fixed
-
-    with open(os.path.join(res.dir, "nastech_cli", "plugins_cmd.py"), encoding="utf-8") as fh:
-        text = fh.read()
-
-    assert 'table.add_column("Name", style="bold", min_width=21)' in text
-
-    assert all(s.status in {"ok", "skip"} for s in res.stages)
-    by_name = {s.name: s for s in res.stages}
-    assert by_name["report"].status == "ok"
-    assert by_name["manifest"].status == "ok"
-
+    assert res.gate
+    assert res.reconcile.fixed == []
+    source = open(os.path.join(updates_dir, "hermes-agent", "hermes_cli", "plugins_cmd.py"), encoding="utf-8").read()
+    actual = open(os.path.join(res.dir, "nastech_cli", "plugins_cmd.py"), encoding="utf-8").read()
+    assert actual == BrandingRules().transform_text(source)
+    assert 'table.add_column("Name", style="bold")' in actual
+    assert "min_width" not in actual
 
 def _hermes_repo_with_skill_description(tmp_path):
     """A fake hermes repo whose bundled skill description is exactly 60 chars
@@ -4054,31 +3906,19 @@ def _hermes_repo_with_skill_description(tmp_path):
     return hermes
 
 
-def test_reconcile_trims_skill_description_to_fork_bytes(tmp_path):
+def test_pipeline_does_not_rewrite_skill_description_for_fork_limits(tmp_path):
     hermes = _hermes_repo_with_skill_description(tmp_path)
     updates_dir = str(tmp_path / "Updates-Commits")
     res = UpdateManager(updates_dir, hermes_url=hermes).run()
-    assert res.gate, f"gate FAILED: {[s for s in res.stages if s.status == 'fail']}"
-    assert "skills/autonomous-ai-agents/nastech-agent/SKILL.md" in res.reconcile.fixed
-
-    path = os.path.join(res.dir, "skills", "autonomous-ai-agents", "nastech-agent", "SKILL.md")
-    with open(path, encoding="utf-8") as fh:
-        text = fh.read()
-
-    assert (
-        'description: "Configure, theme, extend, and orchestrate Nastech Agent."'
-        in text
-    )
-    desc = text.splitlines()[1]
-    assert len(desc) <= 60
-
-    assert all(s.status in {"ok", "skip"} for s in res.stages)
-    by_name = {s.name: s for s in res.stages}
-    assert by_name["report"].status == "ok"
-    assert by_name["manifest"].status == "ok"
-
-
-
+    assert res.gate
+    assert res.reconcile.fixed == []
+    source_path = os.path.join(updates_dir, "hermes-agent", "skills", "autonomous-ai-agents", "hermes-agent", "SKILL.md")
+    output_path = os.path.join(res.dir, "skills", "autonomous-ai-agents", "nastech-agent", "SKILL.md")
+    source = open(source_path, encoding="utf-8").read()
+    actual = open(output_path, encoding="utf-8").read()
+    assert actual == BrandingRules().transform_text(source)
+    assert 'description: "Use, configure, theme, extend, and orchestrate Nastech Agent."' in actual
+    assert len(actual.splitlines()[2]) > 60
 
 def _pages_workflow_fixture(root, staging=True):
     workflow = root / ".github" / "workflows" / "deploy-site.yml"
@@ -6019,59 +5859,30 @@ def test_reconcile_portable_shebang_rewrites_embedded_bash_payload(tmp_path):
     assert _reconcile_portable_shebang(str(candidate)) == []
 
 
-def test_update_gate_allows_engine_registry_retirement(tmp_path):
-    """The owned-assets registry can shrink engine-side without hand-editing
-    the fork: old fork registry sources the authoritative registry no longer
-    owns are sanctioned retirements (reviewable via the engine manifest
-    diff), so the fork-consistency gate passes instead of failing local_only.
-    Mirrors PR #101's owned-registry prune."""
+def test_pipeline_ignores_fork_owned_assets_and_keeps_upstream_bytes(tmp_path):
     hermes = _hermes_repo(tmp_path)
-    src = tmp_path / "hermes-agent"
-    (src / "static" / "img").mkdir(parents=True, exist_ok=True)
-    (src / "static" / "img" / "banner.png").write_bytes(b"HERMES-BANNER-BYTES")
-    subprocess.run(["git", "-C", str(src), "add", "-A"], check=True)
-    subprocess.run(["git", "-C", str(src), "commit", "-q", "-m", "add banner"], check=True)
-    baseline = subprocess.check_output(
-        ["git", "-C", str(src), "rev-parse", "HEAD"], text=True
-    ).strip()
-
-    # The fork was previously branded with the OLD 2-asset registry.
+    source_root = Path(hermes)
+    banner = source_root / "static" / "img" / "banner.png"
+    banner.parent.mkdir(parents=True, exist_ok=True)
+    banner.write_bytes(b"HERMES-UPSTREAM-BANNER")
+    subprocess.run(["git", "-C", hermes, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", hermes, "commit", "-q", "-m", "add upstream banner"], check=True)
     fork = tmp_path / "nastech-agent"
     fork.mkdir()
-    (fork / "manifest.json").write_text(json.dumps({"upstream_sha": baseline}))
-    (fork / "config" / "owned-assets").mkdir(parents=True)
-    (fork / "config" / "owned-assets" / "manifest.json").write_text(json.dumps({
-        "static/img/banner.png": "banner.png",
-        "static/img/old-banner.png": "old-banner.png",
-    }))
-    (fork / "config" / "owned-assets" / "banner.png").write_bytes(b"FORK-BANNER")
-    (fork / "config" / "owned-assets" / "old-banner.png").write_bytes(b"FORK-OLD-BANNER")
+    (fork / "fork-only.txt").write_text("fork data")
     (fork / "static" / "img").mkdir(parents=True)
     (fork / "static" / "img" / "banner.png").write_bytes(b"FORK-BANNER")
-    (fork / "static" / "img" / "old-banner.png").write_bytes(b"FORK-OLD-BANNER")
-
-    # The NEW engine registry pruned old-banner.png (#101-style shrink).
-    registry = tmp_path / "config" / "owned-assets"
-    registry.mkdir(parents=True)
+    registry = tmp_path / "owned"
+    registry.mkdir()
     (registry / "banner.png").write_bytes(b"ENGINE-BANNER")
-    (registry / "manifest.json").write_text(json.dumps({
-        "static/img/banner.png": "banner.png",
-    }))
-    owned = OwnedAssets(root=str(registry))
-
-    result = UpdateManager(
-        str(tmp_path / "Updates-Commits"),
-        hermes_url=hermes, owned=owned, fork_root=str(fork),
-    ).run()
-    assert result.gate, result.fork.summary()
-    statuses = result.fork.statuses
-    assert statuses.get("registry_retired") == 1, statuses
-    assert not statuses.get("missing") and not statuses.get("local_only"), statuses
-    # pruned registry source is gone from the candidate; the retained one stays
-    snap_owned = os.path.join(result.dir, "config", "owned-assets")
-    assert os.path.exists(os.path.join(snap_owned, "banner.png"))
-    assert not os.path.exists(os.path.join(snap_owned, "old-banner.png"))
-
+    (registry / "manifest.json").write_text(json.dumps({"static/img/banner.png":"banner.png"}))
+    result = UpdateManager(str(tmp_path / "Updates-Commits"), hermes_url=hermes,
+                           owned=OwnedAssets(root=str(registry)), fork_root=str(fork)).run()
+    assert result.gate
+    assert result.fork.entries == []
+    assert open(os.path.join(result.dir, "static", "img", "banner.png"), "rb").read() == b"HERMES-UPSTREAM-BANNER"
+    assert not os.path.exists(os.path.join(result.dir, "fork-only.txt"))
+    assert not os.path.exists(os.path.join(result.dir, "config", "owned-assets"))
 
 def test_reconcile_managed_gateway_wire_headers_restores_product_token(tmp_path):
     """Branding collapses the two-token ``x-<org>-<product>-`` prefix.
@@ -7317,52 +7128,18 @@ def test_reconcile_assets_worker_config_skips_missing_file(tmp_path):
     assert _reconcile_assets_worker_config(str(tmp_path), [rel]) == []
 
 
-def test_pipeline_pins_preserved_assets_worker_config(tmp_path):
-    """End to end: preserve carries the fork-only Worker in, the post-preserve
-    reconcile pins the config AND upgrades the handler, and the gate stays green.
-
-    ``scripts/cloudflare/assets-worker`` has no upstream source, so a stale
-    snapshot restored by an update would otherwise replay
-    ``main = "src/index.js"`` (breaking the Cloudflare Workers Builds deploy)
-    and the verbatim-key, KV-only handler that 404s every Termux artifact.
-    """
+def test_pipeline_does_not_carry_fork_only_worker_files(tmp_path):
     hermes = _hermes_repo(tmp_path)
-    baseline = subprocess.check_output(
-        ["git", "-C", hermes, "rev-parse", "HEAD"], text=True
-    ).strip()
     fork = tmp_path / "nastech-agent"
     worker = _assets_worker_dir(fork)
-    (fork / "manifest.json").write_text(json.dumps({"upstream_sha": baseline}))
     (worker / "index.js").write_text(_STALE_WORKER_INDEX, encoding="utf-8")
     (worker / "wrangler.toml").write_text(_STALE_WRANGLER, encoding="utf-8")
-
-    res = UpdateManager(
-        str(tmp_path / "Updates-Commits"),
-        hermes_url=hermes,
-        fork_root=str(fork),
-    ).run()
-
+    res = UpdateManager(str(tmp_path / "Updates-Commits"), hermes_url=hermes,
+                       fork_root=str(fork)).run()
     assert res.gate
-    candidate = os.path.join(res.dir, "scripts", "cloudflare", "assets-worker", "wrangler.toml")
-    pinned = open(candidate, encoding="utf-8").read()
-    assert 'name = "nastech-assets"' in pinned
-    assert 'main = "index.js"' in pinned
-    assert "[previews]" in pinned
-    assert "src/index.js" not in pinned
-    # The R2 binding the live Worker needs must survive the replay.
-    assert "[[r2_buckets]]" in pinned
-    assert 'bucket_name = "nastech-assets"' in pinned
-    # And the handler must come out decoding the key and reading R2.
-    index = os.path.join(res.dir, "scripts", "cloudflare", "assets-worker", "index.js")
-    handler = open(index, encoding="utf-8").read()
-    assert "function decodeChannelKey(" in handler
-    assert "const object = await env.R2.get(key);" in handler
-    assert 'const key = path.replace(/^\\/+/, "");' not in handler
-
-
-# ---------------------------------------------------------------------------
-# Dead configuration produced by the .com -> github.io substitution
-# ---------------------------------------------------------------------------
+    assert res.fork.entries == []
+    assert not os.path.exists(os.path.join(res.dir, "scripts", "cloudflare", "assets-worker"))
+    assert next(stage for stage in res.stages if stage.name == "preserve").status == "skip"
 
 _DEAD_AUTH_CONSTANTS = (
     "AUTH_STORE_VERSION = 1\n"
@@ -8455,55 +8232,30 @@ def test_reconcile_domains_sends_the_apex_to_the_site_not_the_404_root(tmp_path)
     assert "/nastech-agent:8443" not in text
 
 
-def test_pipeline_registers_the_dead_config_reconciles(tmp_path, monkeypatch):
-    """reconcile_tree must actually run the three new stages on a real run."""
+def test_pipeline_leaves_domains_and_dead_config_policy_to_upstream(tmp_path, monkeypatch):
     _table_answer(monkeypatch)
     hermes = _hermes_repo(tmp_path)
-    hermes_path = os.path.join(hermes, "hermes_cli")
-    with open(os.path.join(hermes_path, "auth_constants.py"), "w", encoding="utf-8") as fh:
-        fh.write(_DEAD_AUTH_CONSTANTS)
-    with open(os.path.join(hermes, "SECURITY.md"), "w", encoding="utf-8") as fh:
-        fh.write(
-            "Report privately via [GitHub Security Advisories](https://github.com/NousResearch/hermes-agent/security/advisories/new)\n"
-            "or **security@nousresearch.com**. Do not open public issues.\n"
-        )
-    # Upstream's own scope, at a version the fork never published: branding
-    # renames the scope to one whose 0.4.0 does not exist, so the stage must
-    # repin it (via verified byte-identity) instead of failing the sync.
-    tpl_dir = os.path.join(
-        hermes, "optional-skills", "creative", "pretext", "templates")
-    os.makedirs(tpl_dir)
-    with open(os.path.join(tpl_dir, "donut-orbit.html"), "w", encoding="utf-8") as fh:
-        fh.write(_REAL_DONUT_FONT_REFS.replace("nastech-research", "nous-research"))
+    hermes_path = Path(hermes)
+    (hermes_path / "hermes_cli" / "auth_constants.py").write_text(_DEAD_AUTH_CONSTANTS, encoding="utf-8")
+    (hermes_path / "SECURITY.md").write_text(
+        "Report privately via [GitHub Security Advisories](https://github.com/NousResearch/hermes-agent/security/advisories/new)\n"
+        "or **security@nousresearch.com**. Do not open public issues.\n", encoding="utf-8")
+    tpl_dir = hermes_path / "optional-skills" / "creative" / "pretext" / "templates"
+    tpl_dir.mkdir(parents=True)
+    (tpl_dir / "donut-orbit.html").write_text(_REAL_DONUT_FONT_REFS.replace("nastech-research", "nous-research"), encoding="utf-8")
     subprocess.run(["git", "-C", hermes, "add", "-A"], check=True)
-    subprocess.run(["git", "-C", hermes, "commit", "-q", "-m", "dead config"], check=True)
-
-    res = UpdateManager(
-        str(tmp_path / "Updates-Commits"), hermes_url=hermes).run()
-
-    assert res.gate, f"gate FAILED: {[s for s in res.stages if s.status == 'fail']}"
-    assert "nastech_cli/auth_constants.py" in res.reconcile.fixed
-    assert "SECURITY.md" in res.reconcile.fixed
-
-    candidate = open(
-        os.path.join(res.dir, "nastech_cli", "auth_constants.py"), encoding="utf-8").read()
-    assert '= "https://portal.nastechresearch.github.io"' not in candidate
-    assert "DEFAULT_NASTECH_PORTAL_URL = _nastech_endpoint_default(" in candidate
-    assert "_NastechUnconfiguredEndpoint" in candidate
-
-    security = open(os.path.join(res.dir, "SECURITY.md"), encoding="utf-8").read()
-    assert "security@" not in security
-    assert "nousresearch" not in security
-
-    # the dead scoped-font reference became a published, byte-identical pin,
-    # and the sync still produced a candidate (the gate did not fail)
-    tpl_rel = "optional-skills/creative/pretext/templates/donut-orbit.html"
-    assert tpl_rel in res.reconcile.fixed
-    template = open(os.path.join(res.dir, tpl_rel), encoding="utf-8").read()
-    assert "ui@0.4.0" not in template
-    assert template.count("@nastech-research/ui@0.18.4") == 2
-    assert "nous-research" not in template
-
+    subprocess.run(["git", "-C", hermes, "commit", "-q", "-m", "upstream policy fixtures"], check=True)
+    updates_dir = str(tmp_path / "Updates-Commits")
+    res = UpdateManager(updates_dir, hermes_url=hermes).run()
+    assert res.gate
+    assert res.reconcile.fixed == []
+    rules = BrandingRules()
+    for rel, mapped in (("hermes_cli/auth_constants.py", "nastech_cli/auth_constants.py"),
+                        ("SECURITY.md", "SECURITY.md"),
+                        ("optional-skills/creative/pretext/templates/donut-orbit.html", "optional-skills/creative/pretext/templates/donut-orbit.html")):
+        source = open(os.path.join(updates_dir, "hermes-agent", *rel.split("/")), encoding="utf-8").read()
+        actual = open(os.path.join(res.dir, *mapped.split("/")), encoding="utf-8").read()
+        assert actual == rules.transform_text(source)
 
 def test_reconcile_ui_scope_pins_rejects_unpublished_cdn_version(tmp_path, monkeypatch):
     """A scoped CDN reference must not point at a version nobody published.
@@ -9799,37 +9551,33 @@ def _names_called_inside(module, function_name: str) -> set:
     raise AssertionError(f"{function_name} is not in {module.__file__}")
 
 
-@pytest.mark.parametrize(
-    "rule",
-    [
-        "_reconcile_orphan_picker_fake",
-        "_reconcile_fork_skill_catalogs",
-        "_reconcile_docs_posix_separators",
-        "_reconcile_fork_skill_sidebars",
-        "_reconcile_assets_worker_config",
-        "_reconcile_assets_worker_index",
-    ],
-)
-def test_a_rule_that_needs_a_fork_only_file_never_runs_before_preservation(rule):
-    """``reconcile_tree`` is the stage *before* ``preserve_fork_files``.
-
-    A fork-only path does not exist while it runs, so a rule that rewrites one from
-    inside ``reconcile_tree`` reads ``None``, returns ``[]`` and reports success.  That
-    is how #155 merged green -- its unit test created the file first -- while every
-    published candidate kept shipping the stale mirrored radiolist fake the rule
-    exists to repair, and the fork's CI stayed red for it.  Each of these rules is
-    therefore called from the preserve stage with the paths preservation carried in.
-    """
-    assert rule not in _names_called_inside(updates, "reconcile_tree")
-    assert rule in _names_called_inside(updates, "_preserve")
+def test_brand_only_pipeline_skips_fork_specific_stages(tmp_path):
+    hermes = _hermes_repo(tmp_path)
+    fork = tmp_path / "nastech-agent"
+    fork.mkdir()
+    (fork / "fork-only.txt").write_text("fork-only bytes")
+    res = UpdateManager(str(tmp_path / "Updates-Commits"), hermes_url=hermes,
+                        fork_root=str(fork)).run()
+    by_name = {stage.name: stage for stage in res.stages}
+    assert by_name["reconcile"].status == "skip"
+    assert by_name["preserve"].status == "skip"
+    assert by_name["forkcheck"].status == "skip"
+    assert res.reconcile.fixed == []
+    assert res.fork.entries == []
+    assert not os.path.exists(os.path.join(res.dir, "fork-only.txt"))
 
 
-def test_the_parity_rebuild_replays_the_preserved_picker_fix():
-    """Without the replay, ``verify_final_candidate`` expects the stale bytes and
-    reports the repaired candidate as a source-parity mismatch, so the fix cannot ship.
-    """
-    assert "_reconcile_orphan_picker_fake" in _names_called_inside(
-        conformance, "verify_final_candidate"
+def test_the_parity_rebuild_has_no_fork_reconciliation_calls():
+    """The parity rebuild is only the branded source; no fork edits are replayed."""
+    calls = _names_called_inside(conformance, "verify_final_candidate")
+    assert not calls.intersection(
+        {
+            "_reconcile_orphan_picker_fake",
+            "_reconcile_fork_skill_catalogs",
+            "_reconcile_docs_posix_separators",
+            "preserve_fork_files",
+            "apply_owned_assets",
+        }
     )
 
 

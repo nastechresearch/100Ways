@@ -147,8 +147,8 @@ def test_branded_and_upstream_spellings_of_one_file_compare_equal():
     assert facts.touched_upstream("tests/nastech_cli/test_browse_schema_drift.py") is True
 
 
-def test_class_one_precondition_is_asked_of_the_brand_transform():
-    """The image the classifier blames comes from rules.py, not from a constant here."""
+def test_class_one_precondition_is_asked_of_the_analysis_projection():
+    """Runtime diagnostics use the fork projection; artifact branding leaves CI untouched."""
     shape = _off_loop_facts().runner_shape()
     assert shape.requested == "blacksmith-32vcpu-ubuntu-2404"
     assert shape.actual == "ubuntu-latest"
@@ -156,8 +156,13 @@ def test_class_one_precondition_is_asked_of_the_brand_transform():
     assert shape.forced_down is True
     from hundredways.rules import BrandingRules
 
-    assert BrandingRules().transform_text("runs-on: blacksmith-32vcpu-ubuntu-2404") == (
+    assert BrandingRules().transform_runtime_analysis_text(
+        "runs-on: blacksmith-32vcpu-ubuntu-2404"
+    ) == (
         "runs-on: ubuntu-latest"
+    )
+    assert BrandingRules().transform_text("runs-on: blacksmith-32vcpu-ubuntu-2404") == (
+        "runs-on: blacksmith-32vcpu-ubuntu-2404"
     )
 
 

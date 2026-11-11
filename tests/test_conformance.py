@@ -80,7 +80,7 @@ def test_final_conformance_blocks_unexpected_candidate_path(tmp_path):
     ]
 
 
-def test_final_conformance_allows_declared_fork_owned_path(tmp_path):
+def test_final_conformance_rejects_declared_fork_owned_path(tmp_path):
     source = _tree(tmp_path / "source", {"README.md": "# Hermes Agent\n"})
     candidate = tmp_path / "candidate"
     brand_tree(str(source), str(candidate), BrandingRules())
@@ -91,7 +91,10 @@ def test_final_conformance_allows_declared_fork_owned_path(tmp_path):
 
     report = verify_final_candidate(source, candidate, allowed_extra_paths=[local_path])
 
-    assert report.passed
+    assert not report.passed
+    assert [(issue.code, issue.path) for issue in report.issues] == [
+        ("unexpected-candidate-path", local_path)
+    ]
 
 
 def _git_repo(root: Path, files: dict[str, str]) -> Path:
@@ -107,16 +110,8 @@ def _git_repo(root: Path, files: dict[str, str]) -> Path:
     return root
 
 
-def test_final_conformance_replays_fork_preservation_and_post_preserve_reconciles(tmp_path):
-    """The final-conformance rebuild must reproduce post-preserve reconcile bytes.
-
-    The pipeline preserves fork-local files after reconcile, then re-syncs the
-    skill catalogs and normalizes generated-docs separators; the final
-    candidate carries those bytes.  Conformance rebuilds its own expected tree,
-    so it must replay the same fork-preservation + post-preserve reconciles
-    from the fork -- never trust the candidate -- or a reconciled fork file is
-    reported as a source-parity mismatch (the real runner failure this gates).
-    """
+def test_final_conformance_excludes_fork_files_and_reconciliation(tmp_path):
+    """The candidate is exactly branded upstream, regardless of fork state."""
     catalog = (
         "# Optional Skills Catalog\n"
         "\n"
@@ -124,7 +119,8 @@ def test_final_conformance_replays_fork_preservation_and_post_preserve_reconcile
         "\n"
         "| Skill | Description |\n"
         "|-------|-------------|\n"
-        "| [**canvas-design**](../user-guide/skills/optional/creative/creative-canvas-design.md) | Design art. |\n"
+        "| [**canvas-design**](../user-guide/skills/optional/creative/"
+        "creative-canvas-design.md) | Design art. |\n"
     )
     source = _git_repo(
         tmp_path / "source",
@@ -166,43 +162,21 @@ def test_final_conformance_replays_fork_preservation_and_post_preserve_reconcile
     assert res.gate, [s for s in res.stages if s.status == "fail"]
     candidate = Path(res.dir)
 
-    # The candidate carries the post-preserve reconciles: catalog row + a
-    # POSIX-clean page, while every other fork byte survives verbatim.
+    # Fork-only skills, docs, and catalog rows are not overlaid.
     candidate_catalog = (candidate / catalog_rel).read_text(encoding="utf-8")
-    assert "blender-mcp" in candidate_catalog
-    candidate_page = (candidate / page_rel).read_text(encoding="utf-8")
-    assert "\\" not in candidate_page
-    assert "skills/optional/creative/blender-mcp" in candidate_page
-    assert (candidate / skill_rel).is_file()
+    assert candidate_catalog == catalog
+    assert not (candidate / page_rel).exists()
+    assert not (candidate / skill_rel).exists()
 
-    # Without a fork root the rebuilt expected tree lacks the post-preserve
-    # reconciles: the catalog source-parity issue the runner hit.
-    without_fork = verify_final_candidate(
-        source, candidate, allowed_extra_paths=[page_rel, skill_rel]
-    )
-    assert not without_fork.passed
-    assert ("source-parity", catalog_rel) in [
-        (issue.code, issue.path) for issue in without_fork.issues
-    ]
-
-    # With the fork root, preservation + post-preserve reconciles are replayed
-    # from the fork and the exact candidate verifies clean.
     with_fork = verify_final_candidate(source, candidate, fork_root=str(fork))
     assert with_fork.passed, [
         f"{issue.code} {issue.path}: {issue.detail}" for issue in with_fork.issues
     ]
-    assert catalog_rel in with_fork.reconciled_paths
-    assert page_rel in with_fork.reconciled_paths
+    assert with_fork.reconciled_paths == ()
 
 
-def test_final_conformance_reapplies_the_fork_release_publication_layer(tmp_path):
-    """A fork-first layer in a shared module is rebuilt, never trusted.
-
-    ``reconcile_tree`` reads that layer from the fork checkout, so the
-    conformance rebuild has to pass the fork root too.  Without it the expected
-    tree holds upstream's module while the candidate holds the fork's, and the
-    file reads as a source-parity mismatch on every sync.
-    """
+def test_final_conformance_excludes_fork_release_publication_layer(tmp_path):
+    """Fork-only release behavior is not carried into an upstream snapshot."""
     rel = "scripts/releases/channel_releases.py"
     source = _git_repo(
         tmp_path / "source",
@@ -239,14 +213,17 @@ def test_final_conformance_reapplies_the_fork_release_publication_layer(tmp_path
     res = UpdateManager(str(updates_dir), hermes_url=str(source), fork_root=str(fork)).run()
     assert res.gate, [s for s in res.stages if s.status == "fail"]
     candidate = Path(res.dir)
-    assert "_ASSET_SUFFIXES" in (candidate / rel).read_text(encoding="utf-8")
+    assert "_ASSET_SUFFIXES" not in (candidate / rel).read_text(encoding="utf-8")
+    assert (candidate / rel).read_text(encoding="utf-8") == (source / rel).read_text(
+        encoding="utf-8"
+    )
 
     report = verify_final_candidate(source, candidate, fork_root=str(fork))
 
     assert report.passed, [
         f"{issue.code} {issue.path}: {issue.detail}" for issue in report.issues
     ]
-    assert rel in report.reconciled_paths
+    assert report.reconciled_paths == ()
 
 
 def test_final_candidate_reports_every_issue_kind_in_sequence(tmp_path):
@@ -297,4 +274,3 @@ def test_final_candidate_path_checks_are_not_pruned_like_the_brand_audits(tmp_pa
     ]
     assert report.candidate_digest == tree_digest(candidate)
     assert report.candidate_digest
-

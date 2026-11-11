@@ -6,9 +6,9 @@ enforces it.  This module holds those measurements and nothing else:
 * :func:`unbrand` reverses the brand with the canonical token table from
   :mod:`hundredways.rules`, so a fork path matches an upstream path and a branded file can
   be measured at its upstream size without a second checkout.
-* :func:`branded_image` and :func:`worker_ceiling` ask the brand transform itself what a
-  job's ``runs-on`` became and what worker count it became, so the Class-1 precondition
-  (the fork *had* to lose that machine) cannot drift from the transform that imposes it.
+* :func:`branded_image` and :func:`worker_ceiling` ask the diagnostic-only fork projection
+  what a job's ``runs-on`` became and what worker count it became. This projection is not
+  used by candidate generation and does not change packaged files.
 * :func:`wall_clock_claims` recognises an assertion shape -- a comparison against an
   absolute seconds budget -- instead of a list of test names, which is the only form of
   this rule that survives upstream renaming a test.  A measured number is read from the
@@ -150,16 +150,16 @@ def label_cores(image: str) -> int | None:
 
 
 def branded_image(runs_on: str) -> str:
-    """Ask the canonical transform what image this ``runs-on`` becomes in the fork."""
-    transformed = BrandingRules().transform_text(f"runs-on: {runs_on}")
+    """Ask the diagnostic fork projection what image this lane uses today."""
+    transformed = BrandingRules().transform_runtime_analysis_text(f"runs-on: {runs_on}")
     match = re.search(r"runs-on:[ \t]*(\S+)", transformed)
     return match.group(1) if match else runs_on
 
 
 def runner_shape(runs_on: str, actual: str) -> RunnerShape:
-    """The Class-1 precondition, taken from the transform rather than from a remembered image.
+    """The Class-1 precondition, taken from the fork projection rather than a remembered image.
 
-    ``forced_down`` is only true when the transform itself rewrote the label AND the
+    ``forced_down`` is only true when the diagnostic projection rewrote the label AND the
     rewritten label carries no size while the requested one did: that is a machine the fork
     was obliged to give up, not a lane that simply happens to be slow.
     """
@@ -175,16 +175,18 @@ def runner_shape(runs_on: str, actual: str) -> RunnerShape:
 
 
 def worker_ceiling() -> int | None:
-    """The worker count the engine's own normalizer imposes on a wide fan-out.
+    """The worker count the deployed fork's normalizer imposes on a wide fan-out.
 
-    Read from the canonical transform's output on a synthetic workflow line written in
+    Read from the diagnostic projection's output on a synthetic workflow line written in
     upstream's spelling, so it exercises the branding of the variable name and the cap on its
     value exactly as a sync does.  The number is therefore whatever ``hundredways/rules.py``
     enforces today, not a copy of it that rots.  ``None`` when the transform does not lower the
     probe at all: quoting the probe back as if it were the ceiling would be the same invention
     as hardcoding the cap.
     """
-    transformed = BrandingRules().transform_text(f"HERMES_TEST_WORKERS: {_WORKER_PROBE}")
+    transformed = BrandingRules().transform_runtime_analysis_text(
+        f"HERMES_TEST_WORKERS: {_WORKER_PROBE}"
+    )
     match = re.search(r"NASTECH_TEST_WORKERS:[ \t]*(\d+)", transformed)
     if match is None:
         return None
