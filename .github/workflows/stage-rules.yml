@@ -1,22 +1,17 @@
 name: stage-rules
 
-# Stage 4: prove the branding rules still reproduce the fork birth commit
-# (0cafd22fb from parent 03fa32c92).  Shallow-clones the public nastech-agent
-# fork (auto-deepening if main has grown) and verifies the rules transform of
-# the parent tree against the birth tree.  This is a DRIFT MONITOR: parity
-# must stay >= 99% and the drifted-file set must never grow beyond the
-# known-drift allowlist (files the birth commit manually rewrote).
+# Stage 4: enforce the pinned, pure Hermes-to-Nastech branding contract.
+# The golden snapshot is generated from Hermes only, plus the visual assets
+# explicitly registered in config/owned-assets/manifest.json. No fork tree,
+# reconciliation, or file-preservation input is part of this gate.
 
 on:
   workflow_call:
 
-env:
-  BIRTH_COMMIT: 0cafd22fb
-  BIRTH_PARENT: 03fa32c92
-
 jobs:
   rules:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
 
@@ -27,220 +22,20 @@ jobs:
       - name: Install 100ways
         run: pip install -e .
 
-      - name: Shallow clone of the fork (birth commit is ~30 deep on main)
+      - name: Fetch the pinned Hermes snapshot
+        id: source
+        shell: bash
         run: |
-          git clone --depth=35 --no-checkout \
-            https://github.com/nastechresearch/nastech-agent.git nastech-agent
-          # auto-deepen if the fork's main has grown past the window
-          for i in 1 2 3 4; do
-            if git -C nastech-agent cat-file -e "$BIRTH_PARENT" 2>/dev/null \
-              && git -C nastech-agent cat-file -e "$BIRTH_COMMIT" 2>/dev/null; then
-              break
-            fi
-            echo "deepening history ($i)"
-            git -C nastech-agent fetch --deepen=50 origin main
-          done
-          git -C nastech-agent cat-file -e "$BIRTH_PARENT" 2>/dev/null \
-            || { echo "birth parent not reachable"; exit 1; }
+          set -euo pipefail
+          HERMES_URL=$(python3 -c 'import json; print(json.load(open("config/pure-brand-baseline.json", encoding="utf-8"))["hermes_repository"])')
+          HERMES_SHA=$(python3 -c 'import json; print(json.load(open("config/pure-brand-baseline.json", encoding="utf-8"))["hermes_commit"])')
+          git init --quiet hermes-source
+          git -C hermes-source remote add origin "$HERMES_URL"
+          git -C hermes-source fetch --depth=1 origin "$HERMES_SHA"
+          git -C hermes-source checkout --quiet --detach "$HERMES_SHA"
+          test "$(git -C hermes-source rev-parse HEAD)" = "$HERMES_SHA"
+          echo "sha=$HERMES_SHA" >> "$GITHUB_OUTPUT"
+          echo "- Pinned Hermes source: \`$HERMES_SHA\`" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Verify rebrand parity vs birth commit
-        run: |
-          python3 - <<'EOF'
-          from hundredways.cli import BIRTH_COMMIT, BIRTH_PARENT
-          from hundredways.rules import BrandingRules, DEFAULT_TOKENS
-          from hundredways.verify import verify_rebrand
-          import os
-          repo = os.path.join(os.getcwd(), "nastech-agent")
-          # The birth snapshot predates the user-approved medical-symbol
-          # replacement (⚕ / ☤ -> 𓄃).  Compare historic name-token parity
-          # independently so this intentional brand evolution does not mask
-          # unrelated drift; the current rule is separately unit- and
-          # full-snapshot-tested, then enforced by the weekly symbol audit.
-          historical_tokens = [token for token in DEFAULT_TOKENS if token.match != "⚕"]
-          report = verify_rebrand(repo, BIRTH_PARENT, BIRTH_COMMIT, BrandingRules(tokens=historical_tokens))
-          print(report.summary())
-          assert BrandingRules().transform_text("⚕☤") == "𓄃𓄃"
-
-          # The fork birth commit manually rewrote a fixed set of files
-          # (i18n bundles, READMEs, deleted contributor-email data).  The
-          # rules gate is a DRIFT monitor: it must stay >= 99% and the set
-          # of drifted files must never grow.  A brand-rule regression
-          # either drops the ratio or adds new drift -> CI fails.
-          allowlist = {
-              "README.es.md", "README.md", "README.ur-pk.md", "README.zh-CN.md",
-              "apps/bootstrap-installer/public/nastech-bantu.jpg",
-              "apps/bootstrap-installer/src/components/brand-mark.tsx",
-              "apps/desktop/DESIGN.md",
-              "apps/desktop/public/nastech-bantu.jpg",
-              "apps/desktop/src/components/brand-mark.tsx",
-              "apps/desktop/src/app/command-center/index.tsx",
-              "apps/desktop/src/components/ui/decode-text.tsx",
-              "apps/desktop/src/i18n/ar.ts", "apps/desktop/src/i18n/en.ts",
-              "apps/desktop/src/i18n/ja.ts", "apps/desktop/src/i18n/types.ts",
-              "apps/desktop/src/i18n/zh-hant.ts", "apps/desktop/src/i18n/zh.ts",
-              "apps/desktop/src/plugins/hello-runtime/plugin.runtime.js",
-              "contributors/emails/hermesagent424@gmail.com",
-              "contributors/emails/mchermes@edu.dreamcatcher.ai",
-              "cron/lifecycle_guard.py", "evals/readtool/README.md",
-              "nastech_cli/config.py", "nastech_cli/mcp_security.py",
-              "nastech_cli/profiles.py", "nastech_cli/uninstall.py",
-              "optional-skills/creative/baoyu-comic/references/base-prompt.md",
-              "optional-skills/creative/baoyu-comic/references/storyboard-template.md",
-              "optional-skills/security/web-pentest/references/exploitation-techniques.md",
-              "scripts/contributor_audit.py", "scripts/release.py",
-              "skills/creative/ascii-video/SKILL.md",
-              "skills/creative/manim-video/references/animation-design-thinking.md",
-              "skills/creative/popular-web-designs/templates/composio.md",
-              "skills/creative/popular-web-designs/templates/expo.md",
-              "skills/creative/popular-web-designs/templates/linear.app.md",
-              "skills/creative/popular-web-designs/templates/mintlify.md",
-              "tests/gateway/test_irc_adapter.py",
-              "tests/nastech_cli/test_gateway_restart_loop.py",
-              "tests/nastech_cli/test_profiles.py",
-              "tests/nastech_cli/test_update_import_guard.py",
-              "tests/tui_gateway/test_gateway_owned_session_reap.py",
-              "tools/approval.py",
-              "ui-tui/packages/nastech-ink/src/ink/ink.tsx",
-              "ui-tui/src/gatewayClient.ts",
-              "website/docs/user-guide/features/voice-mode.md",
-              "website/docs/user-guide/skills/bundled/creative/creative-ascii-video.md",
-              "website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/user-guide/features/voice-mode.md",
-              "website/src/data/userStories.json",
-              "web/src/i18n/af.ts", "web/src/i18n/ar.ts", "web/src/i18n/de.ts",
-              "web/src/i18n/en.ts", "web/src/i18n/es.ts", "web/src/i18n/fr.ts",
-              "web/src/i18n/ga.ts", "web/src/i18n/hu.ts", "web/src/i18n/it.ts",
-              "web/src/i18n/ja.ts", "web/src/i18n/ko.ts", "web/src/i18n/pt.ts",
-              "web/src/i18n/ru.ts", "web/src/i18n/tr.ts", "web/src/i18n/types.ts",
-              "web/src/i18n/uk.ts", "web/src/i18n/zh-hant.ts", "web/src/i18n/zh.ts",
-              "web/src/index.css", "web/src/pages/AnalyticsPage.tsx",
-          }
-          # Reviewed rule change: the url-preservation fix (see
-          # rules.GITHUB_REPO_RE) stops renaming the repo NAME inside a
-          # third-party GitHub identifier.  The birth snapshot predates that
-          # fix, so re-rendering the parent now correctly yields the live
-          # ``.../hermes-*`` repository where the birth text carries a
-          # ``.../nastech-*`` path that 404s (7/7 sampled pairs: original 200,
-          # renamed 404).  Each file below drifts for that reason and no other:
-          # stripping repository identifiers makes it byte-identical again, and
-          # every identifier that moves is foreign-owned -- no first-party
-          # identifier changes.  The fork is corrected on the next sync, so this
-          # is a fixed, bounded set; the ratio and every other file stay
-          # enforced.
-          url_preservation_drift = {
-              "optional-mcps/n8n/manifest.yaml",
-              "plugins/nastech-achievements/README.md",
-              "plugins/nastech-achievements/dashboard/dist/index.js",
-              "plugins/nastech-achievements/dashboard/dist/style.css",
-              "skills/creative/comfyui/references/template-integrity.md",
-              "tests/nastech_cli/test_cmd_update.py",
-              "website/docs/getting-started/nix-setup.md",
-              "website/docs/guides/aws-bedrock.md",
-              "website/docs/user-guide/features/skins.md",
-              "website/docs/user-guide/profile-distributions.md",
-              "website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/getting-started/nix-setup.md",
-              "website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/guides/aws-bedrock.md",
-              "website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/user-guide/features/memory-providers.md",
-              "website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/user-guide/features/skins.md",
-              "website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/user-guide/profile-distributions.md",
-          }
-          # Reviewed rule change: the external-service-identifier fix (see
-          # rules.ALGOLIA_INDEX_NAME_RE) stops renaming an Algolia index that
-          # the app the committed credentials reach does not have.  The birth
-          # snapshot branded the DocSearch index name but had no token for the
-          # opaque appId/apiKey beside it, which is the split that made every
-          # published docs search answer HTTP 404 "Index nastech docs does not
-          # exist".  Re-rendering the parent now yields the live index, so the
-          # file drifts by exactly one line -- measured with
-          # PROVISIONED_ALGOLIA_INDICES emptied, the diff for this file is the
-          # single ``indexName`` pair and nothing else.  Kept apart from
-          # url_preservation_drift because the proof above is about repository
-          # identifiers and does not describe this file.
-          service_preservation_drift = {
-              "website/docusaurus.config.ts",
-          }
-          # Reviewed rule change: the external-URL preservation fix (see
-          # rules.THIRD_PARTY_SERVICE_HOSTS) stops renaming a path that is a page
-          # on somebody else's site.  Measured 2026-10-27 on the birth tree: the
-          # rule moves exactly 8 files, and every one of them is a Honcho docs
-          # link -- ``docs.honcho.dev/v3/guides/integrations/hermes`` answers 200
-          # while ``.../integrations/nastech`` answers 404, because Honcho
-          # documents its own integration and the fork cannot publish a page on
-          # their host.  Stripping those URLs makes each file byte-identical
-          # again.  The other preserved hosts (botcabinet, apify, the
-          # ``*.github.io`` shape) cost nothing here: no brand token sat in a
-          # path on them at the birth commit.
-          #
-          # ``discord.gg`` is NOT in the rule, and that is deliberate rather than
-          # an oversight: the invite API answers the guild "Nous Research" for
-          # ``NousResearch`` and ``{"message": "Unknown Invite", "code": 10006}``
-          # for ``NastechResearch``, and the code ``nastechresearch`` is
-          # unclaimed, so the 10 files and 14 links it touches here -- 32 links
-          # across 19 files of the published tree, counting the new-issue
-          # contact form and the desktop crash overlay -- are fixed by an owner
-          # creating their own invite: not by a rule that sends Nastech's
-          # users to the upstream community.  Preserving it would also have taken
-          # 10 files against the 8 this gate has room for before parity drops
-          # below 0.99, which is a signal worth keeping honest.
-          external_url_preservation_drift = {
-              "apps/desktop/src/app/settings/memory/provider-config-modal.test.tsx",
-              "apps/desktop/src/app/settings/memory/provider-config-panel.test.tsx",
-              "optional-skills/autonomous-ai-agents/honcho/SKILL.md",
-              "plugins/memory/honcho/README.md",
-              "plugins/memory/honcho/config_schema.py",
-              "website/docs/user-guide/features/memory-providers.md",
-              "website/docs/user-guide/skills/optional/autonomous-ai-agents/"
-              "autonomous-ai-agents-honcho.md",
-              "website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/"
-              "user-guide/skills/optional/autonomous-ai-agents/"
-              "autonomous-ai-agents-honcho.md",
-          }
-          # Reviewed rule change: a repository we do not own is never renamed,
-          # in any spelling.  The rule used to brand a foreign `owner/repo` when
-          # the same file also spelled it bare, on the theory that a split
-          # spelling reads badly -- which renamed the repository to one that
-          # does not exist.  Measured 2026-10-28: `roqianjas/hermes-account-pool`
-          # answered 200 while `roqianjas/nastech-account-pool` answered 404, and
-          # the same override branded the label in
-          # `optional-skills/creative/comfyui/references/template-integrity.md`
-          # (upstream 200, fork 404).  Both halves are now kept inherited, so
-          # the URL and the string code compares it against still agree.
-          #
-          # The rule moves exactly one birth file, because at the birth commit
-          # `skills/creative/comfyui/references/template-integrity.md` is the
-          # only file that carries a foreign repository in a markdown label.
-          foreign_repository_drift = {
-              "skills/creative/comfyui/references/template-integrity.md",
-          }
-          allowlist |= url_preservation_drift
-          allowlist |= service_preservation_drift
-          allowlist |= external_url_preservation_drift
-          # Reviewed rule change: Supermemory's connect deep-link belongs to
-          # Supermemory.  ``app.supermemory.ai/integrations?connect=hermes`` is
-          # its own integration, and the page that documents it is
-          # ``supermemory.ai/docs/integrations/hermes`` -- probed 2026-10-27,
-          # 200 for that path and 404 for ``.../integrations/nastech``.  The
-          # host is listed (a subdomain is covered) and a markdown label that
-          # spells out a preserved link's address is kept with it, because
-          # branding half of the pair prints an address that does not resolve.
-          service_host_drift = {
-              "plugins/memory/supermemory/README.md",
-              "plugins/memory/supermemory/__init__.py",
-          }
-          allowlist |= foreign_repository_drift
-          allowlist |= service_host_drift
-          drifted = {f.mapped_path for f in report.failed}
-          new_drift = drifted - allowlist
-          # The allowlist above is the precise instrument: an unnamed drifted
-          # file fails the gate by name.  The ratio is the backstop against a
-          # wholesale regression -- a broken rule moves thousands of files, not
-          # one -- and it sat at 0.99 with zero slack (87 of 8713), so every
-          # reviewed rule change had to move it or wait.  0.985 keeps the
-          # backstop honest (~130 files of 8713) while letting a named, measured
-          # rule land.
-          if report.pass_ratio < 0.985:
-              raise SystemExit(f"parity {report.pass_ratio:.4f} < 0.985")
-          if new_drift:
-              raise SystemExit(f"drift grew, new files: {sorted(new_drift)}")
-          print(f"rules gate: PASS (parity {report.pass_ratio:.1%}, "
-                f"{len(drifted)} known drift, {report.locked} locked)")
-          EOF
+      - name: Verify pure-brand snapshot and exact conformance
+        run: python3 scripts/check_pure_brand_snapshot.py --source hermes-source

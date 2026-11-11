@@ -132,6 +132,28 @@ def test_final_conformance_allows_registered_brand_visuals_but_not_fork_code(tmp
     ]
 
 
+def test_final_conformance_requires_registered_visuals_without_upstream_twins(tmp_path):
+    source = _tree(tmp_path / "source", {"README.md": "# Hermes Agent\n"})
+    assets = tmp_path / "config" / "owned-assets"
+    assets.mkdir(parents=True)
+    (assets / "banner.png").write_bytes(b"Nastech banner")
+    (assets / "manifest.json").write_text(
+        json.dumps({"assets/nastech-banner.png": "banner.png"}), encoding="utf-8"
+    )
+    owned = OwnedAssets(root=str(assets)).brand_visuals()
+    candidate = tmp_path / "candidate"
+    brand_tree(str(source), str(candidate), BrandingRules(), owned)
+    apply_owned_assets(str(candidate), owned)
+
+    (candidate / "assets" / "nastech-banner.png").unlink()
+    report = verify_final_candidate(source, candidate, owned_assets_root=assets)
+
+    assert not report.passed
+    assert [(issue.code, issue.path) for issue in report.issues] == [
+        ("source-parity", "assets/nastech-banner.png")
+    ]
+
+
 def _git_repo(root: Path, files: dict[str, str]) -> Path:
     """Seed a mini git repo (the conformance pipeline needs real git evidence)."""
     _tree(root, files)

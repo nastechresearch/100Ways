@@ -9,10 +9,10 @@ name: CI
 # the configured commit threshold.  Pull-request and manual validation remain
 # complete so changes to 100Ways are always tested before review.
 #
-# ``pipeline`` brands the upstream tree, checks brand/rule and fork consistency,
-# and packages the candidate. Tests are limited to this 100Ways repository;
-# the Nastech-agent application suite is not part of this CI. Publication is
-# deferred until every repository verification has completed; #344 is final.
+# ``rules`` locks the pinned pure-brand snapshot; ``pipeline`` brands live
+# upstream and checks exact source conformance and publication readiness. Tests
+# are limited to this 100Ways repository; the Nastech-agent application suite is
+# not part of this CI. Publication is deferred until every verification passes.
 
 on:
   push:

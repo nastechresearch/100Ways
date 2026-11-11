@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "hermes_repository": "https://github.com/NousResearch/hermes-agent.git",
+  "hermes_commit": "6c649241f92617900c5b11a790aa7d0ad7df31d7",
+  "owned_visual_targets": 21,
+  "tree_sha256": "ed5df42acd4c26e26f80216fb874e6230f6546011d400446de8e32a090a1a9cc"
+}
