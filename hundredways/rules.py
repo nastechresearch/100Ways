@@ -1282,3 +1282,49 @@ def is_locked_path(path: str) -> bool:
         if sub in path:
             return True
     return False
+
+
+# Files whose directives are real data but whose comments still ship as text.
+# An ``.npmrc`` comment naming the upstream brand -- or a path the fork does
+# not install into -- is a first-party leak like any other; the directives
+# beside it (``engine-strict=true``, registry auth) must stay byte-identical or
+# the package manager stops doing what the file says.
+COMMENT_LOCKED_FILENAMES = (".npmrc",)
+
+# Comment markers of the formats we comment-brand.  ``.npmrc`` uses ``#`` and
+# ``;``; both are whole-line markers, so a trailing ``#`` inside a directive
+# value stays untouched.
+COMMENT_PREFIXES = ("#", ";")
+
+
+def is_comment_locked_path(path: str) -> bool:
+    """True for locked files whose comment lines are still branded.
+
+    Vendored copies are excluded even when the basename matches: their bytes
+    are somebody else's and pinned by a sibling digest, so branding a comment
+    there breaks the manifest that verifies them.
+    """
+    if path.rsplit("/", 1)[-1] not in COMMENT_LOCKED_FILENAMES:
+        return False
+    return not is_vendored_path(path)
+
+
+def brand_comment_lines(text: str, rules: "BrandingRules") -> str:
+    """Apply the brand transform to comment lines only.
+
+    Every non-comment line -- a directive, a value, a blank line -- is returned
+    byte-for-byte, including its own line ending.  The result is a fixed point
+    of this function whenever :meth:`BrandingRules.transform_text` is one, which
+    is what ``audit_branding_fixed_point`` relies on elsewhere.
+    """
+    out: list[str] = []
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        ending = line[len(body):]
+        stripped = body.lstrip()
+        if not stripped.startswith(COMMENT_PREFIXES):
+            out.append(line)
+            continue
+        indent = body[: len(body) - len(stripped)]
+        out.append(indent + rules.transform_text(stripped) + ending)
+    return "".join(out)

@@ -52,7 +52,9 @@ from .forkcheck import (
 )
 from .rules import (
     BrandingRules,
+    brand_comment_lines,
     collision_safe_path_map,
+    is_comment_locked_path,
     is_immutable_path,
     is_locked_path,
     transform_contributor_email_path,
@@ -303,6 +305,8 @@ def _candidate_text_for(rel: str, text: str, rules: BrandingRules) -> str:
     """Return the deterministic branded candidate payload for one text file."""
     if "contributors/emails/" in rel.lower():
         return transform_contributor_email_text(text, rules)
+    if is_comment_locked_path(rel):
+        return brand_comment_lines(text, rules)
     return rules.transform_text(text)
 
 
@@ -313,9 +317,12 @@ def brand_tree(src: str, dst: str, rules: BrandingRules | None = None,
     Rules: paths (folders AND file names) are mapped through
     ``rules.transform_path``; text files are rewritten through
     ``rules.transform_text``; binary and locked files are copied
-    byte-for-byte (rename only).  Files whose mapped path appears in the
-    ``owned`` registry are replaced by OUR asset instead of upstream's.
-    Mirrors the birth-commit semantics so the verifier can prove the result.
+    byte-for-byte (rename only).  A comment-locked file (``.npmrc``) is the
+    exception: its directives stay byte-identical while its comment lines are
+    branded, because those comments ship as text.  Files whose mapped path
+    appears in the ``owned`` registry are replaced by OUR asset instead of
+    upstream's.  Mirrors the birth-commit semantics so the verifier can prove
+    the result.
     """
     rules = rules or BrandingRules()
     result = BrandResult()
@@ -351,7 +358,9 @@ def brand_tree(src: str, dst: str, rules: BrandingRules | None = None,
         except OSError as exc:
             result.errors.append(f"{rel}: {exc}")
             continue
-        if is_locked_path(rel) or is_locked_path(mapped):
+        if (is_locked_path(rel) or is_locked_path(mapped)) and not (
+            is_comment_locked_path(rel) or is_comment_locked_path(mapped)
+        ):
             result.locked_copied += 1
             with open(dst_path, "wb") as fh:
                 fh.write(data)
@@ -3092,9 +3101,10 @@ def _reconcile_preserved_brand_text(dst: str, preserved: list[str]) -> list[str]
     the candidate trips both ``first-party-brand`` and
     ``brand-text-not-fixed-point``.  Running the same canonical transform the
     brand stage uses makes the file transform-stable while keeping every
-    fork-authored byte that is not an upstream token.  Locked/immutable files
-    are left byte-for-byte: their brand residue is covered by the audit's
-    explicit allow-list, not by rewriting.
+    fork-authored byte that is not an upstream token.  A comment-locked file
+    (``.npmrc``) brands its comment lines only; every other locked file, and
+    every immutable record, is left byte-for-byte because its brand residue is
+    covered by the audit's explicit allow-list, not by rewriting.
 
     Returns the repo-relative paths changed, so the caller can register them
     with ``verify_branded`` / ``compare_trees`` as reconciled content.
@@ -3102,7 +3112,9 @@ def _reconcile_preserved_brand_text(dst: str, preserved: list[str]) -> list[str]
     rules = BrandingRules()
     changed: list[str] = []
     for rel in preserved or []:
-        if is_locked_path(rel) or is_immutable_path(rel):
+        if (
+            is_locked_path(rel) and not is_comment_locked_path(rel)
+        ) or is_immutable_path(rel):
             continue
         path = os.path.join(dst, rel)
         try:
@@ -10656,7 +10668,9 @@ def compare_trees(src: str, dst: str, rules: BrandingRules | None = None,
         if owned and owned.has(mapped):
             report.entries.append(DiffEntry(rel, mapped, "owned"))
             continue
-        locked = is_locked_path(rel) or is_locked_path(mapped)
+        locked = (is_locked_path(rel) or is_locked_path(mapped)) and not (
+            is_comment_locked_path(rel) or is_comment_locked_path(mapped)
+        )
         src_path = os.path.join(src, rel)
         dst_path = os.path.join(dst, mapped)
         try:
@@ -10704,7 +10718,10 @@ def verify_branded(src: str, dst: str, rules: BrandingRules | None = None,
     for rel in source_files:
         report.total += 1
         mapped = path_map[rel]
-        locked = is_locked_path(rel) or is_locked_path(mapped) or is_immutable_path(rel)
+        locked = (
+            (is_locked_path(rel) or is_locked_path(mapped))
+            and not (is_comment_locked_path(rel) or is_comment_locked_path(mapped))
+        ) or is_immutable_path(rel)
         src_path = os.path.join(src, rel)
         dst_path = os.path.join(dst, mapped)
         exists = os.path.isfile(dst_path)
