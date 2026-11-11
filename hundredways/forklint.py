@@ -2,7 +2,7 @@
 
 ``nastech-agent`` re-lints every PR the engine opens.  ``.github/workflows/lint.yml``
 job ``windows-footguns`` runs six first-party checkers plus a blocking
-``ruff check .`` configured by the fork's own ``pyproject.toml``, and the engine's lint
+``ruff check .`` configured by the fork's own ``ruff.toml``, and the engine's lint
 never sees any of it: it lints engine code, not the tree the fork is about to be asked
 to merge.  That gap is the three reds that keep landing *after* the engine declared
 itself green -- a fork checker the engine never ran, a char-count cap the brand
@@ -26,7 +26,12 @@ The contract this module holds:
 * A checker that cannot run is an :data:`UNAVAILABLE` outcome and is blocking.  A
   simulation that quietly skips is indistinguishable from a green fork.
 * Nothing here loosens a fork guard: caps, ``select`` lists, per-file ignores and
-  baselines are read from the fork and handed to its own tools untouched.
+  baselines are read from the fork and handed to its own tools untouched.  The one
+  exception is the file the update itself replaces -- ``ruff check .`` in the fork's CI
+  reads the config in the PR's checkout, so a candidate that ships its own config is
+  linted under that one (:func:`_ruff_config_to_run`); it is refused and reported
+  blocking the moment it stops enforcing a rule, per-file ignore or import ban the
+  fork declares.
 """
 
 from __future__ import annotations
@@ -588,6 +593,7 @@ class ForkRuffConfig:
     preview: bool
     select: tuple[str, ...]
     per_file_ignores: tuple[tuple[str, tuple[str, ...]], ...]
+    banned_api: tuple[str, ...]
     config_text: str
 
 
@@ -613,6 +619,23 @@ _ENTRY_RE = re.compile(
 )
 _CODE_RE = re.compile(r"\"([^\"]+)\"|'([^']+)'")
 _RUFF_PIN_RE = re.compile(r"\"ruff(?P<specifier>==[0-9][^\"]*)\"")
+
+# ``[lint.flake8-tidy-imports.banned-api]`` is a table of module paths, each spelled
+# inline (``"pm.uv".msg = "..."`` or ``"pm.uv" = { msg = "..." }``) or as its own
+# subtable.  Only the PATHS are read here: a candidate that drops one stops enforcing an
+# import ban the fork declared, whatever message it would have printed instead.
+_BANNED_API_TABLE = "lint.flake8-tidy-imports.banned-api"
+_BANNED_ENTRY_RE = re.compile(
+    r"""^[ \t]*(?P<quote>["'])(?P<name>[^"']+)(?P=quote)[ \t]*(?:\.[A-Za-z_-]+[ \t]*)?=""",
+    re.MULTILINE,
+)
+
+
+def _unquote(value: str) -> str:
+    """The bare value of a TOML string, or the text unchanged when it is not quoted."""
+    if len(value) > 1 and value[0] in "\"'" and value[-1] == value[0]:
+        return value[1:-1]
+    return value
 
 
 def _codes(value: str) -> tuple[str, ...]:
@@ -650,6 +673,31 @@ def _toml_sections(text: str, prefix: str) -> tuple[list[str], list[tuple[str, l
         if current is not None:
             current.append(line)
     return top, tables
+
+
+def _banned_api_paths(tables: list[tuple[str, list[str]]]) -> tuple[str, ...]:
+    """Every module path the config bans, in file order, deduplicated.
+
+    Read from both spellings ruff accepts so a config that reorganises the table cannot
+    hide an entry from :func:`ruff_guard_weakenings`: an inline keyed entry
+    (``"pm.uv".msg = "..."``), a bare-name subtable
+    (``[lint.flake8-tidy-imports.banned-api.pm.uv]``), and a quoted subtable header,
+    which the plain-name splitter leaves in the enclosing table's body.
+    """
+    names: list[str] = []
+    for relative, body in tables:
+        if relative == _BANNED_API_TABLE:
+            names.extend(
+                match.group("name")
+                for match in _BANNED_ENTRY_RE.finditer("\n".join(body))
+            )
+        elif relative.startswith(f"{_BANNED_API_TABLE}."):
+            names.append(_unquote(relative[len(_BANNED_API_TABLE) + 1:]))
+        for line in body:
+            stripped = line.strip()
+            if stripped.startswith(f"[{_BANNED_API_TABLE}.") and stripped.endswith("]"):
+                names.append(_unquote(stripped[len(_BANNED_API_TABLE) + 2:-1]))
+    return tuple(dict.fromkeys(names))
 
 
 def read_fork_ruff_config(fork_root: str) -> ForkRuffConfig:
@@ -693,6 +741,7 @@ def read_fork_ruff_config(fork_root: str) -> ForkRuffConfig:
             preview=preview is not None and preview.group("value") == "true",
             select=_codes(select.group("value")),
             per_file_ignores=ignores,
+            banned_api=_banned_api_paths(tables),
             config_text=config_text,
         )
     raise ForkLintError(
@@ -782,19 +831,115 @@ def _ruff_diagnostic_issues(candidate_root: str, stdout: str) -> list[ForkLintIs
     return issues[:FINDINGS_CAP_PER_SCRIPT]
 
 
+def _covers(select: tuple[str, ...], code: str) -> bool:
+    """True when ``select`` enforces ``code``.
+
+    ruff's select list accepts a whole family (``ALL``), a prefix of any length
+    (``TID``, ``TID2``) or the exact code, so enforcement is a prefix test rather than
+    string equality.
+    """
+    return any(chosen == "ALL" or code.startswith(chosen) for chosen in select)
+
+
+def _ignore_map(config: ForkRuffConfig) -> dict[str, tuple[str, ...]]:
+    """``per-file-ignores`` as pattern -> codes, merging repeated patterns."""
+    out: dict[str, tuple[str, ...]] = {}
+    for pattern, codes in config.per_file_ignores:
+        out[pattern] = (*out.get(pattern, ()), *codes)
+    return out
+
+
+def ruff_guard_weakenings(fork: ForkRuffConfig, candidate: ForkRuffConfig) -> list[str]:
+    """Everything the candidate's config stops enforcing that the fork's enforces.
+
+    The candidate ships the config its CI will run, which is normally the one upstream
+    ships -- so the fork's copy is often a *stale* copy of the same file, and linting
+    the candidate against it can flag text upstream added under the newer rules (the
+    ``pm/**`` ``TID251`` exemption upstream retired on 2026-11-09 is exactly that).
+    A stale copy is not a guard: the candidate's own config is what governs the PR, and
+    it may be used as long as it never LOOSENS what the fork declares.  This is the
+    test for that, and every entry it returns is a blocking finding rather than a
+    silently accepted narrowing.
+    """
+    weaker: list[str] = []
+    if fork.preview and not candidate.preview:
+        weaker.append("preview is on for the fork and off in the candidate")
+    for code in fork.select:
+        if not _covers(candidate.select, code):
+            weaker.append(f"the fork selects {code} and the candidate does not")
+    fork_ignores = _ignore_map(fork)
+    for pattern, codes in _ignore_map(candidate).items():
+        allowed = fork_ignores.get(pattern, ())
+        weaker.extend(
+            f'per-file-ignores adds {code} for "{pattern}"'
+            for code in codes
+            if code not in allowed and not _covers(allowed, code)
+        )
+    weaker.extend(
+        f'banned-api entry "{path}" is missing from the candidate'
+        for path in fork.banned_api
+        if path not in candidate.banned_api
+    )
+    return weaker
+
+
+def _ruff_config_to_run(
+    fork_config: ForkRuffConfig, candidate_root: str
+) -> tuple[ForkRuffConfig, list[ForkLintIssue]]:
+    """The config ``ruff check .`` will read in the candidate's checkout, and any note.
+
+    ``ruff check .`` resolves the config file from the tree it is standing in, and the
+    fork's CI checks out the *candidate*: so the candidate's config is the one that will
+    actually run.  The fork's copy is used only when the candidate ships none (there is
+    nothing else to enforce), and a candidate config that loosens the fork's guard is
+    reported instead of used.
+    """
+    try:
+        candidate_config = read_fork_ruff_config(candidate_root)
+    except ForkLintError:
+        return fork_config, []
+    if candidate_config.config_text == fork_config.config_text:
+        return candidate_config, []
+    weakenings = ruff_guard_weakenings(fork_config, candidate_config)
+    if weakenings:
+        return fork_config, [
+            ForkLintIssue(
+                script="ruff", path=candidate_config.source,
+                detail=redact(f"the candidate's {candidate_config.source} weakens the "
+                              f"fork's ruff guard: {detail}"),
+                blocking=True, classification=GENUINE_DIVERGENCE,
+            )
+            for detail in weakenings
+        ]
+    return candidate_config, [ForkLintIssue(
+        script="ruff", path=candidate_config.source,
+        detail=(f"the candidate's own {candidate_config.source} differs from the fork's "
+                f"{fork_config.source}; linting with it because that is the config the "
+                "candidate's CI runs, and it selects every rule, per-file ignore and "
+                "banned-api entry the fork does"),
+        blocking=False,
+    )]
+
+
 def run_fork_ruff(fork_root: str, candidate_root: str) -> list[ForkLintIssue]:
-    """``ruff check`` over the candidate, configured by the fork's own config file.
+    """``ruff check`` over the candidate, configured by the tree's own config file.
 
     Run with ``cwd`` at the candidate because ruff resolves ``per-file-ignores``
     patterns against the paths of the files as seen from the process directory -- the
-    fork's exemptions only land on the files the fork means to exempt when the tree
-    being read is the working directory.  ``--no-cache`` because a lint of a candidate
-    must not leave a ``.ruff_cache`` inside the tree that is about to be packaged.
+    exemptions only land on the files the config means to exempt when the tree being
+    read is the working directory.  ``--no-cache`` because a lint of a candidate must
+    not leave a ``.ruff_cache`` inside the tree that is about to be packaged.
+
+    The config is the candidate's when it ships one (:func:`_ruff_config_to_run`): the
+    fork's CI lints the candidate's checkout, so its own file is what runs there, and
+    the fork's copy is stale whenever the update replaces it.  A candidate config that
+    loosens the fork's guard is reported blocking and never used.
     """
     try:
-        config = read_fork_ruff_config(fork_root)
+        fork_config = read_fork_ruff_config(fork_root)
     except ForkLintError as exc:
         return [_unavailable("ruff", "", str(exc))]
+    config, notes = _ruff_config_to_run(fork_config, candidate_root)
     executable = _ruff_executable()
     if not executable:
         return [_unavailable("ruff", "", "ruff is not installed here, so the fork's ruff "
@@ -814,17 +959,18 @@ def run_fork_ruff(fork_root: str, candidate_root: str) -> list[ForkLintIssue]:
                 timeout=RUFF_TIMEOUT_S, check=False, stdin=subprocess.DEVNULL,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            return [_unavailable("ruff", "", f"cannot run ruff check: {exc}")]
+            return [_unavailable("ruff", "", f"cannot run ruff check: {exc}"), *notes]
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     divergence = _version_divergence(fork_root, executable)
     if proc.returncode == 0:
-        return [divergence] if divergence else []
+        return [*notes, *([divergence] if divergence else [])]
     if proc.returncode != 1:
         return [_unavailable("ruff", "",
-                             f"exit {proc.returncode} with the fork's own {config.source}: "
-                             f"{(proc.stdout + proc.stderr).strip()[:OUTPUT_CAP_CHARS]}")]
+                             f"exit {proc.returncode} with {config.source}: "
+                             f"{(proc.stdout + proc.stderr).strip()[:OUTPUT_CAP_CHARS]}"), *notes]
     issues = _ruff_diagnostic_issues(candidate_root, proc.stdout)
+    issues.extend(notes)
     if divergence:
         issues.append(divergence)
     return sorted(issues, key=lambda issue: (issue.path, issue.detail))
