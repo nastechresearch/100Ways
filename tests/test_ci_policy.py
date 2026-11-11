@@ -223,7 +223,12 @@ def test_ci_runs_100ways_checks_without_nastech_application_test_workflow():
     assert "  forkcheck:" not in ci
     assert "  readme:\n    needs: pipeline" in ci
     assert "needs: [pipeline, all-checks-pass]" in ci
-    assert "Verify rebrand parity vs birth commit" in (root / ".github" / "workflows" / "stage-rules.yml").read_text()
+    rules = (root / ".github" / "workflows" / "stage-rules.yml").read_text()
+    assert "Verify pure-brand snapshot and exact conformance" in rules
+    assert "config/pure-brand-baseline.json" in rules
+    assert "scripts/check_pure_brand_snapshot.py" in rules
+    assert "birth commit" not in rules.lower()
+    assert "nastech-agent" not in rules.lower()
     assert "compare" in pipeline.lower() or "conformance" in pipeline.lower()
     assert not (root / ".github" / "workflows" / "stage-forkcheck.yml").exists()
 

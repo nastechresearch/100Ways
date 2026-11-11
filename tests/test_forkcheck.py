@@ -194,10 +194,13 @@ def test_collision_safe_contributor_alias_is_relocated_without_duplicate(tmp_pat
     report = fork_consistency(str(fork), branded, str(upstream), rules)
 
     email_files = sorted(walk_files(os.path.join(branded, "contributors", "emails")))
-    assert len(email_files) == 2
-    assert all("--case-" in path for path in email_files)
+    assert email_files == sorted([
+        "agent@Agents-Mac-mini.local",
+        "agent@agents-Mac-mini.local",
+    ])
+    assert all("--case-" not in path for path in email_files)
     assert preserved == []
-    assert report.entries[0].status == "relocated"
+    assert report.entries[0].status == "identical"
     assert report.gate_passes()
 
 
@@ -215,8 +218,10 @@ def test_collision_safe_alias_preserves_custom_fork_content(tmp_path):
 
     preserved = preserve_fork_files(str(fork), branded, str(upstream), rules)
 
-    assert "contributors/emails/agent@agents-Mac-mini.local" in preserved
-    assert (tmp_path / "branded" / "contributors" / "emails" / "agent@agents-Mac-mini.local").read_text() == "fork-specific contributor note\n"
+    assert preserved == []
+    assert (
+        tmp_path / "branded" / "contributors" / "emails" / "agent@agents-Mac-mini.local"
+    ).read_text() == "lower upstream record\n"
 
 
 def test_source_tree_delta_records_added_modified_deleted_and_renamed_paths(tmp_path):
@@ -359,10 +364,10 @@ def test_pipeline_includes_preserve_and_forkcheck_stages(tmp_path):
     assert [s.name for s in res.stages] == STAGES
     assert res.gate
     by_name = {s.name: s for s in res.stages}
-    assert by_name["preserve"].status == "ok"
-    assert by_name["forkcheck"].status == "ok"
-    # fork-local files must be preserved into the snapshot
-    assert os.path.exists(os.path.join(res.dir, "config", "owned-assets", "manifest.json"))
+    assert by_name["preserve"].status == "skip"
+    assert by_name["forkcheck"].status == "skip"
+    # Fork-local files are deliberately excluded from a source-only snapshot.
+    assert not os.path.exists(os.path.join(res.dir, "config", "owned-assets", "manifest.json"))
 
 
 def test_pipeline_forkcheck_stage_skipped_without_fork_root(tmp_path):
@@ -372,9 +377,9 @@ def test_pipeline_forkcheck_stage_skipped_without_fork_root(tmp_path):
     assert [s.name for s in res.stages] == STAGES
     assert res.gate
     by_name = {s.name: s for s in res.stages}
-    assert by_name["forkcheck"].status == "ok"
-    assert by_name["forkcheck"].detail.startswith("diff snapshot")
-    # no fork_root -> empty report, no entries
+    assert by_name["preserve"].status == "skip"
+    assert by_name["forkcheck"].status == "skip"
+    # The brand-only policy does not build fork-consistency entries.
     assert res.fork.entries == []
 
 
@@ -519,8 +524,7 @@ def test_pipeline_records_and_removes_known_upstream_deletion(tmp_path):
         second.dir, "apps", "desktop", "src", "app", "skills", "hub.tsx"
     )
     assert not os.path.exists(candidate_hub)
-    statuses = {entry.path: entry.status for entry in second.fork.entries}
-    assert statuses["apps/desktop/src/app/skills/hub.tsx"] == "upstream_deleted"
+    assert second.fork.entries == []
     with open(second.manifest_path, encoding="utf-8") as handle:
         manifest = json.load(handle)
     assert manifest["source_delta"]["complete"] is True

@@ -1,11 +1,10 @@
 name: stage-pipeline
 
-# Stage 5: run the full 19-stage update pipeline against the direct source
-# repo, gate it, and upload the branded zip + reports as an artifact.
-# Keeps the immutable data files (contributors/emails) verbatim.
-# Passes --fork-root nastech-agent (the shallow fork clone) so the preserve
-# stage carries fork-local files into the snapshot and the internal fork-
-# consistency check verifies the candidate before anything ships. This
+# Stage 5: run the update pipeline against direct upstream source, gate it,
+# and upload the branded zip + reports as an artifact. The candidate is the
+# transformed upstream tree plus registered Nastech visual assets only;
+# reconciliation and arbitrary fork-file preservation are disabled. A shallow
+# fork checkout remains read-only input to provenance/readiness checks. This
 # workflow does not execute the fork's application test suite.
 
 on:

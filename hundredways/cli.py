@@ -601,20 +601,16 @@ class Cli:
     def cmd_update(self) -> None:
         """Pull real Hermes, brand the whole tree, verify, save as Nastech-Update#N."""
         updates_dir = self.args.updates_dir or default_updates_dir(self.repo)
+        fork_root = self.args.fork_root or ""
         owned = (
             OwnedAssets(root=self.args.owned_assets_root)
             if self.args.owned_assets_root
             else OwnedAssets(repo=self.repo)
         )
-        if owned.count:
-            print(f"owned-assets registry: {owned.count} target paths in {owned.root}")
-        else:
-            print("owned-assets registry: none found (expected at config/owned-assets/)")
-        fork_root = self.args.fork_root or self.repo
         if fork_root and os.path.isdir(fork_root):
-            print(f"fork-root: {fork_root} (fork-consistency check enabled)")
+            print(f"baseline checkout: {fork_root} (read-only upstream baseline only)")
         else:
-            print(f"fork-root: {fork_root or 'none'} — fork-consistency check will be skipped")
+            print("baseline checkout: none")
         mgr = UpdateManager(updates_dir, hermes_url=self.args.hermes_url,
                             rules=self.rules, owned=owned, ai=AIEngine(),
                             fork_root=fork_root,
@@ -1517,15 +1513,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--updates-dir", default="", help="Updates-Commits dir (default: sibling of the repo)")
     p.add_argument("--hermes-url", default=DEFAULT_HERMES_URL, help="Hermes remote or local path")
     p.add_argument("--source-provenance-url", default="", help="approved HTTPS source URL recorded in the candidate manifest")
-    p.add_argument("--zip", default="", help="also build the release zip at this path (project folder + 2 md reports)")
+    p.add_argument(
+        "--zip",
+        default="",
+        help="also build a branded upstream ZIP with registered Nastech visuals",
+    )
     p.add_argument("--project-name", default="nastech-agent", help="name of the project folder inside the zip")
     p.add_argument("--state-dir", default="", help="state dir (default: repo-sibling 100ways-state)")
     p.add_argument("--fork-root", default="",
-                   help="nastech-agent fork checkout to diff against (default: --repo); "
-                        "enables the preserve + forkcheck stages")
+                   help="optional target checkout used only for its upstream baseline manifest; never merged")
     p.add_argument("--owned-assets-root", default="",
-                    help="explicit config/owned-assets directory managed by 100Ways; "
-                         "overrides the registry located in --repo")
+                   help="owned-visual manifest dir (default: <repo>/config/owned-assets)")
     p.add_argument("--emit-outputs", default="",
                    help="write JSON {update_number, upstream_sha, gate} to this file "
                         "(CI emits these into $GITHUB_OUTPUT)")

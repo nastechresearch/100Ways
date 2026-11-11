@@ -263,15 +263,13 @@ def test_the_two_brand_audits_still_flag_a_brand_word_outside_a_preserved_url():
     assert _allowed_brand_occurrence("hermes", line, "README.md") is False
 
 
-def test_a_host_the_owner_has_provisioned_is_brandable_again(monkeypatch):
-    """The env hook is what the owner flips once a Nastech object exists."""
+def test_a_host_the_owner_has_provisioned_still_has_its_url_preserved(monkeypatch):
+    """The explicit URL freeze takes precedence over host ownership settings."""
     monkeypatch.setenv("HUNDREDWAYS_OWNED_URL_HOSTS", "docs.honcho.dev")
     line = "read https://docs.honcho.dev/v3/guides/integrations/hermes"
 
     assert preserved_external_url_spans(line) == ()
-    assert BrandingRules().transform_text(line) == (
-        "read https://docs.honcho.dev/v3/guides/integrations/nastech"
-    )
+    assert BrandingRules().transform_text(line) == line
 
 
 def test_brand_tree_ships_the_third_party_links_a_human_clicks(tmp_path):

@@ -44,6 +44,24 @@ def registry(tmp_path, targets: dict[str, str]) -> OwnedAssets:
     return OwnedAssets(root=str(root))
 
 
+def test_brand_visuals_excludes_registered_asset_generation_code(tmp_path):
+    owned = registry(
+        tmp_path,
+        {
+            "assets/nastech-logo.svg": "logo.svg",
+            "apps/desktop/public/nastech.png": "nastech.png",
+            "scripts/generate_icons.py": "generate_icons.py",
+        },
+    )
+
+    visuals = owned.brand_visuals()
+
+    assert visuals.mapping == {
+        "assets/nastech-logo.svg": "logo.svg",
+        "apps/desktop/public/nastech.png": "nastech.png",
+    }
+
+
 def policy(*classes: str) -> AssetPolicy:
     return AssetPolicy(version=1, must_own=classes)
 
@@ -209,7 +227,7 @@ def test_art_the_fork_authored_is_not_reported_as_a_leak(tmp_path):
 
 
 def test_a_renamed_upstream_file_counts_as_upstream_at_the_branded_path(tmp_path):
-    """``nous-girl.png`` becomes ``nastech-bantu.png``; the pixels never changed."""
+    """The approved Nous mascot path brands to Nastech's Bantu asset name."""
     theirs = upstream(tmp_path, "apps/bootstrap-installer/public/nous-girl.png")
     walked = tree(tmp_path, "apps/bootstrap-installer/public/nastech-bantu.png")
     owned = registry(tmp_path, {"apps/bootstrap-installer/public/other.jpg": "other.jpg"})

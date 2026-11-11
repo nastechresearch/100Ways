@@ -79,7 +79,7 @@ def test_brand_audit_allows_content_addressed_vendored_fixtures(tmp_path):
     ]
 
 
-def test_brand_audit_flags_third_party_misaki_source_in_uv_lock(tmp_path):
+def test_brand_audit_does_not_brand_third_party_misaki_url_in_uv_lock(tmp_path):
     lock = tmp_path / "uv.lock"
     lock.write_text(
         'source = { git = "https://github.com/NousResearch/misaki.git?rev=abc" }\n'
@@ -87,21 +87,17 @@ def test_brand_audit_flags_third_party_misaki_source_in_uv_lock(tmp_path):
 
     issues = audit_first_party_brand(str(tmp_path))
 
-    assert len(issues) == 1
-    assert issues[0].path == "uv.lock"
-    assert issues[0].code == "first-party-brand"
+    assert issues == []
 
 
-def test_brand_audit_flags_third_party_misaki_source_in_pyproject(tmp_path):
+def test_brand_audit_does_not_brand_third_party_misaki_url_in_pyproject(tmp_path):
     (tmp_path / "pyproject.toml").write_text(
         'dependencies = ["misaki @ git+https://github.com/NousResearch/misaki.git@abc"]\n'
     )
 
     issues = audit_first_party_brand(str(tmp_path))
 
-    assert len(issues) == 1
-    assert issues[0].path == "pyproject.toml"
-    assert issues[0].code == "first-party-brand"
+    assert issues == []
 
 
 def test_brand_fixed_point_audit_blocks_transformable_text_and_paths(tmp_path):
@@ -129,7 +125,6 @@ def test_brand_audit_scans_generated_metadata_and_contributor_emails(tmp_path):
     issues = audit_first_party_brand(str(root))
 
     assert {(issue.code, issue.path) for issue in issues} == {
-        ("first-party-brand", "manifest.json"),
         ("first-party-brand", "reports/UPDATE-REPORT.md"),
         ("first-party-brand", "contributors/emails/agent@hermes.local"),
         ("first-party-brand-path", "contributors/emails/agent@hermes.local"),

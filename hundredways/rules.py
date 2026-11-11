@@ -13,11 +13,9 @@ boundary-guarded so English words (``venous``, ``anonymous``,
 
 from __future__ import annotations
 
-import hashlib
 import os
 import re
 from dataclasses import dataclass, field
-
 
 # ---------------------------------------------------------------------------
 # Token map.  Longest-first; the matcher scans in this order so compound
@@ -58,12 +56,10 @@ def _rule(match: str, replace: str, anchored: bool = False) -> TokenRule:
 
 
 # ---------------------------------------------------------------------------
-# Runner-label normalization.  Upstream Hermes pays for GitHub larger runners
-# (ubuntu-latest-96-core, ubuntu-latest-32-arm-core, ...).  This org does not
-# configure them, so any such label queues a job forever (2026-08-24 incident:
-# the whole nastech-agent CI sat queued 4h+ after a branded update carried the
-# labels over).  Normalizing here — inside the canonical transform — keeps the
-# brander, porter, forkcheck, and analyzer in exact agreement.
+# Historical runtime-policy normalization used only by
+# ``transform_runtime_analysis_text`` for diagnostics of the deployed fork.
+# These helpers are intentionally excluded from ``transform_text`` and from
+# candidate generation: branding must not rewrite CI policy.
 # ---------------------------------------------------------------------------
 
 _RUNNER_LABEL_RE = re.compile(
@@ -233,57 +229,28 @@ def _normalize_blacksmith_action(match_obj: re.Match) -> str:
     return _BLACKSMITH_ACTIONS[match_obj.group(1)]
 
 
-# The canonical learned set.  Order matters: longest compounds first.
+# The branding-only token set.  Keep this deliberately small: the sync may
+# change the Hermes/Nous names, but it must not alter URLs, runner policy,
+# release behavior, or other upstream content.
 DEFAULT_TOKENS: list[TokenRule] = [
-    # -- hosted community plugin: whole repo path ---------------------------
-    # Branding renames the repo NAME inside a GitHub URL
-    # (hermes-plugin-holographic -> nastech-plugin-holographic) but cannot
-    # rename a foreign OWNER, so branding alone left
-    # ``itpartypattaya/nastech-plugin-holographic`` -- a repo that does not
-    # exist.  We host our own copy of this plugin under the ``nastechtest``
-    # organization, pinned at the same commit, so the whole path maps.
-    # It must be a whole-path compound, not the bare ``itpartypattaya``
-    # owner: the other three plugins that owner publishes are not ours, and
-    # the maintainer's contributor record must stay verbatim.  Listed first
-    # because ``transform_strict_metadata_text`` applies tokens in order, so
-    # this has to win before the generic ``hermes`` token below.
-    _rule(
-        "itpartypattaya/hermes-plugin-holographic",
-        "nastechtest/nastech-plugin-holographic",
-    ),
-    # -- nous family: compounds before short forms -------------------------
-    # Girl mascot file keeps Hermes' structure — hermes ships nous-girl.jpg,
-    # so nastech ships nastech-<mascot-name>.jpg.  Only the word "girl" is
-    # swapped for the mascot's name ("bantu"); the nous->nastech prefix is
-    # preserved.  This compound must win before the generic 'nous' token.
+    # Nastech's established mascot name is a brand mapping, not an upstream
+    # feature port. Keep this compound ahead of generic Nous substitutions.
     _rule("nous-girl", "nastech-bantu"),
-    # The .com compounds MUST precede the bare nousresearch / hermes-agent
-    # tokens, otherwise the alternation matches the prefix first and the
-    # domain rule never fires.  (They keep the upstream .com spelling here
-    # because this token set is validated against the fork BIRTH commit,
-    # which used nastechresearch.com; the github.io migration is a
-    # fork-local correction applied by the reconcile stage, not a token.)
-    _rule("hermes-agent.nousresearch.com", "nastech-agent.nastechresearch.com"),
-    _rule("NousResearch.com", "NastechResearch.com"),
-    _rule("nousresearch.com", "nastechresearch.com"),
-    _rule("nousresearch", "nastechresearch"),
-    _rule("NousResearch", "NastechResearch"),
     _rule("NOUSRESEARCH", "NASTECHRESEARCH"),
-    _rule("nous", "nastech", anchored=True),
-    _rule("Nous", "Nastech", anchored=True),
-    _rule("NOUS", "NASTECH", anchored=True),
-    # -- hermes family ------------------------------------------------------
-    _rule("hermes-agent", "nastech-agent"),
-    # HTTP Authorization scheme for cross-gateway room grants.  Must be an
-    # explicit compound: the lowercase `hermes` token is boundary-guarded so
-    # it never fires inside `hermesroom` (protected lowercase substring),
-    # leaving a thr:scheme mismatch that 401s every room-grant request.
-    _rule("hermesroom", "nastechroom"),
-    _rule("hermes", "nastech", anchored=True),
-    _rule("Hermes", "Nastech", anchored=True),
+    _rule("NousResearch", "NastechResearch"),
+    _rule("nousresearch", "nastechresearch"),
+    _rule("HERMESROOM", "NASTECHROOM", anchored=True),
+    _rule("HermesRoom", "NastechRoom", anchored=True),
+    _rule("hermesroom", "nastechroom", anchored=True),
+    _rule("-mhermes_cli", "-mnastech_cli"),
     _rule("HERMES", "NASTECH", anchored=True),
-    # -- brand symbol: replace both inherited medical-symbol variants with
-    #    the user-approved NasTech glyph across UI, locales, docs, and SVGs.
+    _rule("Hermes", "Nastech", anchored=True),
+    _rule("hermes", "nastech", anchored=True),
+    _rule("NOUS", "NASTECH", anchored=True),
+    _rule("Nous", "Nastech", anchored=True),
+    _rule("nous", "nastech", anchored=True),
+    # Core Nastech identity glyph: replace both inherited medical marks with
+    # the user-approved NasTech symbol. URL spans remain protected upstream.
     _rule("⚕", "𓄃"),
     _rule("☤", "𓄃"),
 ]
@@ -751,6 +718,51 @@ _MASK_OPEN = ""
 _MASK_CLOSE = ""
 _MASK_BASE = 0xE100
 
+# Preserve addresses, including their repository/path portions, byte-for-byte.
+# Scheme-bearing URLs, www links, common scheme-less domains with a path, and
+# Git's SCP-like remote syntax are recognized. Trailing prose punctuation is
+# deliberately allowed inside the protected span: it contains no brand token
+# that should be rewritten and avoiding a partial URL is safer.
+URL_SPAN_RE = re.compile(
+    r"(?ix)"
+    r"(?:\b[a-z][a-z0-9+.-]*://|\bmailto:|\bwww\.)[^\s<>\"'`]+"
+    r"|(?<![A-Za-z0-9_@])(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}"
+    r"(?::\d+)?/[^\s<>\"'`]*"
+    r"|(?<![\w@])git@[A-Za-z0-9.-]+:[^\s<>\"'`]+"
+)
+
+
+def url_spans(text: str) -> tuple[re.Match, ...]:
+    """Return URL-like spans that the branding transform must leave intact."""
+    return tuple(URL_SPAN_RE.finditer(text))
+
+
+def token_only_inside_url(text: str, token: str) -> bool:
+    """True when every occurrence of ``token`` in ``text`` is inside a URL."""
+    lowered, needle = text.lower(), token.lower()
+    positions: list[int] = []
+    start = lowered.find(needle)
+    while start != -1:
+        positions.append(start)
+        start = lowered.find(needle, start + 1)
+    if not positions:
+        return False
+    spans = [(match.start(), match.end()) for match in URL_SPAN_RE.finditer(text)]
+    return all(any(lo <= pos and pos + len(needle) <= hi for lo, hi in spans)
+               for pos in positions)
+
+
+def _transform_outside_urls(text: str, transform) -> str:
+    """Apply ``transform`` to prose while preserving each URL exactly."""
+    chunks: list[str] = []
+    cursor = 0
+    for match in URL_SPAN_RE.finditer(text):
+        chunks.append(transform(text[cursor:match.start()]))
+        chunks.append(match.group(0))
+        cursor = match.end()
+    chunks.append(transform(text[cursor:]))
+    return "".join(chunks)
+
 
 def _mask(index: int) -> str:
     return f"{_MASK_OPEN}{chr(_MASK_BASE + index)}{_MASK_CLOSE}"
@@ -790,27 +802,10 @@ class BrandingRules:
         return match_obj.group(0)  # pragma: no cover - defensive
 
     def _apply_tokens(self, text: str) -> str:
-        """Every rule, with no repository-path exemption."""
+        """Apply only the configured brand-name substitutions."""
         tokens = list(self.tokens)
         pattern = self._pattern()
-        branded = pattern.sub(lambda m: self._replacement(m, tokens), text)
-        # ``python -m<module>`` is a valid compact spelling. The normal
-        # boundary-aware matcher does not rewrite the embedded module name,
-        # which would leave generated candidates with stale ``-mhermes_*``
-        # targets after branding.
-        for tok in tokens:
-            branded = re.sub(
-                rf"(?<![A-Za-z0-9_])(-I?m){re.escape(tok.match)}(?=[./_A-Za-z0-9-]|$)",
-                lambda m, replacement=tok.replace: m.group(1) + replacement,
-                branded,
-                flags=re.IGNORECASE,
-            )
-        branded = _RUNNER_LABEL_RE.sub(_normalize_runner, branded)
-        branded = _BLACKSMITH_LABEL_RE.sub(_normalize_blacksmith, branded)
-        branded = _BLACKSMITH_ACTION_RE.sub(_normalize_blacksmith_action, branded)
-        branded = _normalize_test_workers(branded)
-        branded = _normalize_os_test_workers(branded)
-        return _normalize_test_timeout(branded)
+        return pattern.sub(lambda m: self._replacement(m, tokens), text)
 
     def brand_repo_path(self, path: str) -> str:
         """The branded form of a single repository identifier."""
@@ -887,29 +882,88 @@ class BrandingRules:
         return self.preserves_repo_path(repo_url)
 
     def transform_text(self, text: str) -> str:
-        """Apply all branding tokens to free text.
+        """Brand name references, preserving URLs and known third-party IDs."""
+        protected: list[str] = []
 
-        A ``github.com/<owner>/<repo>`` path that :meth:`preserves_repo_path`
-        keeps its inherited spelling -- renaming it yields a repository nobody
-        owns -- while everything around it is branded normally.  That holds
-        without exception: naming the same identifier again in the same file --
-        as a quote-delimited value (``target_repository = "owner/repo"``), a
-        markdown label, a YAML comment or a prose sentence -- does not make it
-        ours to rename.  A file that spells it twice must keep both halves
-        inherited, or the URL and the string it is compared against disagree
-        and the link 404s.
+        def stash(value: str) -> str:
+            protected.append(value)
+            return _mask(len(protected) - 1)
 
-        Measured 2026-10-27/28 (upstream 200 -> fork 404): the label in
-        ``optional-skills/creative/comfyui/references/template-integrity.md``;
-        the comment in ``plugin-catalog/aichipmunk.yaml``; the ``description``
-        of the cloud-file-manager entry, which dragged seven raw screenshots
-        with it; and a ``.git`` URL beside its bare ``target_repository`` pair,
-        branded to ``roqianjas/nastech-account-pool``, a repository that does
-        not exist.  The exemption is exactly one drift file at the birth gate;
-        ``.github/workflows/stage-rules.yml`` names it and carries the floor
-        that admits it.
+        def unmask(value: str) -> str:
+            for index, original in enumerate(protected):
+                value = value.replace(_mask(index), original)
+            return value
+
+        # Freeze complete URL spans first so an identifier pass cannot rewrite
+        # part of a URL before the final text transform.
+        working = URL_SPAN_RE.sub(lambda match: stash(match.group(0)), text)
+
+        # Catalog subdirs point into the named repository. Keep that path when
+        # the repository is external; a similarly named path in an owned repo
+        # remains eligible for ordinary name branding.
+        repo_url = catalog_entry_repo_url(text)
+        if repo_url:
+            def preserve_subdir(match: re.Match) -> str:
+                if self.preserves_catalog_subdir(repo_url, catalog_key_value(match)):
+                    return stash(unmask(match.group(0)))
+                return match.group(0)
+
+            working = CATALOG_SUBDIR_KEY_RE.sub(preserve_subdir, working)
+
+        # If the same external GitHub repository is named as a bare identifier
+        # elsewhere in the file, keep that identifier paired with its URL.
+        external_repo_names: set[str] = set()
+        for match in GITHUB_REPO_RE.finditer(text):
+            if self.preserves_repo_path(match.group(0)):
+                external_repo_names.add(match.group("repo").removesuffix(".git"))
+        for name in sorted(external_repo_names, key=len, reverse=True):
+            identifier = re.compile(
+                rf"(?<![A-Za-z0-9_.-]){re.escape(name)}(?:\.git)?(?![A-Za-z0-9_-])",
+                re.IGNORECASE,
+            )
+            def preserve_identifier(match: re.Match) -> str:
+                return stash(match.group(0))
+
+            working = identifier.sub(preserve_identifier, working)
+
+        def preserve_index(match: re.Match) -> str:
+            value = match.group("value")
+            provisioned = provisioned_algolia_indices()
+            if (
+                value.lower() in provisioned
+                and self.brand_service_name(value).lower() not in provisioned
+            ):
+                return stash(match.group(0))
+            return match.group(0)
+
+        working = ALGOLIA_INDEX_NAME_RE.sub(preserve_index, working)
+
+        def preserve_package(match: re.Match) -> str:
+            name = match.group("name")
+            if self.brand_service_name(name).lower() in fork_published_npm_packages():
+                return match.group(0)
+            return stash(match.group(0))
+
+        working = NPM_PACKAGE_KEY_RE.sub(preserve_package, working)
+
+        transformed = self._apply_tokens(working)
+        for index, original in enumerate(protected):
+            transformed = transformed.replace(_mask(index), original)
+        return transformed
+
+    def transform_runtime_analysis_text(self, text: str) -> str:
+        """Project the historical fork CI policy for diagnostics only.
+
+        This helper is deliberately not used by ``brand_tree`` or packaging; it
+        exists for red-classification of the currently deployed fork state.
         """
-        return self._transform_text(text, preserve_foreign_repos=True)
+        transformed = self.transform_text(text)
+        transformed = _BLACKSMITH_LABEL_RE.sub(_normalize_blacksmith, transformed)
+        transformed = _BLACKSMITH_ACTION_RE.sub(_normalize_blacksmith_action, transformed)
+        transformed = _RUNNER_LABEL_RE.sub(_normalize_runner, transformed)
+        transformed = _normalize_os_test_workers(transformed)
+        transformed = _normalize_test_workers(transformed)
+        return _normalize_test_timeout(transformed)
 
     def _transform_text(self, text: str, *, preserve_foreign_repos: bool) -> str:
         if not preserve_foreign_repos:
@@ -1065,20 +1119,26 @@ def transform_strict_metadata_text(text: str, rules: BrandingRules | None = None
     boundary-safe transformer.
     """
     rules = rules or BrandingRules()
-    transformed = text
-    for token in rules.tokens:
-        pattern = re.compile(re.escape(token.match), re.IGNORECASE)
 
-        def replace(match: re.Match, replacement: str = token.replace) -> str:
-            value = match.group(0)
-            if value.isupper():
-                return replacement.upper()
-            if value[:1].isupper():
-                return replacement[:1].upper() + replacement[1:]
-            return replacement
+    def strict_tokens(segment: str) -> str:
+        transformed = segment
+        for token in rules.tokens:
+            pattern = re.compile(re.escape(token.match), re.IGNORECASE)
 
-        transformed = pattern.sub(replace, transformed)
-    return transformed
+            def replace(match: re.Match, replacement: str = token.replace) -> str:
+                value = match.group(0)
+                if value.isupper():
+                    return replacement.upper()
+                if value.islower():
+                    return replacement.lower()
+                if value[:1].isupper():
+                    return replacement[:1].upper() + replacement[1:].lower()
+                return replacement.lower()
+
+            transformed = pattern.sub(replace, transformed)
+        return transformed
+
+    return _transform_outside_urls(text, strict_tokens)
 
 
 def transform_contributor_email_text(text: str, rules: BrandingRules | None = None) -> str:
@@ -1117,15 +1177,12 @@ def transform_contributor_email_path(path: str, rules: BrandingRules | None = No
 
 
 def collision_safe_path_map(paths: list[str], rules: BrandingRules | None = None) -> dict[str, str]:
-    """Map every source path to a deterministic case-safe candidate path.
+    """Apply only brand tokens to paths; fail rather than inventing a new name.
 
-    Two distinct upstream paths can differ only by case.  That is valid on the
-    upstream's case-sensitive filesystem but unsafe on macOS and Windows.  A
-    collision is resolved *before* candidate materialization by appending a
-    stable source-path digest to each member of the colliding group.  Contributor
-    names remain identity metadata, while contributor-email paths use the same
-    NasTech-safe token mapping as every other candidate path.  No record is
-    dropped or merged.
+    Case-only distinctions are preserved exactly as upstream supplies them.
+    If two source paths collapse to the same literal path after branding, the
+    caller must stop and review the collision instead of appending a synthetic
+    suffix that is not present in Hermes.
     """
     rules = rules or BrandingRules()
     paths = sorted(paths)
@@ -1138,29 +1195,15 @@ def collision_safe_path_map(paths: list[str], rules: BrandingRules | None = None
         )
         for path in paths
     }
-    groups: dict[str, list[str]] = {}
-    for path, target in mapped.items():
-        groups.setdefault(target.casefold(), []).append(path)
-
-    used = {target.casefold() for key, values in groups.items() if len(values) == 1
-            for target in (mapped[values[0]],)}
-    result = dict(mapped)
-    for values in groups.values():
-        if len(values) < 2:
-            continue
-        for path in sorted(values):
-            target = mapped[path]
-            parent, basename = os.path.split(target)
-            stem, extension = os.path.splitext(basename)
-            digest = hashlib.sha256(path.encode("utf-8")).hexdigest()[:12]
-            candidate = os.path.join(parent, f"{stem}--case-{digest}{extension}")
-            ordinal = 2
-            while candidate.casefold() in used:
-                candidate = os.path.join(parent, f"{stem}--case-{digest}-{ordinal}{extension}")
-                ordinal += 1
-            result[path] = candidate
-            used.add(candidate.casefold())
-    return result
+    inverse: dict[str, str] = {}
+    for source, target in mapped.items():
+        previous = inverse.get(target)
+        if previous is not None and previous != source:
+            raise ValueError(
+                f"branding path collision: {previous!r} and {source!r} both map to {target!r}"
+            )
+        inverse[target] = source
+    return mapped
 
 
 def tokens_from_overrides(path: str | None) -> list[TokenRule]:

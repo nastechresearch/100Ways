@@ -89,18 +89,24 @@ def default_updates_dir(repo: str) -> str:
 
 
 def _complete_update_dirs(updates_dir: str) -> list[str]:
-    """Existing update dirs that carry a manifest.json (i.e. completed runs)."""
+    """Existing update dirs with a complete run manifest, including old layout."""
     if not os.path.isdir(updates_dir):
         return []
-    return [d for d in os.listdir(updates_dir)
-            if d.startswith(UPDATE_PREFIX)
-            and os.path.isfile(os.path.join(updates_dir, d, "manifest.json"))]
+    return [
+        d for d in os.listdir(updates_dir)
+        if d.startswith(UPDATE_PREFIX)
+        and os.path.isdir(os.path.join(updates_dir, d))
+        and (
+            os.path.isfile(os.path.join(updates_dir, d, "manifest.json"))
+            or os.path.isfile(os.path.join(updates_dir, f"{d}.manifest.json"))
+        )
+    ]
 
 
 def next_update_number(updates_dir: str) -> int:
     """Highest completed Nastech-Update#N + 1; 1 when none exist.
 
-    A dir without ``manifest.json`` is a partial run (interrupted mid-brand)
+    A dir without a root or sidecar manifest is a partial run (interrupted mid-brand)
     and does not count - the next run overwrites it instead of skipping past
     it, so order stays contiguous.
     """
@@ -179,14 +185,18 @@ def fork_manifest_upstream_sha(fork_root: str) -> str:
 def previous_upstream_sha(updates_dir: str, before_number: int) -> str:
     """Return the most recent recorded source revision, if any."""
     for number in range(before_number - 1, 0, -1):
-        manifest_path = os.path.join(update_path(updates_dir, number), "manifest.json")
-        try:
-            with open(manifest_path, encoding="utf-8") as fh:
-                value = json.load(fh).get("upstream_sha", "")
-            if value:
-                return value
-        except (OSError, ValueError):
-            continue
+        candidates = (
+            os.path.join(updates_dir, f"{UPDATE_PREFIX}{number}.manifest.json"),
+            os.path.join(update_path(updates_dir, number), "manifest.json"),
+        )
+        for manifest_path in candidates:
+            try:
+                with open(manifest_path, encoding="utf-8") as fh:
+                    value = json.load(fh).get("upstream_sha", "")
+                if value:
+                    return value
+            except (OSError, ValueError):
+                continue
     return ""
 
 
@@ -10670,6 +10680,11 @@ def compare_trees(src: str, dst: str, rules: BrandingRules | None = None,
             continue
         added, deleted = _line_delta(expected.decode("utf-8", "replace"), actual.decode("utf-8", "replace"))
         report.entries.append(DiffEntry(rel, mapped, "rewritten", added, deleted))
+    source_targets = set(path_map.values())
+    if owned:
+        for target in sorted(set(owned.mapping) - source_targets):
+            action = "owned" if os.path.isfile(os.path.join(dst, target)) else "missing"
+            report.entries.append(DiffEntry("", target, action))
     return report
 
 
@@ -10689,6 +10704,7 @@ def verify_branded(src: str, dst: str, rules: BrandingRules | None = None,
     report = VerifyReport()
     source_files = _walk_files(src)
     path_map = collision_safe_path_map(source_files, rules)
+    source_targets = set(path_map.values())
     for rel in source_files:
         report.total += 1
         mapped = path_map[rel]
@@ -10758,6 +10774,26 @@ def verify_branded(src: str, dst: str, rules: BrandingRules | None = None,
             res.note = "content differs after branding"
             report.failed.append(res)
         report.results.append(res)
+    if owned:
+        for target in sorted(set(owned.mapping) - source_targets):
+            report.total += 1
+            expected = owned.asset_bytes(target)
+            dst_path = os.path.join(dst, target)
+            exists = os.path.isfile(dst_path)
+            actual = Path(dst_path).read_bytes() if exists else b""
+            identical = expected is not None and exists and actual == expected
+            res = FileResult(
+                path=target,
+                mapped_path=target,
+                pass_=identical,
+                locked=False,
+                note="owned visual asset: must match the Nastech registry",
+            )
+            report.results.append(res)
+            if identical:
+                report.passed += 1
+            else:
+                report.failed.append(res)
     return report
 
 
@@ -10778,7 +10814,7 @@ def update_report_md(result: "UpdateResult") -> str:
         f"# Nastech Update Report #{result.number}",
         "",
         f"- upstream sha : `{result.upstream_sha}`",
-        f"- source       : `{result.hermes_url}`",
+        "- source       : fresh direct upstream clone",
         f"- snapshot     : `{os.path.basename(result.dir)}`",
         f"- gate         : **{'PASS' if result.gate else 'FAIL'}**",
         "",
@@ -10799,7 +10835,7 @@ def update_report_md(result: "UpdateResult") -> str:
         f"- text-rewritten : {result.brand.rewritten}",
         f"- locked-copied  : {result.brand.locked_copied}",
         f"- binary-copied  : {result.brand.binary_copied}",
-        f"- owned assets   : {result.brand.owned} (our logo/banner/mascot override upstream)",
+        f"- owned asset overlays : {result.brand.owned} (disabled for source-only branding)",
     ]
     if result.brand.errors:
         lines += ["- errors:", *[f"  - {e}" for e in result.brand.errors]]
@@ -10889,30 +10925,28 @@ def gate_report_md(result: "UpdateResult") -> str:
 # Release packaging
 # ---------------------------------------------------------------------------
 
-def package_zip(snapshot_dir: str, out_path: str, reports: dict[str, str],
-                project_name: str = "nastech-agent") -> str:
-    """Zip the branded snapshot with the md reports OUTSIDE the project folder.
+def package_zip(snapshot_dir: str, out_path: str, reports: dict[str, str] | None = None,
+                project_name: str = "nastech-agent",
+                include_paths: list[str] | None = None) -> str:
+    """Zip only project files; keep generated reports and manifests out of it.
 
-    Layout:
-        <out_path>/
-          <project_name>/          # the branded project (1 project folder)
-          <report_1>.md            # report 1, at zip root (outside project)
-          <report_2>.md            # report 2, at zip root (outside project)
-
-    The report files and manifest live in the snapshot dir as source-of-truth
-    but are kept OUT of the project folder - only the branded tree goes in.
+    ``include_paths`` is the exact mapped path set derived from upstream. The
+    legacy ``reports`` argument is accepted for call compatibility but is not
+    added to the release archive; run evidence is stored beside the snapshot.
     """
     out_path = os.path.abspath(out_path)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    skip = {"manifest.json", "UPDATE-REPORT.md", "GATE-REPORT.md"}
+    paths = include_paths if include_paths is not None else [
+        rel for rel in _walk_files(snapshot_dir)
+        if not rel.startswith(".100ways/")
+        and rel not in {"manifest.json", "UPDATE-REPORT.md", "GATE-REPORT.md", COMMIT_SUBJECTS_FILE}
+    ]
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for rel in _walk_files(snapshot_dir):
-            if rel in skip:
-                continue
+        for rel in sorted(set(paths)):
             full = os.path.join(snapshot_dir, rel)
+            if not os.path.isfile(full):
+                raise FileNotFoundError(f"mapped upstream path missing from snapshot: {rel}")
             zf.write(full, os.path.join(project_name, rel))
-        for name, content in reports.items():
-            zf.writestr(name, content)
     return out_path
 
 
@@ -11063,174 +11097,53 @@ class UpdateManager:
             shutil.rmtree(dest)
         os.makedirs(dest, exist_ok=True)
 
+        brand_visuals = self.owned.brand_visuals() if self.owned else None
+
         def _brand() -> BrandResult:
-            result = brand_tree(src, dest, self.rules, self.owned)
-            result.owned += len(apply_owned_assets(dest, self.owned))
+            # Carry curated Nastech-owned artwork only; do not merge fork code,
+            # reconciliation, or other local files into the upstream view.
+            result = brand_tree(src, dest, self.rules, brand_visuals)
+            result.owned += len(apply_owned_assets(dest, brand_visuals))
             return result
 
         brand = stage(
             "brand",
             _brand,
-            "brand source and materialize NasTech-owned assets after source deletion",
+            "brand names outside URLs and materialize registered Nastech visual assets only",
         )
 
-        def _reconcile() -> ReconcileResult:
-            result = reconcile_tree(dest, fork_root=self.fork_root, rules=self.rules,
-                                    upstream_src=src)
-            return result
-        reconcile = stage("reconcile", _reconcile,
-                          "sync lockfile root records + apply fork-local content fixes")
-        reconciled_map: dict[str, bytes] = {}
-        if reconcile and reconcile.fixed:
-            for rel in reconcile.fixed:
-                path = os.path.join(dest, rel)
-                if os.path.isfile(path):
-                    try:
-                        with open(path, "rb") as fh:
-                            reconciled_map[rel] = fh.read()
-                    except OSError:
-                        pass
+        reconcile = ReconcileResult()
+        stages.append(StageResult(
+            "reconcile", "skip",
+            "branding-only policy: no Nastech-specific content reconciliation",
+            0,
+        ))
 
-        def _preserve() -> list[str]:
-            # Keep the engine-owned registry inside the snapshot before fork
-            # preservation.  This makes the visual pack reviewable in the
-            # published candidate and lets preserve_fork_files protect it from
-            # an older registry in the fork checkout.
-            if self.owned and self.owned.count and os.path.isdir(self.owned.root):
-                registry_dest = os.path.join(dest, "config", "owned-assets")
-                shutil.copytree(self.owned.root, registry_dest, dirs_exist_ok=True)
-            preserved = preserve_fork_files(
-                self.fork_root,
-                dest,
-                src,
-                self.rules,
-                obsolete_upstream_paths=source_delta.obsolete_mapped,
-                owned_paths=set(self.owned.mapping) if self.owned else set(),
-                allow_unclassified_fork_files=bool(baseline_sha),
-            )
-            # The picker test exists only in the fork, so this is the first moment its
-            # text is in the tree; binding its fake to the live widget signature keeps
-            # the next upstream keyword from turning it red in CI (see the rule).
-            for rel in _reconcile_orphan_picker_fake(dest, preserved):
-                rel_path = os.path.join(dest, rel)
-                if os.path.isfile(rel_path):
-                    try:
-                        with open(rel_path, "rb") as fh:
-                            reconciled_map[rel] = fh.read()
-                    except OSError:
-                        pass
-            # Fork-preserved skills are invisible to the upstream-derived skill
-            # catalogs; re-sync the catalogs so the docs-contract tests pass,
-            # and register the changed files with the parity gates so they are
-            # compared against this reconciled content, not the raw transform.
-            for rel in _reconcile_fork_skill_catalogs(dest, preserved):
-                rel_path = os.path.join(dest, rel)
-                if os.path.isfile(rel_path):
-                    try:
-                        with open(rel_path, "rb") as fh:
-                            reconciled_map[rel] = fh.read()
-                    except OSError:
-                        pass
-            # A fork-preserved generated-docs page committed from a Windows host
-            # carries backslash separators in its ``Path`` row / blob links;
-            # normalize only the contract-flagged contexts, then register the
-            # changed files so the parity gates compare reconciled content.
-            for rel in _reconcile_docs_posix_separators(dest, preserved):
-                rel_path = os.path.join(dest, rel)
-                if os.path.isfile(rel_path):
-                    try:
-                        with open(rel_path, "rb") as fh:
-                            reconciled_map[rel] = fh.read()
-                    except OSError:
-                        pass
-            # Fork-preserved skills are also absent from the upstream-derived
-            # Skills sidebar; add them, then re-sort the catalogs and sidebar to
-            # the generator's slug order so docs-site-checks is a fixed point.
-            for rel in _reconcile_fork_skill_sidebars(dest, preserved):
-                rel_path = os.path.join(dest, rel)
-                if os.path.isfile(rel_path):
-                    try:
-                        with open(rel_path, "rb") as fh:
-                            reconciled_map[rel] = fh.read()
-                    except OSError:
-                        pass
-            for rel in _reconcile_skill_docs_order(dest):
-                rel_path = os.path.join(dest, rel)
-                if os.path.isfile(rel_path):
-                    try:
-                        with open(rel_path, "rb") as fh:
-                            reconciled_map[rel] = fh.read()
-                    except OSError:
-                        pass
-            # A fork-local file is preserved verbatim, so any upstream brand
-            # run left in fork-authored text (e.g. a workflow comment reading
-            # "# Hermes runs this on ...") would trip first-party-brand and
-            # brand-text-not-fixed-point on the candidate.  Apply the same
-            # canonical transform the brand stage uses so preserved text is a
-            # fixed point too, and register the changed files as reconciled.
-            for rel in _reconcile_preserved_brand_text(dest, preserved):
-                rel_path = os.path.join(dest, rel)
-                if os.path.isfile(rel_path):
-                    try:
-                        with open(rel_path, "rb") as fh:
-                            reconciled_map[rel] = fh.read()
-                    except OSError:
-                        pass
-            # The fork-owned Cloudflare Worker config is preserved verbatim too;
-            # a stale snapshot would replay the wrong entry point and break the
-            # Workers Builds deploy.  Pin the worker name and entry point, then
-            # register the changed file as reconciled content.
-            for rel in _reconcile_assets_worker_config(dest, preserved):
-                rel_path = os.path.join(dest, rel)
-                if os.path.isfile(rel_path):
-                    try:
-                        with open(rel_path, "rb") as fh:
-                            reconciled_map[rel] = fh.read()
-                    except OSError:
-                        pass
-            # The same stale snapshot replays the Worker *code*: the verbatim-key,
-            # KV-only handler that 404s apt's percent-encoded "~".  Upgrade it to
-            # the guarded decode + R2 read and register the changed file too.
-            for rel in _reconcile_assets_worker_index(dest, preserved):
-                rel_path = os.path.join(dest, rel)
-                if os.path.isfile(rel_path):
-                    try:
-                        with open(rel_path, "rb") as fh:
-                            reconciled_map[rel] = fh.read()
-                    except OSError:
-                        pass
-            return preserved
-        stage(
-            "preserve",
-            _preserve,
-            "carry explicit fork-owned files while rejecting retired upstream paths",
-        )
+        stages.append(StageResult(
+            "preserve", "skip",
+            "no arbitrary fork-only files are preserved; "
+            "registered visual brand assets are handled separately",
+            0,
+        ))
 
         scan = stage("scan", lambda: scan_tree(dest), "classify every branded file")
         diff = stage(
             "compare",
-            lambda: compare_trees(src, dest, self.rules, self.owned, reconciled_map),
-            "diff branded tree vs upstream",
+            lambda: compare_trees(src, dest, self.rules, brand_visuals),
+            "compare candidate against exact branding plus registered visual assets",
         )
         verify = stage(
             "verify",
-            lambda: verify_branded(src, dest, self.rules, self.owned, reconciled_map),
-            "file-by-file parity gate",
+            lambda: verify_branded(src, dest, self.rules, brand_visuals),
+            "file-by-file branding and owned-visual parity gate",
         )
 
-        def _forkcheck() -> ForkCheckReport:
-            if not self.fork_root:
-                return ForkCheckReport()
-            return fork_consistency(
-                self.fork_root,
-                dest,
-                src,
-                self.rules,
-                obsolete_upstream_paths=source_delta.obsolete_mapped,
-                owned_paths=set(self.owned.mapping) if self.owned else set(),
-            )
-        forkcheck = stage("forkcheck", _forkcheck,
-                          "diff snapshot vs nastech-agent fork (identical/updated/added/missing)")
+        forkcheck = ForkCheckReport()
+        stages.append(StageResult(
+            "forkcheck", "skip",
+            "not a gate: fork-local code is excluded; curated visual brand assets are whitelisted",
+            0,
+        ))
 
         brand = brand or BrandResult()
         reconcile = reconcile or ReconcileResult()
@@ -11238,9 +11151,8 @@ class UpdateManager:
         diff = diff or DiffReport()
         verify = verify or VerifyReport()
         forkcheck = forkcheck or ForkCheckReport()
-        fork_ok = (not self.fork_root) or forkcheck.gate_passes()
         source_delta_ok = not baseline_sha or source_delta.complete
-        passed = gate_passes(verify, self.threshold) and fork_ok and source_delta_ok \
+        passed = gate_passes(verify, self.threshold) and source_delta_ok \
             and not any(s.status == "fail" for s in stages)
 
         result = UpdateResult(
@@ -11308,15 +11220,18 @@ class UpdateManager:
         # only after its operation succeeds.  A failure is visible as ``fail``
         # rather than the old misleading ``skipped``/``deferred`` status.
         os.makedirs(dest, exist_ok=True)
-        # Fork preservation runs before this point and can restore stale
-        # reports from an older review branch.  Drop them now so the candidate
-        # ships only the freshly generated root review evidence below.
-        _reconcile_generated_report_directory(dest)
-        result.report_path = os.path.join(dest, "UPDATE-REPORT.md")
-        result.gate_report_path = os.path.join(dest, "GATE-REPORT.md")
-        # Reports are shipped in the review bundle, so they must obey the same
-        # zero-upstream-brand policy as source files rather than leaking raw
-        # provenance URLs, commit subjects, or upstream paths.
+        # Run evidence lives beside the candidate, never in its source tree or
+        # release ZIP. That prevents generated metadata from becoming a diff.
+        os.makedirs(self.updates_dir, exist_ok=True)
+        meta_stem = os.path.basename(dest)
+        meta_dir = os.path.join(self.updates_dir, f"{meta_stem}.meta")
+        if os.path.isdir(meta_dir):
+            shutil.rmtree(meta_dir)
+        os.makedirs(meta_dir, exist_ok=True)
+        result.report_path = os.path.join(self.updates_dir, f"{meta_stem}-REPORT.md")
+        result.gate_report_path = os.path.join(self.updates_dir, f"{meta_stem}-GATE-REPORT.md")
+        # Reports are sidecar evidence; preserve URLs and apply only the same
+        # Hermes/Nous name substitutions to non-URL prose.
         report_content = transform_strict_metadata_text(update_report_md(result), self.rules)
         gate_content = transform_strict_metadata_text(gate_report_md(result), self.rules)
         try:
@@ -11333,8 +11248,11 @@ class UpdateManager:
             try:
                 result.zip_path = package_zip(
                     dest, zip_path,
-                    {"UPDATE-REPORT.md": report_content, "GATE-REPORT.md": gate_content},
                     project_name=project_name,
+                    include_paths=(
+                        list(collision_safe_path_map(_walk_files(src), self.rules).values())
+                        + (list(brand_visuals.mapping) if brand_visuals else [])
+                    ),
                 )
                 package_stage.status = "ok"
             except (OSError, ValueError) as exc:
@@ -11378,7 +11296,7 @@ class UpdateManager:
                 "baseline_sha": source_delta.baseline_sha,
                 "complete": source_delta.complete,
                 "counts": source_delta.counts,
-                "owned_paths": sorted(self.owned.mapping) if self.owned else [],
+                "owned_paths": sorted(brand_visuals.mapping) if brand_visuals else [],
                 "changes": [
                     {
                         "status": change.status,
@@ -11432,20 +11350,33 @@ class UpdateManager:
                 "deleted_lines": sum(e.deleted_lines for e in forkcheck.entries),
             },
         }
-        result.manifest_path = os.path.join(dest, "manifest.json")
+        result.manifest_path = os.path.join(self.updates_dir, f"{meta_stem}.manifest.json")
         try:
-            receipt = split_manifest_subjects(manifest, dest)
+            receipt = split_manifest_subjects(manifest, meta_dir)
+            receipt["commit_subjects_file"] = os.path.relpath(
+                os.path.join(meta_dir, COMMIT_SUBJECTS_FILE), self.updates_dir
+            )
             with open(result.manifest_path, "w", encoding="utf-8") as fh:
-                # Manifest values include changed paths. Apply the canonical text
-                # normalizer to the serialized metadata too, so generated output
-                # remains a fixed point.  The commit subjects are not here: they are
-                # prose in commit-subjects.jsonl, where the fork's tmp-literal checker
-                # does not read them.
-                fh.write(self.rules.transform_text(json.dumps(receipt, indent=2)))
+                fh.write(transform_strict_metadata_text(json.dumps(receipt, indent=2), self.rules))
             manifest_stage.status = "ok"
         except OSError as exc:
             manifest_stage.status = "fail"
             manifest_stage.detail = f"manifest write failed: {exc}"
+        if report_stage.status == "ok" and manifest_stage.status == "ok":
+            try:
+                final_report = transform_strict_metadata_text(
+                    update_report_md(result), self.rules
+                )
+                final_gate_report = transform_strict_metadata_text(
+                    gate_report_md(result), self.rules
+                )
+                with open(result.report_path, "w", encoding="utf-8") as fh:
+                    fh.write(final_report)
+                with open(result.gate_report_path, "w", encoding="utf-8") as fh:
+                    fh.write(final_gate_report)
+            except OSError as exc:
+                report_stage.status = "fail"
+                report_stage.detail = f"final report refresh failed: {exc}"
         result.stages = stages
 
         # Written before a failed snapshot is discarded: where the minutes went

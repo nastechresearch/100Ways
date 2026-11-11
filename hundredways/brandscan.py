@@ -43,6 +43,7 @@ from .rules import (
     preserved_repo_url_spans,
     preserved_url_link_label_spans,
     token_only_inside,
+    token_only_inside_url,
 )
 
 # A word may begin with the upstream brand and then run on
@@ -104,6 +105,11 @@ def _allowed(
     """
     word = word.lower()
     if path.startswith("contributors/names/"):
+        return True
+    # This policy keeps every URL verbatim, including upstream repository
+    # identifiers. A residual brand inside a URL is therefore inherited by
+    # design, not an unbranded prose occurrence.
+    if token_only_inside_url(line, word):
         return True
     # Vendored third-party content is content-addressed by its origin, so the
     # brand lock copies it verbatim and the word inside is inherited.  Scoped to
