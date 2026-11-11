@@ -11121,7 +11121,7 @@ class UpdateManager:
 
         stages.append(StageResult(
             "preserve", "skip",
-            "branding-only policy: no fork-only files or owned assets are carried forward",
+            "no arbitrary fork-only files are preserved; registered visual brand assets are handled separately",
             0,
         ))
 
@@ -11140,7 +11140,7 @@ class UpdateManager:
         forkcheck = ForkCheckReport()
         stages.append(StageResult(
             "forkcheck", "skip",
-            "not a gate: branding-only output intentionally excludes fork-local changes",
+            "not a gate: fork-local code is excluded; curated visual brand assets are whitelisted",
             0,
         ))
 

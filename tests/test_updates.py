@@ -9579,7 +9579,9 @@ def test_brand_only_pipeline_skips_fork_specific_stages(tmp_path):
     by_name = {stage.name: stage for stage in res.stages}
     assert by_name["reconcile"].status == "skip"
     assert by_name["preserve"].status == "skip"
+    assert "registered visual brand assets" in by_name["preserve"].detail
     assert by_name["forkcheck"].status == "skip"
+    assert "curated visual brand assets" in by_name["forkcheck"].detail
     assert res.reconcile.fixed == []
     assert res.fork.entries == []
     assert not os.path.exists(os.path.join(res.dir, "fork-only.txt"))
