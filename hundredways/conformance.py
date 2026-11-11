@@ -1,8 +1,9 @@
 """Final exact-source conformance verification for branded candidate trees.
 
 This module is intentionally deterministic. It rebuilds the expected branded
-source from the Hermes tree and verifies the candidate without applying fork
-assets, reconciliation, or preservation. It has no network or publication side effects.
+source from the Hermes tree, overlays only manifest-registered visual identity
+assets, and verifies the candidate without reconciliation or fork-file
+preservation. It has no network or publication side effects.
 """
 
 from __future__ import annotations
@@ -14,10 +15,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
+from .assets import OwnedAssets
 from .integrity import audit_candidate_tree, tree_digest
 from .rules import BrandingRules
 from .tree_index import FileIndex
-from .updates import brand_tree, verify_branded
+from .updates import apply_owned_assets, brand_tree, verify_branded
 
 
 @dataclass(frozen=True)
@@ -63,14 +65,11 @@ def verify_final_candidate(
     allowed_extra_paths: Iterable[str] = (),
     fork_root: str | Path = "",
 ) -> ConformanceReport:
-    """Rebuild only the branded source and verify the candidate exactly.
-
-    Compatibility parameters for former fork layers are accepted but ignored;
-    no fork assets, reconciliation, report, or other extra files are allowed.
-    """
+    """Rebuild the brand transform plus registered visuals; reject all other extras."""
     source_path = Path(source)
     candidate_path = Path(candidate)
     rules = rules or BrandingRules()
+    owned = OwnedAssets(root=str(owned_assets_root)).brand_visuals() if owned_assets_root else None
     issues: list[ConformanceIssue] = []
 
     if not source_path.is_dir():
@@ -83,7 +82,8 @@ def verify_final_candidate(
     with tempfile.TemporaryDirectory(prefix="100ways-conformance-") as temporary:
         expected = Path(temporary) / "expected"
         try:
-            brand_tree(str(source_path), str(expected), rules)
+            brand_tree(str(source_path), str(expected), rules, owned)
+            apply_owned_assets(str(expected), owned)
         except (OSError, ValueError) as exc:
             return ConformanceReport(
                 0,
@@ -92,7 +92,7 @@ def verify_final_candidate(
                 tree_digest(candidate_path),
                 (ConformanceIssue("expected-tree", "", str(exc)),),
             )
-        verified = verify_branded(str(source_path), str(candidate_path), rules)
+        verified = verify_branded(str(source_path), str(candidate_path), rules, owned)
         expected_paths = {entry.rel for entry in FileIndex(expected).entries}
 
     for result in verified.failed:
@@ -138,7 +138,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Write final candidate conformance evidence and exit nonzero on mismatch."""
     parser = build_parser()
     args = parser.parse_args(argv)
-    report = verify_final_candidate(args.source, args.candidate)
+    report = verify_final_candidate(
+        args.source, args.candidate, owned_assets_root=args.owned_assets_root
+    )
     Path(args.output).write_text(json.dumps(report.to_dict(), indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report.to_dict(), indent=2))
     return 0 if report.passed else 1

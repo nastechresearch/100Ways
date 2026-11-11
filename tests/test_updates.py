@@ -3706,7 +3706,7 @@ def test_owned_assets_flagged_in_compare(tmp_path):
     assert owned_entries[0].mapped_path == "static/img/banner.png"
 
 
-def test_update_manager_does_not_overlay_owned_assets(tmp_path):
+def test_update_manager_overlays_owned_visuals_but_not_asset_generation_code(tmp_path):
     hermes = _hermes_repo(tmp_path)
     src = os.path.join(str(tmp_path), "hermes-agent")
     img_dir = os.path.join(src, "static", "img")
@@ -3716,14 +3716,32 @@ def test_update_manager_does_not_overlay_owned_assets(tmp_path):
     subprocess.run(["git", "-C", src, "add", "-A"], check=True)
     subprocess.run(["git", "-C", src, "commit", "-q", "-m", "add banner"], check=True)
 
-    owned = OwnedAssets(_owned_registry(tmp_path))
+    owned_root = Path(_owned_registry(tmp_path))
+    (owned_root / "generate_icons.py").write_text("print('generator')\n", encoding="utf-8")
+    (owned_root / "nastech-logo.svg").write_text("<svg>ours</svg>\n", encoding="utf-8")
+    manifest_path = owned_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["scripts/generate_icons.py"] = "generate_icons.py"
+    manifest["assets/nastech-logo.svg"] = "nastech-logo.svg"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    owned = OwnedAssets(str(owned_root))
     updates_dir = str(tmp_path / "Updates-Commits")
-    res = UpdateManager(updates_dir, hermes_url=hermes, owned=owned).run()
+    zip_path = str(tmp_path / "nastech-update.zip")
+    res = UpdateManager(updates_dir, hermes_url=hermes, owned=owned).run(zip_path=zip_path)
     assert res.gate
     snap_banner = os.path.join(res.dir, "static", "img", "banner.png")
     assert os.path.isfile(snap_banner)
-    assert open(snap_banner, "rb").read() == b"HERMES-BANNER-BYTES"
-    assert res.brand.owned == 0
+    assert open(snap_banner, "rb").read() == b"OUR-BANNER-BYTES"
+    assert not os.path.exists(os.path.join(res.dir, "scripts", "generate_icons.py"))
+    assert (Path(res.dir) / "assets" / "nastech-logo.svg").read_text() == "<svg>ours</svg>\n"
+    assert res.brand.owned == 2
+    import zipfile
+
+    with zipfile.ZipFile(zip_path) as archive:
+        names = archive.namelist()
+        assert "nastech-agent/static/img/banner.png" in names
+        assert "nastech-agent/assets/nastech-logo.svg" in names
+        assert not any(name.endswith("scripts/generate_icons.py") for name in names)
 
 
 def _hermes_repo_with_reconcile_patterns(tmp_path):
@@ -5859,7 +5877,7 @@ def test_reconcile_portable_shebang_rewrites_embedded_bash_payload(tmp_path):
     assert _reconcile_portable_shebang(str(candidate)) == []
 
 
-def test_pipeline_ignores_fork_owned_assets_and_keeps_upstream_bytes(tmp_path):
+def test_pipeline_preserves_registered_brand_art_without_fork_only_files(tmp_path):
     hermes = _hermes_repo(tmp_path)
     source_root = Path(hermes)
     banner = source_root / "static" / "img" / "banner.png"
@@ -5880,7 +5898,7 @@ def test_pipeline_ignores_fork_owned_assets_and_keeps_upstream_bytes(tmp_path):
                            owned=OwnedAssets(root=str(registry)), fork_root=str(fork)).run()
     assert result.gate
     assert result.fork.entries == []
-    assert open(os.path.join(result.dir, "static", "img", "banner.png"), "rb").read() == b"HERMES-UPSTREAM-BANNER"
+    assert open(os.path.join(result.dir, "static", "img", "banner.png"), "rb").read() == b"ENGINE-BANNER"
     assert not os.path.exists(os.path.join(result.dir, "fork-only.txt"))
     assert not os.path.exists(os.path.join(result.dir, "config", "owned-assets"))
 
@@ -9568,7 +9586,7 @@ def test_brand_only_pipeline_skips_fork_specific_stages(tmp_path):
 
 
 def test_the_parity_rebuild_has_no_fork_reconciliation_calls():
-    """The parity rebuild is only the branded source; no fork edits are replayed."""
+    """Only manifest-registered visuals may augment the branded-source rebuild."""
     calls = _names_called_inside(conformance, "verify_final_candidate")
     assert not calls.intersection(
         {
@@ -9576,9 +9594,9 @@ def test_the_parity_rebuild_has_no_fork_reconciliation_calls():
             "_reconcile_fork_skill_catalogs",
             "_reconcile_docs_posix_separators",
             "preserve_fork_files",
-            "apply_owned_assets",
         }
     )
+    assert "apply_owned_assets" in calls
 
 
 def test_a_set_element_branding_collapsed_keeps_one_copy(tmp_path):

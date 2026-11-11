@@ -233,6 +233,9 @@ def _normalize_blacksmith_action(match_obj: re.Match) -> str:
 # change the Hermes/Nous names, but it must not alter URLs, runner policy,
 # release behavior, or other upstream content.
 DEFAULT_TOKENS: list[TokenRule] = [
+    # Nastech's established mascot name is a brand mapping, not an upstream
+    # feature port. Keep this compound ahead of generic Nous substitutions.
+    _rule("nous-girl", "nastech-bantu"),
     _rule("NOUSRESEARCH", "NASTECHRESEARCH"),
     _rule("NousResearch", "NastechResearch"),
     _rule("nousresearch", "nastechresearch"),
@@ -246,6 +249,10 @@ DEFAULT_TOKENS: list[TokenRule] = [
     _rule("NOUS", "NASTECH", anchored=True),
     _rule("Nous", "Nastech", anchored=True),
     _rule("nous", "nastech", anchored=True),
+    # Core Nastech identity glyph: replace both inherited medical marks with
+    # the user-approved NasTech symbol. URL spans remain protected upstream.
+    _rule("⚕", "𓄃"),
+    _rule("☤", "𓄃"),
 ]
 
 

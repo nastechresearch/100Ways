@@ -33,6 +33,14 @@ from PIL import Image
 
 MANIFEST_NAME = "manifest.json"
 
+# Update snapshots may carry Nastech-owned visual identity, but never arbitrary
+# fork-only source files. The manifest can also catalog asset-production tools;
+# those stay in the fork and are not part of a branded upstream snapshot.
+_BRAND_VISUAL_SUFFIXES = frozenset({
+    ".avif", ".bmp", ".gif", ".icns", ".ico", ".jpeg", ".jpg",
+    ".png", ".svg", ".tif", ".tiff", ".webp",
+})
+
 # Tauri validates these named bootstrap icons at compile time. Preserve the
 # approved NasTech pixels while normalizing container mode and dimensions every
 # time an owned candidate asset is materialized.
@@ -129,3 +137,19 @@ class OwnedAssets:
             return None
         path = os.path.join(self.root, rel)
         return path if os.path.isfile(path) else None
+
+    def brand_visuals(self) -> "OwnedAssets":
+        """Return only manifest entries whose targets are visual media files.
+
+        This lets update snapshots preserve the explicitly registered Nastech
+        logos, icons, banners, mascots, frames, and other artwork while keeping
+        scripts and other fork-specific source out of the upstream projection.
+        """
+        visual = OwnedAssets(root=self.root)
+        visual._map = {
+            target: source
+            for target, source in self._map.items()
+            if os.path.splitext(target)[1].lower() in _BRAND_VISUAL_SUFFIXES
+            and os.path.splitext(source)[1].lower() in _BRAND_VISUAL_SUFFIXES
+        }
+        return visual

@@ -111,10 +111,12 @@ def test_custom_token():
     assert "Acme" not in rules.transform_text("Acme product")
 
 
-def test_branding_does_not_change_symbols_or_unrelated_mascot_names():
+def test_branding_applies_core_glyph_and_mascot_identity_mappings():
     rules = BrandingRules()
-    text = "Hermes ⚕ ☤ nous-girl"
-    assert rules.transform_text(text) == "Nastech ⚕ ☤ nastech-girl"
+    text = "Hermes ⚕ ☤ nous-girl; nous-cat"
+    assert rules.transform_text(text) == "Nastech 𓄃 𓄃 nastech-bantu; nastech-cat"
+    url = "https://example.org/hermes/☤/nous-girl"
+    assert rules.transform_text(url) == url
 
 
 def test_locked_paths():
@@ -180,15 +182,15 @@ def test_case_sensitivity_embedded_word():
     assert "nastech" in out.lower()
 
 
-def test_girl_mascot_path_changes_only_the_nous_brand_token():
-    """A compound path gets the approved name substitution and nothing else."""
+def test_girl_mascot_path_maps_to_nastech_bantu_art():
+    """The established Bantu mascot name is a core brand identity mapping."""
     rules = BrandingRules()
     assert rules.transform_path("apps/desktop/public/nous-girl.jpg") == \
-        "apps/desktop/public/nastech-girl.jpg"
+        "apps/desktop/public/nastech-bantu.jpg"
     assert rules.transform_path("apps/bootstrap-installer/public/nous-girl.jpg") == \
-        "apps/bootstrap-installer/public/nastech-girl.jpg"
+        "apps/bootstrap-installer/public/nastech-bantu.jpg"
     out = rules.transform_text("the nous-girl mascot")
-    assert "nastech-girl" in out
+    assert "nastech-bantu" in out
     assert "nous-girl" not in out
 
 

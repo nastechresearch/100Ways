@@ -10680,6 +10680,11 @@ def compare_trees(src: str, dst: str, rules: BrandingRules | None = None,
             continue
         added, deleted = _line_delta(expected.decode("utf-8", "replace"), actual.decode("utf-8", "replace"))
         report.entries.append(DiffEntry(rel, mapped, "rewritten", added, deleted))
+    source_targets = set(path_map.values())
+    if owned:
+        for target in sorted(set(owned.mapping) - source_targets):
+            action = "owned" if os.path.isfile(os.path.join(dst, target)) else "missing"
+            report.entries.append(DiffEntry("", target, action))
     return report
 
 
@@ -10699,6 +10704,7 @@ def verify_branded(src: str, dst: str, rules: BrandingRules | None = None,
     report = VerifyReport()
     source_files = _walk_files(src)
     path_map = collision_safe_path_map(source_files, rules)
+    source_targets = set(path_map.values())
     for rel in source_files:
         report.total += 1
         mapped = path_map[rel]
@@ -10768,6 +10774,26 @@ def verify_branded(src: str, dst: str, rules: BrandingRules | None = None,
             res.note = "content differs after branding"
             report.failed.append(res)
         report.results.append(res)
+    if owned:
+        for target in sorted(set(owned.mapping) - source_targets):
+            report.total += 1
+            expected = owned.asset_bytes(target)
+            dst_path = os.path.join(dst, target)
+            exists = os.path.isfile(dst_path)
+            actual = Path(dst_path).read_bytes() if exists else b""
+            identical = expected is not None and exists and actual == expected
+            res = FileResult(
+                path=target,
+                mapped_path=target,
+                pass_=identical,
+                locked=False,
+                note="owned visual asset: must match the Nastech registry",
+            )
+            report.results.append(res)
+            if identical:
+                report.passed += 1
+            else:
+                report.failed.append(res)
     return report
 
 
@@ -11071,15 +11097,19 @@ class UpdateManager:
             shutil.rmtree(dest)
         os.makedirs(dest, exist_ok=True)
 
+        brand_visuals = self.owned.brand_visuals() if self.owned else None
+
         def _brand() -> BrandResult:
-            # The update artifact is a branding-only view of fresh upstream.
-            # Fork-owned asset overlays are not part of this transformation.
-            return brand_tree(src, dest, self.rules)
+            # Carry curated Nastech-owned artwork only; do not merge fork code,
+            # reconciliation, or other local files into the upstream view.
+            result = brand_tree(src, dest, self.rules, brand_visuals)
+            result.owned += len(apply_owned_assets(dest, brand_visuals))
+            return result
 
         brand = stage(
             "brand",
             _brand,
-            "copy upstream and replace only Hermes/Nous names outside URLs",
+            "brand names outside URLs and materialize registered Nastech visual assets only",
         )
 
         reconcile = ReconcileResult()
@@ -11098,13 +11128,13 @@ class UpdateManager:
         scan = stage("scan", lambda: scan_tree(dest), "classify every branded file")
         diff = stage(
             "compare",
-            lambda: compare_trees(src, dest, self.rules),
-            "compare candidate against the exact branding transform",
+            lambda: compare_trees(src, dest, self.rules, brand_visuals),
+            "compare candidate against exact branding plus registered visual assets",
         )
         verify = stage(
             "verify",
-            lambda: verify_branded(src, dest, self.rules),
-            "file-by-file pure-branding parity gate",
+            lambda: verify_branded(src, dest, self.rules, brand_visuals),
+            "file-by-file branding and owned-visual parity gate",
         )
 
         forkcheck = ForkCheckReport()
@@ -11218,7 +11248,10 @@ class UpdateManager:
                 result.zip_path = package_zip(
                     dest, zip_path,
                     project_name=project_name,
-                    include_paths=list(collision_safe_path_map(_walk_files(src), self.rules).values()),
+                    include_paths=(
+                        list(collision_safe_path_map(_walk_files(src), self.rules).values())
+                        + (list(brand_visuals.mapping) if brand_visuals else [])
+                    ),
                 )
                 package_stage.status = "ok"
             except (OSError, ValueError) as exc:
@@ -11262,7 +11295,7 @@ class UpdateManager:
                 "baseline_sha": source_delta.baseline_sha,
                 "complete": source_delta.complete,
                 "counts": source_delta.counts,
-                "owned_paths": [],
+                "owned_paths": sorted(brand_visuals.mapping) if brand_visuals else [],
                 "changes": [
                     {
                         "status": change.status,

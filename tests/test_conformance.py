@@ -1,9 +1,11 @@
+import json
 from pathlib import Path
 
+from hundredways.assets import OwnedAssets
 from hundredways.conformance import verify_final_candidate
 from hundredways.integrity import tree_digest
 from hundredways.rules import BrandingRules
-from hundredways.updates import UpdateManager, brand_tree
+from hundredways.updates import UpdateManager, apply_owned_assets, brand_tree
 
 
 def _tree(root: Path, files: dict[str, str]) -> Path:
@@ -94,6 +96,39 @@ def test_final_conformance_rejects_declared_fork_owned_path(tmp_path):
     assert not report.passed
     assert [(issue.code, issue.path) for issue in report.issues] == [
         ("unexpected-candidate-path", local_path)
+    ]
+
+
+def test_final_conformance_allows_registered_brand_visuals_but_not_fork_code(tmp_path):
+    source = _tree(tmp_path / "source", {"README.md": "# Hermes Agent\n"})
+    assets = tmp_path / "config" / "owned-assets"
+    assets.mkdir(parents=True)
+    (assets / "banner.png").write_bytes(b"Nastech banner")
+    (assets / "generate_icons.py").write_text("print('generator')\n", encoding="utf-8")
+    (assets / "manifest.json").write_text(
+        json.dumps(
+            {
+                "assets/nastech-banner.png": "banner.png",
+                "scripts/generate_icons.py": "generate_icons.py",
+            }
+        ),
+        encoding="utf-8",
+    )
+    owned = OwnedAssets(root=str(assets)).brand_visuals()
+    candidate = tmp_path / "candidate"
+    brand_tree(str(source), str(candidate), BrandingRules(), owned)
+    apply_owned_assets(str(candidate), owned)
+
+    report = verify_final_candidate(source, candidate, owned_assets_root=assets)
+
+    assert report.passed
+    assert (candidate / "assets" / "nastech-banner.png").read_bytes() == b"Nastech banner"
+    (candidate / "scripts").mkdir()
+    (candidate / "scripts" / "generate_icons.py").write_text("fork code\n", encoding="utf-8")
+    report_with_code = verify_final_candidate(source, candidate, owned_assets_root=assets)
+    assert not report_with_code.passed
+    assert [(issue.code, issue.path) for issue in report_with_code.issues] == [
+        ("unexpected-candidate-path", "scripts/generate_icons.py")
     ]
 
 
