@@ -529,6 +529,114 @@ def test_the_forks_ruff_pin_is_eyed_not_assumed(tmp_path):
     assert "the fork pins ruff==0.0.0.dev1" in note.detail
 
 
+def test_banned_api_entries_are_read_from_every_spelling(tmp_path):
+    """A candidate may not drop an import ban by reorganising the table.
+
+    The fork and upstream both spell it inline today; TOML also allows a bare-name
+    subtable and a quoted one, and :func:`ruff_guard_weakenings` compares these paths,
+    so every spelling has to be visible to the reader.
+    """
+    root = tmp_path / "configured"
+    _write(root / "ruff.toml", """[lint]
+select = ["TID251", "RUF100"]
+ignore = ["E501"]
+
+[lint.flake8-tidy-imports.banned-api]
+"pm.uv".msg = "inline"
+"pm._uv" = { msg = "inline table" }
+
+[lint.flake8-tidy-imports.banned-api.pm.environment]
+msg = "bare subtable"
+
+[lint.flake8-tidy-imports.banned-api."pm.runtime_stage"]
+msg = "quoted subtable"
+""")
+
+    config = read_fork_ruff_config(str(root))
+    assert config.banned_api == (
+        "pm.uv", "pm._uv", "pm.environment", "pm.runtime_stage",
+    )
+    assert config.ignore == ("E501",)
+
+
+@pytest.mark.skipif(
+    not forklint._ruff_executable(), reason="the fork's ruff is not installed here"
+)
+def test_the_candidate_lints_under_the_config_its_ci_reads_not_a_stale_fork_copy(tmp_path):
+    """The 2026-11-11 red in miniature: a stale fork config, a candidate that fixes it.
+
+    Upstream retired ``pm/** = ["TID251"]`` on 2026-11-09 and moved those imports under
+    ``# noqa: TID251``.  The fork's ``ruff.toml`` is the older copy, so linting the
+    candidate with it calls every one of those directives unused (``RUF100``) -- and
+    blocks the very update that replaces the file.  ``ruff check .`` in the fork's CI
+    runs in the PR's checkout, so the candidate's own config is the one that governs;
+    it may be used as long as it does not loosen what the fork enforces.
+    """
+    fork = _fork(
+        tmp_path,
+        ruff_select=("RUF100", "TID251"),
+        per_file_ignores=(("pm/**", ("TID251",)),),
+    )
+    candidate = tmp_path / "candidate"
+    _write(candidate / "ruff.toml",
+           '[lint]\nselect = ["RUF100", "TID251"]\n'
+           '[lint.flake8-tidy-imports.banned-api]\n'
+           '"pm.environment".msg = "the environment engine is private"\n')
+    _write(candidate / "pm/operations.py",
+           "from pm.environment import engine  # noqa: TID251\nprint(engine)\n")
+
+    issues = run_fork_ruff(str(fork), str(candidate))
+
+    blocking = [issue for issue in issues if issue.blocking]
+    assert blocking == [], [issue.detail for issue in blocking]
+    (note,) = issues
+    assert note.path == "ruff.toml" and note.classification == ""
+    assert "differs from the fork's ruff.toml" in note.detail
+
+    # The same candidate under the fork's copy IS the live red: the noqa the fork's
+    # retired exemption made unnecessary is reported, which is what blocked the gate.
+    _ = (candidate / "ruff.toml").unlink()
+    (stale,) = run_fork_ruff(str(fork), str(candidate))
+    assert stale.blocking and "RUF100" in stale.detail
+
+
+@pytest.mark.skipif(
+    not forklint._ruff_executable(), reason="the fork's ruff is not installed here"
+)
+def test_a_candidate_config_that_loosens_the_fork_guard_blocks(tmp_path):
+    """Using the candidate's config must never mean accepting a weaker guard.
+
+    Four independent narrowings, one finding each: a rule the fork selects and the
+    candidate does not, a global ignore the candidate adds, a per-file-ignore that did
+    not exist, and an import ban that disappeared.  The fork's own config is what runs,
+    so a green run cannot hide them.
+    """
+    fork = _fork(tmp_path, ruff_select=("F401", "TID251"),
+                 per_file_ignores=(("website/*", ("F401",)),))
+    _write(fork / "ruff.toml", (fork / "ruff.toml").read_text(encoding="utf-8") + (
+        '\n[lint.flake8-tidy-imports.banned-api]\n'
+        '"pm.environment".msg = "private"\n'
+        '"pm.uv".msg = "private"\n'
+    ))
+    candidate = tmp_path / "candidate"
+    _write(candidate / "ruff.toml",
+           '[lint]\nselect = ["F401"]\nignore = ["RUF100"]\n'
+           '[lint.per-file-ignores]\n"website/*" = ["F401"]\n"pm/**" = ["TID251"]\n'
+           '[lint.flake8-tidy-imports.banned-api]\n'
+           '"pm.uv".msg = "private"\n')
+    _write(candidate / "ok.py", "print('ok')\n")
+
+    issues = run_fork_ruff(str(fork), str(candidate))
+
+    assert issues and all(issue.blocking for issue in issues)
+    details = sorted(issue.detail for issue in issues)
+    assert all("weakens the fork's ruff guard" in detail for detail in details)
+    assert any("selects TID251" in detail for detail in details)
+    assert any("ignores RUF100" in detail for detail in details)
+    assert any('per-file-ignores adds TID251 for "pm/**"' in detail for detail in details)
+    assert any('banned-api entry "pm.environment" is missing' in detail for detail in details)
+
+
 # ---------------------------------------------------------------------------
 # (d) classifications agree with the fork-ci-triage skill
 # ---------------------------------------------------------------------------

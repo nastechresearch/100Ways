@@ -52,7 +52,9 @@ from .forkcheck import (
 )
 from .rules import (
     BrandingRules,
+    brand_comment_lines,
     collision_safe_path_map,
+    is_comment_locked_path,
     is_immutable_path,
     is_locked_path,
     transform_contributor_email_path,
@@ -150,7 +152,10 @@ def pull_hermes(updates_dir: str, hermes_url: str = DEFAULT_HERMES_URL) -> str:
         shutil.rmtree(dest)
     last_error = ""
     for attempt in range(1, 6):
-        proc = _run(["git", "-c", "http.version=HTTP/1.1", "clone", "--no-local", url, dest])
+        # The source path itself is the explicit, pinned test/update input. A
+        # normal local clone keeps that fresh-source contract while avoiding
+        # --no-local copying every object before the pipeline can begin.
+        proc = _run(["git", "-c", "http.version=HTTP/1.1", "clone", url, dest])
         if proc.returncode == 0:
             break
         last_error = proc.stderr.strip() or proc.stdout.strip()
@@ -300,6 +305,8 @@ def _candidate_text_for(rel: str, text: str, rules: BrandingRules) -> str:
     """Return the deterministic branded candidate payload for one text file."""
     if "contributors/emails/" in rel.lower():
         return transform_contributor_email_text(text, rules)
+    if is_comment_locked_path(rel):
+        return brand_comment_lines(text, rules)
     return rules.transform_text(text)
 
 
@@ -310,9 +317,12 @@ def brand_tree(src: str, dst: str, rules: BrandingRules | None = None,
     Rules: paths (folders AND file names) are mapped through
     ``rules.transform_path``; text files are rewritten through
     ``rules.transform_text``; binary and locked files are copied
-    byte-for-byte (rename only).  Files whose mapped path appears in the
-    ``owned`` registry are replaced by OUR asset instead of upstream's.
-    Mirrors the birth-commit semantics so the verifier can prove the result.
+    byte-for-byte (rename only).  A comment-locked file (``.npmrc``) is the
+    exception: its directives stay byte-identical while its comment lines are
+    branded, because those comments ship as text.  Files whose mapped path
+    appears in the ``owned`` registry are replaced by OUR asset instead of
+    upstream's.  Mirrors the birth-commit semantics so the verifier can prove
+    the result.
     """
     rules = rules or BrandingRules()
     result = BrandResult()
@@ -348,7 +358,9 @@ def brand_tree(src: str, dst: str, rules: BrandingRules | None = None,
         except OSError as exc:
             result.errors.append(f"{rel}: {exc}")
             continue
-        if is_locked_path(rel) or is_locked_path(mapped):
+        if (is_locked_path(rel) or is_locked_path(mapped)) and not (
+            is_comment_locked_path(rel) or is_comment_locked_path(mapped)
+        ):
             result.locked_copied += 1
             with open(dst_path, "wb") as fh:
                 fh.write(data)
@@ -3089,9 +3101,10 @@ def _reconcile_preserved_brand_text(dst: str, preserved: list[str]) -> list[str]
     the candidate trips both ``first-party-brand`` and
     ``brand-text-not-fixed-point``.  Running the same canonical transform the
     brand stage uses makes the file transform-stable while keeping every
-    fork-authored byte that is not an upstream token.  Locked/immutable files
-    are left byte-for-byte: their brand residue is covered by the audit's
-    explicit allow-list, not by rewriting.
+    fork-authored byte that is not an upstream token.  A comment-locked file
+    (``.npmrc``) brands its comment lines only; every other locked file, and
+    every immutable record, is left byte-for-byte because its brand residue is
+    covered by the audit's explicit allow-list, not by rewriting.
 
     Returns the repo-relative paths changed, so the caller can register them
     with ``verify_branded`` / ``compare_trees`` as reconciled content.
@@ -3099,7 +3112,9 @@ def _reconcile_preserved_brand_text(dst: str, preserved: list[str]) -> list[str]
     rules = BrandingRules()
     changed: list[str] = []
     for rel in preserved or []:
-        if is_locked_path(rel) or is_immutable_path(rel):
+        if (
+            is_locked_path(rel) and not is_comment_locked_path(rel)
+        ) or is_immutable_path(rel):
             continue
         path = os.path.join(dst, rel)
         try:
@@ -5720,10 +5735,11 @@ _HANDOFF_SMOKE_WORKFLOW_EDITS = (
     (_HANDOFF_SMOKE_WORKFLOW_OLD_3, _HANDOFF_SMOKE_WORKFLOW_NEW_3),
 )
 
-_HANDOFF_BUNDLED_WORKFLOW_OLD_1 = """\
-  RELEASE_CHANNEL_STORE: github
-  RELEASE_CLAIM_TAG: ${{ inputs.claim-tag }}
-"""
+# This rule runs after _reconcile_github_pages_release_plane, whose insertion
+# includes the control-plane explanation between the two env keys. Keep that full
+# predecessor shape as the anchor: a shorter prefix would match neither the exact
+# bytes this rule receives nor a moved partial layout.
+_HANDOFF_BUNDLED_WORKFLOW_OLD_1 = _BUNDLED_CHANNEL_STORE_NEW_1
 _HANDOFF_BUNDLED_WORKFLOW_NEW_1 = """\
   RELEASE_CHANNEL_STORE: github
   # The handoff plane (each leg's packages, blockmaps and receipts) is pinned the
@@ -5784,14 +5800,17 @@ _HANDOFF_BUNDLED_WORKFLOW_NEW_6 = """\
 """
 # Admission resolves the store from its own job, so it carries the token like the
 # legs it gates.
+# The upstream admission leg was extended to 60 minutes after real archive
+# verification regularly exceeded the former 30-minute cap. Anchor that current
+# job shape, rather than silently treating its changed timeout as the old leg.
 _HANDOFF_BUNDLED_WORKFLOW_OLD_7 = """\
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       contents: read
     outputs:
 """
 _HANDOFF_BUNDLED_WORKFLOW_NEW_7 = """\
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       contents: read
     env:
@@ -8517,16 +8536,19 @@ def _reconcile_plugin_catalog_admission(dst: str) -> bool:
         return False
     if _PLUGIN_CATALOG_ADMISSION_MARKER in text:
         return False
-    needle = "        run: |\n          set -euo pipefail\n          # HEAD is the PR merge commit:"
-    if needle not in text:
+    needles = (
+        "        run: |\n          set -euo pipefail\n          # HEAD is the PR merge commit:",
+        "        run: python3 -I \"$GITHUB_WORKSPACE/scripts/ci/catalog_changed_entries.py\"\n",
+    )
+    needle = next((value for value in needles if value in text), "")
+    if not needle:
         raise PluginCatalogAdmissionError(
-            f"{rel}: the 'Find changed catalog entries' anchor "
-            "(run: | / set -euo pipefail / '# HEAD is the PR merge commit:') is "
-            "absent and no exemption marker is present, so the sync-PR admission "
-            "exemption could not be applied; re-read the upstream step "
-            "(hermes-agent 86fa9e6ca1:66) and update this rule — skipping "
-            "silently re-publishes the red measured in job 115191916099"
+            f"{rel}: the 'Find changed catalog entries' step has no supported "
+            "launcher anchor and no exemption marker, so the sync-PR admission "
+            "exemption could not be applied; re-derive it against upstream rather "
+            "than silently re-publishing the known red gate"
         )
+    command = needle.splitlines()[-1].removeprefix("        run: ")
     guard = (
         "        run: |\n"
         "          set -euo pipefail\n"
@@ -8545,6 +8567,8 @@ def _reconcile_plugin_catalog_admission(dst: str) -> bool:
         "          fi\n"
         "          # HEAD is the PR merge commit:"
     )
+    if needle.startswith("        run: python3 -I"):
+        guard = guard.rsplit("          # HEAD is the PR merge commit:", 1)[0] + f"          {command}\n"
     updated = text.replace(needle, guard, 1)
     if updated == text:
         return False
@@ -10644,7 +10668,9 @@ def compare_trees(src: str, dst: str, rules: BrandingRules | None = None,
         if owned and owned.has(mapped):
             report.entries.append(DiffEntry(rel, mapped, "owned"))
             continue
-        locked = is_locked_path(rel) or is_locked_path(mapped)
+        locked = (is_locked_path(rel) or is_locked_path(mapped)) and not (
+            is_comment_locked_path(rel) or is_comment_locked_path(mapped)
+        )
         src_path = os.path.join(src, rel)
         dst_path = os.path.join(dst, mapped)
         try:
@@ -10692,7 +10718,10 @@ def verify_branded(src: str, dst: str, rules: BrandingRules | None = None,
     for rel in source_files:
         report.total += 1
         mapped = path_map[rel]
-        locked = is_locked_path(rel) or is_locked_path(mapped) or is_immutable_path(rel)
+        locked = (
+            (is_locked_path(rel) or is_locked_path(mapped))
+            and not (is_comment_locked_path(rel) or is_comment_locked_path(mapped))
+        ) or is_immutable_path(rel)
         src_path = os.path.join(src, rel)
         dst_path = os.path.join(dst, mapped)
         exists = os.path.isfile(dst_path)
@@ -11026,12 +11055,15 @@ class UpdateManager:
 
         def stage(name: str, fn, detail: str = "") -> object:
             start = time.time()
+            print(f"[stage:start] {name}", flush=True)
             try:
                 value = fn()
                 stages.append(StageResult(name, "ok", detail, int((time.time() - start) * 1000)))
+                print(f"[stage:ok] {name}", flush=True)
                 return value
             except Exception as exc:
                 stages.append(StageResult(name, "fail", f"{detail} {exc}", int((time.time() - start) * 1000)))
+                print(f"[stage:fail] {name}: {exc}", flush=True)
                 return None
 
         number = next_update_number(self.updates_dir)
@@ -13646,9 +13678,15 @@ _FREE_JS_CHECK_NAME = (
     "          - leg: workspace\n"
     "            ui_shard: ''\n"
 )
-_UPSTREAM_JS_STEP = (
-    "      - name: Run all workspace checks\n"
-    "        run: node .github/scripts/run-workspace-checks.mjs\n"
+_UPSTREAM_JS_STEPS = (
+    (
+        "      - name: Run all workspace checks\n"
+        "        run: node .github/scripts/run-workspace-checks.mjs\n"
+    ),
+    (
+        "      - name: Run all workspace checks\n"
+        "        run: just check-js-ci\n"
+    ),
 )
 _FREE_JS_STEP_MARKER = "          JS_CHECK_SKIP: "
 _FREE_JS_SCRIPT_MARKER = "const skip = (process.env.JS_CHECK_SKIP || '')"
@@ -13665,14 +13703,14 @@ def _free_js_matrix() -> str:
     return "".join(legs)
 
 
-def _free_js_step() -> str:
-    """The two mutually exclusive check steps, one per leg kind."""
+def _free_js_step(workspace_command: str) -> str:
+    """The two mutually exclusive check steps, retaining upstream's launcher."""
     return (
         "      - name: Run all workspace checks\n"
         "        if: matrix.ui_shard == ''\n"
         "        env:\n"
         f"          JS_CHECK_SKIP: {_FREE_JS_UI_UNIT}\n"
-        "        run: node .github/scripts/run-workspace-checks.mjs\n"
+        f"        run: {workspace_command}\n"
         "      - name: Run the desktop UI suite for this shard\n"
         "        if: matrix.ui_shard != ''\n"
         "        # The leaf script, not the ``check:test:ui`` wrapper: npm swallows\n"
@@ -13755,20 +13793,24 @@ def _reconcile_free_runner_js_lane(dst: str) -> list[str]:
         fixed.append(script_rel)
 
     if not workflow_is_fork:
-        for anchor, what in (
-            (_UPSTREAM_JS_CHECK_NAME, "the `check` job header"),
-            (_UPSTREAM_JS_STEP, "the `Run all workspace checks` step"),
-        ):
-            if anchor not in text:
-                raise FreeRunnerParallelismError(
-                    f"{workflow_rel} changed {what}, so the JS lane sharding has "
-                    "no anchor. Re-derive it against upstream's current "
-                    "js-tests.yml."
-                )
+        if _UPSTREAM_JS_CHECK_NAME not in text:
+            raise FreeRunnerParallelismError(
+                f"{workflow_rel} changed the `check` job header, so the JS lane "
+                "sharding has no anchor. Re-derive it against upstream's current "
+                "js-tests.yml."
+            )
+        upstream_step = next((step for step in _UPSTREAM_JS_STEPS if step in text), None)
+        if upstream_step is None:
+            raise FreeRunnerParallelismError(
+                f"{workflow_rel} changed the `Run all workspace checks` step, so "
+                "the JS lane sharding has no supported launcher anchor. Re-derive "
+                "it against upstream's current js-tests.yml."
+            )
+        workspace_command = upstream_step.rsplit("run: ", 1)[1].strip()
         updated = text.replace(
             _UPSTREAM_JS_CHECK_NAME, _FREE_JS_CHECK_NAME + _free_js_matrix(), 1
         )
-        updated = updated.replace(_UPSTREAM_JS_STEP, _free_js_step(), 1)
+        updated = updated.replace(upstream_step, _free_js_step(workspace_command), 1)
         _reconcile_budget_write(dst, workflow_rel, updated)
         fixed.append(workflow_rel)
 

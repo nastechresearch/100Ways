@@ -1562,6 +1562,23 @@ def test_free_runner_js_lane_shards_the_one_long_unit(tmp_path):
     assert _reconcile_free_runner_js_lane(str(candidate)) == []
 
 
+def test_free_runner_js_lane_preserves_just_launcher(tmp_path):
+    candidate, workflows, _scripts = _free_runner_js_lane_tree(tmp_path)
+    workflow = workflows / "js-tests.yml"
+    workflow.write_text(
+        workflow.read_text(encoding="utf-8").replace(
+            "run: node .github/scripts/run-workspace-checks.mjs",
+            "run: just check-js-ci",
+        ),
+        encoding="utf-8",
+    )
+    _reconcile_free_runner_js_lane(str(candidate))
+    text = workflow.read_text(encoding="utf-8")
+    assert "        run: just check-js-ci\n" in text
+    assert "        run: node .github/scripts/run-workspace-checks.mjs\n" not in text
+    assert _reconcile_free_runner_js_lane(str(candidate)) == []
+
+
 def test_free_runner_js_lane_stops_when_the_skip_seam_is_missing(tmp_path):
     """Legs without the seam re-run every unit, which is the original timeout."""
     candidate, workflows, scripts = _free_runner_js_lane_tree(tmp_path)
@@ -3518,6 +3535,48 @@ def test_compare_trees_reports_missing(tmp_path):
     assert any(e.action == "missing" for e in diff.entries)
     verify = verify_branded(os.path.join(updates_dir, "hermes-agent"), res.dir, rules)
     assert verify.failed
+
+
+def test_brand_tree_brands_npmrc_comments_but_not_directives(tmp_path):
+    """The real upstream root ``.npmrc`` must ship with no upstream brand.
+
+    ``brand_tree`` used to copy it verbatim because ``.npmrc`` is locked, so the
+    shipped comment named ``Docker's /opt/hermes`` -- false for a fork that
+    installs into ``/opt/nastech`` -- and ``weekly_sync.audit_first_party_brand``
+    refused the candidate with exactly that line.  Comment lines are branded;
+    ``engine-strict=true`` stays byte-identical.
+    """
+    from hundredways.weekly_sync import audit_first_party_brand
+
+    upstream = (
+        "# npm treats this folder as a project of its own and would resolve it from the registry,\n"
+        "# past pnpm-workspace.yaml's overrides and release-age gate. engines.npm in package.json is\n"
+        "# no valid range, and engine-strict turns that into a refusal for every command that builds\n"
+        "# a dependency tree here (install, ci, update, dedupe, uninstall, link, --package-lock-only,\n"
+        "# --ignore-scripts, --force). npx, npm exec and npm run do not check it. pnpm ignores both.\n"
+        "# This root file also covers every checkout folder without a package.json (agent/, tools/,\n"
+        "# Docker's /opt/hermes): there npx refuses, not warns, when the package or any non-optional\n"
+        "# dependency it installs declares engines this Node or npm does not satisfy.\n"
+        "engine-strict=true\n"
+    )
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    src.mkdir()
+    (src / ".npmrc").write_text(upstream, encoding="utf-8")
+
+    brand_tree(str(src), str(dst), BrandingRules())
+    branded = (dst / ".npmrc").read_text(encoding="utf-8")
+
+    assert "hermes" not in branded.lower()
+    assert "/opt/nastech" in branded
+    assert branded.splitlines()[-1] == "engine-strict=true"
+    assert len(branded.splitlines()) == len(upstream.splitlines())
+    # The publisher's trust boundary accepts the candidate, and the verifier
+    # agrees the tree is exactly the deterministic candidate.
+    assert audit_first_party_brand(str(dst)) == []
+    assert verify_branded(str(src), str(dst), BrandingRules()).failed == []
+    diff = compare_trees(str(src), str(dst), BrandingRules())
+    assert [e.action for e in diff.entries] == ["identical"]
 
 
 def test_brand_tree_renames_folders_and_files(tmp_path):

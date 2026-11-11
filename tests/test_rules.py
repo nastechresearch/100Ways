@@ -1,6 +1,8 @@
 from hundredways.rules import (
     BrandingRules,
     TokenRule,
+    brand_comment_lines,
+    is_comment_locked_path,
     is_locked_path,
     is_vendored_path,
 )
@@ -592,6 +594,44 @@ def test_locked_paths():
     assert is_locked_path("static/favicon.ico")
     assert not is_locked_path("src/main.py")
     assert not is_locked_path("docs/guide.md")
+
+
+def test_npmrc_comments_brand_but_directives_stay_byte_identical():
+    """An ``.npmrc`` is locked data, yet its comments ship as text.
+
+    Upstream's root file explains itself in comments, one of which names
+    ``Docker's /opt/hermes``.  Copying it verbatim ships the upstream brand and
+    a path the fork does not use; rewriting it wholesale would touch
+    ``engine-strict`` and the registry directives.  Only comment lines brand.
+    """
+    assert is_locked_path(".npmrc")
+    assert is_comment_locked_path(".npmrc")
+    assert is_comment_locked_path("services/api/.npmrc")
+    assert not is_comment_locked_path(".env")
+    assert not is_comment_locked_path("README.md")
+    # A vendored .npmrc is pinned by its origin's digest; comments stay theirs.
+    assert not is_comment_locked_path("plugins/config_backends/remote/vendor/.npmrc")
+
+    text = (
+        "# Docker's /opt/hermes): there npx refuses, not warns\n"
+        "; hermes cache dir\n"
+        "engine-strict=true\n"
+        "registry=https://registry.npmjs.org/\n"
+        "//registry.npmjs.org/:_authToken=${NPM_TOKEN}\n"
+    )
+    branded = brand_comment_lines(text, BrandingRules())
+    assert "/opt/nastech" in branded
+    assert "hermes" not in branded.lower()
+    # Directive lines, including their exact bytes and order, are untouched.
+    assert branded.splitlines()[2:] == text.splitlines()[2:]
+    # Branding comments is itself a fixed point, so the candidate audit passes.
+    assert brand_comment_lines(branded, BrandingRules()) == branded
+
+
+def test_npmrc_blank_and_indented_comment_lines():
+    text = "# hermes\n\n   # hermes note\njust_a_directive = hermes\n"
+    branded = brand_comment_lines(text, BrandingRules())
+    assert branded == "# nastech\n\n   # nastech note\njust_a_directive = hermes\n"
 
 
 def test_dotenv_templates_are_brandable():
