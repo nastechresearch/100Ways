@@ -84,7 +84,11 @@ jobs:
         run: |
           set -euo pipefail
           CANDIDATE_ARGS=()
-          if test -f nastech-candidate/manifest.json; then
+          # The candidate's provenance no longer rides its tree as
+          # manifest.json; the monitor reads the factory state fallback, so
+          # gate on the clone itself (the `|| true` above tolerates a
+          # missing branch).
+          if test -d nastech-candidate/.git; then
             CANDIDATE_ARGS=(--candidate-repo nastech-candidate)
           fi
           python3 -m hundredways.commit_stream \

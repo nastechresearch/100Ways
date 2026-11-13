@@ -86,12 +86,11 @@ def test_tree_audit_blocks_symlinks_world_writable_and_case_collisions(tmp_path)
     assert {"case-collision", "world-writable", "symlink"} <= codes
 
 
-def test_archive_audit_accepts_expected_root_and_manifest(tmp_path):
+def test_archive_audit_accepts_expected_root_without_run_metadata(tmp_path):
     archive = tmp_path / "candidate.zip"
     _archive(
         archive,
         {
-            "nastech-agent/manifest.json": "{}",
             "nastech-agent/app.py": "print('ok')",
             "GATE-REPORT.md": "ok",
             "UPDATE-REPORT.md": "ok",
@@ -102,12 +101,36 @@ def test_archive_audit_accepts_expected_root_and_manifest(tmp_path):
     assert audit_candidate_archive(archive) == []
 
 
-def test_archive_audit_rejects_unsafe_or_unexpected_entries(tmp_path):
+def test_archive_audit_rejects_run_metadata_in_product(tmp_path):
+    """Run metadata must never ride the product archive.
+
+    Provenance lives in the factory's own state; a metadata entry inside the
+    product root means a packaging path regressed to carrying it into the
+    product -- the regression the retirement policy exists to prevent.
+    """
     archive = tmp_path / "candidate.zip"
     _archive(
         archive,
         {
             "nastech-agent/manifest.json": "{}",
+            "nastech-agent/commit-subjects.jsonl": "abc subject\n",
+            "nastech-agent/PUBLICATION-AUTHORIZATION-RECEIPT.json": "{}",
+            "nastech-agent/reports/UPDATE-REPORT.md": "stale evidence\n",
+            "nastech-agent/app.py": "print('ok')",
+        },
+    )
+
+    codes = {issue.code for issue in audit_candidate_archive(archive)}
+
+    assert codes == {"archive-metadata"}
+
+
+def test_archive_audit_rejects_unsafe_or_unexpected_entries(tmp_path):
+    archive = tmp_path / "candidate.zip"
+    _archive(
+        archive,
+        {
+            "nastech-agent/app.py": "ok",
             "../escape.txt": "no",
             "other-root.txt": "no",
         },
