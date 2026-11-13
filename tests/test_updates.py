@@ -122,7 +122,6 @@ from hundredways.updates import (
     _reconcile_preserved_brand_text,
     _reconcile_prompt_surface_snapshot,
     _reconcile_python_test_timeout,
-    _reconcile_reasoning_effort_selection,
     _reconcile_set_theme_catalog_line,
     _reconcile_sigv4_vectors,
     _reconcile_skill_description_hardline,
@@ -5086,57 +5085,6 @@ def test_reconcile_telegram_mention_context_lengths(tmp_path):
     assert 'length=11' not in updated
     # Idempotent.
     assert _reconcile_telegram_mention_context_lengths(str(candidate)) == 0
-
-
-def test_reconcile_reasoning_effort_selection(tmp_path):
-    candidate = tmp_path / "candidate"
-    target = candidate / "nastech_cli" / "main.py"
-    target.parent.mkdir(parents=True)
-    target.write_text(
-        'def some_existing(): pass\n'
-        '# ---- END PLUGIN-COMPAT ----\n',
-        encoding="utf-8",
-    )
-
-    assert _reconcile_reasoning_effort_selection(str(candidate)) == 1
-    updated = target.read_text(encoding="utf-8")
-    assert 'def _prompt_reasoning_effort_selection(efforts, current_effort=""):' in updated
-    assert '# ---- END PLUGIN-COMPAT ----\n' in updated
-    assert updated.index("# ---- END PLUGIN-COMPAT ----") < updated.index(
-        "def _prompt_reasoning_effort_selection"
-    )
-    # Idempotent.
-    assert _reconcile_reasoning_effort_selection(str(candidate)) == 0
-
-
-def test_reconcile_reasoning_effort_selection_falls_back_before_main_def(tmp_path):
-    """When the PLUGIN-COMPAT anchor is gone, graft before ``def main():``.
-
-    Upstream dropped the anchor that the graft used to key on, so the fork's
-    preserved curses-migration test could no longer import the symbol.  The
-    fallback inserts the module-scope function right before ``def main():``.
-    """
-    candidate = tmp_path / "candidate"
-    target = candidate / "nastech_cli" / "main.py"
-    target.parent.mkdir(parents=True)
-    target.write_text(
-        'import sys\n\n'
-        'CONST = 1\n\n\n'
-        'def helper():\n'
-        '    return 2\n\n\n'
-        'def main():\n'
-        '    print("hi")\n',
-        encoding="utf-8",
-    )
-
-    assert _reconcile_reasoning_effort_selection(str(candidate)) == 1
-    updated = target.read_text(encoding="utf-8")
-    assert 'def _prompt_reasoning_effort_selection(efforts, current_effort=""):' in updated
-    # The graft lands at module scope, before main, not inside helper().
-    assert updated.index("def _prompt_reasoning_effort_selection(") > updated.index("def helper()")
-    assert updated.index("def _prompt_reasoning_effort_selection(") < updated.index("def main():")
-    # Idempotent.
-    assert _reconcile_reasoning_effort_selection(str(candidate)) == 0
 
 
 def test_fork_release_publication_is_reapplied_after_a_sync(tmp_path):

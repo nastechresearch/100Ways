@@ -12,6 +12,7 @@ from hundredways.forkcheck import (
     ForkCheckReport,
     fork_consistency,
     preserve_fork_files,
+    retired_fork_files,
     scan_brand_violations,
     source_tree_delta,
     walk_files,
@@ -86,14 +87,33 @@ def test_fork_consistency_flags_missing_upstream_file(tmp_path):
 
 
 def test_fork_consistency_flags_unpreserved_fork_local_file(tmp_path):
+    """An allowlisted fork-local file absent from the candidate fails the gate."""
+    rules = BrandingRules()
+    upstream = _tree(tmp_path / "upstream", {})
+    fork = _tree(tmp_path / "fork", {".github/workflows/release.yml": "lane\n"})
+    branded = _tree(tmp_path / "branded", {})  # preserve step not run
+    report = fork_consistency(str(fork), str(branded), str(upstream), rules)
+    entry = next(e for e in report.entries if e.path == ".github/workflows/release.yml")
+    assert entry.status == "local_only"
+    assert not report.gate_passes()
+
+
+def test_fork_consistency_retires_unallowlisted_fork_local_file(tmp_path):
+    """A fork-local file outside the preserve allowlist is policy-retired.
+
+    Deliberately absent from the candidate (the retirement this whole change
+    exists for: one-off content must not become a permanent product resident),
+    surfaced in the report, and never a gate failure.
+    """
     rules = BrandingRules()
     upstream = _tree(tmp_path / "upstream", {})
     fork = _tree(tmp_path / "fork", {"local.md": "fork only\n"})
     branded = _tree(tmp_path / "branded", {})  # preserve step not run
     report = fork_consistency(str(fork), str(branded), str(upstream), rules)
     entry = next(e for e in report.entries if e.path == "local.md")
-    assert entry.status == "local_only"
-    assert not report.gate_passes()
+    assert entry.status == "retired_by_policy"
+    assert report.gate_passes()
+    assert retired_fork_files(str(fork), str(upstream), rules) == ["local.md"]
 
 
 def test_updated_file_added_line_brand_violation_is_reported(tmp_path):
@@ -158,22 +178,27 @@ def test_scan_brand_violations_sweeps_whole_tree(tmp_path):
     assert "package-lock.json" not in by_path
 
 
-def test_preserve_fork_files_copies_fork_local_content(tmp_path):
+def test_preserve_fork_files_copies_allowlisted_fork_local_content(tmp_path):
     rules = BrandingRules()
     upstream = _tree(tmp_path / "upstream", {
         "hermes_cli/main.py": "x\n",
     })
     fork = _tree(tmp_path / "fork", {
         "nastech_cli/main.py": "x\n",             # upstream twin (branded): NOT preserved
-        "config/owned-assets/manifest.json": "{}\n",  # fork-local: preserved
-        "local.md": "fork\n",
+        "config/owned-assets/manifest.json": "{}\n",  # explicitly owned: preserved
+        ".github/workflows/release.yml": "lane\n",    # allowlisted: preserved
+        "local.md": "fork\n",                         # off-allowlist: retired
     })
     branded = _tree(tmp_path / "branded", {})
     preserved = preserve_fork_files(str(fork), str(branded), str(upstream), rules)
     assert "config/owned-assets/manifest.json" in preserved
-    assert "local.md" in preserved
+    assert ".github/workflows/release.yml" in preserved
+    assert "local.md" not in preserved
     assert "nastech_cli/main.py" not in preserved  # upstream provides it
-    assert (tmp_path / "branded" / "local.md").read_text() == "fork\n"
+    assert (tmp_path / "branded" / ".github" / "workflows" / "release.yml").read_text() == "lane\n"
+    assert not (tmp_path / "branded" / "local.md").exists()
+    # The report mirrors the copy pass: exactly the policy retirement.
+    assert retired_fork_files(str(fork), str(upstream), rules) == ["local.md"]
 
 
 def test_collision_safe_contributor_alias_is_relocated_without_duplicate(tmp_path):
@@ -201,7 +226,13 @@ def test_collision_safe_contributor_alias_is_relocated_without_duplicate(tmp_pat
     assert report.gate_passes()
 
 
-def test_collision_safe_alias_preserves_custom_fork_content(tmp_path):
+def test_collision_safe_alias_retires_custom_fork_content(tmp_path):
+    """Custom fork data at a legacy alias path is policy-retired, not carried.
+
+    The alias resolution proves only byte-equality with upstream; custom
+    content is fork-local extras like any other, so the preserve allowlist
+    decides its fate -- outside the list it stays off the candidate.
+    """
     rules = BrandingRules()
     upstream = _tree(tmp_path / "upstream", {
         "contributors/emails/agent@agents-Mac-mini.local": "lower upstream record\n",
@@ -215,8 +246,11 @@ def test_collision_safe_alias_preserves_custom_fork_content(tmp_path):
 
     preserved = preserve_fork_files(str(fork), branded, str(upstream), rules)
 
-    assert "contributors/emails/agent@agents-Mac-mini.local" in preserved
-    assert (tmp_path / "branded" / "contributors" / "emails" / "agent@agents-Mac-mini.local").read_text() == "fork-specific contributor note\n"
+    assert preserved == []
+    assert not os.path.exists(os.path.join(branded, "contributors", "emails", "agent@agents-Mac-mini.local"))
+    assert retired_fork_files(str(fork), str(upstream), rules) == [
+        "contributors/emails/agent@agents-Mac-mini.local",
+    ]
 
 
 def test_source_tree_delta_records_added_modified_deleted_and_renamed_paths(tmp_path):
@@ -442,12 +476,12 @@ def test_brand_tree_preserves_executable_bit(tmp_path):
 def test_preserve_fork_files_carries_executable_bit(tmp_path):
     rules = BrandingRules()
     upstream = _tree(tmp_path / "upstream", {"x.txt": "1\n"})
-    fork = _tree(tmp_path / "fork", {"bin/tool": "#!/bin/sh\necho hi\n"})
-    os.chmod(os.path.join(str(fork), "bin", "tool"), 0o755)
+    fork = _tree(tmp_path / "fork", {"scripts/releases/tool": "#!/bin/sh\necho hi\n"})
+    os.chmod(os.path.join(str(fork), "scripts", "releases", "tool"), 0o755)
     branded = _tree(tmp_path / "branded", {"x.txt": "1\n"})
     preserved = preserve_fork_files(str(fork), str(branded), str(upstream), rules)
-    assert "bin/tool" in preserved
-    assert os.stat(os.path.join(str(branded), "bin", "tool")).st_mode & stat.S_IXUSR
+    assert "scripts/releases/tool" in preserved
+    assert os.stat(os.path.join(str(branded), "scripts", "releases", "tool")).st_mode & stat.S_IXUSR
 
 
 def test_contributor_email_upstream_paths_map_to_nastech_once(tmp_path):

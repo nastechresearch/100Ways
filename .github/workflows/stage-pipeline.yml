@@ -393,6 +393,12 @@ jobs:
           )
           snapshot = os.path.join(updates, candidates[-1])
           reports = {"UPDATE-REPORT.md", "GATE-REPORT.md"}
+          # Run metadata never reaches the product folder: the update-PR
+          # workflow commits the project folder verbatim, so a metadata file
+          # here would ride the tree onto the fork branch and be carried
+          # forward forever by the preserve stage.
+          metadata = {"manifest.json", "commit-subjects.jsonl",
+                      "SYNC-SUMMARY.md", "PUBLICATION-AUTHORIZATION-RECEIPT.json"}
           with zipfile.ZipFile(os.environ["HUNDREDWAYS_ZIP"], "w", zipfile.ZIP_DEFLATED) as archive:
               for current, dirs, files in os.walk(snapshot):
                   # Candidate reports are generated at archive root below;
@@ -402,7 +408,7 @@ jobs:
                   for name in files:
                       source = os.path.join(current, name)
                       relative = os.path.relpath(source, snapshot)
-                      if relative in reports:
+                      if relative in reports or relative in metadata:
                           continue
                       archive.write(source, os.path.join("nastech-agent", relative))
               for report in reports:
