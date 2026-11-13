@@ -5,15 +5,21 @@ commits, never whole-tree churn) and never drops a fork-local feature.
 Three guarantees, enforced by ``fork_consistency`` against the real fork:
 
   * **No feature loss.**  Every file the fork carries must exist in the
-    branded tree.  Fork-local files (owned-assets registry, contributor
-    emails, fork-only skills/tests) have no upstream source and must be
-    PRESERVED verbatim -- otherwise the PR deletes them.  The one sanctioned
-    exception: a fork ``config/owned-assets/`` registry file that the
-    authoritative engine registry in the candidate no longer owns is a
-    *retirement* (``registry_retired``), proven by the engine-side manifest
-    diff exactly as an upstream deletion is proven by the upstream diff.
-    Without that carve-out the engine could never evolve its own registry
-    (the fork is branded from engine output, so nothing else can retire it).
+    branded tree -- except the two sanctioned retirements.  Fork-local files
+    (owned-assets registry, contributor emails, fork-only skills/tests) have
+    no upstream source and are PRESERVED verbatim only when they are on the
+    reviewed preserve allowlist (``FORK_PRESERVE_ALLOWLIST``); a fork-local
+    file outside it is *retired by policy* (``retired_by_policy``) --
+    deliberately absent from the candidate, never silently carried, never a
+    failure, so one-off content cannot become a permanent resident of the
+    product tree.  The other sanctioned retirement: a fork
+    ``config/owned-assets/`` registry file that the authoritative engine
+    registry in the candidate no longer owns is a *retirement*
+    (``registry_retired``), proven by the engine-side manifest diff exactly
+    as an upstream deletion is proven by the upstream diff.  Without those
+    carve-outs the engine could never evolve its own registry or shed
+    retired fork content (the fork is branded from engine output, so
+    nothing else can retire them).
   * **No spurious modification.**  Files upstream did not touch must be
     byte-identical to the fork (``identical``).  Only files upstream changed
     may differ (``updated``), and every added line must be brand-clean.
@@ -63,7 +69,7 @@ class ForkViolation:
 class ForkEntry:
     """Per-file fork-consistency status."""
     path: str            # path in the branded tree / fork (fork-relative)
-    status: str          # identical | updated | added | missing | local_only | locked
+    status: str          # identical | updated | added | missing | local_only | retired | locked
     added_lines: int = 0
     deleted_lines: int = 0
     violations: list[ForkViolation] = field(default_factory=list)
@@ -101,6 +107,7 @@ class ForkCheckReport:
             f"(+{added_lines}/-{deleted_lines} lines), {statuses.get('added', 0)} added, "
             f"{statuses.get('missing', 0)} missing, "
             f"{statuses.get('local_only', 0)} fork-local-unpreserved, "
+            f"{statuses.get('retired_by_policy', 0)} policy-retired fork files, "
             f"{statuses.get('stale_upstream', 0)} stale-upstream, "
             f"{statuses.get('registry_retired', 0)} registry-retired owned assets, "
             f"{statuses.get('locked', 0)} locked/binary, "
@@ -395,6 +402,62 @@ def _upstream_mapped(upstream: list[str], rules: BrandingRules) -> set[str]:
     return set(collision_safe_path_map(upstream, rules).values())
 
 
+def _relocated_collision_alias_target(
+    rel: str,
+    path_map: dict[str, str],
+    rules: BrandingRules | None = None,
+) -> str | None:
+    """Collision-safe destination a legacy raw fork path maps to, if any.
+
+    A prior candidate may contain an unsuffixed contributor record from before
+    collision handling existed.  Such an alias maps to its collision-safe
+    upstream destination (resolved through the strict email mapper when the
+    spellings differ only by case or a brand token); anything else is genuine
+    fork-local content and maps to nothing.
+    """
+    rules = rules or BrandingRules()
+    mapped = path_map.get(rel)
+    is_email = "contributors/emails/" in rel.lower()
+    if is_email and (not mapped or mapped == rel):
+        candidate = transform_contributor_email_path(rel, rules)
+        if candidate in set(path_map.values()) and candidate != rel:
+            mapped = candidate
+    if not mapped or mapped == rel:
+        return None
+    return mapped
+
+
+def _alias_bytes_match(
+    fork_path: str,
+    destination_path: str,
+    rules: BrandingRules,
+) -> bool:
+    """True when the fork alias carries exactly the destination's content.
+
+    Contributor records are compared through the same email text transform the
+    branded tree applies, so a brand-renamed record still matches its upstream
+    source; every other file must be byte-identical.  Custom fork data never
+    matches and is never silently dropped.
+    """
+    source_data = _read(fork_path)
+    destination_data = _read(destination_path)
+    if source_data is None or destination_data is None:
+        return False
+    if (
+        "contributors/emails/" in fork_path.lower()
+        and is_text(source_data)
+        and is_text(destination_data)
+    ):
+        expected = transform_contributor_email_text(
+            source_data.decode("utf-8", "replace"), rules
+        )
+        actual = transform_contributor_email_text(
+            destination_data.decode("utf-8", "replace"), rules
+        )
+        return expected == actual
+    return source_data == destination_data
+
+
 def _is_relocated_collision_alias(
     rel: str,
     path_map: dict[str, str],
@@ -404,33 +467,112 @@ def _is_relocated_collision_alias(
 ) -> bool:
     """Return true only when a legacy raw path is byte-preserved at its safe path.
 
-    A prior candidate may contain an unsuffixed contributor record from before
-    collision handling existed.  It is safe to omit that legacy alias only if
-    its collision-safe upstream destination exists and contains exactly the
-    same bytes; custom fork data is never discarded.
+    It is safe to omit that legacy alias only if its collision-safe upstream
+    destination exists in the branded tree and contains exactly the same
+    bytes; custom fork data is never discarded.
     """
     rules = rules or BrandingRules()
-    mapped = path_map.get(rel)
-    is_email = "contributors/emails/" in rel.lower()
-    # A legacy fork can carry a pre-policy email alias whose source spelling
-    # differs from the current upstream spelling only by case or a brand token.
-    # Resolve it through the same strict email mapper, but only when that
-    # destination is an actual current upstream destination.
-    if is_email and (not mapped or mapped == rel):
-        candidate = transform_contributor_email_path(rel, rules)
-        if candidate in set(path_map.values()) and candidate != rel:
-            mapped = candidate
-    if not mapped or mapped == rel:
+    mapped = _relocated_collision_alias_target(rel, path_map, rules)
+    if not mapped:
         return False
     source = os.path.join(fork_root, rel)
     destination = os.path.join(branded_root, mapped)
     if not os.path.isfile(source) or not os.path.isfile(destination):
         return False
-    source_data = _read(source)
-    if is_email and is_text(source_data):
-        expected = transform_contributor_email_text(source_data.decode("utf-8", "replace"), rules).encode("utf-8")
-        return expected == _read(destination)
-    return source_data == _read(destination)
+    return _alias_bytes_match(source, destination, rules)
+
+
+# ---------------------------------------------------------------------------
+# Fork-local preserve allowlist
+# ---------------------------------------------------------------------------
+
+# Fork-local files (no upstream source) the factory deliberately carries into
+# every branded tree.  This is the CONTRACT, reviewed in the open: an entry may
+# be an exact path or a directory prefix with its trailing slash.  Anything on
+# fork main outside this list is retired by policy -- deliberately absent from
+# the candidate, surfaced in the fork report, and never a failure.  Before this
+# list existed the preserve stage carried every fork-local file forward, which
+# is how one-off content (pipeline metadata, retired tests, local commit
+# identities, retired skills) became permanent residents of the product tree.
+FORK_PRESERVE_ALLOWLIST: tuple[str, ...] = (
+    # The fork's release lane (R2 assets, unsigned stable legs, channel heads).
+    ".github/workflows/release.yml",
+    ".github/workflows/manual-release.yml",
+    "scripts/releases/",
+    "scripts/termux/release_apt.py",
+    "scripts/cloudflare/assets-worker/",
+    "tests/ci/gh_release_store.py",
+    "tests/ci/test_release_plane_store_pin_admission.py",
+    "tests/ci/test_stable_release_store_seam.py",
+    "tests/ci/test_unsigned_desktop_legs.py",
+    "tests/scripts/test_channel_release_assets.py",
+    "tests/scripts/test_gh_transport.py",
+    "tests/scripts/test_latest_manifest.py",
+    "tests/scripts/test_release_channel_store.py",
+    "tests/scripts/test_release_ghpages.py",
+    "tests/scripts/test_termux_release_apt.py",
+    "apps/desktop/electron/update-rebuild.ts",
+    "apps/desktop/electron/update-rebuild.test.ts",
+    "apps/desktop/electron/update-relaunch.ts",
+    "apps/desktop/electron/update-relaunch.test.ts",
+)
+
+
+def is_allowlisted_fork_local(rel: str) -> bool:
+    """True when a fork-local path is sanctioned to survive every branded tree."""
+    rel = rel.replace(os.sep, "/")
+    return any(rel == entry or rel.startswith(entry) for entry in FORK_PRESERVE_ALLOWLIST)
+
+
+def retired_fork_files(
+    fork_root: str,
+    upstream_root: str,
+    rules: BrandingRules | None = None,
+    *,
+    obsolete_upstream_paths: set[str] | None = None,
+    owned_paths: set[str] | None = None,
+) -> list[str]:
+    """Fork-local files the allowlist retires: present on fork main, absent
+    from the candidate by policy (not by accident).  Mirrors the skip
+    conditions of :func:`preserve_fork_files` so the report and the copy pass
+    can never disagree."""
+    if not fork_root or not os.path.isdir(fork_root):
+        return []
+    rules = rules or BrandingRules()
+    obsolete_upstream_paths = obsolete_upstream_paths or set()
+    owned_paths = owned_paths or set()
+    upstream_path_map = collision_safe_path_map(walk_files(upstream_root), rules)
+    upstream_mapped = set(upstream_path_map.values())
+    retired: list[str] = []
+    for rel in walk_files(fork_root):
+        if rel in upstream_mapped:
+            continue
+        # A legacy collision alias already reaches the branded tree through its
+        # collision-safe destination: its content is upstream-provided there.
+        # Without a branded tree to compare against, the same evidence is the
+        # upstream clone -- the alias is omitted only when the fork bytes match
+        # the upstream bytes at the destination (emails through the same text
+        # transform), so custom fork data is still retired as fork-local, never
+        # misreported as an alias.
+        mapped = _relocated_collision_alias_target(rel, upstream_path_map, rules)
+        if mapped:
+            fork_path = os.path.join(fork_root, rel)
+            upstream_path = os.path.join(upstream_root, mapped)
+            alias_is_upstream_content = (
+                os.path.isfile(fork_path)
+                and os.path.isfile(upstream_path)
+                and _alias_bytes_match(fork_path, upstream_path, rules)
+            )
+            if alias_is_upstream_content:
+                continue
+        if is_explicitly_owned(rel, owned_paths):
+            continue
+        if rel in obsolete_upstream_paths:
+            continue
+        if is_allowlisted_fork_local(rel):
+            continue
+        retired.append(rel)
+    return sorted(retired)
 
 
 def preserve_fork_files(
@@ -441,15 +583,17 @@ def preserve_fork_files(
     *,
     obsolete_upstream_paths: set[str] | None = None,
     owned_paths: set[str] | None = None,
-    allow_unclassified_fork_files: bool = True,
 ) -> list[str]:
-    """Copy fork-local files (no upstream source) into the branded tree.
+    """Copy allowlisted fork-local files (no upstream source) into the branded tree.
 
-    Fork files whose path no upstream path maps to are fork-only content
-    (owned-assets registry, contributor emails, fork-added skills/tests).
-    Branding upstream alone would silently drop them from the PR; this
-    carries them over verbatim so nothing is lost. When an engine-owned asset
-    registry is present, its mapped target paths remain authoritative too.
+    Fork files whose path no upstream path maps to are fork-only content.
+    Branding upstream alone would silently drop them from the PR, so the
+    allowlist below carries the sanctioned set over verbatim.  A fork-local
+    file OUTSIDE the allowlist is retired by policy: deliberately absent from
+    the candidate, never silently carried, never a fork-consistency failure.
+    The retired paths are returned by :func:`retired_fork_files` so the report
+    can show them. When an engine-owned asset registry is present, its mapped
+    target paths remain authoritative too.
     """
     if not fork_root or not os.path.isdir(fork_root):
         return []
@@ -471,8 +615,8 @@ def preserve_fork_files(
         explicitly_owned = is_explicitly_owned(rel, owned_paths)
         if rel in obsolete_upstream_paths and not explicitly_owned:
             continue  # direct source evidence proves this is stale upstream code
-        if not allow_unclassified_fork_files and not explicitly_owned:
-            continue  # without a baseline, stop for ownership review
+        if not explicitly_owned and not is_allowlisted_fork_local(rel):
+            continue  # fork-local content outside the allowlist: retired by policy
         dst = os.path.join(branded_root, rel)
         src = os.path.join(fork_root, rel)
         # A 100Ways-owned registry is an explicit, reviewable visual identity
@@ -512,12 +656,15 @@ def fork_consistency(
     state); ``branded_root`` is the freshly-branded pipeline snapshot;
     ``upstream_root`` is the freshly-pulled hermes source.  Every fork file
     must survive in the branded tree (identical, updated, or preserved);
-    anything missing or fork-local-but-unpreserved fails the gate.  Fork
-    registry-source files (``config/owned-assets/``) absent from the branded
-    tree are classified ``registry_retired`` instead of ``local_only`` when
-    the candidate carries the authoritative engine registry and no longer
-    declares them -- a sanctioned engine-side retirement, not an accidental
-    drop.
+    anything missing or fork-local-but-unpreserved fails the gate -- except
+    the two sanctioned retirements: fork registry-source files
+    (``config/owned-assets/``) absent from the branded tree are classified
+    ``registry_retired`` when the candidate carries the authoritative engine
+    registry and no longer declares them, and fork-local files outside the
+    preserve allowlist (``FORK_PRESERVE_ALLOWLIST``) are classified
+    ``retired_by_policy`` -- deliberately absent from the candidate, never a
+    failure.  The retired paths are exactly :func:`retired_fork_files`'s
+    output, so the report and the copy pass can never disagree.
     """
     rules = rules or BrandingRules()
     obsolete_upstream_paths = obsolete_upstream_paths or set()
@@ -587,8 +734,17 @@ def fork_consistency(
                 report.entries.append(entry)
                 continue
             # upstream has a file mapping here -> branding dropped it (bug).
-            # no upstream source -> fork-local content that was NOT preserved.
-            entry.status = "missing" if rel in upstream_mapped else "local_only"
+            # no upstream source -> fork-local content.  Outside the preserve
+            # allowlist (and not explicitly owned) that absence is policy:
+            # the file is deliberately retired, not accidentally dropped.
+            if rel not in upstream_mapped:
+                entry.status = (
+                    "retired_by_policy"
+                    if not explicitly_owned and not is_allowlisted_fork_local(rel)
+                    else "local_only"
+                )
+            else:
+                entry.status = "missing"
             report.entries.append(entry)
             continue
         fork_data = _read(os.path.join(fork_root, rel))

@@ -135,13 +135,18 @@ jobs:
           # wipe the fork checkout (keep .git + untracked tree/ + artifact/)
           find . -mindepth 1 -maxdepth 1 ! -name .git ! -name tree \
              ! -name artifact -exec rm -rf -- {} +
-          mkdir -p reports
+          # Review evidence is for the PR body, never for the product tree:
+          # keep it OUTSIDE the checkout so `git add -f -A` cannot commit it.
+          # A reports/ dir committed here rode every update onto the fork
+          # branch and was carried forward forever by the preserve stage.
+          REPORTS="${RUNNER_TEMP}/update-reports"
+          mkdir -p "$REPORTS"
           cp -a tree/nastech-agent/. .
-          mv tree/UPDATE-REPORT.md reports/UPDATE-REPORT.md
-          mv tree/GATE-REPORT.md reports/GATE-REPORT.md
-          mv tree/SYNC-SUMMARY.md reports/SYNC-SUMMARY.md
-          mv tree/PUBLICATION-AUTHORIZATION-RECEIPT.json reports/PUBLICATION-AUTHORIZATION-RECEIPT.json
-          rm -rf tree artifact
+          mv tree/UPDATE-REPORT.md "$REPORTS/UPDATE-REPORT.md"
+          mv tree/GATE-REPORT.md "$REPORTS/GATE-REPORT.md"
+          mv tree/SYNC-SUMMARY.md "$REPORTS/SYNC-SUMMARY.md"
+          mv tree/PUBLICATION-AUTHORIZATION-RECEIPT.json "$REPORTS/PUBLICATION-AUTHORIZATION-RECEIPT.json"
+          rm -rf tree artifact reports
 
           # force-add beats the nastech-*/* gitignore pattern; -A captures
           # upstream deletions too so the PR diff = what changed (branded)
@@ -161,7 +166,7 @@ jobs:
           if [ -s artifact/SYNC-TITLE.md ]; then
             PR_TITLE=$(head -n 1 artifact/SYNC-TITLE.md)
           fi
-          BODY_FILE="reports/SYNC-SUMMARY.md"
+          BODY_FILE="$REPORTS/SYNC-SUMMARY.md"
           if [ -s artifact/SYNC-PR-BODY.md ]; then
             BODY_FILE="artifact/SYNC-PR-BODY.md"
           fi
@@ -173,3 +178,65 @@ jobs:
               --title "$PR_TITLE" --body-file "$BODY_FILE"
           fi
           gh pr view "$FORK#$TEST" --json url --jq .url || true
+
+      - name: Record branded baseline in the factory
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.NAS_TECH_AGENT_TOKEN }}
+          UPSTREAM_SHA: ${{ inputs.upstream_sha }}
+        run: |
+          set -euo pipefail
+          # The next run's source-evidence needs the last branded upstream
+          # SHA.  It used to ride inside the product tree (root manifest.json)
+          # -- run metadata in the product.  It now lives in the factory's own
+          # state file; this step keeps it current right after a successful
+          # update.  [skip ci] keeps the record commit from re-triggering CI.
+          python3 - <<'PYEOF'
+          import base64
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          token = os.environ["GH_TOKEN"]
+          sha = os.environ.get("UPSTREAM_SHA", "")
+          if len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha):
+              print(f"no upstream sha to record ({sha!r}); skipping")
+              raise SystemExit(0)
+          repo = os.environ["GITHUB_REPOSITORY"]
+          path = "state/baseline.json"
+          content = base64.b64encode(
+              (json.dumps({"upstream_sha": sha}, indent=2) + "\n").encode()
+          ).decode()
+
+          def api(method: str, url: str, payload: dict | None = None) -> dict:
+              request = urllib.request.Request(
+                  f"https://api.github.com{url}",
+                  data=json.dumps(payload).encode() if payload is not None else b"",
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                      "Content-Type": "application/json",
+                      "User-Agent": "hundredways-factory",
+                  },
+                  method=method,
+              )
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  return json.load(response)
+
+          file_sha = None
+          try:
+              file_sha = api("GET", f"/repos/{repo}/contents/{path}")["sha"]
+          except urllib.error.HTTPError as exc:
+              if exc.code != 404:
+                  raise
+          body = {
+              "message": "[skip ci] chore: record branded baseline " + sha[:8],
+              "content": content,
+              "branch": "main",
+          }
+          if file_sha:
+              body["sha"] = file_sha
+          api("PUT", f"/repos/{repo}/contents/{path}", body)
+          print(f"recorded baseline {sha} in {repo}#main:{path}")
+          PYEOF

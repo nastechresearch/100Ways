@@ -107,7 +107,9 @@ def _git_repo(root: Path, files: dict[str, str]) -> Path:
     return root
 
 
-def test_final_conformance_replays_fork_preservation_and_post_preserve_reconciles(tmp_path):
+def test_final_conformance_replays_fork_preservation_and_post_preserve_reconciles(
+    tmp_path, monkeypatch
+):
     """The final-conformance rebuild must reproduce post-preserve reconcile bytes.
 
     The pipeline preserves fork-local files after reconcile, then re-syncs the
@@ -116,7 +118,23 @@ def test_final_conformance_replays_fork_preservation_and_post_preserve_reconcile
     so it must replay the same fork-preservation + post-preserve reconciles
     from the fork -- never trust the candidate -- or a reconciled fork file is
     reported as a source-parity mismatch (the real runner failure this gates).
+
+    The fixture skill is deliberately on the preserve allowlist: under the
+    retirement policy a fork-added skill only reaches the product when the
+    factory sanctions its path, which is exactly the scenario being replayed
+    here.
     """
+    import hundredways.forkcheck as forkcheck_module
+
+    monkeypatch.setattr(
+        forkcheck_module,
+        "FORK_PRESERVE_ALLOWLIST",
+        forkcheck_module.FORK_PRESERVE_ALLOWLIST
+        + (
+            "optional-skills/creative/blender-mcp/",
+            "website/docs/user-guide/skills/optional/creative/creative-blender-mcp.md",
+        ),
+    )
     catalog = (
         "# Optional Skills Catalog\n"
         "\n"

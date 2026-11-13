@@ -181,6 +181,37 @@ def fork_manifest_upstream_sha(fork_root: str) -> str:
     return value if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value) else ""
 
 
+def engine_repo_root() -> str:
+    """The 100Ways factory repository root (parent of the hundredways package)."""
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def engine_baseline_sha(fork_root: str = "") -> str:
+    """Read the last verified Hermes SHA recorded in the factory's own state.
+
+    Provenance lives HERE, in the engine repository (``state/baseline.json``,
+    maintained by the branded-update workflow) -- never in the product tree,
+    whose only job is to be the branded software.  This is the fallback when
+    the Updates-Commits history and the fork manifest are both unavailable,
+    e.g. on a fresh runner after the product tree stopped carrying
+    ``manifest.json``.
+
+    Consulted only for a real fork checkout (one with a ``.git`` dir, like
+    the CI shallow clone): the state describes the factory's real product,
+    and a fixture tree without git history is by construction not that
+    product, so unit-test runs stay isolated from the recorded state.
+    """
+    if not fork_root or not os.path.isdir(os.path.join(fork_root, ".git")):
+        return ""
+    state_path = os.path.join(engine_repo_root(), "state", "baseline.json")
+    try:
+        with open(state_path, encoding="utf-8") as handle:
+            value = json.load(handle).get("upstream_sha", "")
+    except (OSError, ValueError):
+        return ""
+    return value if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value) else ""
+
+
 def previous_upstream_sha(updates_dir: str, before_number: int) -> str:
     """Return the most recent recorded source revision, if any."""
     for number in range(before_number - 1, 0, -1):
@@ -2382,131 +2413,6 @@ def _reconcile_telegram_mention_context_lengths(dst: str) -> int:
     )
     if text == original:
         return 0
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(text)
-    return 1
-
-
-# Grafted from the fork's ``nastech_cli/main.py`` (``_prompt_reasoning_effort_selection``):
-# the fork-owned regression test ``tests/nastech_cli/test_setup_menu_curses_migration.py``
-# imports it, but ``main.py`` itself is upstream-derived and the upstream project never
-# defined the symbol.  Body must match the fork byte-for-byte (minus its trailing blank
-# lines); module imports (``subprocess``) already exist at that point in main.py.
-_REASONING_EFFORT_FORK_BODY = '''def _prompt_reasoning_effort_selection(efforts, current_effort=""):
-    """Prompt for a reasoning effort. Returns effort, 'none', or None to keep current."""
-    deduped = list(
-        dict.fromkeys(
-            str(effort).strip().lower() for effort in efforts if str(effort).strip()
-        )
-    )
-    canonical_order = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
-    ordered = [effort for effort in canonical_order if effort in deduped]
-    ordered.extend(effort for effort in deduped if effort not in canonical_order)
-    if not ordered:
-        return None
-
-    def _label(effort):
-        if effort == current_effort:
-            return f"{effort}  \u2190 currently in use"
-        return effort
-
-    disable_label = "Disable reasoning"
-    skip_label = "Skip (keep current)"
-
-    if current_effort == "none":
-        default_idx = len(ordered)
-    elif current_effort in ordered:
-        default_idx = ordered.index(current_effort)
-    elif "medium" in ordered:
-        default_idx = ordered.index("medium")
-    else:
-        default_idx = 0
-
-    try:
-        from nastech_cli.curses_ui import curses_radiolist
-
-        choices = [_label(effort) for effort in ordered]
-        choices.append(disable_label)
-        choices.append(skip_label)
-        idx = curses_radiolist(
-            "Select reasoning effort:",
-            choices,
-            selected=default_idx,
-            cancel_returns=-1,
-        )
-        if idx < 0:
-            return None
-        print()
-        if idx < len(ordered):
-            return ordered[idx]
-        if idx == len(ordered):
-            return "none"
-        return None
-    except (ImportError, NotImplementedError, OSError, subprocess.SubprocessError):
-        pass
-
-    print("Select reasoning effort:")
-    for i, effort in enumerate(ordered, 1):
-        print(f"  {i}. {_label(effort)}")
-    n = len(ordered)
-    print(f"  {n + 1}. {disable_label}")
-    print(f"  {n + 2}. {skip_label}")
-    print()
-
-    while True:
-        try:
-            choice = input(f"Choice [1-{n + 2}] (default: keep current): ").strip()
-            if not choice:
-                return None
-            idx = int(choice)
-            if 1 <= idx <= n:
-                return ordered[idx - 1]
-            if idx == n + 1:
-                return "none"
-            if idx == n + 2:
-                return None
-            print(f"Please enter 1-{n + 2}")
-        except ValueError:
-            print("Please enter a number")
-        except (KeyboardInterrupt, EOFError):
-            return None
-
-
-'''
-
-def _reconcile_reasoning_effort_selection(dst: str) -> int:
-    """Graft the fork's reasoning-effort picker into the branded main module.
-
-    The fork-owned ``tests/nastech_cli/test_setup_menu_curses_migration.py``
-    imports ``_prompt_reasoning_effort_selection`` from ``nastech_cli.main``,
-    but the module itself is upstream-derived and upstream never defined the
-    symbol — so the fork's preserved test raises ImportError at CI test time.
-    Patch main.py once to grow the fork-local function.
-    """
-    rel = "nastech_cli/main.py"
-    path = os.path.join(dst, rel)
-    if not os.path.isfile(path):
-        return 0
-    try:
-        text = open(path, encoding="utf-8").read()
-    except OSError:
-        return 0
-    if "def _prompt_reasoning_effort_selection(" in text:
-        return 0
-    anchor = "# ---- END PLUGIN-COMPAT ----\n"
-    if anchor in text:
-        text = text.replace(anchor, anchor + _REASONING_EFFORT_FORK_BODY, 1)
-    else:
-        # Upstream dropped the PLUGIN-COMPAT anchor; fall back to inserting
-        # the fork-local function at module scope right before ``def main():``
-        # so the preserved fork test can still import the symbol.
-        main_match = re.search(r"(?m)^def main\(", text)
-        if not main_match:
-            return 0
-        body = _REASONING_EFFORT_FORK_BODY
-        if not body.endswith("\n"):
-            body += "\n"
-        text = text[: main_match.start()] + body + text[main_match.start():]
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(text)
     return 1
@@ -10365,9 +10271,6 @@ def reconcile_tree(
     if _reconcile_telegram_mention_context_lengths(dst):
         result.total += 1
         result.fixed.append("tests/gateway/test_telegram_mention_context.py")
-    if _reconcile_reasoning_effort_selection(dst):
-        result.total += 1
-        result.fixed.append("nastech_cli/main.py")
     if _reconcile_apt_pool_first_char(dst):
         result.total += 1
         result.fixed.append("tests/scripts/test_stage_apt_repo.py")
@@ -10928,15 +10831,26 @@ def package_zip(snapshot_dir: str, out_path: str, reports: dict[str, str],
           <report_1>.md            # report 1, at zip root (outside project)
           <report_2>.md            # report 2, at zip root (outside project)
 
-    The report files and manifest live in the snapshot dir as source-of-truth
-    but are kept OUT of the project folder - only the branded tree goes in.
+    The report files, the run manifest and the commit-subject log live in the
+    snapshot dir as source-of-truth but are kept OUT of the project folder -
+    only the branded tree goes in.  Run metadata must never reach the product
+    tree: the update-PR workflow commits the project folder verbatim, so a
+    metadata file here would become a permanent fork-local resident carried
+    forward by the preserve stage.
     """
     out_path = os.path.abspath(out_path)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    skip = {"manifest.json", "UPDATE-REPORT.md", "GATE-REPORT.md"}
+    skip = {
+        "manifest.json", "UPDATE-REPORT.md", "GATE-REPORT.md", "SYNC-SUMMARY.md",
+        "PUBLICATION-AUTHORIZATION-RECEIPT.json", "commit-subjects.jsonl",
+    }
+
+    def _skipped(rel: str) -> bool:
+        return rel in skip or rel.startswith("reports/")
+
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for rel in _walk_files(snapshot_dir):
-            if rel in skip:
+            if _skipped(rel):
                 continue
             full = os.path.join(snapshot_dir, rel)
             zf.write(full, os.path.join(project_name, rel))
@@ -11075,7 +10989,7 @@ class UpdateManager:
         src = hermes_path(self.updates_dir)
         baseline_sha = previous_upstream_sha(
             self.updates_dir, number
-        ) or fork_manifest_upstream_sha(self.fork_root)
+        ) or fork_manifest_upstream_sha(self.fork_root) or engine_baseline_sha(self.fork_root)
         evidence = stage(
             "source-evidence",
             lambda: (
@@ -11138,7 +11052,6 @@ class UpdateManager:
                 self.rules,
                 obsolete_upstream_paths=source_delta.obsolete_mapped,
                 owned_paths=set(self.owned.mapping) if self.owned else set(),
-                allow_unclassified_fork_files=bool(baseline_sha),
             )
             # The picker test exists only in the fork, so this is the first moment its
             # text is in the tree; binding its fake to the live widget signature keeps

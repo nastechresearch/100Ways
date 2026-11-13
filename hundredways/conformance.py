@@ -32,6 +32,7 @@ from .updates import (
     _reconcile_skill_docs_order,
     apply_owned_assets,
     brand_tree,
+    engine_baseline_sha,
     fork_manifest_upstream_sha,
     reconcile_tree,
     verify_branded,
@@ -112,11 +113,13 @@ def _replay_fork_preservation(
     must reproduce them from the fork -- never trust the candidate -- or a
     reconciled fork file would be reported as a source-parity mismatch.  The
     source delta is recomputed exactly as the pipeline does (baseline from the
-    fork manifest, upstream from the source clone's HEAD).
+    fork manifest or the engine state, upstream from the source clone's HEAD).
     """
     if not fork_root or not os.path.isdir(fork_root):
         return []
-    baseline_sha = fork_manifest_upstream_sha(fork_root)
+    baseline_sha = (
+        fork_manifest_upstream_sha(fork_root) or engine_baseline_sha(fork_root)
+    )
     try:
         delta = source_tree_delta(
             source, baseline_sha, _conformance_upstream_sha(source), rules
@@ -130,7 +133,6 @@ def _replay_fork_preservation(
         rules,
         obsolete_upstream_paths=delta.obsolete_mapped,
         owned_paths=set(owned.mapping) if owned else set(),
-        allow_unclassified_fork_files=bool(baseline_sha),
     )
 
 
