@@ -21,6 +21,18 @@ _ALLOWED_ARCHIVE_ROOT_FILES = {
     "SYNC-SUMMARY.md",
     "UPDATE-REPORT.md",
 }
+# Run metadata that must never ride the product archive.  Provenance lives in
+# the factory's own state (``state/baseline.json``, maintained by the
+# branded-update workflow) and the candidate snapshot -- the product tree's
+# only job is to be the branded software.  A metadata entry inside the
+# product root means a packaging path regressed to carrying run metadata
+# into the product.
+PRODUCT_METADATA_EXCLUSIONS: tuple[str, ...] = (
+    "manifest.json",
+    "commit-subjects.jsonl",
+    "PUBLICATION-AUTHORIZATION-RECEIPT.json",
+)
+_PRODUCT_METADATA_DIRS: tuple[str, ...] = ("reports/",)
 
 
 @dataclass(frozen=True)
@@ -174,7 +186,6 @@ def audit_candidate_archive(path: str | Path) -> list[IntegrityIssue]:
         return [IntegrityIssue("candidate-archive", archive_path.name, "archive is unavailable")]
     issues: list[IntegrityIssue] = []
     names: dict[str, str] = {}
-    expected_manifest = f"{ARCHIVE_ROOT}/manifest.json"
     try:
         with zipfile.ZipFile(archive_path) as archive:
             infos = archive.infolist()
@@ -202,10 +213,22 @@ def audit_candidate_archive(path: str | Path) -> list[IntegrityIssue]:
                     issues.append(IntegrityIssue("archive-root", name, "unexpected archive root entry"))
                 if name.startswith(f"{ARCHIVE_ROOT}/.git/") or name == f"{ARCHIVE_ROOT}/.git":
                     issues.append(IntegrityIssue("archive-git-metadata", name, "archive contains Git metadata"))
+                if top == ARCHIVE_ROOT:
+                    product_relative = name[len(ARCHIVE_ROOT) + 1:]
+                    metadata_hit = (
+                        product_relative in PRODUCT_METADATA_EXCLUSIONS
+                        or product_relative.startswith(_PRODUCT_METADATA_DIRS)
+                    )
+                    if metadata_hit:
+                        issues.append(
+                            IntegrityIssue(
+                                "archive-metadata",
+                                name,
+                                "run metadata must not ride the product archive",
+                            )
+                        )
                 if info.file_size and info.compress_size and info.file_size / info.compress_size > 250:
                     issues.append(IntegrityIssue("archive-compression-ratio", name, "compression ratio exceeds safety limit"))
     except (OSError, zipfile.BadZipFile) as exc:
         return [IntegrityIssue("candidate-archive", archive_path.name, f"invalid archive: {exc}")]
-    if expected_manifest not in names.values():
-        issues.append(IntegrityIssue("archive-manifest", expected_manifest, "candidate archive lacks its manifest"))
     return issues

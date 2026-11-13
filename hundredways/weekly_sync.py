@@ -89,7 +89,7 @@ HARDENED_CI_CAPABILITIES: tuple[str, ...] = (
     "candidate-tree-case-collision-audit", "candidate-tree-control-path-audit",
     "candidate-tree-unsafe-mode-audit", "deterministic-candidate-tree-digest",
     "archive-path-traversal-audit", "archive-root-inventory-audit",
-    "archive-manifest-presence-audit", "archive-symlink-audit",
+    "archive-metadata-exclusion-audit", "archive-symlink-audit",
     "archive-unsafe-mode-audit", "archive-compression-ratio-audit",
     "receipt-tree-digest-binding", "upstream-release-tag-source-binding",
     "nastech-release-tag-collision-audit", "manual-release-only-authorization",

@@ -3594,6 +3594,9 @@ def test_package_zip_excludes_reports_from_project(tmp_path):
     (snapshot / "app" / "main.py").write_text("x\n")
     (snapshot / "UPDATE-REPORT.md").write_text("rep1\n")
     (snapshot / "GATE-REPORT.md").write_text("rep2\n")
+    (snapshot / "manifest.json").write_text('{"upstream_sha": "%s"}\n' % ("a" * 40))
+    (snapshot / "commit-subjects.jsonl").write_text("abc subject\n")
+    (snapshot / "PUBLICATION-AUTHORIZATION-RECEIPT.json").write_text("{}\n")
     out = str(tmp_path / "out.zip")
     package_zip(str(snapshot), out, {"UPDATE-REPORT.md": "rep1\n", "GATE-REPORT.md": "rep2\n"})
     with zipfile.ZipFile(out) as zf:
@@ -3601,6 +3604,14 @@ def test_package_zip_excludes_reports_from_project(tmp_path):
     assert "nastech-agent/app/main.py" in names
     assert "UPDATE-REPORT.md" in names
     assert not any(n.startswith("nastech-agent/") and n.endswith("REPORT.md") for n in names)
+    # Run metadata never rides the product archive -- the exact property
+    # audit_candidate_archive now enforces (the gate receipt rejects it).
+    assert not any(n.startswith("nastech-agent/manifest.json") for n in names)
+    assert not any(n.startswith("nastech-agent/commit-subjects.jsonl") for n in names)
+    assert not any(n.startswith("nastech-agent/PUBLICATION-AUTHORIZATION-RECEIPT") for n in names)
+    from hundredways.integrity import audit_candidate_archive
+
+    assert audit_candidate_archive(out) == []
 
 
 def test_contributor_emails_are_mapped_without_data_loss(tmp_path):

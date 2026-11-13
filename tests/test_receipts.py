@@ -17,7 +17,8 @@ from hundredways.weekly_sync import WeeklyFullSyncReport
 
 def _candidate_archive(path) -> None:
     with zipfile.ZipFile(path, "w") as archive:
-        archive.writestr("nastech-agent/manifest.json", "{}")
+        # Run metadata (manifest.json et al.) never rides the product
+        # archive; the fixture mirrors the packaging policy exactly.
         archive.writestr("nastech-agent/README.md", "verified tree")
 
 
@@ -54,6 +55,21 @@ def test_gate_receipt_binds_pass_decision_source_and_artifact(tmp_path):
     assert receipt["candidate_artifact"]["sha256"] == sha256_file(artifact)
     assert len(receipt["integrity"]["payload_sha256"]) == 64
     assert verify_receipt_integrity(receipt) is True
+
+
+def test_gate_receipt_rejects_archive_carrying_run_metadata(tmp_path):
+    """An archive with run metadata cannot be authorized: packaging regressed."""
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / "manifest.json").write_text("{}")
+    artifact = tmp_path / "candidate.zip"
+    with zipfile.ZipFile(artifact, "w") as archive:
+        archive.writestr("nastech-agent/manifest.json", "{}")
+
+    with pytest.raises(ValueError, match="archive-metadata"):
+        build_gate_decision_receipt(
+            _passing_report(), candidate_root=candidate, artifact_path=artifact
+        )
 
 
 def test_publication_receipt_requires_pass_gate_and_is_pr_only(tmp_path):

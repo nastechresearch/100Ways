@@ -101,6 +101,77 @@ def test_commit_stream_rejects_missing_baseline(tmp_path):
         load_baseline_sha(target)
 
 
+def test_load_baseline_sha_falls_back_to_factory_state(tmp_path, monkeypatch):
+    """Without a product manifest, provenance comes from the factory's state.
+
+    The product tree stopped carrying manifest.json when run metadata left
+    the product; the fallback is consulted only for a real checkout (a
+    ``.git`` dir), exactly like ``engine_baseline_sha`` -- the fixture needs
+    one, and the factory root is redirected so the recorded repository state
+    never leaks into the test.
+    """
+    import hundredways.updates as updates_module
+
+    target = tmp_path / "nastech"
+    target.mkdir()
+    _git(target, "init")
+    factory = tmp_path / "factory"
+    (factory / "state").mkdir(parents=True)
+    (factory / "state" / "baseline.json").write_text(
+        json.dumps({"upstream_sha": "a" * 40}), encoding="utf-8"
+    )
+    monkeypatch.setattr(updates_module, "engine_repo_root", lambda: str(factory))
+
+    assert load_baseline_sha(target) == "a" * 40
+
+
+def test_load_baseline_sha_without_checkout_ignores_factory_state(tmp_path, monkeypatch):
+    """A tree without git history is not the product: the fallback stays off."""
+    import hundredways.updates as updates_module
+
+    target = tmp_path / "nastech"
+    target.mkdir()
+    factory = tmp_path / "factory"
+    (factory / "state").mkdir(parents=True)
+    (factory / "state" / "baseline.json").write_text(
+        json.dumps({"upstream_sha": "a" * 40}), encoding="utf-8"
+    )
+    monkeypatch.setattr(updates_module, "engine_repo_root", lambda: str(factory))
+
+    with pytest.raises(RuntimeError, match="cannot read merged NasTech manifest"):
+        load_baseline_sha(target)
+
+
+def test_inspect_commit_stream_reads_candidate_from_factory_state(tmp_path, monkeypatch):
+    """An open candidate without a manifest is still audit context.
+
+    The candidate branch is the last branded tree; the factory state records
+    its SHA, so the monitor reports it as the open candidate without ever
+    using it as the merged baseline.
+    """
+    import hundredways.updates as updates_module
+
+    upstream, target, merged_baseline = _repos(tmp_path)
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    _commit(upstream, "candidate snapshot", "candidate\n")
+    _git(candidate, "init")
+    factory = tmp_path / "factory"
+    (factory / "state").mkdir(parents=True)
+    (factory / "state" / "baseline.json").write_text(
+        json.dumps({"upstream_sha": merged_baseline}), encoding="utf-8"
+    )
+    monkeypatch.setattr(updates_module, "engine_repo_root", lambda: str(factory))
+
+    decision = inspect_commit_stream(upstream, target, candidate_repo=candidate, threshold=5)
+
+    assert decision.baseline_sha == merged_baseline
+    assert decision.candidate_baseline_sha == merged_baseline
+    assert decision.status == "warming"
+    assert decision.pending_commits == 1
+    assert decision.trigger_sync is False
+
+
 def test_commit_stream_reports_open_candidate_without_using_it_as_baseline(tmp_path):
     upstream, target, merged_baseline = _repos(tmp_path)
     candidate = tmp_path / "candidate"

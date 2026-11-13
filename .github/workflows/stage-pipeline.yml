@@ -352,7 +352,13 @@ jobs:
               with open("nastech-agent/manifest.json", encoding="utf-8") as fh:
                   baseline = json.load(fh).get("upstream_sha", "")
           except (OSError, ValueError):
-              baseline = ""
+              # Run metadata left the product tree (manifest.json included):
+              # the factory's own state file records the last branded SHA.
+              try:
+                  with open("state/baseline.json", encoding="utf-8") as fh:
+                      baseline = json.load(fh).get("upstream_sha", "")
+              except (OSError, ValueError):
+                  baseline = ""
           write_sync_summary(
               os.environ["HUNDREDWAYS_SUMMARY"],
               upstream_repo=os.path.join(updates, "hermes-agent"),

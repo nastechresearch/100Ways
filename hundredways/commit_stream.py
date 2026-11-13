@@ -1,10 +1,12 @@
 """Commit-threshold monitor for the NasTech full-sync publisher.
 
 The monitor compares the exact upstream SHA recorded in the checked-out
-NasTech main branch's ``manifest.json`` with the current upstream head.  It
-never publishes anything itself.  It produces deterministic evidence for the
-workflow to notify operators below the threshold and to enable the complete
-100Ways verification chain once the threshold is reached.
+NasTech main branch's provenance (``manifest.json`` while the product still
+ships it, the factory's ``state/baseline.json`` once run metadata left the
+product) with the current upstream head.  It never publishes anything
+itself.  It produces deterministic evidence for the workflow to notify
+operators below the threshold and to enable the complete 100Ways
+verification chain once the threshold is reached.
 """
 from __future__ import annotations
 
@@ -106,15 +108,34 @@ def _git(repo: Path, *args: str, check: bool = True) -> str:
 
 
 def load_baseline_sha(nastech_repo: str | Path) -> str:
-    """Return the upstream SHA recorded by the last merged NasTech snapshot."""
+    """Return the upstream SHA recorded by the last merged NasTech snapshot.
+
+    Provenance lives in the factory's own state (``state/baseline.json``,
+    maintained by the branded-update workflow) -- the product tree stopped
+    carrying ``manifest.json`` when run metadata left the product.  The
+    manifest stays the primary source while a tree still ships it, so during
+    the migration the two sources simply agree.  Like
+    :func:`hundredways.updates.engine_baseline_sha`, the state fallback is
+    consulted only for a real checkout (one with a ``.git`` dir): a fixture
+    tree without git history is not the product, so unit-test runs stay
+    isolated from the recorded state.  Failing both sources raises: a silent
+    wrong baseline would miscount the pending-commit threshold.
+    """
     manifest = Path(nastech_repo) / "manifest.json"
     try:
         data = json.loads(manifest.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
-        raise RuntimeError(f"cannot read merged NasTech manifest: {manifest}") from error
-    baseline = data.get("upstream_sha")
-    if not isinstance(baseline, str) or len(baseline) < 12:
+    except (OSError, ValueError):
+        data = None
+    if data is not None:
+        baseline = data.get("upstream_sha")
+        if isinstance(baseline, str) and len(baseline) >= 12:
+            return baseline
         raise RuntimeError("merged NasTech manifest has no valid upstream_sha")
+    from .updates import engine_baseline_sha
+
+    baseline = engine_baseline_sha(str(nastech_repo))
+    if not baseline:
+        raise RuntimeError(f"cannot read merged NasTech manifest: {manifest}")
     return baseline
 
 
@@ -132,8 +153,11 @@ def inspect_commit_stream(
     upstream = Path(upstream_repo)
     merged_baseline = load_baseline_sha(nastech_repo)
     candidate_baseline = ""
-    if candidate_repo is not None and (Path(candidate_repo) / "manifest.json").is_file():
-        candidate_baseline = load_baseline_sha(candidate_repo)
+    if candidate_repo is not None:
+        try:
+            candidate_baseline = load_baseline_sha(candidate_repo)
+        except RuntimeError:
+            candidate_baseline = ""
     # Thresholds measure what NasTech main is missing.  An open candidate is
     # audit context only; it must never hide a 50+ commit backlog from main.
     baseline = merged_baseline
