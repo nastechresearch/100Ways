@@ -2018,6 +2018,11 @@ def _reconcile_docs_search_hydration_gate(dst: str) -> bool:
     ``_reconcile_plugin_guard_trusted_installer_hosts`` restores the one
     site-specific reference a global brand rule cannot fix.
 
+    Upstream's ``checkBrowser`` has since grown its own cure (the probe clicks
+    inside a ``while (!(await input.isVisible()))`` loop under a 30 s
+    deadline), so a tree branded from that shape needs no gate: this rule
+    recognises the loop and leaves the file alone.
+
     The gate waits for ``.DocSearch-Button-Keys kbd``, absent from the server
     render and present only once the widget has mounted.  Its bound is
     ``REQUEST_TIMEOUT_MS``: the deadline this script already gives every round
@@ -2040,6 +2045,22 @@ def _reconcile_docs_search_hydration_gate(dst: str) -> bool:
     )
     if gate in text:
         # Already gated: the second pass is a no-op.
+        return False
+    # Upstream fixed the dropped click itself: `checkBrowser` now clicks the
+    # button inside a `while (!(await input.isVisible()))` loop under a 30 s
+    # deadline, so the probe no longer clicks straight after
+    # `domcontentloaded` -- it keeps clicking like a visitor until the modal
+    # opens.  That is the same cure this gate applied, from the source
+    # project's side, so the fork's rewrite is unnecessary there and the old
+    # anchors are gone on purpose.  Recognise the fix and leave the file
+    # alone; a future regression back to the single early click is caught by
+    # the needle branch below.
+    upstream_fix = (
+        "    const input = page.locator('.DocSearch-Input');\n"
+        "    const deadline = Date.now() + 30_000;\n"
+        "    while (!(await input.isVisible())) {\n"
+    )
+    if upstream_fix in text:
         return False
     goto_line = (
         "    await page.goto(`${DOCS_URL}/`, { waitUntil: 'domcontentloaded', timeout: 30_000 });\n"

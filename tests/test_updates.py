@@ -4492,6 +4492,41 @@ def test_reconcile_docs_search_hydration_gate_flags_a_moved_anchor(tmp_path):
         reconcile_tree(str(root))
 
 
+def test_reconcile_docs_search_hydration_gate_yields_to_upstreams_own_fix(tmp_path):
+    """Upstream's ``checkBrowser`` now clicks inside a
+    ``while (!(await input.isVisible()))`` loop under a 30 s deadline -- the
+    same cure this gate applied, from the source project's side.  A tree
+    branded from that shape needs no gate, and raising on it would stop every
+    sync until someone retargets an anchor there is nothing left to retarget.
+    """
+    root = tmp_path / "branded"
+    probe = _write_live_search_probe(root, (
+        "async function checkBrowser() {\n"
+        "  try {\n"
+        "    await page.goto(`${DOCS_URL}/`, { waitUntil: 'domcontentloaded', timeout: 30_000 });\n"
+        "    const input = page.locator('.DocSearch-Input');\n"
+        "    const deadline = Date.now() + 30_000;\n"
+        "    while (!(await input.isVisible())) {\n"
+        "      if (Date.now() > deadline) {\n"
+        "        fail('search button never opened the search modal within 30s');\n"
+        "        return;\n"
+        "      }\n"
+        "      await page.locator('.DocSearch-Button').first().click({ timeout: 20_000 });\n"
+        "      await input.waitFor({ state: 'visible', timeout: 2_000 }).catch(() => {});\n"
+        "    }\n"
+        "    await input.fill(QUERIES[0], { timeout: 10_000 });\n"
+        "  } finally {\n"
+        "    await browser.close();\n"
+        "  }\n"
+        "}\n"
+    ))
+
+    assert _reconcile_docs_search_hydration_gate(str(root)) is False
+    text = probe.read_text(encoding="utf-8")
+    assert "DocSearch-Button-Keys kbd" not in text   # no gate injected
+    assert "while (!(await input.isVisible())) {" in text
+
+
 def test_reconcile_tree_gates_the_probe_after_the_domain_rewrite(tmp_path):
     """The gate runs after branding, and is recorded as a reconciled path."""
     root = tmp_path / "branded"
