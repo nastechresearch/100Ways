@@ -9942,6 +9942,72 @@ class ForkDivergenceMergeError(ValueError):
     """
 
 
+#: The release-plane files whose collision answer is the fork's, decided per
+#: conflict hunk rather than per file.  Both sides of every hunk these paths
+#: produce are deliberate edits to the fork's owned release plane -- the
+#: unsigned-desktop candidate legs, the Termux APT channel, the sharded test
+#: lanes, the sync-PR catalog bypass -- so the fork's side is the documented
+#: resolution and upstream's variant of the same region is not wanted.  A hunk
+#: resolution, not a whole-file take: the rest of the merge still unions, so
+#: upstream's additions in non-conflicting regions of these files land as
+#: usual.  Anything colliding outside this table still fails the sync via
+#: :class:`ForkDivergenceMergeError` -- the default stays fail-closed; this
+#: table only names the plane the fork owns.
+#:
+#: Verified per file against the fork's own tree before admission here: the
+#: fork's ``publish_pointer`` carries the read-back digest check upstream's
+#: inline variant performs, and the fork deleted ``deploy-vercel`` itself.
+_FORK_PREFERRED_DIVERGENCE_FILES = (
+    ".github/workflows/deploy-site.yml",
+    ".github/workflows/desktop-bundled-release.yml",
+    ".github/workflows/js-tests.yml",
+    ".github/workflows/lint.yml",
+    ".github/workflows/plugin-catalog-ci.yml",
+    ".github/workflows/stable-release.yml",
+    ".github/workflows/tests.yml",
+    "scripts/bundles/release_artifacts.py",
+    "scripts/releases/channel_publish.py",
+    "tests/scripts/test_release_artifacts.py",
+    "tests/scripts/test_release_channels.py",
+    "tests/scripts/test_release_entrypoint.py",
+    "tests/scripts/test_release_lanes.py",
+    "tests/scripts/test_stable_release.py",
+)
+
+
+def _resolve_hunks_taking_fork(text: str) -> tuple[str, bool]:
+    """Replace every conflict hunk with the fork's side of it.
+
+    Used only for :data:`_FORK_PREFERRED_DIVERGENCE_FILES`: the merge has
+    already unioned both sides outside the hunks, so what remains is the
+    regions both parties rewrote, and there the fork's release-plane edit is
+    the answer.  ``False`` means no conflict markers survived; ``True`` means
+    the text was not the well-formed three-way output ``git merge-file``
+    produces and the caller must treat the file as unresolved.
+    """
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    index = 0
+    while index < len(lines):
+        if not lines[index].startswith("<<<<<<<"):
+            out.append(lines[index])
+            index += 1
+            continue
+        separator = index + 1
+        while separator < len(lines) and not lines[separator].startswith("======="):
+            separator += 1
+        end = separator + 1
+        while end < len(lines) and not lines[end].startswith(">>>>>>>"):
+            end += 1
+        if separator >= len(lines) or end >= len(lines):
+            # Not a well-formed hunk; keep the remainder conflicted.
+            out.extend(lines[index:])
+            return "".join(out), True
+        out.extend(lines[separator + 1:end])
+        index = end + 1
+    return "".join(out), False
+
+
 def _upstream_text_at(upstream_src: str, commit: str, rel: str) -> str | None:
     """Upstream's own text for ``rel`` at ``commit``, or ``None`` if unknown.
 
@@ -10100,6 +10166,30 @@ def _merge_fork_edits(base: str, ours: str, theirs: str) -> tuple[str, bool]:
     return proc.stdout, False
 
 
+def _merge_fork_edits_resolved(base: str, ours: str, theirs: str, rel: str,
+                               upstream_src: str,
+                               rules: BrandingRules) -> tuple[str, bool]:
+    """The merge, with every documented resolution the engine knows applied.
+
+    In order: the plain three-way merge, the import-union for import-only
+    hunks, ``_retry_from_branded`` for the table-quote collision, and finally
+    -- for :data:`_FORK_PREFERRED_DIVERGENCE_FILES` only -- the fork's side of
+    each remaining hunk.  ``True`` means the file stays unresolved and the
+    caller must not publish a tree carrying it merged.
+    """
+    merged, conflict = _merge_fork_edits(base, ours, theirs)
+    if not conflict:
+        return merged, False
+    if rel in _FORK_PREFERRED_DIVERGENCE_FILES:
+        resolved, conflicted = _resolve_hunks_taking_fork(merged)
+        if not conflicted:
+            return resolved, False
+    retry = _retry_from_branded(base, ours, theirs, upstream_src, rel, rules)
+    if retry is not None:
+        return retry, False
+    return merged, True
+
+
 def _upstream_head(upstream_src: str) -> str:
     """The commit ``brand_tree`` branded the candidate from, or ``""``."""
     if not upstream_src:
@@ -10195,13 +10285,11 @@ def _reconcile_fork_release_divergence(
         if ancestor is None:
             continue
         ancestor = rules.transform_text(ancestor)
-        merged, conflict = _merge_fork_edits(ancestor, ours, theirs)
+        merged, conflict = _merge_fork_edits_resolved(
+            ancestor, ours, theirs, rel, upstream_src, rules)
         if conflict:
-            merged = _retry_from_branded(ancestor, ours, theirs, upstream_src,
-                                         rel, rules)
-            if merged is None:
-                collided.append(rel)
-                continue
+            collided.append(rel)
+            continue
         if merged != ours:
             with open(ours_path, "w", encoding="utf-8") as fh:
                 fh.write(merged)

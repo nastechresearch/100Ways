@@ -9072,6 +9072,64 @@ def test_a_parenthesized_from_import_stays_conflicted():
     assert conflicted_flag is True
     assert "<<<<<<<" in resolved
 
+
+_POLICY_COLLISION_TIP = _MERGE_UPSTREAM_BASE.replace(
+    "def _touch(channel: str) -> None:\n    return None\n",
+    "def _touch(channel: str) -> None:\n    return None\n\n\nAUDIT_DAYS = 30\n",
+).replace(
+    "def _touch(channel: str) -> None:",
+    "def _record(channel: str) -> None:",
+).replace("_touch(", "_record(")
+
+_POLICY_COLLISION_FORK = _MERGE_UPSTREAM_BASE.replace(
+    'FEED = "https://cdn.example.test/feed"',
+    'FEED = "https://github.com/nastechresearch/nastech-agent/releases/download"',
+).replace(
+    "def _touch(channel: str) -> None:",
+    "def _reap(channel: str) -> None:",
+).replace("_touch(", "_reap(")
+
+
+def test_a_policy_table_file_resolves_its_collision_fork_side(tmp_path):
+    """The fork's owned release plane has a documented collision answer.
+
+    ``tests/scripts/test_stable_release.py`` is in
+    ``_FORK_PREFERRED_DIVERGENCE_FILES``: when both sides rewrote the same
+    region, the fork's side is the answer -- but only for that region.  The
+    rest of the merge still unions, so upstream's dry-run (added in a region
+    the fork left alone) lands alongside the fork's fix.
+    """
+    rel = "tests/scripts/test_stable_release.py"
+    dst, fork, hermes = _merge_tree(
+        tmp_path, _POLICY_COLLISION_TIP, _POLICY_COLLISION_FORK,
+        rel=rel, base_text=_MERGE_UPSTREAM_BASE)
+
+    fixed, unresolved = _reconcile_fork_release_divergence(
+        dst, fork_root=fork, upstream_src=hermes)
+
+    text = (Path(dst) / rel).read_text()
+    assert unresolved == []
+    assert fixed == [rel]
+    # The fork's side of the collided region.
+    assert "def _reap(channel: str) -> None:" in text
+    assert "_record" not in text
+    # Upstream's addition outside the collision still landed.
+    assert "AUDIT_DAYS = 30" in text
+    # The fork's non-collided fix rode the union too.
+    assert "releases/download" in text
+
+
+def test_an_off_table_body_collision_still_fails_the_sync(tmp_path):
+    """The policy table names the fork's owned plane and nothing else; a
+    collision in any other release-plane path stays fail-closed."""
+    dst, fork, hermes = _merge_probe_tree(tmp_path, _POLICY_COLLISION_TIP,
+                                          _POLICY_COLLISION_FORK,
+                                          rel="tests/scripts/test_off_table_probe.py")
+
+    with pytest.raises(ForkDivergenceMergeError) as excinfo:
+        reconcile_tree(dst, fork_root=fork, upstream_src=hermes)
+    assert "tests/scripts/test_off_table_probe.py" in str(excinfo.value)
+
 # ---------------------------------------------------------------------------
 # A pnpm lock's ui digest, which branding renames the key over but cannot move
 # ---------------------------------------------------------------------------
