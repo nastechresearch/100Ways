@@ -127,6 +127,9 @@ from hundredways.updates import (
     _reconcile_skill_description_hardline,
     _reconcile_skill_docs_order,
     _reconcile_fork_release_divergence,
+    ForkDivergenceMergeError,
+    _merge_fork_edits,
+    _resolve_import_conflict_hunks,
     _reconcile_pnpm_ui_integrity,
     _reconcile_store_gate_covers_the_lane,
     _reconcile_telegram_mention_context_lengths,
@@ -8912,6 +8915,127 @@ def test_a_collision_is_reported_not_guessed_at(tmp_path):
     assert fixed == []
     # The candidate is left exactly as branding and the span tables produced it.
     assert (Path(dst) / "scripts" / "releases" / "stable.py").read_text() == ours
+
+
+# Upstream and the fork both extend the same import block; the fork also
+# retires the bucket feed in a region upstream left alone.
+_IMPORT_MERGE_BASE = '''"""Publish one release."""
+
+from scripts.releases.channels import ChannelPublisher
+
+FEED = "https://cdn.example.test/feed"
+
+
+def publish(tag: str) -> str:
+    return f"{FEED}/{tag}"
+'''
+
+_IMPORT_MERGE_TIP = _IMPORT_MERGE_BASE.replace(
+    "from scripts.releases.channels import ChannelPublisher\n",
+    "from scripts.releases.channels import ChannelPublisher\n"
+    "from scripts.releases.desktop_targets import NATIVE_LEGS\n",
+)
+
+_IMPORT_MERGE_FORK = _IMPORT_MERGE_BASE.replace(
+    "from scripts.releases.channels import ChannelPublisher\n",
+    "from scripts.releases.channels import ChannelPublisher, write_immutable_feeds\n",
+).replace(
+    'FEED = "https://cdn.example.test/feed"',
+    'FEED = "https://github.com/nastechresearch/nastech-agent/releases/download"',
+)
+
+
+def test_an_import_only_conflict_unions_both_sides(tmp_path):
+    """Upstream adds one import where the fork adds another and the merge
+    refuses the whole file -- that is how ``channel_releases.py`` silently
+    lost the fork's termux advance for several syncs.  Import regions are
+    additive, so both sides' imports land and the fork's body fix rides with
+    them."""
+    dst, fork, hermes = _merge_tree(tmp_path, _IMPORT_MERGE_TIP, _IMPORT_MERGE_FORK,
+                                    base_text=_IMPORT_MERGE_BASE)
+
+    fixed, unresolved = _reconcile_fork_release_divergence(
+        dst, fork_root=fork, upstream_src=hermes)
+
+    text = (Path(dst) / "scripts" / "releases" / "stable.py").read_text()
+    assert unresolved == []
+    assert fixed == ["scripts/releases/stable.py"]
+    assert "from scripts.releases.desktop_targets import NATIVE_LEGS" in text
+    assert ("from scripts.releases.channels import "
+            "ChannelPublisher, write_immutable_feeds" in text)
+    assert "github.com/nastechresearch/nastech-agent/releases/download" in text
+
+
+def _merge_probe_tree(tmp_path, ours, theirs,
+                      rel="tests/scripts/test_divergence_probe.py"):
+    """The three trees the merge reads, in a path no other reconciler claims.
+
+    ``reconcile_tree`` runs every reconciler, and the release-lane ones
+    require anchors in the files they know -- a fixture colliding in
+    ``scripts/releases/stable.py`` trips ``SigningGatedLaneError`` before the
+    divergence merge is reached.  ``tests/scripts/`` is inside
+    ``_FORK_MERGE_PREFIXES`` and outside every anchor table.
+    """
+    return _merge_tree(tmp_path, ours, theirs, rel=rel)
+
+
+def test_a_body_collision_fails_reconcile_tree(tmp_path):
+    """A collision recorded and forgotten shipped a ``sequencer.py`` that
+    called a ``channel_releases.advance_termux_apt`` no sync had carried for
+    several updates.  ``reconcile_tree`` now raises, so conformance reports
+    the file and no candidate with a silently dropped release lane passes the
+    gate."""
+    theirs = _MERGE_FORK
+    ours = _MERGE_UPSTREAM_BASE.replace(
+        'FEED = "https://cdn.example.test/feed"',
+        'FEED = "https://pages.nastech.test/feed"',
+    )
+    dst, fork, hermes = _merge_probe_tree(tmp_path, ours, theirs)
+
+    with pytest.raises(ForkDivergenceMergeError) as excinfo:
+        reconcile_tree(dst, fork_root=fork, upstream_src=hermes)
+    assert "tests/scripts/test_divergence_probe.py" in str(excinfo.value)
+
+
+def test_the_import_union_resolves_the_real_conflict_shape():
+    """The exact hunk the 7d777095 sync produced: both sides extend the same
+    ``scripts.releases.channels`` import differently."""
+    conflicted = (
+        "from scripts.releases.progress import log\n"
+        "<<<<<<< ours\n"
+        "from scripts.releases.desktop_targets import NATIVE_LEGS\n"
+        "from scripts.releases.channels import ChannelPublisher, R2ChannelStore\n"
+        "=======\n"
+        "from scripts.releases.channels import ChannelPublisher, write_immutable_feeds\n"
+        ">>>>>>> theirs\n"
+        "from scripts.releases.r2_scope import channel_public_base\n"
+    )
+    resolved, conflicted_flag = _resolve_import_conflict_hunks(conflicted)
+
+    assert conflicted_flag is False
+    assert "from scripts.releases.desktop_targets import NATIVE_LEGS" in resolved
+    assert ("from scripts.releases.channels import "
+            "ChannelPublisher, R2ChannelStore, write_immutable_feeds" in resolved)
+    assert "<<<<<<<" not in resolved
+
+
+def test_a_parenthesized_from_import_stays_conflicted():
+    """A multi-line from-import is not something the union can express; the
+    hunk stays for the retry/`ForkDivergenceMergeError` path instead of
+    shipping a mangled import."""
+    conflicted = (
+        "<<<<<<< ours\n"
+        "from scripts.releases.channels import (\n"
+        "    ChannelPublisher,\n"
+        ")\n"
+        "=======\n"
+        "from scripts.releases.channels import ChannelPublisher\n"
+        ">>>>>>> theirs\n"
+    )
+    resolved, conflicted_flag = _resolve_import_conflict_hunks(conflicted)
+
+    assert conflicted_flag is True
+    assert "<<<<<<<" in resolved
 
 # ---------------------------------------------------------------------------
 # A pnpm lock's ui digest, which branding renames the key over but cannot move
