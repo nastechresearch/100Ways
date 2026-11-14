@@ -9956,7 +9956,11 @@ class ForkDivergenceMergeError(ValueError):
 #:
 #: Verified per file against the fork's own tree before admission here: the
 #: fork's ``publish_pointer`` carries the read-back digest check upstream's
-#: inline variant performs, and the fork deleted ``deploy-vercel`` itself.
+#: inline variant performs, the fork deleted ``deploy-vercel`` itself, and the
+#: fork's ``channel_releases.py`` references no ``desktop_targets`` name at all
+#: (it deleted the module too), so the one line the fork's side drops there is
+#: a deliberate unused-import removal -- keeping it would fail the fork's own
+#: pinned ``ruff check .`` with F401 on every sync.
 _FORK_PREFERRED_DIVERGENCE_FILES = (
     ".github/workflows/deploy-site.yml",
     ".github/workflows/desktop-bundled-release.yml",
@@ -9967,6 +9971,7 @@ _FORK_PREFERRED_DIVERGENCE_FILES = (
     ".github/workflows/tests.yml",
     "scripts/bundles/release_artifacts.py",
     "scripts/releases/channel_publish.py",
+    "scripts/releases/channel_releases.py",
     "tests/scripts/test_release_artifacts.py",
     "tests/scripts/test_release_channels.py",
     "tests/scripts/test_release_entrypoint.py",

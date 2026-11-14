@@ -9130,6 +9130,51 @@ def test_an_off_table_body_collision_still_fails_the_sync(tmp_path):
         reconcile_tree(dst, fork_root=fork, upstream_src=hermes)
     assert "tests/scripts/test_off_table_probe.py" in str(excinfo.value)
 
+
+_MERGE_UPSTREAM_WITH_IMPORT = _MERGE_UPSTREAM_BASE.replace(
+    'FEED = "https://cdn.example.test/feed"',
+    "from scripts.releases.channels import ChannelPublisher\n\n"
+    'FEED = "https://cdn.example.test/feed"',
+)
+
+_DELETION_TIP = _MERGE_UPSTREAM_WITH_IMPORT.replace(
+    "from scripts.releases.channels import ChannelPublisher\n",
+    "from scripts.releases.channels import ChannelPublisher\n"
+    "from scripts.releases.desktop_targets import NATIVE_LEGS\n",
+)
+
+# The fork dropped the module entirely: no import and no use of the names.
+_DELETION_FORK = _MERGE_UPSTREAM_WITH_IMPORT.replace(
+    "from scripts.releases.channels import ChannelPublisher\n", "",
+).replace(
+    "    return url\n",
+    "    return url.rstrip('/')\n",
+)
+
+
+def test_a_policy_table_deletion_wins_over_upstreams_import_edit(tmp_path):
+    """The real channel_releases.py hunk the 4b40ffb0ad sync produced: the
+    span tables already shaped the candidate's import block, so the only
+    conflict left is one line the fork deleted (its file references none of
+    the module's names and it deleted the module too).  A union cannot carry
+    a deletion, and keeping the line fails the fork's own ``ruff check .``
+    with F401 -- so on a policy-table file the fork's empty side is the
+    answer, while the fork's body fix in the region below still rides the
+    union."""
+    rel = "scripts/releases/channel_releases.py"
+    dst, fork, hermes = _merge_tree(
+        tmp_path, _DELETION_TIP, _DELETION_FORK,
+        rel=rel, base_text=_MERGE_UPSTREAM_WITH_IMPORT)
+
+    fixed, unresolved = _reconcile_fork_release_divergence(
+        dst, fork_root=fork, upstream_src=hermes)
+
+    text = (Path(dst) / rel).read_text()
+    assert unresolved == []
+    assert fixed == [rel]
+    assert "desktop_targets" not in text          # the deletion stands
+    assert "rstrip('/')" in text                  # the fork's body fix rode the union
+
 # ---------------------------------------------------------------------------
 # A pnpm lock's ui digest, which branding renames the key over but cannot move
 # ---------------------------------------------------------------------------
