@@ -2018,6 +2018,11 @@ def _reconcile_docs_search_hydration_gate(dst: str) -> bool:
     ``_reconcile_plugin_guard_trusted_installer_hosts`` restores the one
     site-specific reference a global brand rule cannot fix.
 
+    Upstream's ``checkBrowser`` has since grown its own cure (the probe clicks
+    inside a ``while (!(await input.isVisible()))`` loop under a 30 s
+    deadline), so a tree branded from that shape needs no gate: this rule
+    recognises the loop and leaves the file alone.
+
     The gate waits for ``.DocSearch-Button-Keys kbd``, absent from the server
     render and present only once the widget has mounted.  Its bound is
     ``REQUEST_TIMEOUT_MS``: the deadline this script already gives every round
@@ -2040,6 +2045,22 @@ def _reconcile_docs_search_hydration_gate(dst: str) -> bool:
     )
     if gate in text:
         # Already gated: the second pass is a no-op.
+        return False
+    # Upstream fixed the dropped click itself: `checkBrowser` now clicks the
+    # button inside a `while (!(await input.isVisible()))` loop under a 30 s
+    # deadline, so the probe no longer clicks straight after
+    # `domcontentloaded` -- it keeps clicking like a visitor until the modal
+    # opens.  That is the same cure this gate applied, from the source
+    # project's side, so the fork's rewrite is unnecessary there and the old
+    # anchors are gone on purpose.  Recognise the fix and leave the file
+    # alone; a future regression back to the single early click is caught by
+    # the needle branch below.
+    upstream_fix = (
+        "    const input = page.locator('.DocSearch-Input');\n"
+        "    const deadline = Date.now() + 30_000;\n"
+        "    while (!(await input.isVisible())) {\n"
+    )
+    if upstream_fix in text:
         return False
     goto_line = (
         "    await page.goto(`${DOCS_URL}/`, { waitUntil: 'domcontentloaded', timeout: 30_000 });\n"
@@ -9921,6 +9942,77 @@ class ForkDivergenceMergeError(ValueError):
     """
 
 
+#: The release-plane files whose collision answer is the fork's, decided per
+#: conflict hunk rather than per file.  Both sides of every hunk these paths
+#: produce are deliberate edits to the fork's owned release plane -- the
+#: unsigned-desktop candidate legs, the Termux APT channel, the sharded test
+#: lanes, the sync-PR catalog bypass -- so the fork's side is the documented
+#: resolution and upstream's variant of the same region is not wanted.  A hunk
+#: resolution, not a whole-file take: the rest of the merge still unions, so
+#: upstream's additions in non-conflicting regions of these files land as
+#: usual.  Anything colliding outside this table still fails the sync via
+#: :class:`ForkDivergenceMergeError` -- the default stays fail-closed; this
+#: table only names the plane the fork owns.
+#:
+#: Verified per file against the fork's own tree before admission here: the
+#: fork's ``publish_pointer`` carries the read-back digest check upstream's
+#: inline variant performs, the fork deleted ``deploy-vercel`` itself, and the
+#: fork's ``channel_releases.py`` references no ``desktop_targets`` name at all
+#: (it deleted the module too), so the one line the fork's side drops there is
+#: a deliberate unused-import removal -- keeping it would fail the fork's own
+#: pinned ``ruff check .`` with F401 on every sync.
+_FORK_PREFERRED_DIVERGENCE_FILES = (
+    ".github/workflows/deploy-site.yml",
+    ".github/workflows/desktop-bundled-release.yml",
+    ".github/workflows/js-tests.yml",
+    ".github/workflows/lint.yml",
+    ".github/workflows/plugin-catalog-ci.yml",
+    ".github/workflows/stable-release.yml",
+    ".github/workflows/tests.yml",
+    "scripts/bundles/release_artifacts.py",
+    "scripts/releases/channel_publish.py",
+    "scripts/releases/channel_releases.py",
+    "tests/scripts/test_release_artifacts.py",
+    "tests/scripts/test_release_channels.py",
+    "tests/scripts/test_release_entrypoint.py",
+    "tests/scripts/test_release_lanes.py",
+    "tests/scripts/test_stable_release.py",
+)
+
+
+def _resolve_hunks_taking_fork(text: str) -> tuple[str, bool]:
+    """Replace every conflict hunk with the fork's side of it.
+
+    Used only for :data:`_FORK_PREFERRED_DIVERGENCE_FILES`: the merge has
+    already unioned both sides outside the hunks, so what remains is the
+    regions both parties rewrote, and there the fork's release-plane edit is
+    the answer.  ``False`` means no conflict markers survived; ``True`` means
+    the text was not the well-formed three-way output ``git merge-file``
+    produces and the caller must treat the file as unresolved.
+    """
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    index = 0
+    while index < len(lines):
+        if not lines[index].startswith("<<<<<<<"):
+            out.append(lines[index])
+            index += 1
+            continue
+        separator = index + 1
+        while separator < len(lines) and not lines[separator].startswith("======="):
+            separator += 1
+        end = separator + 1
+        while end < len(lines) and not lines[end].startswith(">>>>>>>"):
+            end += 1
+        if separator >= len(lines) or end >= len(lines):
+            # Not a well-formed hunk; keep the remainder conflicted.
+            out.extend(lines[index:])
+            return "".join(out), True
+        out.extend(lines[separator + 1:end])
+        index = end + 1
+    return "".join(out), False
+
+
 def _upstream_text_at(upstream_src: str, commit: str, rel: str) -> str | None:
     """Upstream's own text for ``rel`` at ``commit``, or ``None`` if unknown.
 
@@ -9940,6 +10032,101 @@ def _upstream_text_at(upstream_src: str, commit: str, rel: str) -> str | None:
     return proc.stdout if proc.returncode == 0 else None
 
 
+_IMPORT_LINE_RE = re.compile(r"\s*(?:import\s+[\w.]+|from\s+[\w.]+\s+import\s+\S)")
+
+
+def _union_import_sides(ours: list[str], theirs: list[str]) -> list[str] | None:
+    """Union two conflict sides that each hold only import statements.
+
+    Plain ``import x`` lines dedupe; same-module ``from m import ...`` lines
+    coalesce into one line at the position the module was first imported.
+    Ordering is first-seen (ours first, then the fork's additions) so the
+    result is deterministic.  ``None`` means a side holds something this
+    union cannot express (parenthesized multi-line from-imports) and the
+    caller must keep the hunk conflicted.
+    """
+    entries: list[str] = []
+    seen: set[str] = set()
+    from_names: dict[str, list[str]] = {}
+    first_from: dict[str, int] = {}
+
+    for line in ours + theirs:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if "(" in stripped or ")" in stripped:
+            return None
+        match = re.match(r"from\s+([\w.]+)\s+import\s+(.+)$", stripped)
+        if match:
+            module, names = match.group(1), [
+                name.strip() for name in match.group(2).split(",") if name.strip()
+            ]
+            if module in from_names:
+                for name in names:
+                    if name not in from_names[module]:
+                        from_names[module].append(name)
+                        entries[first_from[module]] = (
+                            f"from {module} import {', '.join(from_names[module])}\n"
+                        )
+                continue
+            from_names[module] = names
+            first_from[module] = len(entries)
+            entries.append(f"from {module} import {', '.join(names)}\n")
+            continue
+        if stripped in seen:
+            continue
+        seen.add(stripped)
+        entries.append(line if line.endswith("\n") else line + "\n")
+    return entries
+
+
+def _resolve_import_conflict_hunks(text: str) -> tuple[str, bool]:
+    """Resolve conflict hunks whose both sides hold only import statements.
+
+    Import regions are additive: upstream and the fork both extend the same
+    block, and ``git merge-file`` refuses the whole file for that one hunk --
+    which is how a release lane silently lost its imports (and everything the
+    merge could otherwise have carried with them).  Union both sides instead;
+    any hunk whose sides are not all single-line import statements stays
+    conflicted and the caller treats the file as unresolved.
+
+    Returns the (possibly resolved) text and whether any hunk remains.
+    """
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    index = 0
+    unresolved = False
+    while index < len(lines):
+        line = lines[index]
+        if not line.startswith("<<<<<<<"):
+            out.append(line)
+            index += 1
+            continue
+        separator = index + 1
+        while separator < len(lines) and not lines[separator].startswith("======="):
+            separator += 1
+        end = separator + 1
+        while end < len(lines) and not lines[end].startswith(">>>>>>>"):
+            end += 1
+        if separator >= len(lines) or end >= len(lines):
+            out.extend(lines[index:])
+            return "".join(out), True
+        ours = lines[index + 1:separator]
+        theirs = lines[separator + 1:end]
+        if ours and theirs and all(
+            not l.strip() or _IMPORT_LINE_RE.match(l) for l in ours + theirs
+        ):
+            union = _union_import_sides(ours, theirs)
+            if union is not None:
+                out.extend(union)
+                index = end + 1
+                continue
+        out.extend(lines[index:end + 1])
+        index = end + 1
+        unresolved = True
+    return "".join(out), unresolved
+
+
 def _merge_fork_edits(base: str, ours: str, theirs: str) -> tuple[str, bool]:
     """Merge the fork's file over ``ours`` using ``base`` as the common ancestor.
 
@@ -9947,6 +10134,12 @@ def _merge_fork_edits(base: str, ours: str, theirs: str) -> tuple[str, bool]:
     is what a developer would get running the same merge, and it never produces
     output that silently mixes both sides' edits without saying so.  ``-p``
     keeps the tree read-only until the merge is known to be clean.
+
+    The one exception is an import-only conflict: upstream and the fork both
+    extend the same import block, git refuses the whole file for it, and a
+    file that ships without either side's imports is an ImportError -- the
+    loudest way to lose a release lane.  Those hunks are unioned (both sides'
+    imports land); every other conflict leaves the file unresolved.
 
     The boolean is ``True`` when the two sides collided (or git could not say)
     -- callers must treat that as unresolved, never as "keep either side".
@@ -9972,7 +10165,34 @@ def _merge_fork_edits(base: str, ours: str, theirs: str) -> tuple[str, bool]:
         shutil.rmtree(workdir, ignore_errors=True)
     if proc.returncode < 0:
         return ours, True
-    return proc.stdout, proc.returncode > 0
+    if proc.returncode > 0:
+        resolved, conflicted = _resolve_import_conflict_hunks(proc.stdout)
+        return resolved, conflicted
+    return proc.stdout, False
+
+
+def _merge_fork_edits_resolved(base: str, ours: str, theirs: str, rel: str,
+                               upstream_src: str,
+                               rules: BrandingRules) -> tuple[str, bool]:
+    """The merge, with every documented resolution the engine knows applied.
+
+    In order: the plain three-way merge, the import-union for import-only
+    hunks, ``_retry_from_branded`` for the table-quote collision, and finally
+    -- for :data:`_FORK_PREFERRED_DIVERGENCE_FILES` only -- the fork's side of
+    each remaining hunk.  ``True`` means the file stays unresolved and the
+    caller must not publish a tree carrying it merged.
+    """
+    merged, conflict = _merge_fork_edits(base, ours, theirs)
+    if not conflict:
+        return merged, False
+    if rel in _FORK_PREFERRED_DIVERGENCE_FILES:
+        resolved, conflicted = _resolve_hunks_taking_fork(merged)
+        if not conflicted:
+            return resolved, False
+    retry = _retry_from_branded(base, ours, theirs, upstream_src, rel, rules)
+    if retry is not None:
+        return retry, False
+    return merged, True
 
 
 def _upstream_head(upstream_src: str) -> str:
@@ -10070,13 +10290,11 @@ def _reconcile_fork_release_divergence(
         if ancestor is None:
             continue
         ancestor = rules.transform_text(ancestor)
-        merged, conflict = _merge_fork_edits(ancestor, ours, theirs)
+        merged, conflict = _merge_fork_edits_resolved(
+            ancestor, ours, theirs, rel, upstream_src, rules)
         if conflict:
-            merged = _retry_from_branded(ancestor, ours, theirs, upstream_src,
-                                         rel, rules)
-            if merged is None:
-                collided.append(rel)
-                continue
+            collided.append(rel)
+            continue
         if merged != ours:
             with open(ours_path, "w", encoding="utf-8") as fh:
                 fh.write(merged)
@@ -10451,6 +10669,19 @@ def reconcile_tree(
         result.total += 1
         result.fixed.append(rel)
     result.unresolved = _collided
+    if _collided:
+        # The docstring on this class is the contract: a collision is a silent
+        # choice about what users download, and both choices have shipped
+        # quietly broken release lanes before -- the fork's termux APT advance
+        # (``channel_releases.advance_termux_apt``) vanished for several syncs
+        # while ``sequencer.py`` kept calling it, because this collision was
+        # recorded and never raised.  Fail the candidate here so conformance
+        # reports it and no branded update leaves with a lane the fork's own
+        # tree does not have.
+        raise ForkDivergenceMergeError(
+            "the fork and upstream changed the same release-plane region "
+            "differently; resolve before this update can publish: "
+            f"{', '.join(_collided)}")
     # Upstream's seed constant is dead code upstream -- a published head has
     # overridden it on every read -- but with zero fork stables published it IS
     # this fork's version line, so it is re-derived from the stable tags the

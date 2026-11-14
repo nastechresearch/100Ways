@@ -127,6 +127,9 @@ from hundredways.updates import (
     _reconcile_skill_description_hardline,
     _reconcile_skill_docs_order,
     _reconcile_fork_release_divergence,
+    ForkDivergenceMergeError,
+    _merge_fork_edits,
+    _resolve_import_conflict_hunks,
     _reconcile_pnpm_ui_integrity,
     _reconcile_store_gate_covers_the_lane,
     _reconcile_telegram_mention_context_lengths,
@@ -4487,6 +4490,41 @@ def test_reconcile_docs_search_hydration_gate_flags_a_moved_anchor(tmp_path):
 
     with pytest.raises(DocsSearchHydrationGateError):
         reconcile_tree(str(root))
+
+
+def test_reconcile_docs_search_hydration_gate_yields_to_upstreams_own_fix(tmp_path):
+    """Upstream's ``checkBrowser`` now clicks inside a
+    ``while (!(await input.isVisible()))`` loop under a 30 s deadline -- the
+    same cure this gate applied, from the source project's side.  A tree
+    branded from that shape needs no gate, and raising on it would stop every
+    sync until someone retargets an anchor there is nothing left to retarget.
+    """
+    root = tmp_path / "branded"
+    probe = _write_live_search_probe(root, (
+        "async function checkBrowser() {\n"
+        "  try {\n"
+        "    await page.goto(`${DOCS_URL}/`, { waitUntil: 'domcontentloaded', timeout: 30_000 });\n"
+        "    const input = page.locator('.DocSearch-Input');\n"
+        "    const deadline = Date.now() + 30_000;\n"
+        "    while (!(await input.isVisible())) {\n"
+        "      if (Date.now() > deadline) {\n"
+        "        fail('search button never opened the search modal within 30s');\n"
+        "        return;\n"
+        "      }\n"
+        "      await page.locator('.DocSearch-Button').first().click({ timeout: 20_000 });\n"
+        "      await input.waitFor({ state: 'visible', timeout: 2_000 }).catch(() => {});\n"
+        "    }\n"
+        "    await input.fill(QUERIES[0], { timeout: 10_000 });\n"
+        "  } finally {\n"
+        "    await browser.close();\n"
+        "  }\n"
+        "}\n"
+    ))
+
+    assert _reconcile_docs_search_hydration_gate(str(root)) is False
+    text = probe.read_text(encoding="utf-8")
+    assert "DocSearch-Button-Keys kbd" not in text   # no gate injected
+    assert "while (!(await input.isVisible())) {" in text
 
 
 def test_reconcile_tree_gates_the_probe_after_the_domain_rewrite(tmp_path):
@@ -8912,6 +8950,230 @@ def test_a_collision_is_reported_not_guessed_at(tmp_path):
     assert fixed == []
     # The candidate is left exactly as branding and the span tables produced it.
     assert (Path(dst) / "scripts" / "releases" / "stable.py").read_text() == ours
+
+
+# Upstream and the fork both extend the same import block; the fork also
+# retires the bucket feed in a region upstream left alone.
+_IMPORT_MERGE_BASE = '''"""Publish one release."""
+
+from scripts.releases.channels import ChannelPublisher
+
+FEED = "https://cdn.example.test/feed"
+
+
+def publish(tag: str) -> str:
+    return f"{FEED}/{tag}"
+'''
+
+_IMPORT_MERGE_TIP = _IMPORT_MERGE_BASE.replace(
+    "from scripts.releases.channels import ChannelPublisher\n",
+    "from scripts.releases.channels import ChannelPublisher\n"
+    "from scripts.releases.desktop_targets import NATIVE_LEGS\n",
+)
+
+_IMPORT_MERGE_FORK = _IMPORT_MERGE_BASE.replace(
+    "from scripts.releases.channels import ChannelPublisher\n",
+    "from scripts.releases.channels import ChannelPublisher, write_immutable_feeds\n",
+).replace(
+    'FEED = "https://cdn.example.test/feed"',
+    'FEED = "https://github.com/nastechresearch/nastech-agent/releases/download"',
+)
+
+
+def test_an_import_only_conflict_unions_both_sides(tmp_path):
+    """Upstream adds one import where the fork adds another and the merge
+    refuses the whole file -- that is how ``channel_releases.py`` silently
+    lost the fork's termux advance for several syncs.  Import regions are
+    additive, so both sides' imports land and the fork's body fix rides with
+    them."""
+    dst, fork, hermes = _merge_tree(tmp_path, _IMPORT_MERGE_TIP, _IMPORT_MERGE_FORK,
+                                    base_text=_IMPORT_MERGE_BASE)
+
+    fixed, unresolved = _reconcile_fork_release_divergence(
+        dst, fork_root=fork, upstream_src=hermes)
+
+    text = (Path(dst) / "scripts" / "releases" / "stable.py").read_text()
+    assert unresolved == []
+    assert fixed == ["scripts/releases/stable.py"]
+    assert "from scripts.releases.desktop_targets import NATIVE_LEGS" in text
+    assert ("from scripts.releases.channels import "
+            "ChannelPublisher, write_immutable_feeds" in text)
+    assert "github.com/nastechresearch/nastech-agent/releases/download" in text
+
+
+def _merge_probe_tree(tmp_path, ours, theirs,
+                      rel="tests/scripts/test_divergence_probe.py"):
+    """The three trees the merge reads, in a path no other reconciler claims.
+
+    ``reconcile_tree`` runs every reconciler, and the release-lane ones
+    require anchors in the files they know -- a fixture colliding in
+    ``scripts/releases/stable.py`` trips ``SigningGatedLaneError`` before the
+    divergence merge is reached.  ``tests/scripts/`` is inside
+    ``_FORK_MERGE_PREFIXES`` and outside every anchor table.
+    """
+    return _merge_tree(tmp_path, ours, theirs, rel=rel)
+
+
+def test_a_body_collision_fails_reconcile_tree(tmp_path):
+    """A collision recorded and forgotten shipped a ``sequencer.py`` that
+    called a ``channel_releases.advance_termux_apt`` no sync had carried for
+    several updates.  ``reconcile_tree`` now raises, so conformance reports
+    the file and no candidate with a silently dropped release lane passes the
+    gate."""
+    theirs = _MERGE_FORK
+    ours = _MERGE_UPSTREAM_BASE.replace(
+        'FEED = "https://cdn.example.test/feed"',
+        'FEED = "https://pages.nastech.test/feed"',
+    )
+    dst, fork, hermes = _merge_probe_tree(tmp_path, ours, theirs)
+
+    with pytest.raises(ForkDivergenceMergeError) as excinfo:
+        reconcile_tree(dst, fork_root=fork, upstream_src=hermes)
+    assert "tests/scripts/test_divergence_probe.py" in str(excinfo.value)
+
+
+def test_the_import_union_resolves_the_real_conflict_shape():
+    """The exact hunk the 7d777095 sync produced: both sides extend the same
+    ``scripts.releases.channels`` import differently."""
+    conflicted = (
+        "from scripts.releases.progress import log\n"
+        "<<<<<<< ours\n"
+        "from scripts.releases.desktop_targets import NATIVE_LEGS\n"
+        "from scripts.releases.channels import ChannelPublisher, R2ChannelStore\n"
+        "=======\n"
+        "from scripts.releases.channels import ChannelPublisher, write_immutable_feeds\n"
+        ">>>>>>> theirs\n"
+        "from scripts.releases.r2_scope import channel_public_base\n"
+    )
+    resolved, conflicted_flag = _resolve_import_conflict_hunks(conflicted)
+
+    assert conflicted_flag is False
+    assert "from scripts.releases.desktop_targets import NATIVE_LEGS" in resolved
+    assert ("from scripts.releases.channels import "
+            "ChannelPublisher, R2ChannelStore, write_immutable_feeds" in resolved)
+    assert "<<<<<<<" not in resolved
+
+
+def test_a_parenthesized_from_import_stays_conflicted():
+    """A multi-line from-import is not something the union can express; the
+    hunk stays for the retry/`ForkDivergenceMergeError` path instead of
+    shipping a mangled import."""
+    conflicted = (
+        "<<<<<<< ours\n"
+        "from scripts.releases.channels import (\n"
+        "    ChannelPublisher,\n"
+        ")\n"
+        "=======\n"
+        "from scripts.releases.channels import ChannelPublisher\n"
+        ">>>>>>> theirs\n"
+    )
+    resolved, conflicted_flag = _resolve_import_conflict_hunks(conflicted)
+
+    assert conflicted_flag is True
+    assert "<<<<<<<" in resolved
+
+
+_POLICY_COLLISION_TIP = _MERGE_UPSTREAM_BASE.replace(
+    "def _touch(channel: str) -> None:\n    return None\n",
+    "def _touch(channel: str) -> None:\n    return None\n\n\nAUDIT_DAYS = 30\n",
+).replace(
+    "def _touch(channel: str) -> None:",
+    "def _record(channel: str) -> None:",
+).replace("_touch(", "_record(")
+
+_POLICY_COLLISION_FORK = _MERGE_UPSTREAM_BASE.replace(
+    'FEED = "https://cdn.example.test/feed"',
+    'FEED = "https://github.com/nastechresearch/nastech-agent/releases/download"',
+).replace(
+    "def _touch(channel: str) -> None:",
+    "def _reap(channel: str) -> None:",
+).replace("_touch(", "_reap(")
+
+
+def test_a_policy_table_file_resolves_its_collision_fork_side(tmp_path):
+    """The fork's owned release plane has a documented collision answer.
+
+    ``tests/scripts/test_stable_release.py`` is in
+    ``_FORK_PREFERRED_DIVERGENCE_FILES``: when both sides rewrote the same
+    region, the fork's side is the answer -- but only for that region.  The
+    rest of the merge still unions, so upstream's dry-run (added in a region
+    the fork left alone) lands alongside the fork's fix.
+    """
+    rel = "tests/scripts/test_stable_release.py"
+    dst, fork, hermes = _merge_tree(
+        tmp_path, _POLICY_COLLISION_TIP, _POLICY_COLLISION_FORK,
+        rel=rel, base_text=_MERGE_UPSTREAM_BASE)
+
+    fixed, unresolved = _reconcile_fork_release_divergence(
+        dst, fork_root=fork, upstream_src=hermes)
+
+    text = (Path(dst) / rel).read_text()
+    assert unresolved == []
+    assert fixed == [rel]
+    # The fork's side of the collided region.
+    assert "def _reap(channel: str) -> None:" in text
+    assert "_record" not in text
+    # Upstream's addition outside the collision still landed.
+    assert "AUDIT_DAYS = 30" in text
+    # The fork's non-collided fix rode the union too.
+    assert "releases/download" in text
+
+
+def test_an_off_table_body_collision_still_fails_the_sync(tmp_path):
+    """The policy table names the fork's owned plane and nothing else; a
+    collision in any other release-plane path stays fail-closed."""
+    dst, fork, hermes = _merge_probe_tree(tmp_path, _POLICY_COLLISION_TIP,
+                                          _POLICY_COLLISION_FORK,
+                                          rel="tests/scripts/test_off_table_probe.py")
+
+    with pytest.raises(ForkDivergenceMergeError) as excinfo:
+        reconcile_tree(dst, fork_root=fork, upstream_src=hermes)
+    assert "tests/scripts/test_off_table_probe.py" in str(excinfo.value)
+
+
+_MERGE_UPSTREAM_WITH_IMPORT = _MERGE_UPSTREAM_BASE.replace(
+    'FEED = "https://cdn.example.test/feed"',
+    "from scripts.releases.channels import ChannelPublisher\n\n"
+    'FEED = "https://cdn.example.test/feed"',
+)
+
+_DELETION_TIP = _MERGE_UPSTREAM_WITH_IMPORT.replace(
+    "from scripts.releases.channels import ChannelPublisher\n",
+    "from scripts.releases.channels import ChannelPublisher\n"
+    "from scripts.releases.desktop_targets import NATIVE_LEGS\n",
+)
+
+# The fork dropped the module entirely: no import and no use of the names.
+_DELETION_FORK = _MERGE_UPSTREAM_WITH_IMPORT.replace(
+    "from scripts.releases.channels import ChannelPublisher\n", "",
+).replace(
+    "    return url\n",
+    "    return url.rstrip('/')\n",
+)
+
+
+def test_a_policy_table_deletion_wins_over_upstreams_import_edit(tmp_path):
+    """The real channel_releases.py hunk the 4b40ffb0ad sync produced: the
+    span tables already shaped the candidate's import block, so the only
+    conflict left is one line the fork deleted (its file references none of
+    the module's names and it deleted the module too).  A union cannot carry
+    a deletion, and keeping the line fails the fork's own ``ruff check .``
+    with F401 -- so on a policy-table file the fork's empty side is the
+    answer, while the fork's body fix in the region below still rides the
+    union."""
+    rel = "scripts/releases/channel_releases.py"
+    dst, fork, hermes = _merge_tree(
+        tmp_path, _DELETION_TIP, _DELETION_FORK,
+        rel=rel, base_text=_MERGE_UPSTREAM_WITH_IMPORT)
+
+    fixed, unresolved = _reconcile_fork_release_divergence(
+        dst, fork_root=fork, upstream_src=hermes)
+
+    text = (Path(dst) / rel).read_text()
+    assert unresolved == []
+    assert fixed == [rel]
+    assert "desktop_targets" not in text          # the deletion stands
+    assert "rstrip('/')" in text                  # the fork's body fix rode the union
 
 # ---------------------------------------------------------------------------
 # A pnpm lock's ui digest, which branding renames the key over but cannot move
