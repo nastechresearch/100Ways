@@ -31,6 +31,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -1025,6 +1026,126 @@ def _reconcile_plugin_guard_trusted_installer_hosts(dst: str) -> int:
     return 1
 
 
+def _reconcile_catalog_redirect_host_test(dst: str) -> int:
+    """Restore the plugin-catalog redirect tests after the domain migration.
+
+    The catalog test's fake handler answers by ``request.url.host``. Upstream
+    compares against its vanity host ``nastech-agent.nastechresearch.com``;
+    the brand domain pass rewrites both the comparison and ``LIVE_CATALOG_URL``
+    into the docs compound ``nastechresearch.github.io/nastech-agent`` -- which
+    is a host plus a path and can never equal an httpx hostname. The redirect
+    tests then read a success where they demanded a failed fetch, and the
+    ``followed`` test's hop collapses onto itself (source URL == target URL).
+
+    The branded world serves the catalog straight off GitHub Pages, so the
+    fake is rewritten to the branded shape: the handler answers 200 when the
+    request *is* the redirect target, 301s every other request on the bare
+    Pages host onto it, and the ``followed`` test hops from the bare host
+    (no docs path) onto the full docs URL. Like the guard-allowlist rule this
+    cannot be global: the docs compound is the fork's real catalog URL
+    everywhere else in the file. No-op once corrected.  Returns 1 when the
+    file changed.
+    """
+    path = os.path.join(dst, "tests", "nastech_cli", "test_plugin_catalog.py")
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return 0
+    changed = text
+
+    # 1. the fake's bare-host comparison (a compound host never matches)
+    changed = changed.replace(
+        '        if request.url.host == "nastechresearch.github.io/nastech-agent":\n'
+        '            return httpx.Response(301, headers={"location": target})\n',
+        '        # The branded catalog is served straight off GitHub Pages: the final\n'
+        '        # hop answers 200 when the request is the redirect target itself, and\n'
+        '        # the bare Pages host 301s everything else onto it (a compound host\n'
+        '        # plus path never equals an httpx hostname, so the old spelling\n'
+        '        # always fell through to the 200 branch).\n'
+        '        if str(request.url) == target:\n'
+        '            return httpx.Response(200, json=doc)\n'
+        '        if request.url.host == "nastechresearch.github.io":\n'
+        '            return httpx.Response(301, headers={"location": target})\n',
+        1,
+    )
+
+    # 2. the followed test hops from the bare host onto the full docs URL
+    #    (its source must differ from its target or the hop loops forever)
+    changed = changed.replace(
+        '    monkeypatch.setattr(pc, "LIVE_CATALOG_URL", '
+        '"https://nastechresearch.github.io/nastech-agent/docs/api/plugin-catalog.json")\n'
+        '    pages = "https://nastechresearch.github.io/nastech-agent/docs/api/plugin-catalog.json"\n',
+        '    # The redirect source must differ from the target: the hop starts on\n'
+        '    # the bare Pages host and lands on the full docs URL.\n'
+        '    monkeypatch.setattr(pc, "LIVE_CATALOG_URL", '
+        '"https://nastechresearch.github.io/docs/api/plugin-catalog.json")\n'
+        '    pages = "https://nastechresearch.github.io/nastech-agent/docs/api/plugin-catalog.json"\n',
+        1,
+    )
+
+    if changed == text:
+        return 0
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(changed)
+    return 1
+
+
+def _reconcile_serve_handler_ledger(dst: str) -> int:
+    """Re-sort the serve-handler ledger after the rename moves its rows.
+
+    The ledger is generated code: ``gen_serve_handler_ledger.py`` sorts its
+    rows by ``(kind is rpc, handler)``. Token branding renames the handler
+    strings *inside the committed JSON without re-sorting it*, so rows like
+    ``GET /api/hermes/update/check`` -> ``GET /api/nastech/update/check``
+    land in the slot the old spelling sorted into and the ledger test fails
+    with "serve_handler_ledger.json is stale". Regenerate the rendered text
+    from the renamed rows with the generator's own recipe (same row sort,
+    same ``json.dumps`` spelling); the rows' facts are untouched. No-op when
+    the order already is the generator's.
+    """
+    rel = os.path.join("tests", "nastech_cli", "serve_handler_ledger.json")
+    path = os.path.join(dst, rel)
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8-sig") as fh:
+            data = json.loads(fh.read())
+    except (OSError, ValueError):
+        return 0
+    handlers = data.get("handlers") if isinstance(data, dict) else None
+    if not isinstance(handlers, list) or not handlers:
+        return 0
+    ordered = sorted(
+        handlers, key=lambda row: (row.get("kind") == "rpc", str(row.get("handler", "")))
+    )
+    if ordered == handlers:
+        return 0
+    counts: dict[str, dict[str, int]] = {}
+    for row in ordered:
+        bucket = counts.setdefault(str(row.get("kind", "")), {})
+        bucket[str(row.get("decision", ""))] = bucket.get(str(row.get("decision", "")), 0) + 1
+    head = json.dumps(
+        {
+            "generated_by": data.get("generated_by", ""),
+            "refs": data.get("refs", ""),
+            "decisions": data.get("decisions", []),
+            "counts": counts,
+        },
+        indent=1, sort_keys=True,
+    )
+    rendered = (
+        head[:-2] + ',\n "handlers": [\n'
+        + ",\n".join("  " + json.dumps(row, sort_keys=True) for row in ordered)
+        + "\n ]\n}\n"
+    )
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(rendered)
+    return 1
+
+
 def _reconcile_fts5_trigram(dst: str) -> list[str]:
     """Fix the SQLite FTS5 trigram self-test the fork's CI runs.
 
@@ -1166,6 +1287,92 @@ def _sort_brand_export_type_runs(text: str) -> str:
             out.append(lines[index])
             index += 1
     return "\n".join(out)
+
+
+_BRAND_REL_EXPORT_START = re.compile(r"^export\b")
+_BRAND_REL_EXPORT_SOURCE = re.compile(r"from '(\.[^']*)'")
+
+
+def _sort_brand_relative_export_runs(text: str) -> str:
+    """Sort contiguous relative-path export statements by module path.
+
+    ``perfectionist/sort-exports`` is an error in the workspace ESLint config,
+    and it orders these statements by their module path. Renaming
+    ``hermes-cloud`` to ``nastech-cloud`` moves that path lexically past its
+    neighbours, so upstream's valid order stops being valid once branded
+    (``Expected "./i18n" to come before "./nastech-cloud"``). Statements are
+    units from their ``export`` line through the line carrying their
+    ``from '...'`` clause; a run is sorted only when every statement sources a
+    relative path, and only when the run's renamed spelling shows the reorder
+    is the brand's doing -- upstream blocks upstream wrote stay fixed points.
+    """
+    lines = text.split("\n")
+    out: list[str] = []
+    index = 0
+    while index < len(lines):
+        if not _BRAND_REL_EXPORT_START.match(lines[index]):
+            out.append(lines[index])
+            index += 1
+            continue
+        statements: list[list[str]] = []
+        end = index
+        renamed = False
+        clean = True
+        while end < len(lines) and _BRAND_REL_EXPORT_START.match(lines[end]):
+            start = end
+            end += 1
+            while True:
+                # the start line itself may already carry the from clause
+                scanned = max(start, end - 1)
+                source = _BRAND_REL_EXPORT_SOURCE.search(lines[scanned])
+                if source is not None:
+                    statements.append([source.group(1), lines[start:scanned + 1]])
+                    if "nastech" in "\n".join(lines[start:scanned + 1]):
+                        renamed = True
+                    end = scanned + 1
+                    break
+                if end >= len(lines):
+                    clean = False
+                    break
+                line = lines[end]
+                if _BRAND_REL_EXPORT_START.match(line) or not line.strip():
+                    clean = False  # malformed statement or a gap: this run stays put
+                    break
+                end += 1
+            if end < len(lines) and not _BRAND_REL_EXPORT_START.match(lines[end]):
+                break
+        if clean and len(statements) > 1 and renamed:
+            order = [path for path, _ in statements]
+            if order != sorted(order):
+                lines[index:end] = [
+                    line for _, block in sorted(statements, key=lambda s: s[0])
+                    for line in block
+                ]
+        out.extend(lines[index:end])
+        index = end
+    return "\n".join(out)
+
+
+def _reconcile_brand_relative_export_order(dst: str) -> list[str]:
+    """Re-sort the relative-path export blocks the rename de-ordered."""
+    repaired: list[str] = []
+    for rel in _walk_files(dst):
+        if not rel.endswith((".ts", ".tsx", ".mts", ".cts")):
+            continue
+        if is_locked_path(rel) or is_immutable_path(rel):
+            continue
+        path = os.path.join(dst, rel)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        updated = _sort_brand_relative_export_runs(text)
+        if updated != text:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(updated)
+            repaired.append(rel)
+    return repaired
 
 
 def _reconcile_desktop_export_order(dst: str) -> list[str]:
@@ -7705,6 +7912,15 @@ _TERMUX_TUI_SETUP_GATE_EDITS = (
     ),
 )
 
+# Upstream re-designed the resume path around the shared gateway: the stored
+# session's frozen policy carries its own route, so ``session.resume`` decides
+# and only a failed resume surfaces the error -- the canonical transport must
+# NOT ask ``setup.status`` on resume (blankInstallSetupRequired.test.ts asserts
+# "resumes a stored session on its own route" with no panel, and "opens Setup
+# Required when resuming fails" with ``error: storage_unavailable``).  When
+# this comment is upstream's current spelling, the second edit is superseded.
+_TERMUX_TUI_RESUME_STANDDOWN_ANCHOR = "so only a failed resume asks"
+
 
 def _reconcile_termux_tui_setup_gate(dst: str) -> list[str]:
     """Ask ``setup.status`` on the canonical transport too.
@@ -7728,6 +7944,13 @@ def _reconcile_termux_tui_setup_gate(dst: str) -> list[str]:
     Both sites move together or the sync stops (a half-applied gate hides the panel on one path);
     if upstream drops the canonical skip itself, the rule stands down.
 
+    The resume site (the second edit) stood down on the 2026-11-14 sync: upstream redesigned the
+    resume path around the shared gateway -- the stored session's frozen policy carries its own
+    route, so only a failed resume asks (see ``_TERMUX_TUI_RESUME_STANDDOWN_ANCHOR``). Forcing the
+    ask there reds ``blankInstallSetupRequired.test.ts``: the resume-routes test sees a Setup
+    Required panel it must not see, and the failing-resume test never reaches
+    ``session.resume`` to record ``error: storage_unavailable``. The new-session gate stays.
+
     The gate is a new RPC on a path whose test fakes enumerate the viewer calls, so every fake that
     cannot answer it is taught in the same pass: a product fix that reds the suite is not a fix the
     sync can ship, and the pipeline's parity gate only lets a rewrite through when the rule reports
@@ -7741,8 +7964,15 @@ def _reconcile_termux_tui_setup_gate(dst: str) -> list[str]:
         return []  # upstream rewrote or removed the gate; theirs is authoritative
     edited = text
     changed: list[str] = []
-    for before, after in _TERMUX_TUI_SETUP_GATE_EDITS:
+    for index, (before, after) in enumerate(_TERMUX_TUI_SETUP_GATE_EDITS):
         if after in edited:
+            continue
+        if index == 1 and _TERMUX_TUI_RESUME_STANDDOWN_ANCHOR in edited:
+            # Upstream's launchRouteServes redesign supersedes the fork's
+            # resume-path edit: the canonical transport keeps its skip there,
+            # and asking anyway reds blankInstallSetupRequired.test.ts (the
+            # resume-routes test sees a panel it must not see, and the
+            # failing-resume test never reaches session.resume).
             continue
         if before not in edited:
             raise TermuxTuiSetupGateError(
@@ -7963,13 +8193,10 @@ def _reconcile_windows_real_git_locate(dst: str) -> bool:
         '        for arch in ("clangarm64", "mingw64", "mingw32")\n'
         "    ] + _portable_git_candidates()\n"
     )
-    if needle not in text:
-        raise WindowsRealGitLocateError(
-            f"{rel} carries neither the legacy libexec-only candidate list nor "
-            f"{marker!r}, so the real-git locator patch no longer applies. "
-            "Update the needle in _reconcile_windows_real_git_locate to "
-            "upstream's new shape, then re-run."
-        )
+    # Upstream edits the arch tuple independently of this patch (6cea8f027b
+    # added ucrt64), so the legacy list is also recognised with any arch
+    # contents -- the replacement enumerates every layout itself and never
+    # carries the tuple forward.
     replacement = (
         "    # Every layout Git for Windows has shipped: enumerate them all and\n"
         "    # let the fork-bomb probe -- not the path -- decide which one is real,\n"
@@ -7990,7 +8217,26 @@ def _reconcile_windows_real_git_locate(dst: str) -> bool:
         "            with suppress(OSError):\n"
         "                candidates.extend(sorted(git_root.glob(pattern)))\n"
     )
-    _reconcile_budget_write(dst, rel, text.replace(needle, replacement, 1))
+    needle_re = re.compile(
+        r"    candidates = \[\n"
+        r'        Path\(base\) / "Git" / arch / "libexec" / "git-core" / "git\.exe"\n'
+        r'        for base in \(r"C:\\Program Files", r"C:\\Program Files \(x86\)"\)\n'
+        r'        for arch in \("[^)]*"\)\n'
+        r"    \] \+ _portable_git_candidates\(\)\n"
+    )
+    if needle in text:
+        patched = text.replace(needle, replacement, 1)
+    else:
+        match = needle_re.search(text)
+        if match is None:
+            raise WindowsRealGitLocateError(
+                f"{rel} carries neither the legacy libexec-only candidate list nor "
+                f"{marker!r}, so the real-git locator patch no longer applies. "
+                "Update the needle in _reconcile_windows_real_git_locate to "
+                "upstream's new shape, then re-run."
+            )
+        patched = text[:match.start()] + replacement + text[match.end():]
+    _reconcile_budget_write(dst, rel, patched)
     return True
 
 
@@ -9667,6 +9913,15 @@ class UiScopePinError(ValueError):
     """
 
 
+class PnpmDepsHashError(ValueError):
+    """The nix pnpm-deps store hash no longer describes the branded lock.
+
+    A ``ValueError`` on purpose, like ``UiScopePinError``: the update
+    pipeline records it as a failed stage instead of publishing a tree whose
+    nix build CI refuses.
+    """
+
+
 def _walk_ui_scope_text_files(dst: str) -> list[str]:
     """Text files that mention the renamed scope in a ``pkg@version`` form.
 
@@ -9837,6 +10092,8 @@ _PNPM_UI_KEY_RE = re.compile(
     r"^([ ]*)'@(?P<scope>[A-Za-z0-9_.\-]+)/ui@(?P<version>\d+\.\d+\.\d+)[^']*':$")
 _PNPM_RESOLUTION_RE = re.compile(
     r"^([ ]*)resolution: \{integrity: (?P<digest>sha512-[A-Za-z0-9+/=]+)\}?,?$")
+_PNPM_DEPS_HASH_REL = os.path.join("nix", "pnpm-deps-hash")
+_PNPM_DEPS_HASH_VALUE_RE = re.compile(r"^sha256-[A-Za-z0-9+/]{43}=?$")
 
 
 def _ui_fork_digest(rel: str, version: str) -> str:
@@ -9859,6 +10116,91 @@ def _ui_fork_digest(rel: str, version: str) -> str:
             f"upstream's bytes for the same version number fail the install"
         )
     return digest
+
+
+def _reconcile_pnpm_importer_key_order(dst: str) -> list[str]:
+    """Re-sort every importer's dependency keys into pnpm's canonical order.
+
+    Branding renames lock keys in place (``@hermes/ink`` -> ``@nastech/ink``),
+    so a renamed key keeps the slot the pre-rename spelling sorted into.  pnpm
+    itself always writes these maps alphabetically, and the Docker build's
+    ``node-deps.mjs`` compares the recorded install lock against the source
+    lock with an order-sensitive equality -- the renamed lock is the only lock
+    in the world whose importers are out of canonical order, so every
+    container build refuses it with "pnpm did not record the locked install".
+    Re-sorting the dep maps (leaving each key's own quoting and its nested
+    specifier/version lines untouched) makes the branded lock look exactly
+    like one pnpm wrote.
+    """
+    fixed: list[str] = []
+    section_re = re.compile(r"^ {4}(dependencies|devDependencies|optionalDependencies):\s*$")
+    key_re = re.compile(r"^ {6}('(?:[^']|'')*'|[^:\s][^:]*):\s*$")
+    for rel in _walk_files(dst):
+        if os.path.basename(rel) != _PNPM_LOCK_FILENAME:
+            continue
+        if is_locked_path(rel) or is_immutable_path(rel):
+            continue
+        path = os.path.join(dst, rel)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                lines = fh.read().splitlines(keepends=True)
+        except (OSError, UnicodeDecodeError):
+            continue
+        out: list[str] = []
+        index = 0
+        changed = False
+        while index < len(lines):
+            line = lines[index]
+            out.append(line)
+            index += 1
+            if line.rstrip("\n") != "importers:":
+                continue
+            # Inside the importers section: each map under a dependency
+            # section header holds one entry per 6-space-indented key.
+            while index < len(lines):
+                header = section_re.match(lines[index].rstrip("\n"))
+                if header is None:
+                    if lines[index].startswith(" ") or not lines[index].strip():
+                        out.append(lines[index])
+                        index += 1
+                        continue
+                    break  # a new top-level key ends the importers section
+                out.append(lines[index])
+                index += 1
+                blocks: list[tuple[str, list[str]]] = []
+                while index < len(lines):
+                    entry = lines[index]
+                    match = key_re.match(entry.rstrip("\n"))
+                    if match is None:
+                        break
+                    name = match.group(1)
+                    if name.startswith("'"):
+                        name = name[1:-1].replace("''", "'")
+                    block = [entry]
+                    index += 1
+                    while index < len(lines):
+                        nested = lines[index]
+                        if nested.strip() and (
+                            len(nested) - len(nested.lstrip(" ")) <= 6
+                        ):
+                            break
+                        block.append(nested)
+                        index += 1
+                    blocks.append((name, block))
+                order = [name for name, _ in blocks]
+                if order != sorted(order):
+                    for _, block in sorted(blocks, key=lambda item: item[0]):
+                        out.extend(block)
+                    changed = True
+                else:
+                    for _, block in blocks:
+                        out.extend(block)
+        if not changed:
+            continue
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("".join(out))
+        fixed.append(rel)
+    return fixed
 
 
 def _reconcile_pnpm_ui_integrity(dst: str) -> list[str]:
@@ -9902,11 +10244,94 @@ def _reconcile_pnpm_ui_integrity(dst: str) -> list[str]:
     return fixed
 
 
+def _nix_pnpm_deps_got(dst: str, nix: str) -> str | None:
+    """Ask the pnpm-deps derivation for the store digest it computed.
+
+    ``nix build .#pnpm-deps`` (``nix/lib.nix`` ``pnpmDeps``) succeeds when the
+    hash file already describes the store -- and then there is nothing to
+    write, reported here as ``None``.  On a mismatch the build fails after
+    printing ``got: sha256-...`` (the same line the CI job's ``sed`` and
+    ``updatePnpmLockfile`` both parse), which is the honest replacement
+    value.
+    """
+    try:
+        proc = subprocess.run(
+            [nix, "build", ".#pnpm-deps", "--no-link"],
+            cwd=dst,
+            capture_output=True,
+            text=True,
+            timeout=3600,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode == 0:
+        return None
+    for line in (proc.stdout + proc.stderr).splitlines():
+        match = re.search(r"\bgot: (sha256-[A-Za-z0-9+/]{43}=?)(?=\s|$)", line)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _reconcile_pnpm_deps_hash(dst: str) -> list[str]:
+    """Rewrite ``nix/pnpm-deps-hash`` after branding renamed the lock.
+
+    The derivation hashes the pnpm store the workspace manifests plus the
+    lock install, and the CI job (``nix.yml``) refuses a hash that does not
+    describe it.  Branding swaps ``@nous-research/ui`` for the fork's own
+    tarball inside that store, so upstream's hash is stale after every
+    rename pass.  The only honest value is the one the derivation itself
+    reports, so a nix-capable host recomputes it exactly the way the CI job
+    does.  A host without nix cannot verify anything: it stops the sync
+    rather than writing a guessed digest, unless the owner pins the value
+    the CI lane printed via ``HUNDREDWAYS_PNPM_DEPS_HASH`` -- which is still
+    verified against the derivation whenever nix is here.
+    """
+    path = os.path.join(dst, _PNPM_DEPS_HASH_REL)
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            current = fh.read().strip()
+    except OSError:
+        return []
+    pin = os.environ.get("HUNDREDWAYS_PNPM_DEPS_HASH", "").strip()
+    if pin and not _PNPM_DEPS_HASH_VALUE_RE.fullmatch(pin):
+        raise PnpmDepsHashError(
+            f"HUNDREDWAYS_PNPM_DEPS_HASH={pin!r} is not an SRI sha256 digest; "
+            "copy the 'got:' line the 'pnpm deps hash' CI lane prints"
+        )
+    nix = shutil.which("nix")
+    if nix is not None:
+        got = _nix_pnpm_deps_got(dst, nix)
+        if got is None:
+            # the derivation accepted the current hash: it already matches
+            return []
+        if pin and pin != got:
+            raise PnpmDepsHashError(
+                f"HUNDREDWAYS_PNPM_DEPS_HASH pins {pin} but the derivation "
+                f"computes {got} for this tree; drop the pin or fix it"
+            )
+        value = got
+    else:
+        if not pin:
+            raise PnpmDepsHashError(
+                f"{_PNPM_DEPS_HASH_REL} describes the pre-rename store and this "
+                "host has no nix to derive the post-rename value. Set "
+                "HUNDREDWAYS_PNPM_DEPS_HASH to the 'got:' digest the 'pnpm deps "
+                "hash' CI lane prints, or run the factory on a nix-capable host"
+            )
+        value = pin
+    if value == current:
+        return []
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(value + "\n")
+    return [_PNPM_DEPS_HASH_REL]
+
+
 # ---------------------------------------------------------------------------
 # The fork's release-plane edits, replayed as a merge
-# ---------------------------------------------------------------------------
-
-#: Paths where the fork owns the behaviour of a file upstream also edits.  This
+# ---------------------------------------------------------------------------#: Paths where the fork owns the behaviour of a file upstream also edits.  This
 #: is the release plane: what makes a Nastech release land on GitHub releases
 #: instead of the retired bucket, how the version line follows Hermes, and the
 #: tests that hold those contracts.
@@ -9972,6 +10397,7 @@ _FORK_PREFERRED_DIVERGENCE_FILES = (
     "scripts/bundles/release_artifacts.py",
     "scripts/releases/channel_publish.py",
     "scripts/releases/channel_releases.py",
+    "scripts/releases/darwin.py",
     "tests/scripts/test_release_artifacts.py",
     "tests/scripts/test_release_channels.py",
     "tests/scripts/test_release_entrypoint.py",
@@ -10263,7 +10689,13 @@ def _reconcile_fork_release_divergence(
     if not fork_root:
         return [], []
     rules = rules or BrandingRules()
-    baseline = baseline or fork_manifest_upstream_sha(fork_root)
+    # The product tree stopped carrying manifest.json (metadata lives in the
+    # factory now), so a CI checkout of the fork has no manifest to read.  The
+    # factory's own baseline record is exactly the "upstream the fork last
+    # synced" this merge needs; without it the whole replay silently skipped
+    # and every shared release-plane file shipped as a fork/upstream hybrid.
+    baseline = baseline or fork_manifest_upstream_sha(fork_root) \
+        or engine_baseline_sha(fork_root)
     fixed, collided = [], []
     for rel in _walk_files(dst):
         if not rel.startswith(_FORK_MERGE_PREFIXES):
@@ -10302,14 +10734,340 @@ def _reconcile_fork_release_divergence(
     return sorted(fixed), sorted(collided)
 
 
+# ---------------------------------------------------------------------------
+# The code-health ratchet: inherited upstream sites are waived, never guessed
+# ---------------------------------------------------------------------------
+
+#: The reason an inline waiver for a site the fork did not write carries.  The
+#: syntax is the ratchet's own -- ``health: allow <RULES> -- <why>``, read back
+#: by ``apply_allows`` in the fork's ``scripts/code_health/report.py`` on the
+#: finding's line (or, for FILE_LINES, anywhere in lines 1-5) -- and the reason
+#: is the honest one: the line exists in the branded upstream text the
+#: candidate was branded from, so the debt arrived through the sync and no
+#: fork edit created it.
+HEALTH_WAIVER_REASON = "inherited verbatim from upstream"
+
+_HEALTH_ALLOW_MARK = re.compile(r"health:\s*allow\b")
+
+_HEALTH_HASH_PREFIX_EXTS = frozenset((".py", ".pyi", ".pyw", ".yml", ".yaml", ".toml", ".sh"))
+_HEALTH_SLASH_PREFIX_EXTS = frozenset((".ts", ".tsx", ".mts", ".cts", ".mjs", ".cjs", ".js", ".jsx"))
+
+
+class CodeHealthRatchetError(ValueError):
+    """A blocking code-health site the branded tree did not inherit verbatim.
+
+    A ``ValueError`` on purpose, like :class:`UiScopePinError` and
+    :class:`PnpmDepsHashError`: the update pipeline records it as a failed
+    stage instead of publishing a tree whose lint lane CI refuses -- or one
+    whose only answer was a guessed waiver on fork-written code.
+    """
+
+
+def _ratchet_fork_base_ref(fork_root: str, git: str) -> str | None:
+    """The fork revision the candidate's lint lane will be judged against.
+
+    CI's ratchet compares the PR head with the merge base of ``origin/<base>``,
+    and the candidate branch always descends from fork main, so that merge
+    base is fork main's head.  The factory's shallow clone records it as
+    ``origin/main``; a plain checkout may only carry ``main``.  ``None`` when
+    neither ref resolves -- the caller cannot run the ratchet honestly then.
+    """
+    for ref in ("refs/remotes/origin/main", "refs/heads/main"):
+        proc = subprocess.run(
+            [git, "-C", fork_root, "rev-parse", "--verify", ref + "^{commit}"],
+            capture_output=True, text=True, check=False,
+        )
+        if proc.returncode == 0:
+            return proc.stdout.strip()
+    return None
+
+
+def _ratchet_copy_tree(dst: str, into: str) -> None:
+    """Copy the candidate's files into ``into``, skipping what no repo carries.
+
+    ``__pycache__``/``.venv``/``node_modules`` are local build state: CI's
+    ratchet never sees them, and counting their lines or hits would judge a
+    tree the fork's lint lane does not measure.
+    """
+    skip = {".git", "__pycache__", ".venv", "node_modules"}
+    for root, dirs, files in os.walk(dst):
+        dirs[:] = [d for d in dirs if d not in skip]
+        rel = os.path.relpath(root, dst)
+        target = into if rel == "." else os.path.join(into, rel)
+        os.makedirs(target, exist_ok=True)
+        for name in files:
+            shutil.copy2(os.path.join(root, name), os.path.join(target, name))
+
+
+def _ratchet_blocking(dst: str, fork_root: str, git: str) -> list[dict]:
+    """Run the branded tree's own code-health ratchet; return its blocking sites.
+
+    The ratchet is the fork's tooling (``python -m scripts.code_health``) and
+    CI runs it on every PR against fork main, so the engine judges the
+    candidate with the same tool and the same base instead of a
+    re-implementation that would drift from the lane's verdict.  The run needs
+    a git repo holding both revisions, so fork main's tree and the candidate
+    are committed into a temporary repository -- the head is the candidate
+    exactly as this sync is about to publish it.
+
+    Returns the parsed findings ``verdict`` counts as blocking (blocking rule,
+    no ``allowed_reason``).  A ratchet that cannot run, crashes, or answers
+    anything but its findings JSON stops the sync: an unmeasurable candidate
+    is exactly the state the lane refuses.
+    """
+    base = _ratchet_fork_base_ref(fork_root, git)
+    if base is None:
+        raise CodeHealthRatchetError(
+            f"{fork_root} carries no resolvable fork main ref; the code-health "
+            "ratchet cannot be judged against the base CI will use"
+        )
+    with tempfile.TemporaryDirectory(prefix="health-ratchet-") as tmp:
+        def _git(*args: str) -> None:
+            proc = subprocess.run(
+                [git, "-C", tmp, *args], capture_output=True, text=True, check=False,
+                env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1"})
+            if proc.returncode != 0:
+                raise CodeHealthRatchetError(
+                    "code-health ratchet staging failed: git " + " ".join(args)
+                    + f" -> {proc.stderr.strip()[:400]}")
+
+        _git("init", "-q")
+        _git("-c", "user.name=factory", "-c", "user.email=factory@invalid",
+             "fetch", "-q", fork_root, base)
+        _git("-c", "user.name=factory", "-c", "user.email=factory@invalid",
+             "checkout", "-q", "-b", "base", "FETCH_HEAD")
+        for name in os.listdir(tmp):
+            if name != ".git":
+                shutil.rmtree(os.path.join(tmp, name)) \
+                    if os.path.isdir(os.path.join(tmp, name)) \
+                    else os.remove(os.path.join(tmp, name))
+        _ratchet_copy_tree(dst, tmp)
+        _git("add", "-A")
+        _git("-c", "user.name=factory", "-c", "user.email=factory@invalid",
+             "commit", "-qm", "candidate")
+        # The ratchet's --base/--head name refs, not HEAD: a detached candidate
+        # commit answers "Needed a single revision" (git has no lowercase head).
+        _git("branch", "head")
+        proc = subprocess.run(
+            [sys.executable, "-m", "scripts.code_health",
+             "--base", "base", "--head", "head", "--json"],
+            cwd=tmp, capture_output=True, text=True, check=False, timeout=7200)
+        if proc.returncode not in (0, 1):
+            raise CodeHealthRatchetError(
+                "the candidate's own code-health ratchet failed to run: "
+                + (proc.stderr.strip()[-600:] or f"exit {proc.returncode}"))
+        try:
+            findings = json.loads(proc.stdout)
+        except ValueError as exc:
+            raise CodeHealthRatchetError(
+                f"the code-health ratchet answered no findings JSON ({exc}); "
+                f"stderr: {proc.stderr.strip()[-400:]}") from exc
+        if not isinstance(findings, list):
+            raise CodeHealthRatchetError(
+                "the code-health ratchet answered an unexpected JSON shape: "
+                + str(findings)[:200])
+        return [f for f in findings
+                if isinstance(f, dict) and f.get("blocking")
+                and not f.get("allowed_reason")]
+
+
+def _ratchet_upstream_text_map(
+    upstream_src: str, rules: BrandingRules,
+) -> dict[str, str]:
+    """Branded candidate path -> branded upstream text, for site attribution."""
+    texts: dict[str, str] = {}
+    for rel in _walk_files(upstream_src):
+        branded = rules.transform_path(rel)
+        if branded in texts:
+            continue
+        path = os.path.join(upstream_src, rel)
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                texts[branded] = rules.transform_text(fh.read())
+        except OSError:
+            continue
+    return texts
+
+
+def _ratchet_line_code(line: str, prefix: str) -> str:
+    """A line's code text: its comment suffix and surrounding whitespace gone.
+
+    Both sides of the comparison are cut at the same comment marker, so a
+    ``#`` or ``//`` inside a string literal mangles both equally and honest
+    equality still holds.
+    """
+    return line.split(prefix, 1)[0].strip()
+
+
+def _ratchet_waiver_prefix(rel: str) -> str | None:
+    """The comment prefix a waiver in ``rel`` is written with, or ``None``."""
+    ext = os.path.splitext(rel)[1]
+    if ext in _HEALTH_HASH_PREFIX_EXTS:
+        return "#"
+    if ext in _HEALTH_SLASH_PREFIX_EXTS:
+        return "//"
+    return None
+
+
+def _ratchet_insert_waivers(
+    text: str, rel: str, lines_wanted: dict[int, list[str]],
+) -> str:
+    """Insert one inline waiver comment per blocking line, bottom-up.
+
+    Every rule wanted on one line shares a single comment (`allow BLE001,
+    HX016 -- ...`): ``apply_allows`` splits the rule list on commas and
+    spaces.  A FILE_LINES finding is answered on a fresh comment-only line at
+    the top -- its allow window is lines 1-5, and the file's shebang, when it
+    has one, stays line 1.  Any other finding is answered at the end of its
+    own line, unless that line ends with a line-continuation backslash (a
+    comment may not follow one); then the waiver rides the comment-only line
+    above, the other position ``_allow_lines`` accepts.  Insertion runs
+    bottom-up so an inserted line never shifts a line number still to be
+    answered.  A line that already carries a waiver is left alone -- the
+    caller's verification re-run settles any coverage it lacks, and layering
+    a second ``health: allow`` onto one line would leave the first comment's
+    rule list the only one ``apply_allows`` reads.
+    """
+    prefix = _ratchet_waiver_prefix(rel)
+    if prefix is None:
+        raise CodeHealthRatchetError(
+            f"{rel} has no comment syntax this ratchet waiver is written in; "
+            "the site must be resolved by hand")
+    out = text.splitlines()
+    file_lines = any("FILE_LINES" in rules for rules in lines_wanted.values())
+    for line_no in sorted(lines_wanted, reverse=True):
+        wanted = lines_wanted[line_no]
+        index = line_no - 1
+        if not 0 <= index < len(out):
+            raise CodeHealthRatchetError(
+                f"{rel}:{line_no} is outside the file the ratchet measured; "
+                "the tree changed under the ratchet's answer")
+        if _HEALTH_ALLOW_MARK.search(out[index]):
+            continue
+        rules_txt = ", ".join(wanted)
+        comment = f"{prefix} health: allow {rules_txt} -- {HEALTH_WAIVER_REASON}"
+        if wanted == ["FILE_LINES"]:
+            continue
+        if out[index].rstrip().endswith("\\"):
+            out.insert(index, comment)
+        else:
+            out[index] = f"{out[index].rstrip()}  {comment}"
+    if file_lines and out and not _HEALTH_ALLOW_MARK.search("".join(out[:5])):
+        top = 1 if out[0].startswith("#!") else 0
+        out.insert(top, f"{prefix} health: allow FILE_LINES -- {HEALTH_WAIVER_REASON}")
+    text = "\n".join(out)
+    if text.endswith("\n") or not text:
+        return text
+    return text + "\n"
+
+
+def _reconcile_code_health_ratchet(
+    dst: str,
+    fork_root: str | None,
+    upstream_src: str,
+    rules: BrandingRules | None = None,
+) -> list[str]:
+    """Waive the code-health ratchet sites the branded tree inherited verbatim.
+
+    CI runs the fork's ratchet on every PR against fork main, and a branded
+    tip carries upstream-written lines the fork never had a chance to judge:
+    the ones that trip the ratchet would turn the lint lane red on every sync.
+    The tree's own answer is an inline waiver naming the rule and the reason;
+    this rule writes exactly that, and only where it is honest -- every waived
+    line must exist, comments and whitespace aside, in the branded upstream
+    text the candidate was branded from.  A site the fork wrote, or a hybrid
+    the merge produced, fails the sync with the site named: a guessed waiver
+    on fork-written code would bury a real regression, and the default stays
+    fail-closed.  The verdict is then re-run on the modified tree and must be
+    clean -- an insertion that does not silence its site is a bug, not a
+    publication.
+
+    Without a fork checkout there is no base to judge against and the rule
+    no-ops; the same when the checkout carries no resolvable fork main ref --
+    the ratchet is the lint lane's pre-flight, and CI (which computes its own
+    merge base from the PR) stays the authority a pre-flight cannot out-vote.
+    A base that cannot be found never waives anything: it only restores the
+    pre-rule behaviour of leaving the sites for CI to answer.
+    """
+    rules = rules or BrandingRules()
+    git = shutil.which("git")
+    if not fork_root or not os.path.isdir(fork_root) or git is None:
+        return []
+    if _ratchet_fork_base_ref(fork_root, git) is None:
+        return []
+    sites = _ratchet_blocking(dst, fork_root, git)
+    if not sites:
+        return []
+    upstream_texts = _ratchet_upstream_text_map(upstream_src, rules) \
+        if upstream_src and os.path.isdir(upstream_src) else {}
+    inherited: dict[str, dict[int, list[str]]] = {}
+    foreign: list[str] = []
+    for site in sites:
+        path, rule, line_no = site.get("path"), site.get("rule"), site.get("line")
+        if not isinstance(path, str) or not isinstance(rule, str) \
+                or not isinstance(line_no, int) or _ratchet_waiver_prefix(path) is None:
+            foreign.append(str(site)[:120])
+            continue
+        branded = upstream_texts.get(path)
+        if branded is None:
+            foreign.append(f"{rule} {path}:{line_no} (no upstream source)")
+            continue
+        cand_path = os.path.join(dst, path)
+        try:
+            with open(cand_path, encoding="utf-8", errors="replace") as fh:
+                cand_lines = fh.read().splitlines()
+        except OSError:
+            foreign.append(f"{rule} {path}:{line_no} (unreadable)")
+            continue
+        if not 1 <= line_no <= len(cand_lines):
+            foreign.append(f"{rule} {path}:{line_no} (outside the file)")
+            continue
+        prefix = _ratchet_waiver_prefix(path)
+        code = _ratchet_line_code(cand_lines[line_no - 1], prefix)
+        if not any(_ratchet_line_code(l, prefix) == code for l in branded.splitlines()):
+            foreign.append(f"{rule} {path}:{line_no} (not in the branded upstream text)")
+            continue
+        file_sites = inherited.setdefault(path, {})
+        file_sites.setdefault(line_no, [])
+        if rule not in file_sites[line_no]:
+            file_sites[line_no].append(rule)
+    if foreign:
+        raise CodeHealthRatchetError(
+            "the code-health ratchet blocks on sites the fork wrote, which "
+            "cannot be waived as inherited upstream debt: "
+            + "; ".join(sorted(set(foreign))))
+    for rel, lines_wanted in sorted(inherited.items()):
+        path = os.path.join(dst, rel)
+        with open(path, encoding="utf-8", errors="strict") as fh:
+            original = fh.read()
+        updated = _ratchet_insert_waivers(original, rel, lines_wanted)
+        if updated != original:
+            with open(path, "w", encoding="utf-8", newline="") as fh:
+                fh.write(updated)
+    remaining = _ratchet_blocking(dst, fork_root, git)
+    if remaining:
+        raise CodeHealthRatchetError(
+            "waived sites did not silence the ratchet (the tree still blocks "
+            f"on {len(remaining)} of them): "
+            + "; ".join(f"{s.get('rule')} {s.get('path')}:{s.get('line')}"
+                        for s in remaining[:12]))
+    return sorted(inherited)
+
+
 def reconcile_tree(
     dst: str,
     *,
     fork_root: str | None = None,
     rules: BrandingRules | None = None,
     upstream_src: str = "",
+    baseline: str = "",
 ) -> ReconcileResult:
     """Apply known post-brand fixes to the branded tree in place.
+
+    ``baseline`` is the upstream SHA the fork last synced, as the caller's
+    own provenance chain resolved it (Updates-Commits history first); when
+    empty, the fork-divergence replay falls back to the fork manifest and
+    then the factory's ``state/baseline.json``.
 
     ``fork_root`` is the fork checkout the pipeline preserves fork-local files
     from; the reconcilers that carry fork-first code in a shared path read it
@@ -10378,6 +11136,9 @@ def reconcile_tree(
     if fts5_fixed:
         result.total += len(fts5_fixed)
         result.fixed.extend(fts5_fixed)
+    for rel in _reconcile_brand_relative_export_order(dst):
+        result.total += 1
+        result.fixed.append(rel)
     if _reconcile_hermez_obfuscation(dst):
         result.total += 1
         result.fixed.append("tests/nastech_cli/test_gateway_restart_loop.py")
@@ -10560,9 +11321,40 @@ def reconcile_tree(
     # the install at the fork's tarball while the digest beside it still
     # describes upstream's bytes for the same version -- an install that fails
     # for every user.  The value only ever comes from the fork's own publish.
+    pnpm_lock_touched: list[str] = []
     for rel in _reconcile_pnpm_ui_integrity(dst):
         result.total += 1
         result.fixed.append(rel)
+        pnpm_lock_touched.append(rel)
+    # The same renames also de-sort the importer dep maps (a renamed key keeps
+    # its pre-rename slot while pnpm writes these maps alphabetically), and the
+    # Docker build's node-deps refuses a lock whose importers are out of
+    # canonical order -- so the maps go back into pnpm's order after branding.
+    for rel in _reconcile_pnpm_importer_key_order(dst):
+        result.total += 1
+        result.fixed.append(rel)
+        pnpm_lock_touched.append(rel)
+    # Branding also swaps the fork's ui tarball into the pnpm store the nix
+    # derivation hashes, so nix/pnpm-deps-hash goes stale on every rename
+    # pass; the derivation itself names the replacement value.  Fires only
+    # when a lock pass above actually rewrote the lock.
+    if pnpm_lock_touched:
+        for rel in _reconcile_pnpm_deps_hash(dst):
+            result.total += 1
+            result.fixed.append(rel)
+    # The catalog redirect test answers by ``request.url.host``, a bare
+    # hostname; the domain pass rewrote that host into the docs compound (host
+    # plus path), which never matches and turns the redirect-off-host refusal
+    # into a 200. Bare-host spelling is restored for that one comparison.
+    if _reconcile_catalog_redirect_host_test(dst):
+        result.total += 1
+        result.fixed.append("tests/nastech_cli/test_plugin_catalog.py")
+    # The generated ledger sorts its rows by handler name; the rename moves
+    # rows without re-sorting, so the rendered text is regenerated from the
+    # renamed rows with the generator's own recipe.
+    if _reconcile_serve_handler_ledger(dst):
+        result.total += 1
+        result.fixed.append("tests/nastech_cli/serve_handler_ledger.json")
     if _reconcile_plugin_guard_trusted_installer_hosts(dst) and "tools/plugin_guard_context.py" not in result.fixed:
         result.total += 1
         result.fixed.append("tools/plugin_guard_context.py")
@@ -10664,7 +11456,8 @@ def reconcile_tree(
     # guessed at.  Before the prompt snapshot, which reads files outside this
     # scope, and before the credential audit, which reads workflows.
     _merged, _collided = _reconcile_fork_release_divergence(
-        dst, fork_root=fork_root, upstream_src=upstream_src, rules=rules)
+        dst, fork_root=fork_root, upstream_src=upstream_src, rules=rules,
+        baseline=baseline)
     for rel in _merged:
         result.total += 1
         result.fixed.append(rel)
@@ -10702,6 +11495,15 @@ def reconcile_tree(
     # files.  Computing it any earlier leaves surfaces.json describing the
     # pre-migration text (the fork's stale-manifest failure).
     for rel in _reconcile_prompt_surface_snapshot(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    # Code-health ratchet LAST but before the credential gate: it runs the
+    # candidate's own lint tool twice (before and after its edits), so it
+    # must see the tree every content rule above has finished writing, and
+    # the Store-gate audit below reads workflows this rule does not touch.
+    # Inline-waives the blocking sites the branded tree inherited verbatim
+    # from upstream and fails the sync on anything the fork wrote.
+    for rel in _reconcile_code_health_ratchet(dst, fork_root, upstream_src, rules):
         result.total += 1
         result.fixed.append(rel)
     # Credential-gate completeness LAST, after every rule above has finished writing
@@ -11253,7 +12055,7 @@ class UpdateManager:
 
         def _reconcile() -> ReconcileResult:
             result = reconcile_tree(dest, fork_root=self.fork_root, rules=self.rules,
-                                    upstream_src=src)
+                                    upstream_src=src, baseline=baseline_sha)
             return result
         reconcile = stage("reconcile", _reconcile,
                           "sync lockfile root records + apply fork-local content fixes")

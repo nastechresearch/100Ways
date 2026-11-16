@@ -97,7 +97,7 @@ def test_publication_receipt_requires_pass_gate_and_is_pr_only(tmp_path):
     assert receipt["schema"] == PUBLICATION_RECEIPT_SCHEMA
     assert receipt["target"]["candidate_branch"] == "100WAYS"
     assert receipt["authorized_actions"] == [
-        "force-push-candidate-branch",
+        "fast-forward-push-candidate-branch",
         "create-or-update-pull-request",
     ]
     assert receipt["prohibited_actions"] == ["merge", "tag", "release", "deploy"]

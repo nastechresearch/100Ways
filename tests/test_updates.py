@@ -85,6 +85,7 @@ from hundredways.updates import (
     _reconcile_connector_test_guest_offline,
     _reconcile_credential_display_test,
     _reconcile_desktop_export_order,
+    _reconcile_brand_relative_export_order,
     _reconcile_desktop_notification_timer_teardown,
     _reconcile_desktop_path_fixtures,
     _reconcile_desktop_skin_alias,
@@ -117,6 +118,8 @@ from hundredways.updates import (
     _reconcile_pinned_source_clones,
     _reconcile_plugin_catalog_admission,
     _reconcile_plugin_guard_trusted_installer_hosts,
+    _reconcile_catalog_redirect_host_test,
+    _reconcile_serve_handler_ledger,
     _reconcile_portable_shebang,
     _reconcile_portal_override_test_collision,
     _reconcile_preserved_brand_text,
@@ -131,6 +134,11 @@ from hundredways.updates import (
     _merge_fork_edits,
     _resolve_import_conflict_hunks,
     _reconcile_pnpm_ui_integrity,
+    _reconcile_pnpm_importer_key_order,
+    _reconcile_pnpm_deps_hash,
+    _nix_pnpm_deps_got,
+    _PNPM_DEPS_HASH_REL,
+    PnpmDepsHashError,
     _reconcile_store_gate_covers_the_lane,
     _reconcile_telegram_mention_context_lengths,
     _reconcile_dead_api_defaults,
@@ -441,6 +449,71 @@ def test_desktop_export_order_moves_branded_statements_to_sorted_position(tmp_pa
         and text.index("/** The live gateway instance type")
         < text.index("export type { NastechGateway }")
     )
+
+
+def test_shared_relative_export_run_is_re_sorted_after_the_rename(tmp_path):
+    """Renaming ``./hermes-cloud`` to ``./nastech-cloud`` moves that path lexically
+    past ``./i18n``, and ``perfectionist/sort-exports`` is an error in the
+    workspace ESLint config -- so the renamed run goes back into module-path
+    order instead of weakening the lint policy.
+    """
+    candidate = tmp_path / "candidate"
+    shared = candidate / "apps" / "shared" / "src" / "index.ts"
+    shared.parent.mkdir(parents=True)
+    shared.write_text(
+        "export * from './gateway-events'\n"
+        "export { NASTECH_CLOUD_MANAGED, isNastechCloudUrl } from './nastech-cloud'\n"
+        "export {\n"
+        "  applyDocumentLocale,\n"
+        "  type EndonymLocale,\n"
+        "  isRecord,\n"
+        "  LOCALE_ENDONYMS,\n"
+        "  mergeTranslations,\n"
+        "  RTL_LOCALES,\n"
+        "  type TranslationOverride\n"
+        "} from './i18n'\n"
+        "export { type FuzzyMatch, fuzzyRank } from './fuzzy'\n",
+        encoding="utf-8",
+    )
+    # A foreign-source statement breaks the run; it must stay untouched.
+    other = candidate / "apps" / "shared" / "src" / "other.ts"
+    other.write_text(
+        "export { compactNumber } from './format'\n"
+        "export type { NastechGateway } from '@/nastech'\n"
+        "export { thing } from './zebra'\n"
+        "export { widget } from './alpha'\n",
+        encoding="utf-8",
+    )
+    # An unrenamed upstream block is a fixed point: no edit without a rename.
+    plain = candidate / "apps" / "shared" / "src" / "plain.ts"
+    plain.write_text(
+        "export { a } from './zebra'\n"
+        "export { b } from './alpha'\n",
+        encoding="utf-8",
+    )
+
+    changed = _reconcile_brand_relative_export_order(str(candidate))
+
+    assert changed == ["apps/shared/src/index.ts"]
+    text = shared.read_text(encoding="utf-8")
+    assert text.index("'./fuzzy'") < text.index("'./gateway-events'")
+    assert text.index("'./gateway-events'") < text.index("'./i18n'")
+    assert text.index("'./i18n'") < text.index("'./nastech-cloud'")
+    # each multi-line statement travels whole
+    assert "  LOCALE_ENDONYMS,\n" in text and "  RTL_LOCALES,\n" in text
+    other_text = other.read_text(encoding="utf-8")
+    assert other_text == (
+        "export { compactNumber } from './format'\n"
+        "export type { NastechGateway } from '@/nastech'\n"
+        "export { thing } from './zebra'\n"
+        "export { widget } from './alpha'\n"
+    )
+    assert plain.read_text(encoding="utf-8") == (
+        "export { a } from './zebra'\n"
+        "export { b } from './alpha'\n"
+    )
+    # idempotent once sorted
+    assert _reconcile_brand_relative_export_order(str(candidate)) == []
 
 
 def test_ci_runner_budgets_normalize_free_runner_timeouts(tmp_path):
@@ -2763,6 +2836,58 @@ def test_termux_tui_setup_gate_raises_when_one_site_moves(tmp_path):
     assert path.read_text(encoding="utf-8") == text
 
 
+def test_termux_tui_resume_edit_stands_down_to_upstreams_route_design(tmp_path):
+    """Upstream's shared-gateway redesign supersedes the fork's resume-path edit.
+
+    The stored session's frozen policy carries its own route, so only a failed
+    resume asks -- upstream's ``blankInstallSetupRequired.test.ts`` asserts the
+    canonical transport resumes with no panel and a failing resume surfaces
+    ``error: storage_unavailable``. The engine's second edit must not fire when
+    that comment is upstream's current spelling, while the new-session gate
+    still applies.
+    """
+    text = _TERMUX_TUI_TEXT.replace(
+        "      return (gw.isCanonical ? Promise.resolve(null) : "
+        "rpc<SetupStatusResponse>('setup.status', {}))\n",
+        "      // The legacy transport builds the resumed agent from the profile's config. On the shared\n"
+        "      // gateway the stored session's frozen policy carries its own route, so only a failed resume asks.\n"
+        "      return (gw.isCanonical ? Promise.resolve(null) : "
+        "rpc<SetupStatusResponse>('setup.status', {}))\n",
+    )
+    candidate, path = _termux_tui_candidate(tmp_path, text=text)
+
+    # The resume site keeps upstream's canonical skip: the edit stands down,
+    # while the new-session gate (whose after-form upstream has not adopted in
+    # this shape) still applies.
+    assert _reconcile_termux_tui_setup_gate(str(candidate)) != []
+    text_now = path.read_text(encoding="utf-8")
+    assert "only a failed resume asks" in text_now
+    assert (
+        "      return (gw.isCanonical ? Promise.resolve(null) : "
+        "rpc<SetupStatusResponse>('setup.status', {}))\n"
+    ) in text_now
+    assert (
+        "        const setup = await rpc<SetupStatusResponse>('setup.status', {})\n"
+    ) in text_now
+
+    # ... while the new-session gate on the same design still applies.
+    text_both = _TERMUX_TUI_TEXT.replace(
+        "        const setup = gw.isCanonical ? null : "
+        "await rpc<SetupStatusResponse>('setup.status', {})\n",
+        "        const setup = await rpc<SetupStatusResponse>('setup.status', {})\n",
+    ).replace(
+        "      return (gw.isCanonical ? Promise.resolve(null) : "
+        "rpc<SetupStatusResponse>('setup.status', {}))\n",
+        "      // The legacy transport builds the resumed agent from the profile's config. On the shared\n"
+        "      // gateway the stored session's frozen policy carries its own route, so only a failed resume asks.\n"
+        "      return (gw.isCanonical ? Promise.resolve(null) : "
+        "rpc<SetupStatusResponse>('setup.status', {}))\n",
+    )
+    candidate2, path2 = _termux_tui_candidate(tmp_path, text=text_both)
+    assert _reconcile_termux_tui_setup_gate(str(candidate2)) == []
+    assert "only a failed resume asks" in path2.read_text(encoding="utf-8")
+
+
 def test_termux_tui_setup_gate_raises_when_one_call_is_rewritten(tmp_path):
     """A half-applied gate is worse than none: it stops the sync."""
     text = _TERMUX_TUI_TEXT.replace(
@@ -4341,6 +4466,111 @@ def test_reconcile_plugin_guard_trusted_installer_hosts(tmp_path):
 
     # Idempotent once the allowlist carries the bare host.
     assert _reconcile_plugin_guard_trusted_installer_hosts(str(root)) == 0
+
+
+def test_reconcile_catalog_redirect_host_test(tmp_path):
+    """The fake's ``request.url.host`` is a bare hostname; the domain pass
+    rewrote the comparison into the docs compound (host plus path), so the
+    redirect test's handler always returned 200 and the refusal it asserts
+    never happened. Only the comparison is rewritten back to the bare host --
+    the compound stays correct everywhere else in the file.
+    """
+    root = tmp_path / "branded"
+    tests = root / "tests" / "nastech_cli"
+    tests.mkdir(parents=True)
+    target = tests / "test_plugin_catalog.py"
+    target.write_text(
+        "def _redirecting_to(target: str, doc: dict):\n"
+        "    import httpx\n"
+        "\n"
+        "    def handler(request):\n"
+        '        if request.url.host == "nastechresearch.github.io/nastech-agent":\n'
+        '            return httpx.Response(301, headers={"location": target})\n'
+        "        return httpx.Response(200, json=doc)\n"
+        "    return handler\n"
+        "\n"
+        "\n"
+        "def test_the_docs_host_redirect_to_github_pages_is_followed(tmp_path, monkeypatch):\n"
+        "    cache = _fresh_cache(tmp_path, monkeypatch, {\"entries\": [], \"removed\": []})\n"
+        "    cache.unlink()\n"
+        '    monkeypatch.setattr(pc, "LIVE_CATALOG_URL", '
+        '"https://nastechresearch.github.io/nastech-agent/docs/api/plugin-catalog.json")\n'
+        '    pages = "https://nastechresearch.github.io/nastech-agent/docs/api/plugin-catalog.json"\n'
+        "    _serve_with(monkeypatch, _redirecting_to(pages, {\"entries\": [_entry(\"published\")], \"removed\": []}))\n"
+        "\n"
+        "\n"
+        "def test_a_redirect_off_the_catalog_hosts_is_a_failed_fetch(tmp_path, monkeypatch):\n"
+        "    cache = _fresh_cache(tmp_path, monkeypatch, {\"entries\": [], \"removed\": []})\n"
+        "    cache.unlink()\n"
+        '    monkeypatch.setattr(pc, "LIVE_CATALOG_URL", '
+        '"https://nastechresearch.github.io/nastech-agent/docs/api/plugin-catalog.json")\n'
+    )
+
+    assert _reconcile_catalog_redirect_host_test(str(root)) == 1
+    text = target.read_text()
+    assert 'request.url.host == "nastechresearch.github.io"' in text
+    assert 'request.url.host == "nastechresearch.github.io/nastech-agent"' not in text
+    # the fake answers the final hop by full URL, not by host
+    assert "if str(request.url) == target:" in text
+    # the followed hop starts on the bare host and lands on the docs URL
+    assert '"https://nastechresearch.github.io/docs/api/plugin-catalog.json"' in text
+    assert 'pages = "https://nastechresearch.github.io/nastech-agent/docs/api/plugin-catalog.json"' in text
+    # the failed-fetch test keeps the full docs URL as its catalog
+    assert text.count(
+        'LIVE_CATALOG_URL", "https://nastechresearch.github.io/nastech-agent/docs/api/plugin-catalog.json")'
+    ) >= 1
+    # the real catalog URL keeps its docs path elsewhere in the file
+    assert "nastechresearch.github.io/nastech-agent/docs/api/plugin-catalog.json" in text
+
+    # Idempotent once the fake carries the branded shape.
+    assert _reconcile_catalog_redirect_host_test(str(root)) == 0
+
+
+def test_serve_handler_ledger_rows_follow_the_renamed_sort(tmp_path):
+    """The generator sorts rows by ``(kind is rpc, handler)``; the rename moves
+    ``/api/hermes/update`` rows past ``/api/m*`` without re-sorting the JSON,
+    and the ledger test refuses the stale render. The rows' facts stay
+    untouched -- only the rendered order is regenerated.
+    """
+    root = tmp_path / "branded"
+    tests = root / "tests" / "nastech_cli"
+    tests.mkdir(parents=True)
+    target = tests / "serve_handler_ledger.json"
+    stale = (
+        '{\n'
+        ' "counts": {"http": {"undecided": 2}, "rpc": {"undecided": 1}},\n'
+        ' "decisions": ["undecided"],\n'
+        ' "generated_by": "scripts/gen_serve_handler_ledger.py",\n'
+        ' "handlers": [\n'
+        '  {"current_path": "b", "decision": "undecided", "handler": "GET /api/nastech/update/check", '
+        '"kind": "http", "ref": ""},\n'
+        '  {"current_path": "a", "decision": "undecided", "handler": "GET /api/host/identity", '
+        '"kind": "http", "ref": ""},\n'
+        '  {"current_path": "c", "decision": "undecided", "handler": "POST /api/model/set", '
+        '"kind": "http", "ref": ""},\n'
+        '  {"current_path": "d", "decision": "undecided", "handler": "gateway.ping2", "kind": "rpc", "ref": ""}\n'
+        ' ],\n'
+        ' "refs": "#145171 (EP-1)"\n'
+        '}\n'
+    )
+    target.write_text(stale)
+
+    assert _reconcile_serve_handler_ledger(str(root)) == 1
+    text = target.read_text()
+    # the renamed row moved past POST /api/model/set, per the generator's key
+    assert text.index('"GET /api/host/identity"') < text.index('"GET /api/nastech/update/check"')
+    assert text.index('"GET /api/nastech/update/check"') < text.index('"POST /api/model/set"')
+    # rpc rows still sort after every http row, and rows keep their facts
+    assert text.index('"POST /api/model/set"') < text.index('"gateway.ping2"')
+    assert '"current_path": "b"' in text
+    import json as _json
+    data = _json.loads(text)
+    assert data["counts"] == {"http": {"undecided": 3}, "rpc": {"undecided": 1}}
+    assert data["refs"] == "#145171 (EP-1)"
+
+    # Idempotent once the rows are in the generator's order.
+    assert _reconcile_serve_handler_ledger(str(root)) == 0
+    assert target.read_text() == text
 
 
 def test_reconcile_plugin_guard_leaves_install_paths_untouched(tmp_path):
@@ -8819,6 +9049,44 @@ def test_the_forks_release_fix_survives_upstreams_rewrite_of_the_same_file(tmp_p
     assert 'print("would promote", channel)' in text
 
 
+def test_the_replay_reads_the_factory_baseline_when_the_fork_has_no_manifest(tmp_path, monkeypatch):
+    """The product tree no longer carries manifest.json, and a CI fork checkout has
+    none to read -- the replay must then take the factory's recorded baseline
+    instead of silently skipping every shared release-plane file.
+
+    Red on the 2026-11-14 canary: with the baseline lookup empty, the merge stage
+    never ran, and ``channel_publish.py`` shipped as a fork/upstream hybrid whose
+    ``NATIVE_LEGS`` still named a build group upstream had deleted.
+    """
+    dst, fork, hermes = _merge_tree(tmp_path, _MERGE_UPSTREAM_TIP, _MERGE_FORK)
+    os.remove(Path(fork) / "manifest.json")
+    # A real fork checkout (the shape CI clones) -- a .git dir, no manifest.
+    (Path(fork) / ".git").mkdir()
+    # The factory records the fork's last synced upstream SHA.
+    engine_root = tmp_path / "engine"
+    (engine_root / "state").mkdir(parents=True)
+    baseline_sha = _upstream_sha_of(hermes, "scripts/releases/stable.py")
+    (engine_root / "state" / "baseline.json").write_text(
+        json.dumps({"upstream_sha": baseline_sha}))
+    monkeypatch.setattr(updates, "engine_repo_root", lambda: str(engine_root))
+
+    fixed, unresolved = _reconcile_fork_release_divergence(
+        dst, fork_root=fork, upstream_src=hermes)
+
+    text = (Path(dst) / "scripts" / "releases" / "stable.py").read_text()
+    assert fixed == ["scripts/releases/stable.py"]
+    assert unresolved == []
+    assert "github.com/nastechresearch/nastech-agent/releases/download" in text
+    assert "dry_run: bool = False" in text
+
+
+def _upstream_sha_of(hermes: str, rel: str) -> str:
+    """The commit in the fake upstream whose tree first wrote ``rel``."""
+    proc = subprocess.run(["git", "-C", hermes, "log", "--format=%H", "--diff-filter=A",
+                           "-1", "--", rel], capture_output=True, text=True, check=True)
+    return proc.stdout.strip()
+
+
 _MERGE_WORKFLOW_BASE = """name: Canary release
 
 on:
@@ -9119,6 +9387,34 @@ def test_a_policy_table_file_resolves_its_collision_fork_side(tmp_path):
     assert "releases/download" in text
 
 
+def test_the_darwin_handoff_seam_resolves_its_collision_fork_side(tmp_path):
+    """``scripts/releases/darwin.py`` is the fork's owned plane too.
+
+    The fork's handoff-store seam (#205) re-indents ``finalize``'s whole body
+    under ``if transport is r2_module:``, so any upstream edit inside that
+    region collides with the fork's insertion hunk.  The fork's side is the
+    answer for the collided region; upstream's changes outside it still
+    union in.
+    """
+    rel = "scripts/releases/darwin.py"
+    dst, fork, hermes = _merge_tree(
+        tmp_path, _POLICY_COLLISION_TIP, _POLICY_COLLISION_FORK,
+        rel=rel, base_text=_MERGE_UPSTREAM_BASE)
+
+    fixed, unresolved = _reconcile_fork_release_divergence(
+        dst, fork_root=fork, upstream_src=hermes)
+
+    text = (Path(dst) / rel).read_text()
+    assert unresolved == []
+    assert fixed == [rel]
+    # The fork's side of the collided region.
+    assert "def _reap(channel: str) -> None:" in text
+    # Upstream's addition outside the collision still landed.
+    assert "AUDIT_DAYS = 30" in text
+    # The fork's non-collided fix rode the union too.
+    assert "releases/download" in text
+
+
 def test_an_off_table_body_collision_still_fails_the_sync(tmp_path):
     """The policy table names the fork's owned plane and nothing else; a
     collision in any other release-plane path stays fail-closed."""
@@ -9230,6 +9526,174 @@ def test_pnpm_lock_ui_digest_describes_the_forks_tarball(tmp_path):
     # idempotent: the fork's own digest is already there
     assert _reconcile_pnpm_ui_integrity(str(tmp_path)) == []
     assert lock.read_text() == text
+
+
+def test_pnpm_importer_dep_maps_are_re_sorted_into_pnps_order(tmp_path):
+    """Renaming a lock key in place leaves it in the slot the old spelling sorted
+    into, and pnpm always writes these maps alphabetically -- the Docker build's
+    order-sensitive lock comparison refuses any other order ("pnpm did not
+    record the locked install of ui-tui, web").  Branding re-sorts them.
+    """
+    lock = tmp_path / "pnpm-lock.yaml"
+    lock.write_text(
+        "lockfileVersion: '9.0'\n"
+        "\n"
+        "importers:\n"
+        "\n"
+        "  .:\n"
+        "    dependencies:\n"
+        "      js-yaml:\n"
+        "        specifier: 4.3.2\n"
+        "        version: 4.3.2\n"
+        "    devDependencies:\n"
+        "      zed:\n"
+        "        specifier: 1.0.0\n"
+        "        version: 1.0.0\n"
+        "\n"
+        "  ui-tui:\n"
+        "    dependencies:\n"
+        "      '@nastech/ink':\n"
+        "        specifier: 0.18.4\n"
+        "        version: 0.18.4\n"
+        "      '@nastech/shared':\n"
+        "        specifier: workspace:*\n"
+        "        version: link:../apps/shared\n"
+        "      '@nanostores/react':\n"
+        "        specifier: 0.7.0\n"
+        "        version: 0.7.0(react@19.3.0)\n"
+        "\n"
+        "packages:\n"
+        "\n"
+        "  '@nanostores/react@0.7.0':\n"
+        "    resolution: {integrity: sha512-aaa}\n"
+    )
+
+    assert _reconcile_pnpm_importer_key_order(str(tmp_path)) == ["pnpm-lock.yaml"]
+
+    text = lock.read_text()
+    ui = text.index("'@nanostores/react':")
+    ink = text.index("'@nastech/ink':")
+    shared = text.index("'@nastech/shared':")
+    assert ui < ink < shared, "pnpm's canonical alphabetical order, quotes aside"
+    # each entry keeps its own nested lines intact
+    assert "        version: 0.7.0(react@19.3.0)\n" in text
+    assert "        version: link:../apps/shared\n" in text
+    # sections outside the importers maps are untouched
+    assert text.index("'@nanostores/react@0.7.0':") > text.index("packages:")
+
+    # idempotent: a pnpm-written lock already is in canonical order
+    assert _reconcile_pnpm_importer_key_order(str(tmp_path)) == []
+    assert lock.read_text() == text
+
+
+def _pnpm_deps_hash(tmp_path, value: str) -> Path:
+    """The one-line fixed-output hash file as upstream's tip carries it."""
+    nix_dir = tmp_path / "nix"
+    nix_dir.mkdir()
+    hash_file = nix_dir / "pnpm-deps-hash"
+    hash_file.write_text(value + "\n")
+    return hash_file
+
+
+_UPSTREAM_STORE_HASH = "sha256-Ez5DyfFuou8SWXaCZFnY+5mpdQ1bBM9jd7ukna4S3ss="
+_BRANDED_STORE_HASH = "sha256-LkDhX4Kb8AZ5SHRIG3rEww+nWWCjXyF5Jcts3KCKu/Y="
+
+
+def test_pnpm_deps_hash_is_rewritten_from_the_derivations_got(tmp_path, monkeypatch):
+    """Branding swaps the fork's ui tarball into the hashed store, so the
+    derivation -- not a guess -- names the replacement value."""
+    hash_file = _pnpm_deps_hash(tmp_path, _UPSTREAM_STORE_HASH)
+    monkeypatch.setattr(updates.shutil, "which", lambda name: "/usr/bin/nix")
+    monkeypatch.setattr(
+        updates, "_nix_pnpm_deps_got", lambda dst, nix: _BRANDED_STORE_HASH)
+
+    assert _reconcile_pnpm_deps_hash(str(tmp_path)) == [_PNPM_DEPS_HASH_REL]
+
+    assert hash_file.read_text() == _BRANDED_STORE_HASH + "\n"
+
+
+def test_pnpm_deps_hash_is_a_fixed_point_when_the_derivation_accepts_it(tmp_path, monkeypatch):
+    hash_file = _pnpm_deps_hash(tmp_path, _BRANDED_STORE_HASH)
+    monkeypatch.setattr(updates.shutil, "which", lambda name: "/usr/bin/nix")
+    monkeypatch.setattr(updates, "_nix_pnpm_deps_got", lambda dst, nix: None)
+
+    assert _reconcile_pnpm_deps_hash(str(tmp_path)) == []
+    assert hash_file.read_text() == _BRANDED_STORE_HASH + "\n"
+
+
+def test_pnpm_deps_hash_without_nix_stops_the_sync(tmp_path, monkeypatch):
+    """A host that cannot verify the store must not publish a stale hash -- or
+    invent one."""
+    hash_file = _pnpm_deps_hash(tmp_path, _UPSTREAM_STORE_HASH)
+    monkeypatch.delenv("HUNDREDWAYS_PNPM_DEPS_HASH", raising=False)
+    monkeypatch.setattr(updates.shutil, "which", lambda name: None)
+
+    with pytest.raises(PnpmDepsHashError):
+        _reconcile_pnpm_deps_hash(str(tmp_path))
+
+    assert hash_file.read_text() == _UPSTREAM_STORE_HASH + "\n"
+
+
+def test_pnpm_deps_hash_pin_writes_the_value_the_owner_copied_from_ci(tmp_path, monkeypatch):
+    hash_file = _pnpm_deps_hash(tmp_path, _UPSTREAM_STORE_HASH)
+    monkeypatch.setenv("HUNDREDWAYS_PNPM_DEPS_HASH", _BRANDED_STORE_HASH)
+    monkeypatch.setattr(updates.shutil, "which", lambda name: None)
+
+    assert _reconcile_pnpm_deps_hash(str(tmp_path)) == [_PNPM_DEPS_HASH_REL]
+
+    assert hash_file.read_text() == _BRANDED_STORE_HASH + "\n"
+
+    # idempotent once written
+    assert _reconcile_pnpm_deps_hash(str(tmp_path)) == []
+
+
+def test_pnpm_deps_hash_pin_must_be_an_sri_digest(tmp_path, monkeypatch):
+    hash_file = _pnpm_deps_hash(tmp_path, _UPSTREAM_STORE_HASH)
+    monkeypatch.setenv("HUNDREDWAYS_PNPM_DEPS_HASH", "e3b0c44298fc1c149afbf4c8996fb924")
+    monkeypatch.setattr(updates.shutil, "which", lambda name: None)
+
+    with pytest.raises(PnpmDepsHashError):
+        _reconcile_pnpm_deps_hash(str(tmp_path))
+
+    assert hash_file.read_text() == _UPSTREAM_STORE_HASH + "\n"
+
+
+def test_pnpm_deps_hash_pin_is_verified_against_the_derivation(tmp_path, monkeypatch):
+    """When nix is here the pin is a claim, not an authority: the derivation
+    still decides, and a disagreeing pin stops the sync."""
+    hash_file = _pnpm_deps_hash(tmp_path, _UPSTREAM_STORE_HASH)
+    monkeypatch.setenv("HUNDREDWAYS_PNPM_DEPS_HASH", _UPSTREAM_STORE_HASH)
+    monkeypatch.setattr(updates.shutil, "which", lambda name: "/usr/bin/nix")
+    monkeypatch.setattr(
+        updates, "_nix_pnpm_deps_got", lambda dst, nix: _BRANDED_STORE_HASH)
+
+    with pytest.raises(PnpmDepsHashError):
+        _reconcile_pnpm_deps_hash(str(tmp_path))
+
+    assert hash_file.read_text() == _UPSTREAM_STORE_HASH + "\n"
+
+
+def test_pnpm_deps_hash_needs_a_nix_tree_at_all(tmp_path):
+    assert _reconcile_pnpm_deps_hash(str(tmp_path)) == []
+
+
+def test_nix_pnpm_deps_got_parses_the_build_failure_output(tmp_path, monkeypatch):
+    """``got: sha256-...`` rides the build failure output, exactly the line
+    the CI job's sed and updatePnpmLockfile parse."""
+
+    class FakeCompleted:
+        returncode = 1
+        stdout = ""
+        stderr = "error: hash mismatch in fixed output derivation 'pnpm-deps'\n" \
+                 f"         got: {_BRANDED_STORE_HASH}\n" \
+                 "        wanted: sha256-0000000000000000000000000000000000000000000000=\n"
+
+    def fake_run(*args, **kwargs):
+        return FakeCompleted()
+
+    monkeypatch.setattr(updates.subprocess, "run", fake_run)
+
+    assert _nix_pnpm_deps_got(str(tmp_path), "/usr/bin/nix") == _BRANDED_STORE_HASH
 
 
 def test_pnpm_lock_ui_digest_for_a_newer_publish_needs_no_engine_edit(
@@ -10235,3 +10699,159 @@ def test_the_bundled_workflow_records_its_artifact_sizes(tmp_path):
         assert "desktop-bundled-release.yml" in str(exc)
     else:
         raise AssertionError("a moved anchor must raise")
+
+
+# ---------------------------------------------------------------------------
+# The code-health ratchet: inherited upstream sites are waived inline
+# ---------------------------------------------------------------------------
+
+_RATCHET_WHY = updates.HEALTH_WAIVER_REASON
+
+
+def _ratchet_inherited_line(tmp_path, branded_rel="pkg/mod.py", line="        env = os.environ.copy()"):
+    """A candidate tree and an upstream tree sharing one branded line verbatim.
+
+    Returns (dst, upstream) directory strings.  The candidate's line 2 and the
+    branded upstream text carry the same code, so the ratchet's site on it is
+    inherited debt, not fork-written code.
+    """
+    dst = tmp_path / "dst"
+    upstream = tmp_path / "upstream"
+    (dst / "pkg").mkdir(parents=True)
+    (upstream / "pkg").mkdir(parents=True)
+    (dst / branded_rel).write_text(f"line one\n{line}\nline three\n")
+    (upstream / branded_rel).write_text(f"line one\n{line}\nline three\n")
+    return str(dst), str(upstream)
+
+
+def _ratchet_fork_with_main(tmp_path):
+    """A tiny fork checkout whose ``main`` ref resolves, as CI's base does."""
+    fork = tmp_path / "fork"
+    fork.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(fork)], check=True)
+    (fork / "README.md").write_text("fork main\n")
+    for args in (
+        ["add", "-A"],
+        ["-c", "user.name=t", "-c", "user.email=t@i", "commit", "-qm", "init"],
+    ):
+        subprocess.run(["git", "-C", str(fork), *args], check=True)
+    return str(fork)
+
+
+def _ratchet_site(rel="pkg/mod.py", rule="HX006", line=2):
+    return {"path": rel, "rule": rule, "line": line, "blocking": True}
+
+
+def test_health_waiver_groups_one_lines_rules_into_a_single_comment(tmp_path):
+    """Two rules blocking on one line share one ``allow`` comment."""
+    text = "a\n    time.sleep(0)\nb\n"
+    out = updates._ratchet_insert_waivers(text, "pkg/mod.py", {2: ["HX006", "HX008"]})
+    lines = out.splitlines()
+    assert "health: allow HX006, HX008" in lines[1]
+    assert lines[1].rstrip().endswith(f"-- {_RATCHET_WHY}")
+    assert len(lines) == 3, "an own-line waiver adds no line"
+
+
+def test_health_waivers_insert_bottom_up_so_earlier_lines_hold(tmp_path):
+    """Inserting for line 3 must not shift the answer for line 2."""
+    text = "a\n    b = open(f)\n    c = (1 + \\\n        2)\n"
+    out = updates._ratchet_insert_waivers(text, "pkg/mod.py", {2: ["HX006"], 3: ["HX006"]})
+    lines = out.splitlines()
+    assert "health: allow HX006" in lines[1], "line 2 answered on its own line"
+    assert "health: allow HX006" in lines[2], "line 3's answer rides the comment-only line above"
+    assert lines[3].rstrip().endswith("\\"), "the continued line is untouched"
+    assert len(lines) == 5, "exactly one line was inserted"
+
+
+def test_health_file_lines_waiver_sits_below_the_shebang(tmp_path):
+    """FILE_LINES is answered in lines 1-5; a shebang keeps line 1."""
+    text = "#!/usr/bin/env python3\nx = 1\n"
+    out = updates._ratchet_insert_waivers(text, "big.py", {1: ["FILE_LINES"]})
+    lines = out.splitlines()
+    assert lines[0].startswith("#!")
+    assert lines[1] == f"# health: allow FILE_LINES -- {_RATCHET_WHY}"
+    # ... and without a shebang it is line 1.
+    out = updates._ratchet_insert_waivers("x = 1\n", "big.py", {1: ["FILE_LINES"]})
+    assert out.splitlines()[0] == f"# health: allow FILE_LINES -- {_RATCHET_WHY}"
+
+
+def test_health_waiver_on_a_continuation_line_rides_the_line_above(tmp_path):
+    """A comment may not follow a line-continuation backslash."""
+    text = "a\n    total = (\n        1 + \\\n        2)\nb\n"
+    out = updates._ratchet_insert_waivers(text, "pkg/mod.py", {3: ["HX013"]})
+    lines = out.splitlines()
+    assert "health: allow HX013" in lines[2], "the comment-only line above"
+    assert lines[3].rstrip().endswith("\\"), "the continued line is untouched"
+
+
+def test_health_waiver_leaves_a_line_that_already_carries_one(tmp_path):
+    """Layering a second ``health: allow`` would bury the first rule list."""
+    text = f"a\n    x = 1  # health: allow HX006 -- {_RATCHET_WHY}\nb\n"
+    out = updates._ratchet_insert_waivers(text, "pkg/mod.py", {2: ["HX006", "HX013"]})
+    assert out == text, "the caller's verification re-run settles any gap"
+
+
+def test_health_waiver_syntax_fails_closed_without_a_comment_form(tmp_path):
+    text = "a\nb\n"
+    with pytest.raises(updates.CodeHealthRatchetError) as exc:
+        updates._ratchet_insert_waivers(text, "data/blob.bin", {1: ["HX006"]})
+    assert "blob.bin" in str(exc.value)
+
+
+def test_the_ratchet_no_ops_without_a_fork_checkout(tmp_path):
+    """No fork checkout means no base CI could judge against; nothing is written."""
+    dst, upstream = _ratchet_inherited_line(tmp_path)
+    assert updates._reconcile_code_health_ratchet(dst, None, upstream) == []
+    assert (Path(dst) / "pkg/mod.py").read_text().splitlines()[1] == "        env = os.environ.copy()"
+
+
+def test_the_ratchet_waives_an_inherited_site_and_reruns_clean(tmp_path, monkeypatch):
+    """The honest path: the site is upstream's line, the waiver lands inline,
+    and the verification re-run must come back clean before anything publishes."""
+    dst, upstream = _ratchet_inherited_line(tmp_path)
+    fork = _ratchet_fork_with_main(tmp_path)
+    calls = []
+
+    def fake_blocking(_dst, _fork, _git):
+        calls.append(1)
+        return [] if len(calls) > 1 else [_ratchet_site()]
+
+    monkeypatch.setattr(updates, "_ratchet_blocking", fake_blocking)
+    assert updates._reconcile_code_health_ratchet(dst, fork, upstream) == ["pkg/mod.py"]
+    assert len(calls) == 2, "a verification re-run, not a single measurement"
+    waived = (Path(dst) / "pkg/mod.py").read_text().splitlines()[1]
+    assert "health: allow HX006" in waived and _RATCHET_WHY in waived
+
+
+def test_the_ratchet_fails_closed_on_a_site_upstream_does_not_carry(tmp_path, monkeypatch):
+    """A waiver on fork-written code would bury a real regression."""
+    dst, upstream = _ratchet_inherited_line(tmp_path)
+    fork = _ratchet_fork_with_main(tmp_path)
+    # The candidate's line 2 exists only in the candidate: upstream says
+    # something else on every line.
+    (Path(upstream) / "pkg/mod.py").write_text("other\nlines\nhere\n")
+    monkeypatch.setattr(
+        updates, "_ratchet_blocking", lambda *_a: [_ratchet_site()])
+    with pytest.raises(updates.CodeHealthRatchetError) as exc:
+        updates._reconcile_code_health_ratchet(dst, fork, upstream)
+    assert "not in the branded upstream text" in str(exc.value)
+    waived = (Path(dst) / "pkg/mod.py").read_text()
+    assert "health: allow" not in waived, "nothing is written on a failed sync"
+
+
+def test_the_ratchet_fails_closed_on_a_file_no_upstream_source_maps(tmp_path, monkeypatch):
+    dst, upstream = _ratchet_inherited_line(tmp_path)
+    fork = _ratchet_fork_with_main(tmp_path)
+    monkeypatch.setattr(
+        updates, "_ratchet_blocking",
+        lambda *_a: [_ratchet_site(rel="forkonly/mod.py")])
+    with pytest.raises(updates.CodeHealthRatchetError) as exc:
+        updates._reconcile_code_health_ratchet(dst, fork, upstream)
+    assert "no upstream source" in str(exc.value)
+
+
+def test_the_ratchet_names_its_base_from_the_forks_main_ref(tmp_path):
+    fork = _ratchet_fork_with_main(tmp_path)
+    git = shutil.which("git")
+    assert updates._ratchet_fork_base_ref(fork, git) is not None
+    assert updates._ratchet_fork_base_ref(str(tmp_path / "absent"), git) is None

@@ -191,7 +191,7 @@ def build_publication_authorization_receipt(
             "gate_receipt_sha256": sha256_file(gate_path),
             "candidate_artifact_sha256": actual_digest,
         },
-        "authorized_actions": ["force-push-candidate-branch", "create-or-update-pull-request"],
+        "authorized_actions": ["fast-forward-push-candidate-branch", "create-or-update-pull-request"],
         "prohibited_actions": ["merge", "tag", "release", "deploy"],
     }
     payload["integrity"] = {"payload_sha256": _canonical_digest(payload)}

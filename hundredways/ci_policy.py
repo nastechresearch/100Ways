@@ -18,8 +18,9 @@ class WorkflowPolicyIssue:
 _ACTION_LINE = re.compile(r"^\s*(?:-\s*)?uses:\s*([^\s#]+)", re.MULTILINE)
 _FULL_SHA = re.compile(r"@[0-9a-f]{40}(?:\s|$|#)")
 _PUBLICATION_WORKFLOWS: dict[str, tuple[str, ...]] = {
-    # The candidate path from #344.  It force-pushes the machine-generated
-    # candidate branch by design, so no rule here forbids that.
+    # The candidate path from #344.  It fast-forward-pushes the
+    # machine-generated candidate branch (accumulating commits, never
+    # --force), so no rule here forbids the push itself.
     "stage-update-pr.yml": ("workflow_call",),
     # The chat path: a poll window whose /apply verb runs the engine suite and
     # then pushes one branch and opens one PR against the dispatched ref.  It is

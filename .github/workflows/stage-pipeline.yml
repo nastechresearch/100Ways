@@ -51,6 +51,15 @@ jobs:
         with:
           python-version: "3.12"
 
+      # The candidate's code-health ratchet measures TypeScript through the
+      # fork's scripts/code_health/ts_measure.py, which shells out to node
+      # (and npm-installs the lockfile's typescript).  Without node every TS
+      # file answers a blocking MEASURE finding and the lint lane's own
+      # engine gate fails the sync on files it never read.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # 7.0.0
+        with:
+          node-version: 26
+
       - name: Install 100ways
         # The ai extra is what lets the review narrative ask Ollama for one prose
         # paragraph; without it the narrative silently stays deterministic-only.
@@ -154,6 +163,50 @@ jobs:
               for key in ("update_number", "upstream_sha"):
                   gh.write(f"{key}={out.get(key, '')}\n")
           EOF
+
+      - name: Re-derive the pnpm-deps fixed-output hash on the branded tree
+        id: pnpm-deps-hash
+        env:
+          HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
+        run: |
+          set -euo pipefail
+          SNAPSHOT=$(find "$HUNDREDWAYS_UPDATES_DIR" -maxdepth 1 -type d -name 'Nastech-Update#*' | sort -V | tail -1)
+          test -n "$SNAPSHOT"
+          echo "snapshot=$SNAPSHOT" >> "$GITHUB_OUTPUT"
+
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # Branding rewrites pnpm-lock.yaml (workspace package renames), so the
+      # pnpm store the lock describes is a different one than upstream's, and
+      # the hash copied from upstream pins the wrong store: flake check and the
+      # pnpm-deps-hash lane both go red on every update.  The same probe the
+      # fork's own nix.yml runs is executed here against the branded tree, and
+      # the hash Nix actually computes is recorded into the snapshot before
+      # anything is published -- the tree ships with the hash its own lock
+      # derives, not with upstream's.
+      - name: Record the pnpm-deps hash the branded lock derives
+        env:
+          SNAPSHOT: ${{ steps.pnpm-deps-hash.outputs.snapshot }}
+        run: |
+          set -o pipefail
+          cd "$SNAPSHOT"
+          if nix build .#pnpm-deps --no-link --print-build-logs 2>&1 | tee "$RUNNER_TEMP/pnpm-deps.log"; then
+            echo "the branded lock already derives the committed pnpm-deps hash"
+            exit 0
+          fi
+          got=$(sed -n 's/^ *got: *\(sha256-[A-Za-z0-9+/=]*\)$/\1/p' "$RUNNER_TEMP/pnpm-deps.log")
+          if [ -z "$got" ]; then
+            echo "::error::the pnpm-deps build failed without naming a hash; cannot re-derive nix/pnpm-deps-hash"
+            exit 1
+          fi
+          printf '%s\n' "$got" > nix/pnpm-deps-hash
+          echo "nix/pnpm-deps-hash <- $got" >> "$GITHUB_STEP_SUMMARY"
+          # The FOD is content-addressed by the store this lock fetches, so the
+          # recorded hash is a fixed point: a second build must succeed now.
+          nix build .#pnpm-deps --no-link
 
       - name: Run hardened weekly decision gate
         id: weekly
