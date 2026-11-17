@@ -1818,6 +1818,44 @@ def _run_budget_block(text, frame, budget_s=3.0, wait_s=20.0):
     return namespace
 
 
+#: The real upstream file at commit 9dbaa77c, the shape factory run 6 branded.
+#: Upstream refactored this test's budget plumbing after 27e38935 -- the
+#: ``import nastech_state_reconcile as reconcile`` + ``getattr(reconcile,
+#: "BROWSE_RECONCILE_BUDGET_S", ...)`` pair became a direct
+#: ``from persistence.core.admin import BROWSE_RECONCILE_BUDGET_S`` -- which is
+#: exactly why rewrite #11's old import anchor stopped matching and the factory
+#: stopped at reconcile.  Keeping the verbatim file here makes that regression
+#: concrete instead of relying only on the self-derived pre-image above.
+_BROWSE_LIVE_UPSTREAM = Path(__file__).resolve().parent / (
+    "fixtures/browse_budget_flock/upstream_9dbaa77c.py.txt"
+)
+
+
+def test_browse_budget_flock_tests_apply_to_live_upstream_refactor(tmp_path):
+    """The real 9dbaa77c file brands and rewrites cleanly, and stays a fixed point.
+
+    This is the exact case factory run 6 hit: a stale import anchor left the
+    flock-budget tests on upstream's absolute-second bounds.  The rewrite must
+    now land on the refactored file, keep upstream's new budget plumbing
+    intact, and install the ``OwnershipConflict`` import pair #12 needs.
+    """
+    branded = BrandingRules().transform_text(_BROWSE_LIVE_UPSTREAM.read_text(encoding="utf-8"))
+    candidate, path = _browse_budget_tree(tmp_path, branded)
+
+    assert _reconcile_browse_budget_flock_tests(str(candidate)) is True
+    text = path.read_text(encoding="utf-8")
+    # The rewrite landed on the refactored shape...
+    assert "def _hold_release_latency(" in text
+    assert "assert charge < budget_s + 2, out" in text
+    assert "from gateway.runtime_ownership import OwnershipConflict, ProfileOwnership" in text
+    # ...without clobbering upstream's new budget source...
+    assert "from persistence.core.admin import BROWSE_RECONCILE_BUDGET_S" in text
+    assert "budget_s = BROWSE_RECONCILE_BUDGET_S" in text
+    # ...and is stable on the next sync.
+    assert _reconcile_browse_budget_flock_tests(str(candidate)) is False
+    assert path.read_text(encoding="utf-8") == text
+
+
 def test_browse_budget_flock_tests_rebuild_the_host_aware_bounds(tmp_path):
     """Every rewrite pair applies, in order, and the result is a fixed point.
 
@@ -2084,7 +2122,10 @@ def test_browse_budget_bound_and_constants_survive_the_rewrite(tmp_path):
     text = _browse_budget_rewritten(tmp_path)
     assert text.count("budget_s + 2") == 1
     assert "assert charge < budget_s + 2, out" in text
-    assert 'getattr(reconcile, "BROWSE_RECONCILE_BUDGET_S", 2.0)' in text
+    # Rewrite #11 now only adds the OwnershipConflict import pair #12 needs; it
+    # no longer carries (or edits) upstream's budget-source line.  What must
+    # survive is the == 3.0 pin and the + 2 margin, asserted here and below.
+    assert "from gateway.runtime_ownership import OwnershipConflict, ProfileOwnership" in text
     assert _BROWSE_BUDGET_PIN in text  # the == 3.0 pin, verbatim
     for widened in ("budget_s + 3", "budget_s + 2.5", "budget_s * 2", "BUDGET_S = 4"):
         assert widened not in text

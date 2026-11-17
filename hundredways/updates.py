@@ -7405,17 +7405,20 @@ started = time.monotonic()
 ''',
     ),
     (
+        # Upstream 9dbaa77c refactored this test's budget plumbing: the
+        # ``import nastech_state_reconcile as reconcile`` + ``getattr(reconcile,
+        # "BROWSE_RECONCILE_BUDGET_S", ...)`` pair became a direct
+        # ``from persistence.core.admin import BROWSE_RECONCILE_BUDGET_S``.  The
+        # only thing this rewrite needs is the ``runtime_ownership`` import line
+        # that pair #12's ``except OwnershipConflict`` depends on, so anchor on
+        # the two stable imports and leave upstream's volatile budget plumbing
+        # alone.  ``import gateway.run_bootstrap as bootstrap`` appears once in
+        # the file, which keeps the replacement unique.
         '''    import gateway.run_bootstrap as bootstrap
-    import nastech_state_reconcile as reconcile
     from gateway.runtime_ownership import ProfileOwnership
-
-    budget_s = getattr(reconcile, "BROWSE_RECONCILE_BUDGET_S", 2.0)
 ''',
         '''    import gateway.run_bootstrap as bootstrap
-    import nastech_state_reconcile as reconcile
     from gateway.runtime_ownership import OwnershipConflict, ProfileOwnership
-
-    budget_s = getattr(reconcile, "BROWSE_RECONCILE_BUDGET_S", 2.0)
 ''',
     ),
     (
