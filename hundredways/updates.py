@@ -8144,6 +8144,44 @@ def _reconcile_canary_unsigned_dispatch(dst: str) -> list[str]:
     return changed
 
 
+def _reconcile_sqlite3_cli_refusal_test(dst: str) -> int:
+    """Pin the lost-and-found refusal test to the empty refusal lookup.
+
+    Upstream's ``test_unreadable_schema_without_cli_names_the_sqlite3_requirement``
+    monkeypatches ``find_sqlite3_cli`` to ``None`` but leaves
+    ``find_sqlite3_cli_refusal`` reading the module global. That global is
+    populated by the *real* probe the same file runs at import time
+    (``HAVE_SQLITE3_CLI = find_sqlite3_cli() is not None``): on a runner whose
+    only ``sqlite3`` CLI carries the WAL-reset bug (Debian/Ubuntu 3.45.1) the
+    cached ``wal_reset_vulnerable`` refusal routes the raise through the
+    WAL-warning branch, whose message never names ``.recover``, and the test
+    fails on the environment rather than on the behaviour. The upstream runners
+    do not carry that CLI, so upstream never sees it; the fork's GitHub-hosted
+    lanes do, deterministically. Pin the refusal lookup empty next to the
+    patched probe -- the test's scenario is the missing-CLI guidance, and the
+    WAL refusal has its own coverage. No-op once corrected.
+    """
+    rel = os.path.join("tests", "nastech_cli", "test_session_recovery_lost_and_found.py")
+    text = _reconcile_budget_read(dst, rel)
+    if text is None:
+        return 0
+    needle = '    monkeypatch.setattr(laf, "find_sqlite3_cli", lambda: None)\n'
+    patched = '    monkeypatch.setattr(laf, "find_sqlite3_cli_refusal", lambda: {})\n'
+    if patched in text:
+        return 0
+    if needle not in text:
+        return 0
+    replacement = (
+        needle
+        + "    # The import-time HAVE_SQLITE3_CLI probe caches a WAL-vulnerable CLI's\n"
+        + "    # refusal in the module global; this scenario needs the plain\n"
+        + "    # missing-CLI guidance, so pin the refusal lookup empty as well.\n"
+        + patched
+    )
+    _reconcile_budget_write(dst, rel, text.replace(needle, replacement, 1))
+    return 1
+
+
 class WindowsRealGitLocateError(ValueError):
     """``_locate_real_git`` no longer matches the shape the robustness patch needs.
 
@@ -10842,12 +10880,25 @@ def _ratchet_blocking(dst: str, fork_root: str, git: str) -> list[dict]:
                     if os.path.isdir(os.path.join(tmp, name)) \
                     else os.remove(os.path.join(tmp, name))
         _ratchet_copy_tree(dst, tmp)
+        # The candidate must commit onto its own ref: committing on ``base``
+        # would advance the base branch to the candidate and diff it against
+        # itself ("no measured files changed").  ``head`` starts where base
+        # is, then takes the candidate's tree; the ratchet's --base/--head
+        # name refs, not HEAD (git has no lowercase head revision).
+        _git("checkout", "-q", "-b", "head")
         _git("add", "-A")
         _git("-c", "user.name=factory", "-c", "user.email=factory@invalid",
              "commit", "-qm", "candidate")
-        # The ratchet's --base/--head name refs, not HEAD: a detached candidate
-        # commit answers "Needed a single revision" (git has no lowercase head).
-        _git("branch", "head")
+        # A staging that leaves base and head identical diffs against itself
+        # and answers a clean ratchet on an unmeasured tree; fail instead.
+        refs = subprocess.run(
+            [git, "-C", tmp, "rev-parse", "base", "head"],
+            capture_output=True, text=True, check=False)
+        shas = refs.stdout.split()
+        if refs.returncode != 0 or len(shas) != 2 or shas[0] == shas[1]:
+            raise CodeHealthRatchetError(
+                "code-health ratchet staging left base and head the same "
+                "revision; the candidate would be measured against itself")
         proc = subprocess.run(
             [sys.executable, "-m", "scripts.code_health",
              "--base", "base", "--head", "head", "--json"],
@@ -11349,6 +11400,13 @@ def reconcile_tree(
     if _reconcile_catalog_redirect_host_test(dst):
         result.total += 1
         result.fixed.append("tests/nastech_cli/test_plugin_catalog.py")
+    # The lost-and-found refusal test reads the module-global CLI refusal the
+    # file's own import-time probe cached; on a runner whose only sqlite3 CLI
+    # carries the WAL-reset bug the raise takes the WAL branch and never names
+    # .recover. The refusal lookup is pinned empty next to the patched probe.
+    if _reconcile_sqlite3_cli_refusal_test(dst):
+        result.total += 1
+        result.fixed.append("tests/nastech_cli/test_session_recovery_lost_and_found.py")
     # The generated ledger sorts its rows by handler name; the rename moves
     # rows without re-sorting, so the rendered text is regenerated from the
     # renamed rows with the generator's own recipe.

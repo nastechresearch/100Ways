@@ -120,6 +120,7 @@ from hundredways.updates import (
     _reconcile_plugin_guard_trusted_installer_hosts,
     _reconcile_catalog_redirect_host_test,
     _reconcile_serve_handler_ledger,
+    _reconcile_sqlite3_cli_refusal_test,
     _reconcile_portable_shebang,
     _reconcile_portal_override_test_collision,
     _reconcile_preserved_brand_text,
@@ -4524,6 +4525,60 @@ def test_reconcile_catalog_redirect_host_test(tmp_path):
 
     # Idempotent once the fake carries the branded shape.
     assert _reconcile_catalog_redirect_host_test(str(root)) == 0
+
+
+def test_reconcile_sqlite3_cli_refusal_test(tmp_path):
+    """The lost-and-found refusal test reads the module-global refusal that the
+    same file's import-time ``HAVE_SQLITE3_CLI`` probe cached; on a runner whose
+    only sqlite3 CLI carries the WAL-reset bug that cached refusal routes the
+    raise through the WAL branch, whose message never names ``.recover``. The
+    refusal lookup is pinned empty next to the patched probe, and the file
+    imports it inside the function so the patch is seen.
+    """
+    root = tmp_path / "branded"
+    tests = root / "tests" / "nastech_cli"
+    tests.mkdir(parents=True)
+    target = tests / "test_session_recovery_lost_and_found.py"
+    target.write_text(
+        "HAVE_SQLITE3_CLI = find_sqlite3_cli() is not None\n"
+        "\n"
+        "\n"
+        "def test_unreadable_schema_without_cli_names_the_sqlite3_requirement(tmp_path, monkeypatch):\n"
+        "    source = tmp_path / 'schemaless.db'\n"
+        "    import nastech_cli.session_lost_and_found as laf\n"
+        "\n"
+        "    monkeypatch.setattr(laf, \"find_sqlite3_cli\", lambda: None)\n"
+        "    with pytest.raises(SessionRecoverySourceError) as excinfo:\n"
+        "        recover_session_database(source, output, allow_partial=True)\n"
+        "    assert \".recover\" in str(excinfo.value)\n"
+    )
+
+    assert _reconcile_sqlite3_cli_refusal_test(str(root)) == 1
+    text = target.read_text()
+    assert 'monkeypatch.setattr(laf, "find_sqlite3_cli", lambda: None)' in text
+    assert 'monkeypatch.setattr(laf, "find_sqlite3_cli_refusal", lambda: {})' in text
+    # The refusal pin sits directly after the probe pin it mirrors.
+    probe = text.index('monkeypatch.setattr(laf, "find_sqlite3_cli", lambda: None)')
+    refusal = text.index('monkeypatch.setattr(laf, "find_sqlite3_cli_refusal", lambda: {})')
+    assert text[probe:refusal].count("\n") <= 4
+    # Everything else in the file is untouched.
+    assert text.startswith("HAVE_SQLITE3_CLI = find_sqlite3_cli() is not None\n")
+    assert text.count("find_sqlite3_cli_refusal") == 1
+
+    # Idempotent once the test carries the pinned refusal.
+    assert _reconcile_sqlite3_cli_refusal_test(str(root)) == 0
+
+
+def test_reconcile_sqlite3_cli_refusal_test_absent_or_moved(tmp_path):
+    """A file without the needle, or without the file at all, is a no-op."""
+    root = tmp_path / "branded"
+    tests = root / "tests" / "nastech_cli"
+    tests.mkdir(parents=True)
+    (tests / "test_session_recovery_lost_and_found.py").write_text(
+        "def test_other(): pass\n"
+    )
+    assert _reconcile_sqlite3_cli_refusal_test(str(root)) == 0
+    assert _reconcile_sqlite3_cli_refusal_test(str(tmp_path / "empty")) == 0
 
 
 def test_serve_handler_ledger_rows_follow_the_renamed_sort(tmp_path):
@@ -10855,3 +10910,66 @@ def test_the_ratchet_names_its_base_from_the_forks_main_ref(tmp_path):
     git = shutil.which("git")
     assert updates._ratchet_fork_base_ref(fork, git) is not None
     assert updates._ratchet_fork_base_ref(str(tmp_path / "absent"), git) is None
+
+
+_RATCHET_FAKE_CODE_HEALTH = '''\
+"""Fake fork ratchet: measure only what the base..head diff carries."""
+import json, subprocess
+from pathlib import Path
+
+diff = subprocess.run(
+    ["git", "diff", "--name-only", "base", "head"],
+    capture_output=True, text=True, check=False).stdout
+if "pkg/mod.py" not in diff:
+    print(json.dumps([]))
+elif "health: allow" in Path("pkg/mod.py").read_text():
+    print(json.dumps([]))
+else:
+    print(json.dumps([
+        {"path": "pkg/mod.py", "rule": "HX006", "line": 2, "blocking": True},
+    ]))
+'''
+
+
+def _ratchet_fork_tooling(dst: str) -> None:
+    """Stage the fake fork ratchet into the candidate tree as scripts.code_health."""
+    scripts = Path(dst) / "scripts"
+    scripts.mkdir()
+    (scripts / "__init__.py").write_text("")
+    (scripts / "code_health.py").write_text(_RATCHET_FAKE_CODE_HEALTH)
+
+
+def test_the_ratchet_staging_commits_the_candidate_onto_its_own_head(tmp_path):
+    """The staged candidate must diff against fork main.
+
+    Committing on ``base`` advanced the base ref to the candidate, so the
+    staged base and head named the same commit and the measured diff was
+    empty: the ratchet answered clean on a tree it never measured and the
+    sync published unjudged sites. ``head`` now starts where base is and
+    takes the candidate's tree, so the diff is the candidate.
+    """
+    dst, upstream = _ratchet_inherited_line(tmp_path)
+    fork = _ratchet_fork_with_main(tmp_path)
+    _ratchet_fork_tooling(dst)
+
+    # No _ratchet_blocking mock: the real staging and the real subprocess
+    # ratchet answer for the staged tree.
+    assert updates._reconcile_code_health_ratchet(dst, fork, upstream) == ["pkg/mod.py"]
+    waived = (Path(dst) / "pkg/mod.py").read_text().splitlines()[1]
+    assert "health: allow HX006" in waived and _RATCHET_WHY in waived
+
+
+def test_the_ratchet_staging_fails_closed_on_a_base_identical_candidate(tmp_path):
+    """A candidate identical to fork main has nothing to commit onto head;
+    staging must fail loudly instead of measuring base against itself."""
+    fork = _ratchet_fork_with_main(tmp_path)
+    dst = tmp_path / "candidate"
+    dst.mkdir()
+    shutil.copy(str(Path(fork) / "README.md"), str(dst / "README.md"))
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    (upstream / "README.md").write_text("fork main\n")
+
+    with pytest.raises(updates.CodeHealthRatchetError) as exc:
+        updates._reconcile_code_health_ratchet(str(dst), fork, str(upstream))
+    assert "staging" in str(exc.value)
