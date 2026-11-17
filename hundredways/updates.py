@@ -10822,6 +10822,30 @@ def _ratchet_fork_base_ref(fork_root: str, git: str) -> str | None:
     return None
 
 
+def _ratchet_objects_dir(fork_root: str, git: str) -> str:
+    """The fork checkout's git object store, absolute.
+
+    The staging repository reads the base commit's objects through this store
+    instead of fetching them, so it must survive a worktree checkout (whose
+    ``.git`` is a pointer back to the shared store) as well as a plain clone.
+    ``""`` when the store cannot be located.
+    """
+    proc = subprocess.run(
+        [git, "-C", fork_root, "rev-parse", "--path-format=absolute",
+         "--git-common-dir"],
+        capture_output=True, text=True, check=False,
+    )
+    if proc.returncode != 0:
+        proc = subprocess.run(
+            [git, "-C", fork_root, "rev-parse", "--absolute-git-dir"],
+            capture_output=True, text=True, check=False,
+        )
+        if proc.returncode != 0:
+            return ""
+    objects = os.path.join(proc.stdout.strip(), "objects")
+    return objects if os.path.isdir(objects) else ""
+
+
 def _ratchet_copy_tree(dst: str, into: str) -> None:
     """Copy the candidate's files into ``into``, skipping what no repo carries.
 
@@ -10862,6 +10886,12 @@ def _ratchet_blocking(dst: str, fork_root: str, git: str) -> list[dict]:
             "ratchet cannot be judged against the base CI will use"
         )
     with tempfile.TemporaryDirectory(prefix="health-ratchet-") as tmp:
+        objects = _ratchet_objects_dir(fork_root, git)
+        if not objects:
+            raise CodeHealthRatchetError(
+                f"{fork_root} keeps no git object store; the code-health "
+                "ratchet cannot stage fork main as the base CI judges against")
+
         def _git(*args: str) -> None:
             proc = subprocess.run(
                 [git, "-C", tmp, *args], capture_output=True, text=True, check=False,
@@ -10872,10 +10902,16 @@ def _ratchet_blocking(dst: str, fork_root: str, git: str) -> list[dict]:
                     + f" -> {proc.stderr.strip()[:400]}")
 
         _git("init", "-q")
-        _git("-c", "user.name=factory", "-c", "user.email=factory@invalid",
-             "fetch", "-q", fork_root, base)
-        _git("-c", "user.name=factory", "-c", "user.email=factory@invalid",
-             "checkout", "-q", "-b", "base", "FETCH_HEAD")
+        # The factory clones the fork shallow, and a shallow source cannot
+        # serve its tip over fetch (the receiver refuses shallow roots), so
+        # the staging does not fetch at all: it reads fork main's objects
+        # through the fork's own object store and checks the base commit out
+        # directly.  A full clone reaches the same result through the same
+        # path, so there is only one staging behaviour to keep honest.
+        with open(os.path.join(tmp, ".git", "objects", "info", "alternates"),
+                  "w", encoding="utf-8") as fh:
+            fh.write(objects + "\n")
+        _git("checkout", "-q", "-b", "base", base)
         for name in os.listdir(tmp):
             if name != ".git":
                 shutil.rmtree(os.path.join(tmp, name)) \

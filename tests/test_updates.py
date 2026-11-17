@@ -10978,6 +10978,27 @@ def test_the_ratchet_staging_commits_the_candidate_onto_its_own_head(tmp_path):
     assert "health: allow HX006" in waived and _RATCHET_WHY in waived
 
 
+def test_the_ratchet_stages_the_base_from_a_shallow_fork_clone(tmp_path):
+    """The factory's fork checkout is a ``--depth=1`` clone, and a shallow
+    source cannot serve its tip over fetch; the staging must still stage fork
+    main as the base by reading the fork's own object store."""
+    fork = _ratchet_fork_with_main(tmp_path)
+    shallow = tmp_path / "fork-shallow"
+    subprocess.run(
+        ["git", "clone", "-q", "--depth=1", "file://" + str(fork), str(shallow)],
+        check=True)
+    assert (shallow / ".git" / "shallow").is_file(), (
+        "the regression needs a genuinely shallow clone; local --depth against "
+        "a plain path is ignored")
+    dst, upstream = _ratchet_inherited_line(tmp_path)
+    _ratchet_fork_tooling(dst)
+
+    assert updates._reconcile_code_health_ratchet(dst, str(shallow), upstream) == [
+        "pkg/mod.py"]
+    waived = (Path(dst) / "pkg/mod.py").read_text().splitlines()[1]
+    assert "health: allow HX006" in waived and _RATCHET_WHY in waived
+
+
 def test_the_ratchet_staging_fails_closed_on_a_base_identical_candidate(tmp_path):
     """A candidate identical to fork main has nothing to commit onto head;
     staging must fail loudly instead of measuring base against itself."""
