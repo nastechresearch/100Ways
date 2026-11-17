@@ -11313,8 +11313,12 @@ def _ruff_lane_rederive_config(dst: str, fork_root: str) -> list[str]:
 
 
 def _ruff_lane_run(ruff: str, args: list[str], dst: str, timeout: int = 900):
+    # --no-cache: a lint of a candidate must not leave a .ruff_cache inside a
+    # tree that is about to be packaged.  forklint.py does the same; without
+    # it the final conformance scan rejects every cached entry as an
+    # unexpected candidate path.
     return subprocess.run(
-        [ruff, "check", ".", *args], cwd=dst, capture_output=True, text=True,
+        [ruff, "check", "--no-cache", ".", *args], cwd=dst, capture_output=True, text=True,
         errors="replace", timeout=timeout, check=False, stdin=subprocess.DEVNULL)
 
 

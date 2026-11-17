@@ -23,6 +23,9 @@ from .integrity import audit_candidate_tree, tree_digest
 from .rules import BrandingRules
 from .tree_index import FileIndex
 from .updates import (
+    PnpmDepsHashError,
+    _PNPM_DEPS_HASH_REL,
+    _PNPM_DEPS_HASH_VALUE_RE,
     _reconcile_assets_worker_config,
     _reconcile_assets_worker_index,
     _reconcile_docs_posix_separators,
@@ -144,6 +147,7 @@ def verify_final_candidate(
     rules: BrandingRules | None = None,
     allowed_extra_paths: Iterable[str] = (),
     fork_root: str | Path = "",
+    pnpm_deps_hash: str = "",
 ) -> ConformanceReport:
     """Rebuild expected branded source and verify the final candidate exactly.
 
@@ -229,6 +233,21 @@ def verify_final_candidate(
             expected_path = expected / relative
             if expected_path.is_file():
                 reconciled_bytes[relative] = expected_path.read_bytes()
+        # The factory's own nix step re-derives nix/pnpm-deps-hash on the
+        # *final* branded snapshot, after fork preservation; this rebuild
+        # computes it earlier, mid-reconcile, before preservation landed.  A
+        # pin recorded by that step is authoritative for the shipped tree, so
+        # overlay it here rather than report the candidate's own nix-derived
+        # value as a source-parity mismatch.  Fail closed on a malformed pin.
+        if pnpm_deps_hash:
+            pin = pnpm_deps_hash.strip()
+            if not _PNPM_DEPS_HASH_VALUE_RE.fullmatch(pin):
+                raise PnpmDepsHashError(
+                    f"conformance pnpm-deps hash {pin!r} is not an SRI sha256 digest"
+                )
+            hash_path = expected / _PNPM_DEPS_HASH_REL
+            if hash_path.is_file():
+                reconciled_bytes[_PNPM_DEPS_HASH_REL] = (pin + "\n").encode("utf-8")
         verified = verify_branded(
             str(source_path),
             str(candidate_path),
@@ -278,6 +297,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--candidate", required=True)
     parser.add_argument("--owned-assets-root", default="")
     parser.add_argument("--fork-root", default="")
+    parser.add_argument(
+        "--pnpm-deps-hash",
+        default=os.environ.get("HUNDREDWAYS_CONFORMANCE_PNPM_DEPS_HASH", ""),
+        help="SRI hash the factory's nix step recorded for nix/pnpm-deps-hash",
+    )
     parser.add_argument("--output", required=True)
     return parser
 
@@ -301,6 +325,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         owned_assets_root=args.owned_assets_root,
         allowed_extra_paths=allowed_extra_paths,
         fork_root=args.fork_root,
+        pnpm_deps_hash=args.pnpm_deps_hash,
     )
     Path(args.output).write_text(json.dumps(report.to_dict(), indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report.to_dict(), indent=2))

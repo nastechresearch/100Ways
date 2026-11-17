@@ -11205,6 +11205,32 @@ def _ruff_lane_seeded(dst, fork_table, cand_table=None):
         "from pm.environment import X  # noqa: FAKE123\nfrom pm._uv import Y\n")
 
 
+def test_the_ruff_lane_does_not_leave_a_cache_in_the_candidate(tmp_path, monkeypatch):
+    """A ruff lint of a candidate must not write .ruff_cache into a tree that
+    is about to be packaged -- final conformance rejects every cached entry as
+    an unexpected candidate path."""
+    seen = {}
+
+    class _Proc:
+        stdout = "[]"
+        stderr = ""
+        returncode = 0
+
+    def _fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return _Proc()
+
+    monkeypatch.setattr(updates.subprocess, "run", _fake_run)
+
+    updates._ruff_lane_run("/usr/bin/ruff", ["--fix"], str(tmp_path))
+    assert seen["cmd"] == ["/usr/bin/ruff", "check", "--no-cache", ".", "--fix"]
+
+    updates._ruff_lane_run("/usr/bin/ruff", ["--output-format", "json"], str(tmp_path))
+    assert seen["cmd"] == [
+        "/usr/bin/ruff", "check", "--no-cache", ".", "--output-format", "json"
+    ]
+
+
 def test_the_ruff_lane_makes_the_forks_ruff_config_the_candidates(tmp_path, monkeypatch):
     """Upstream's config drift the fork never declared does not survive the sync:
     the candidate's active ruff config becomes the fork's declared file verbatim."""

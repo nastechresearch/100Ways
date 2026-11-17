@@ -188,6 +188,7 @@ jobs:
       # anything is published -- the tree ships with the hash its own lock
       # derives, not with upstream's.
       - name: Record the pnpm-deps hash the branded lock derives
+        id: record-pnpm-hash
         env:
           SNAPSHOT: ${{ steps.pnpm-deps-hash.outputs.snapshot }}
         run: |
@@ -195,18 +196,27 @@ jobs:
           cd "$SNAPSHOT"
           if nix build .#pnpm-deps --no-link --print-build-logs 2>&1 | tee "$RUNNER_TEMP/pnpm-deps.log"; then
             echo "the branded lock already derives the committed pnpm-deps hash"
-            exit 0
+            got=$(sed -n '1s/[[:space:]]*$//p' nix/pnpm-deps-hash)
+            if [ -z "$got" ]; then
+              echo "::error::the branded nix/pnpm-deps-hash is empty"
+              exit 1
+            fi
+          else
+            got=$(sed -n 's/^ *got: *\(sha256-[A-Za-z0-9+/=]*\)$/\1/p' "$RUNNER_TEMP/pnpm-deps.log")
+            if [ -z "$got" ]; then
+              echo "::error::the pnpm-deps build failed without naming a hash; cannot re-derive nix/pnpm-deps-hash"
+              exit 1
+            fi
+            printf '%s\n' "$got" > nix/pnpm-deps-hash
+            echo "nix/pnpm-deps-hash <- $got" >> "$GITHUB_STEP_SUMMARY"
+            # The FOD is content-addressed by the store this lock fetches, so the
+            # recorded hash is a fixed point: a second build must succeed now.
+            nix build .#pnpm-deps --no-link
           fi
-          got=$(sed -n 's/^ *got: *\(sha256-[A-Za-z0-9+/=]*\)$/\1/p' "$RUNNER_TEMP/pnpm-deps.log")
-          if [ -z "$got" ]; then
-            echo "::error::the pnpm-deps build failed without naming a hash; cannot re-derive nix/pnpm-deps-hash"
-            exit 1
-          fi
-          printf '%s\n' "$got" > nix/pnpm-deps-hash
-          echo "nix/pnpm-deps-hash <- $got" >> "$GITHUB_STEP_SUMMARY"
-          # The FOD is content-addressed by the store this lock fetches, so the
-          # recorded hash is a fixed point: a second build must succeed now.
-          nix build .#pnpm-deps --no-link
+          # The final conformance rebuild computes this hash mid-reconcile,
+          # before fork preservation; hand it the authoritative value so it verifies
+          # the same bytes the snapshot ships with.
+          echo "pnpm_deps_hash=$got" >> "$GITHUB_OUTPUT"
 
       - name: Run hardened weekly decision gate
         id: weekly
@@ -294,6 +304,7 @@ jobs:
         env:
           HUNDREDWAYS_UPDATES_DIR: ${{ runner.temp }}/Updates-Commits
           HUNDREDWAYS_CONFORMANCE: ${{ runner.temp }}/candidate-conformance.json
+          HUNDREDWAYS_CONFORMANCE_PNPM_DEPS_HASH: ${{ steps.record-pnpm-hash.outputs.pnpm_deps_hash }}
         run: |
           set -euo pipefail
           SNAPSHOT=$(find "$HUNDREDWAYS_UPDATES_DIR" -maxdepth 1 -type d -name 'Nastech-Update#*' | sort -V | tail -1)

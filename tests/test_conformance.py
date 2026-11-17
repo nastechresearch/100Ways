@@ -1,9 +1,12 @@
 from pathlib import Path
 
+import pytest
+
+import hundredways.updates as updates
 from hundredways.conformance import verify_final_candidate
 from hundredways.integrity import tree_digest
 from hundredways.rules import BrandingRules
-from hundredways.updates import UpdateManager, brand_tree
+from hundredways.updates import PnpmDepsHashError, UpdateManager, brand_tree
 
 
 def _tree(root: Path, files: dict[str, str]) -> Path:
@@ -315,4 +318,58 @@ def test_final_candidate_path_checks_are_not_pruned_like_the_brand_audits(tmp_pa
     ]
     assert report.candidate_digest == tree_digest(candidate)
     assert report.candidate_digest
+
+
+_BRANDED_PNPM_HASH = "sha256-Ez5DyfFuou8SWXaCZFnY+5mpdQ1bBM9jd7ukna4S3ss="
+_NIX_DERIVED_PNPM_HASH = "sha256-LkDhX4Kb8AZ5SHRIG3rEww+nWWCjXyF5Jcts3KCKu/Y="
+
+
+def _pnpm_hash_tree(tmp_path):
+    """A source whose nix hash the factory re-derived after fork preservation."""
+    source = _tree(
+        tmp_path / "source",
+        {
+            "nix/pnpm-deps-hash": _BRANDED_PNPM_HASH + "\n",
+            "README.md": "# Hermes Agent\n",
+        },
+    )
+    candidate = tmp_path / "candidate"
+    brand_tree(str(source), str(candidate), BrandingRules())
+    (candidate / "nix" / "pnpm-deps-hash").write_text(
+        _NIX_DERIVED_PNPM_HASH + "\n", encoding="utf-8"
+    )
+    return source, candidate
+
+
+def test_final_conformance_uses_the_hash_the_nix_step_recorded(tmp_path, monkeypatch):
+    """The factory re-derives nix/pnpm-deps-hash on the final snapshot, after
+    fork preservation; conformance computes it mid-reconcile.  Without the
+    recorded value the candidate's own nix-derived hash is a false mismatch;
+    with it the exact same candidate conforms."""
+    source, candidate = _pnpm_hash_tree(tmp_path)
+    # Keep this test host-independent: no nix means the rebuild leaves the
+    # branded hash alone, exactly as it does when the pin is absent on CI.
+    monkeypatch.setattr(updates.shutil, "which", lambda name: None)
+
+    without_pin = verify_final_candidate(source, candidate)
+    assert not without_pin.passed
+    assert ("source-parity", "nix/pnpm-deps-hash") in [
+        (issue.code, issue.path) for issue in without_pin.issues
+    ]
+
+    with_pin = verify_final_candidate(
+        source, candidate, pnpm_deps_hash=_NIX_DERIVED_PNPM_HASH
+    )
+    assert with_pin.passed
+    assert with_pin.issues == ()
+    assert "nix/pnpm-deps-hash" in with_pin.reconciled_paths
+
+
+def test_final_conformance_rejects_a_malformed_recorded_pnpm_hash(tmp_path, monkeypatch):
+    """A corrupt pin fails closed instead of being trusted into the expected tree."""
+    source, candidate = _pnpm_hash_tree(tmp_path)
+    monkeypatch.setattr(updates.shutil, "which", lambda name: None)
+
+    with pytest.raises(PnpmDepsHashError):
+        verify_final_candidate(source, candidate, pnpm_deps_hash="not-an-sri-digest")
 
