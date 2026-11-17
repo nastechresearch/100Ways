@@ -10446,6 +10446,22 @@ _FORK_PREFERRED_DIVERGENCE_FILES = (
     "tests/scripts/test_stable_release.py",
 )
 
+#: Tests whose caps belong to the checker the candidate actually ships, not to
+#: the fork's copy of it.  ``tests/scripts/test_check_agents_md_size.py`` reads
+#: ``ROOT_MAX_CHARS``/``CHAIN_MAX_CHARS`` out of ``scripts/ci/check_agents_md_size.py``.
+#: The candidate carries *upstream's* checker (those numbers are the model
+#: context upstream declares), so a test that reads them through upstream's
+#: ``importlib`` module is the one that stays honest in the branded tree.  The
+#: fork rewrote the same test to read them through an ``ast`` helper because its
+#: own checker raises the caps; in the candidate that rewrite would read
+#: upstream's checker instead and would drop upstream's 128k regression test.
+#: When both sides collide here, the branded upstream text wins -- but only
+#: after the guard below proves the fork's side held no test the branded text
+#: lacks and the branded text still derives its caps from source.
+_UPSTREAM_AUTHORITATIVE_TESTS = (
+    "tests/scripts/test_check_agents_md_size.py",
+)
+
 
 def _resolve_hunks_taking_fork(text: str) -> tuple[str, bool]:
     """Replace every conflict hunk with the fork's side of it.
@@ -10478,6 +10494,72 @@ def _resolve_hunks_taking_fork(text: str) -> tuple[str, bool]:
         out.extend(lines[separator + 1:end])
         index = end + 1
     return "".join(out), False
+
+
+def _test_function_names(text: str) -> set[str]:
+    """The test functions a module defines, so a collision cannot lose one."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return set()
+    return {node.name for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name.startswith("test_")}
+
+
+def _derives_cap_from_source(text: str, constant: str) -> bool:
+    """True when *text* reads *constant* off the checker instead of hard-coding it.
+
+    Upstream's importlib module (``_MODULE.ROOT_MAX_CHARS``) and the fork's
+    ``ast`` helper (``_cap("ROOT_MAX_CHARS")``) are the two shapes this engine
+    has seen; both count, so neither side's cap-derivation intent is mistaken
+    for a hard-coded number.
+    """
+    if constant not in text:
+        return False
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == constant:
+            return True
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "_cap" and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == constant):
+            return True
+    return False
+
+
+def _resolve_collision_taking_branded_test(ours: str, theirs: str, rel: str) -> str | None:
+    """Resolve a cap-derivation test collision in favour of the branded upstream text.
+
+    Returns *ours* only when all three hold, otherwise ``None`` so the caller
+    keeps the file fail-closed:
+
+    * *rel* is the one test whose caps belong to the checker the candidate
+      ships (:data:`_UPSTREAM_AUTHORITATIVE_TESTS`);
+    * the fork's side adds no test the branded text lacks, so taking upstream
+      never silently drops a fork regression;
+    * the branded text still reads both caps from the checker, so the fork's
+      "a raise is not a test edit" intent survives the choice.
+
+    A source-level cap, rather than a remembered number, is what keeps this
+    correct across another upstream cap change.
+    """
+    if rel not in _UPSTREAM_AUTHORITATIVE_TESTS:
+        return None
+    fork_tests = _test_function_names(theirs)
+    branded_tests = _test_function_names(ours)
+    if not fork_tests <= branded_tests:
+        return None
+    if not branded_tests or not all(
+        _derives_cap_from_source(ours, name)
+        for name in ("ROOT_MAX_CHARS", "CHAIN_MAX_CHARS")
+    ):
+        return None
+    return ours
 
 
 def _upstream_text_at(upstream_src: str, commit: str, rel: str) -> str | None:
@@ -10644,10 +10726,12 @@ def _merge_fork_edits_resolved(base: str, ours: str, theirs: str, rel: str,
     """The merge, with every documented resolution the engine knows applied.
 
     In order: the plain three-way merge, the import-union for import-only
-    hunks, ``_retry_from_branded`` for the table-quote collision, and finally
-    -- for :data:`_FORK_PREFERRED_DIVERGENCE_FILES` only -- the fork's side of
-    each remaining hunk.  ``True`` means the file stays unresolved and the
-    caller must not publish a tree carrying it merged.
+    hunks, the fork's side of each remaining hunk (for
+    :data:`_FORK_PREFERRED_DIVERGENCE_FILES` only), ``_retry_from_branded`` for
+    the table-quote collision, and finally the branded-text resolution for the
+    one test whose caps belong to the checker the candidate ships
+    (:data:`_UPSTREAM_AUTHORITATIVE_TESTS`).  ``True`` means the file stays
+    unresolved and the caller must not publish a tree carrying it merged.
     """
     merged, conflict = _merge_fork_edits(base, ours, theirs)
     if not conflict:
@@ -10659,6 +10743,9 @@ def _merge_fork_edits_resolved(base: str, ours: str, theirs: str, rel: str,
     retry = _retry_from_branded(base, ours, theirs, upstream_src, rel, rules)
     if retry is not None:
         return retry, False
+    branded = _resolve_collision_taking_branded_test(ours, theirs, rel)
+    if branded is not None:
+        return branded, False
     return merged, True
 
 

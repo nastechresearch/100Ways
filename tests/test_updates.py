@@ -134,6 +134,7 @@ from hundredways.updates import (
     ForkDivergenceMergeError,
     _merge_fork_edits,
     _resolve_import_conflict_hunks,
+    _resolve_collision_taking_branded_test,
     _reconcile_pnpm_ui_integrity,
     _reconcile_pnpm_importer_key_order,
     _reconcile_pnpm_deps_hash,
@@ -9525,6 +9526,100 @@ def test_a_policy_table_deletion_wins_over_upstreams_import_edit(tmp_path):
     assert fixed == [rel]
     assert "desktop_targets" not in text          # the deletion stands
     assert "rstrip('/')" in text                  # the fork's body fix rode the union
+
+
+# ---------------------------------------------------------------------------
+# A cap-derivation test collision: the test must travel with the checker
+# ---------------------------------------------------------------------------
+# The 2026-11-17 factory sync (#222 raised the fork's caps; upstream 27e38935
+# raised its own) produced this exact three-way collision in
+# ``tests/scripts/test_check_agents_md_size.py``.  Both sides rewrote the same
+# baseline test to stop hard-coding the caps -- the fork through an ``ast``
+# helper, upstream through an ``importlib`` module -- and upstream's side also
+# added the 128k regression test.  The candidate ships *upstream's* checker, so
+# the branded text is the authoritative side here: it reads the caps from that
+# same checker and keeps the new test.  Taking the fork's side instead would
+# drop upstream's test and derive caps from a checker the candidate does not
+# carry.
+
+_CAP_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "agents_md_size_cap"
+
+
+def _cap_test_text(which: str) -> str:
+    """The verbatim production versions of the colliding cap test."""
+    return (_CAP_FIXTURES / f"{which}.py.txt").read_text(encoding="utf-8")
+
+
+_CAP_TEST_BASE = _cap_test_text("base")
+_CAP_TEST_UPSTREAM = _cap_test_text("upstream")
+_CAP_TEST_FORK = _cap_test_text("fork")
+
+
+def test_cap_derivation_collision_keeps_upstream_test_and_its_checker(tmp_path):
+    """The real #222/27e38935 collision resolves to the branded upstream text.
+
+    Upstream's importlib-derived caps and its 128k regression test both survive;
+    the fork's ``ast`` rewrite is redundant in a tree that ships upstream's
+    checker, so dropping it here loses no rule.
+    """
+    rel = "tests/scripts/test_check_agents_md_size.py"
+    # Prove the fixture really is the colliding shape, otherwise this test
+    # could pass even if the new resolution never ran.
+    _, plain_conflict = _merge_fork_edits(_CAP_TEST_BASE, _CAP_TEST_UPSTREAM,
+                                          _CAP_TEST_FORK)
+    assert plain_conflict is True
+
+    dst, fork, hermes = _merge_tree(
+        tmp_path, _CAP_TEST_UPSTREAM, _CAP_TEST_FORK,
+        rel=rel, base_text=_CAP_TEST_BASE)
+
+    # The whole tree reconciles: no ForkDivergenceMergeError, no unresolved file.
+    reconcile_tree(dst, fork_root=fork, upstream_src=hermes)
+    fixed, unresolved = _reconcile_fork_release_divergence(
+        dst, fork_root=fork, upstream_src=hermes)
+    assert unresolved == []
+
+    text = (Path(dst) / rel).read_text()
+    # The branded text already carries the right answer, so nothing needed
+    # writing -- and crucially the merge did not replace it with a hybrid.
+    assert text == _CAP_TEST_UPSTREAM
+    assert "test_a_chain_at_the_cap_loads_whole_on_a_128k_model" in text
+    assert "_MODULE.ROOT_MAX_CHARS" in text
+    assert "def _cap(" not in text  # the fork's redundant rewrite did not land
+
+
+def test_cap_derivation_collision_fails_closed_when_the_fork_adds_a_test(tmp_path):
+    """A fork-only test in that file is a real loss, so the sync still stops.
+
+    The branded-text resolution is narrower than the path itself: it may only
+    fire while the fork's side holds no test the branded text lacks.  A future
+    fork regression test must not be silently traded away for upstream's copy.
+    """
+    rel = "tests/scripts/test_check_agents_md_size.py"
+    fork_text = _CAP_TEST_FORK + (
+        "\n\ndef test_fork_chain_regression(tmp_path):\n    assert True\n"
+    )
+    dst, fork, hermes = _merge_tree(
+        tmp_path, _CAP_TEST_UPSTREAM, fork_text,
+        rel=rel, base_text=_CAP_TEST_BASE)
+
+    with pytest.raises(ForkDivergenceMergeError) as excinfo:
+        reconcile_tree(dst, fork_root=fork, upstream_src=hermes)
+    assert rel in str(excinfo.value)
+
+
+def test_cap_derivation_collision_fails_closed_when_upstream_hardcodes_caps():
+    """The branded side must still derive its caps from source, not freeze them.
+
+    If upstream ever replaces the importlib read with literals, taking its side
+    would defeat the whole point of the fork's raise-is-not-a-test-edit rule;
+    the guard refuses and the collision goes back to a human.
+    """
+    rel = "tests/scripts/test_check_agents_md_size.py"
+    branded = _CAP_TEST_UPSTREAM.replace(
+        "ROOT_CAP, CHAIN_CAP = _MODULE.ROOT_MAX_CHARS, _MODULE.CHAIN_MAX_CHARS",
+        "ROOT_CAP, CHAIN_CAP = 12_100, 30_600")
+    assert _resolve_collision_taking_branded_test(branded, _CAP_TEST_FORK, rel) is None
 
 # ---------------------------------------------------------------------------
 # A pnpm lock's ui digest, which branding renames the key over but cannot move
