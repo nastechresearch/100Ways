@@ -42,6 +42,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .assets import OwnedAssets
+from . import forklint
 from .profiling import stage_table as _stage_table
 from .profiling import write_profile as _write_profile
 from .forkcheck import (
@@ -11147,6 +11148,157 @@ def _reconcile_code_health_ratchet(
     return sorted(inherited)
 
 
+# ---------------------------------------------------------------------------
+# The fork's blocking ruff lane
+# ---------------------------------------------------------------------------
+#: The fork's lint lane runs a blocking ``ruff check .`` under the fork's own
+#: config on every PR head, and the branded tree inherits whatever ruff debt
+#: upstream wrote since the last sync.  Upstream's config and the fork's also
+#: drift apart in style, not just strictness: upstream silences TID251 in
+#: ``pm/**`` with inline ``# noqa`` comments while the fork ignores TID251 for
+#: that glob wholesale (run 44102260050: 23 unused-noqa blockers), and upstream
+#: adds per-file-ignores the fork's guard refuses (PLW1514 for four globs).
+#: Both must be settled here, before the publication gate sees the tree.
+#:
+#: The fork's lint lane runs a blocking ``ruff check .`` under the tree's own
+#: config on every PR head, and the branded tree inherits whatever ruff debt
+#: and config drift upstream wrote since the last sync.  Upstream's config
+#: drifts from the fork's in both directions: upstream selected a preview
+#: rule the fork's declared config does not enforce (PLW1514 -- hundreds of
+#: bare ``open()`` calls the fork never signed up to flag), upstream
+#: silences TID251 in ``pm/**`` with inline ``# noqa`` comments where the
+#: fork ignores it wholesale (23 unused-noqa blockers in run 44102260050),
+#: and upstream adds per-file-ignores the fork's guard refuses outright.
+#:
+#: The rule settles the config first: the candidate's active ruff config
+#: becomes the fork's declared config verbatim.  The fork's config is the
+#: contract its own CI enforces -- the publication gate already refuses a
+#: candidate that weakens it piecemeal, and it lints with the candidate's
+#: file whenever that file does not weaken the guard, so partial re-derivation
+#: leaves a config the gate itself would not run honestly.  Then the fork's
+#: pinned ruff applies its own safe fixes to the tree it is about to lint:
+#: ruff is the authority on what a safe fix is, and the result passes the
+#: same lane CI runs.  Findings ruff cannot fix safely are left in place for
+#: the publication gate to report and stop the sync on -- the engine does
+#: not hand-edit code ruff would not fix.
+
+
+def _ruff_lane_config_file(root: str) -> str:
+    """The ruff config ``ruff check .`` resolves to in ``root``, or ``""``."""
+    for name in forklint.FORK_RUFF_CONFIGS:
+        path = os.path.join(root, name)
+        if os.path.isfile(path):
+            return path
+    return ""
+
+
+def _ruff_lane_rederive_config(dst: str, fork_root: str) -> list[str]:
+    """Make the candidate's active ruff config the fork's declared one, verbatim.
+
+    Returns the candidate-relative path of the config file written, if any.
+    A fork whose config resolves to ``pyproject.toml`` is left alone: its
+    ruff section is part of a larger file the merge stage owns, and the gate
+    reads that section itself and judges the candidate against it.
+    """
+    fork_cfg = _ruff_lane_config_file(fork_root)
+    if not fork_cfg or os.path.basename(fork_cfg) == forklint.FORK_PYPROJECT:
+        return []
+    fork_name = os.path.basename(fork_cfg)
+    cand_cfg = _ruff_lane_config_file(dst)
+    if cand_cfg and os.path.basename(cand_cfg) != forklint.FORK_PYPROJECT:
+        target = cand_cfg
+    else:
+        # The candidate ships no active ruff config (or only a pyproject
+        # section): the fork's own file wins ``ruff check .`` resolution.
+        target = os.path.join(dst, fork_name)
+    with open(fork_cfg, encoding="utf-8") as fh:
+        fork_text = fh.read()
+    if os.path.isfile(target):
+        with open(target, encoding="utf-8") as fh:
+            if fh.read() == fork_text:
+                return []
+    with open(target, "w", encoding="utf-8", newline="") as fh:
+        fh.write(fork_text)
+    return [os.path.relpath(target, dst)]
+
+
+def _ruff_lane_run(ruff: str, args: list[str], dst: str, timeout: int = 900):
+    return subprocess.run(
+        [ruff, "check", ".", *args], cwd=dst, capture_output=True, text=True,
+        errors="replace", timeout=timeout, check=False, stdin=subprocess.DEVNULL)
+
+
+def _ruff_lane_findings(ruff: str, dst: str) -> dict[str, list[str]] | None:
+    """ruff findings per candidate-relative file, or ``None`` when ruff failed."""
+    proc = _ruff_lane_run(ruff, ["--output-format", "json"], dst)
+    if proc.returncode not in (0, 1):
+        return None
+    try:
+        diagnostics = json.loads(proc.stdout) or []
+    except ValueError:
+        return None
+    root = os.path.abspath(dst)
+    findings: dict[str, list[str]] = {}
+    for diagnostic in diagnostics if isinstance(diagnostics, list) else []:
+        filename = diagnostic.get("filename") if isinstance(diagnostic, dict) else None
+        if not filename:
+            continue
+        rel = os.path.relpath(os.path.abspath(str(filename)), root)
+        findings.setdefault(os.path.normpath(rel), []).append(
+            str(diagnostic.get("code") or "?"))
+    return findings
+
+
+def _reconcile_fork_ruff_lane(dst: str, fork_root: str | None) -> list[str]:
+    """Make the branded tree pass the fork's blocking ``ruff check .`` lane.
+
+    Makes the candidate's active ruff config the fork's declared config, then
+    lets the fork's own ruff apply its safe fixes to the tree.  Returns
+    every path whose content changed, so the publication gate and the
+    tree-comparison tooling expect the reconciled content.  Findings ruff
+    cannot fix safely stay in the tree: the gate reports them as blocking and
+    the sync stops rather than shipping a red lint lane.
+    """
+    if not fork_root or not os.path.isdir(fork_root):
+        return []
+    changed = _ruff_lane_rederive_config(dst, fork_root)
+    ruff = forklint._ruff_executable()
+    if not ruff:
+        # Without ruff nothing here can be fixed; the publication gate runs
+        # the same lane and reports the findings -- or ruff's absence -- as
+        # its own blocking outcome.
+        return changed
+    before = _ruff_lane_findings(ruff, dst)
+    if before is None:
+        return changed
+    if not before:
+        return changed
+    digests = {}
+    for rel in before:
+        path = os.path.join(dst, rel)
+        try:
+            with open(path, "rb") as fh:
+                digests[rel] = hashlib.sha256(fh.read()).hexdigest()
+        except OSError:
+            digests[rel] = None
+    try:
+        _ruff_lane_run(ruff, ["--fix"], dst)
+    except subprocess.TimeoutExpired:
+        return changed
+    for rel, digest in digests.items():
+        if digest is None:
+            continue
+        path = os.path.join(dst, rel)
+        try:
+            with open(path, "rb") as fh:
+                now = hashlib.sha256(fh.read()).hexdigest()
+        except OSError:
+            continue
+        if now != digest:
+            changed.append(rel)
+    return sorted(set(changed))
+
+
 def reconcile_tree(
     dst: str,
     *,
@@ -11595,6 +11747,14 @@ def reconcile_tree(
     # files.  Computing it any earlier leaves surfaces.json describing the
     # pre-migration text (the fork's stale-manifest failure).
     for rel in _reconcile_prompt_surface_snapshot(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    # The fork's blocking ruff lane before the ratchet: it makes the
+    # candidate's active ruff config the fork's declared config and lets
+    # the fork's pinned ruff apply its safe fixes, so the ratchet below
+    # measures the tree exactly as the lint lane will judge it, and the
+    # publication gate's ruff run sees a tree this rule already settled.
+    for rel in _reconcile_fork_ruff_lane(dst, fork_root):
         result.total += 1
         result.fixed.append(rel)
     # Code-health ratchet LAST but before the credential gate: it runs the

@@ -10999,6 +10999,183 @@ def test_the_ratchet_stages_the_base_from_a_shallow_fork_clone(tmp_path):
     assert "health: allow HX006" in waived and _RATCHET_WHY in waived
 
 
+def _ruff_lane_tree(root, table_body, select_body='select = ["RUF100", "PIE807"]\n'):
+    """A checkout whose active ruff config is a root ``ruff.toml``."""
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "ruff.toml").write_text(
+        "line-length = 88\n\n[lint]\n" + select_body
+        + "\n[lint.per-file-ignores]\n" + table_body
+        + "\n[lint.mccabe]\nmax-complexity = 20\n")
+    return str(root)
+
+
+_FAKE_RUFF = r'''#!/usr/bin/env python3
+"""A fake ruff: reports and strips ``# noqa: FAKE123`` the way the real one does."""
+import json, os, sys
+
+argv = sys.argv[1:]
+if "--fix" in argv:
+    for base, _dirs, files in os.walk("."):
+        if ".git" in base.split(os.sep):
+            continue
+        for name in files:
+            if not name.endswith(".py"):
+                continue
+            path = os.path.join(base, name)
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+            updated = "\n".join(
+                line for line in text.splitlines() if "# noqa: FAKE123" not in line
+            ) + "\n"
+            if updated != text:
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(updated)
+    print("Found 0 errors (fixed).")
+    sys.exit(0)
+findings = []
+for base, _dirs, files in os.walk("."):
+    if ".git" in base.split(os.sep):
+        continue
+    for name in files:
+        if not name.endswith(".py"):
+            continue
+        path = os.path.join(base, name)
+        with open(path, encoding="utf-8") as fh:
+            for no, line in enumerate(fh.read().splitlines(), 1):
+                if "# noqa: FAKE123" in line:
+                    findings.append({
+                        "filename": os.path.abspath(path),
+                        "code": "FAKE123",
+                        "location": {"row": no},
+                    })
+print(json.dumps(findings))
+sys.exit(1 if findings else 0)
+'''
+
+
+def _ruff_lane_fake_ruff(tmp_path):
+    fake = tmp_path / "fake-ruff"
+    fake.write_text(_FAKE_RUFF)
+    fake.chmod(0o755)
+    return str(fake)
+
+
+def _ruff_lane_seeded(dst, fork_table, cand_table=None):
+    """A candidate carrying an upstream-style unused noqa plus both configs."""
+    _ruff_lane_tree(Path(dst), fork_table if cand_table is None else cand_table)
+    (Path(dst) / "pm").mkdir()
+    (Path(dst) / "pm" / "mod.py").write_text(
+        "from pm.environment import X  # noqa: FAKE123\nfrom pm._uv import Y\n")
+
+
+def test_the_ruff_lane_makes_the_forks_ruff_config_the_candidates(tmp_path, monkeypatch):
+    """Upstream's config drift the fork never declared does not survive the sync:
+    the candidate's active ruff config becomes the fork's declared file verbatim."""
+    dst = tmp_path / "dst"
+    fork = tmp_path / "fork"
+    fork.mkdir()
+    fork_table = '"pm/**" = ["FAKE123"]\n'
+    _ruff_lane_tree(fork, fork_table)
+    _ruff_lane_tree(
+        dst, fork_table + '"tests/**" = ["FAKE123"]\n',
+        select_body='select = ["RUF100", "PIE807", "FAKE456"]\n')
+    monkeypatch.setattr(updates.forklint, "_ruff_executable", lambda: "")
+
+    assert updates._reconcile_fork_ruff_lane(str(dst), str(fork)) == ["ruff.toml"]
+    assert (dst / "ruff.toml").read_text() == (fork / "ruff.toml").read_text()
+
+
+def test_the_ruff_lane_strips_the_noqas_the_forks_config_makes_dead(tmp_path, monkeypatch):
+    """The fork ignores a rule for pm/** wholesale, upstream silences it inline:
+    the branded tree carries upstream's comments under the fork's config, where
+    they are dead weight the fork's own ruff flags and then fixes itself."""
+    dst = tmp_path / "dst"
+    fork = tmp_path / "fork"
+    fork.mkdir()
+    _ruff_lane_seeded(str(dst), '"pm/**" = ["FAKE123"]\n')
+    _ruff_lane_tree(fork, '"pm/**" = ["FAKE123"]\n')
+    monkeypatch.setattr(updates.forklint, "_ruff_executable",
+                        lambda: _ruff_lane_fake_ruff(tmp_path))
+
+    assert updates._reconcile_fork_ruff_lane(str(dst), str(fork)) == ["pm/mod.py"]
+    assert "# noqa" not in (dst / "pm" / "mod.py").read_text()
+
+
+def test_the_ruff_lane_reports_a_clean_candidate_as_unchanged(tmp_path, monkeypatch):
+    dst = tmp_path / "dst"
+    fork = tmp_path / "fork"
+    fork.mkdir()
+    _ruff_lane_tree(fork, '"pm/**" = ["FAKE123"]\n')
+    _ruff_lane_tree(dst, '"pm/**" = ["FAKE123"]\n')
+    (dst / "pm").mkdir()
+    (dst / "pm" / "mod.py").write_text("from pm.environment import X\n")
+    monkeypatch.setattr(updates.forklint, "_ruff_executable",
+                        lambda: _ruff_lane_fake_ruff(tmp_path))
+
+    assert updates._reconcile_fork_ruff_lane(str(dst), str(fork)) == []
+
+
+_FAKE_RUFF_STUBBORN = r'''#!/usr/bin/env python3
+"""A fake ruff that always reports one finding and never fixes anything."""
+import json, os, sys
+
+argv = sys.argv[1:]
+if "--fix" in argv:
+    print("Found 1 error (0 fixed, 1 remaining).")
+    sys.exit(1)
+print(json.dumps([{
+    "filename": os.path.abspath("pm/mod.py"),
+    "code": "FAKE123",
+    "location": {"row": 1},
+}]))
+sys.exit(1)
+'''
+
+
+def test_the_ruff_lane_leaves_unfixable_findings_for_the_gate(tmp_path, monkeypatch):
+    """A finding ruff cannot fix safely stays in the tree: the publication gate
+    reports it as blocking and the sync stops, rather than the engine hand-
+    editing code ruff would not fix."""
+    dst = tmp_path / "dst"
+    fork = tmp_path / "fork"
+    fork.mkdir()
+    _ruff_lane_seeded(str(dst), '"pm/**" = ["FAKE123"]\n')
+    _ruff_lane_tree(fork, '"pm/**" = ["FAKE123"]\n')
+    stubborn = tmp_path / "stubborn-ruff"
+    stubborn.write_text(_FAKE_RUFF_STUBBORN)
+    stubborn.chmod(0o755)
+    monkeypatch.setattr(updates.forklint, "_ruff_executable", lambda: str(stubborn))
+
+    assert updates._reconcile_fork_ruff_lane(str(dst), str(fork)) == []
+    assert "# noqa: FAKE123" in (dst / "pm" / "mod.py").read_text()
+
+
+def test_the_ruff_lane_no_ops_without_a_fork_checkout(tmp_path):
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    _ruff_lane_seeded(str(dst), '"pm/**" = ["FAKE123"]\n')
+    assert updates._reconcile_fork_ruff_lane(str(dst), None) == []
+
+
+@pytest.mark.skipif(shutil.which("ruff") is None, reason="ruff is not installed")
+def test_the_ruff_lane_matches_the_real_ruffs_contract(tmp_path):
+    """The fake-ruff tests encode ruff's CLI contract; this one runs the real
+    binary so the contract cannot drift unnoticed."""
+    dst = tmp_path / "dst"
+    fork = tmp_path / "fork"
+    fork.mkdir()
+    table = "\n"
+    _ruff_lane_tree(fork, table)
+    _ruff_lane_tree(dst, table, select_body='select = ["RUF100", "PIE807"]\n')
+    (dst / "pm").mkdir()
+    (dst / "pm" / "mod.py").write_text("x = lambda: {}\n" + "y = 1  # noqa: PIE790\n")
+
+    assert updates._reconcile_fork_ruff_lane(str(dst), str(fork)) == ["pm/mod.py"]
+    text = (dst / "pm" / "mod.py").read_text()
+    assert "# noqa" not in text
+
+
 def test_the_ratchet_staging_fails_closed_on_a_base_identical_candidate(tmp_path):
     """A candidate identical to fork main has nothing to commit onto head;
     staging must fail loudly instead of measuring base against itself."""
