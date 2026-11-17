@@ -10906,6 +10906,24 @@ def test_the_ratchet_fails_closed_on_a_file_no_upstream_source_maps(tmp_path, mo
     assert "no upstream source" in str(exc.value)
 
 
+def test_the_ratchet_resolves_the_forks_relative_fork_root(tmp_path, monkeypatch):
+    """The factory passes --fork-root as a workspace-relative directory; the
+    ratchet's staging fetches from it with cwd inside its own temp repo, so
+    it must be resolved before that fetch runs."""
+    seen = {}
+
+    def fake_blocking(dst, fork_root, git):
+        seen["fork_root"] = fork_root
+        return []
+
+    monkeypatch.setattr(updates, "_ratchet_blocking", fake_blocking)
+    monkeypatch.chdir(tmp_path)
+    _ratchet_fork_with_main(tmp_path)
+    dst, upstream = _ratchet_inherited_line(tmp_path / "tree")
+    assert updates._reconcile_code_health_ratchet(dst, "fork", upstream) == []
+    assert os.path.isabs(seen["fork_root"])
+
+
 def test_the_ratchet_names_its_base_from_the_forks_main_ref(tmp_path):
     fork = _ratchet_fork_with_main(tmp_path)
     git = shutil.which("git")

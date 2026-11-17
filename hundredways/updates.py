@@ -11046,6 +11046,10 @@ def _reconcile_code_health_ratchet(
     git = shutil.which("git")
     if not fork_root or not os.path.isdir(fork_root) or git is None:
         return []
+    # The factory passes --fork-root as a workspace-relative directory; the
+    # ratchet's staging fetches FROM that path while cwd is its own temp
+    # repository, so a relative spelling resolves to nothing there.
+    fork_root = os.path.abspath(fork_root)
     if _ratchet_fork_base_ref(fork_root, git) is None:
         return []
     sites = _ratchet_blocking(dst, fork_root, git)
