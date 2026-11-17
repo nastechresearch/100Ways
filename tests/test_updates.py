@@ -9676,15 +9676,16 @@ def test_pnpm_deps_hash_is_a_fixed_point_when_the_derivation_accepts_it(tmp_path
     assert hash_file.read_text() == _BRANDED_STORE_HASH + "\n"
 
 
-def test_pnpm_deps_hash_without_nix_stops_the_sync(tmp_path, monkeypatch):
-    """A host that cannot verify the store must not publish a stale hash -- or
-    invent one."""
+def test_pnpm_deps_hash_without_nix_defers_to_the_workflows_nix_step(tmp_path, monkeypatch):
+    """A host without nix cannot verify the store, so it writes no guessed
+    digest: the hash stays as branded and stage-pipeline's own nix step --
+    which runs after reconcile, on the nix-capable runner -- re-derives it
+    from the snapshot before anything is published."""
     hash_file = _pnpm_deps_hash(tmp_path, _UPSTREAM_STORE_HASH)
     monkeypatch.delenv("HUNDREDWAYS_PNPM_DEPS_HASH", raising=False)
     monkeypatch.setattr(updates.shutil, "which", lambda name: None)
 
-    with pytest.raises(PnpmDepsHashError):
-        _reconcile_pnpm_deps_hash(str(tmp_path))
+    assert _reconcile_pnpm_deps_hash(str(tmp_path)) == []
 
     assert hash_file.read_text() == _UPSTREAM_STORE_HASH + "\n"
 

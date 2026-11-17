@@ -10320,10 +10320,12 @@ def _reconcile_pnpm_deps_hash(dst: str) -> list[str]:
     tarball inside that store, so upstream's hash is stale after every
     rename pass.  The only honest value is the one the derivation itself
     reports, so a nix-capable host recomputes it exactly the way the CI job
-    does.  A host without nix cannot verify anything: it stops the sync
-    rather than writing a guessed digest, unless the owner pins the value
-    the CI lane printed via ``HUNDREDWAYS_PNPM_DEPS_HASH`` -- which is still
-    verified against the derivation whenever nix is here.
+    does.  A host without nix cannot verify anything and writes no guessed
+    digest: it defers to the factory's own nix step
+    (``stage-pipeline.yml`` installs nix and re-derives the hash on the
+    snapshot before anything is published), or to the owner pinning the
+    value the CI lane printed via ``HUNDREDWAYS_PNPM_DEPS_HASH`` -- which is
+    still verified against the derivation whenever nix is here.
     """
     path = os.path.join(dst, _PNPM_DEPS_HASH_REL)
     if not os.path.isfile(path):
@@ -10353,12 +10355,12 @@ def _reconcile_pnpm_deps_hash(dst: str) -> list[str]:
         value = got
     else:
         if not pin:
-            raise PnpmDepsHashError(
-                f"{_PNPM_DEPS_HASH_REL} describes the pre-rename store and this "
-                "host has no nix to derive the post-rename value. Set "
-                "HUNDREDWAYS_PNPM_DEPS_HASH to the 'got:' digest the 'pnpm deps "
-                "hash' CI lane prints, or run the factory on a nix-capable host"
-            )
+            # No nix and no pin: nothing here can be verified, so the hash
+            # stays as branded and the stage-pipeline nix step (which runs
+            # after reconcile, on a nix-capable runner) re-derives it from
+            # the snapshot before anything ships.  Raising here would stop
+            # that step from ever running.
+            return []
         value = pin
     if value == current:
         return []
