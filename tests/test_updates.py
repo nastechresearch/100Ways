@@ -101,6 +101,7 @@ from hundredways.updates import (
     _reconcile_windows_boot_lifecycle_race,
     _reconcile_windows_real_git_locate,
     _reconcile_docs_posix_separators,
+    _reconcile_fork_runner_linearity_budgets,
     _reconcile_docs_search_hydration_gate,
     _reconcile_drop_vercel_deploy_job,
     _reconcile_fork_skill_catalogs,
@@ -2421,6 +2422,103 @@ def test_python_slow_runner_wait_budgets_doubles_each_probe(tmp_path):
     for rel in files:
         text = read(rel)
         assert rules.transform_text(text) == text
+
+
+def test_reconcile_fork_runner_linearity_budgets(tmp_path):
+    """Widen the linearity ceilings the free 4-core runner cannot meet.
+
+    Both target modules are byte-identical to upstream; the same four probes
+    measured 2.0-2.3s on two independent fork CI runs against 1s/2s budgets.
+    """
+    root = tmp_path / "branded"
+    files = {
+        "tests/gateway/test_telegram_rich_messages.py": (
+            "def test_rich_payload_is_linear_in_unclosed_backtick_runs():\n"
+            "    started = time.perf_counter()\n"
+            "    adapter._rich_message_payload(content)\n"
+            "    assert time.perf_counter() - started < 1.0\n"
+            "    adapter._rich_message_payload(content)\n"
+            "    assert time.perf_counter() - started < 1.0\n"
+        ),
+        "tests/tools/test_approval_windows_hardline_scripts.py": (
+            "def test_bare_cr_runs_scan_in_linear_time(command):\n"
+            "    start = time.perf_counter()\n"
+            "    assert not detect_hardline_command(command)[0]\n"
+            "    assert time.perf_counter() - start < 2\n"
+        ),
+        "tests/tools/test_approval_windows.py": (
+            "def test_repeated_launcher_words_scan_in_linear_time(self, command):\n"
+            "    start = time.perf_counter()\n"
+            "    assert not _is_dangerous(command)\n"
+            "    assert time.perf_counter() - start < 2, command[:30]\n"
+            "\n"
+            "def test_quoted_collapse_tail_scans_in_linear_time(self, cmd):\n"
+            "    start = time.perf_counter()\n"
+            "    assert detect_hardline_command(cmd) == (False, None)\n"
+            "    assert time.perf_counter() - start < 2, cmd[:30]\n"
+        ),
+    }
+    for rel, text in files.items():
+        path = root.joinpath(*rel.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    assert set(_reconcile_fork_runner_linearity_budgets(str(root))) == set(files)
+
+    def read(rel):
+        return root.joinpath(*rel.split("/")).read_text(encoding="utf-8")
+
+    rich = read("tests/gateway/test_telegram_rich_messages.py")
+    assert rich.count("assert time.perf_counter() - started < 6.0") == 2
+    assert "< 1.0" not in rich
+    hardline = read("tests/tools/test_approval_windows_hardline_scripts.py")
+    assert "assert time.perf_counter() - start < 6\n" in hardline
+    assert "< 2\n" not in hardline
+    approval = read("tests/tools/test_approval_windows.py")
+    assert "assert time.perf_counter() - start < 6, command[:30]" in approval
+    assert "assert time.perf_counter() - start < 6, cmd[:30]" in approval
+    assert "< 2," not in approval
+
+    # Fixed point, including the brand transform the candidate audit enforces.
+    assert _reconcile_fork_runner_linearity_budgets(str(root)) == []
+    rules = BrandingRules()
+    for rel in files:
+        text = read(rel)
+        assert rules.transform_text(text) == text
+
+
+def test_reconcile_fork_runner_linearity_budgets_leaves_other_timers(tmp_path):
+    """Only the named linearity ceilings move; an unrelated timer is untouched."""
+    root = tmp_path / "branded"
+    path = root / "tests" / "tools" / "test_approval_windows.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "assert time.perf_counter() - start < 2, command[:30]\n"
+        "assert time.perf_counter() - elapsed < 2, 'unrelated'\n",
+        encoding="utf-8",
+    )
+
+    assert _reconcile_fork_runner_linearity_budgets(str(root)) == [
+        "tests/tools/test_approval_windows.py"
+    ]
+    assert path.read_text(encoding="utf-8") == (
+        "assert time.perf_counter() - start < 6, command[:30]\n"
+        "assert time.perf_counter() - elapsed < 2, 'unrelated'\n"
+    )
+
+
+def test_reconcile_fork_runner_linearity_budgets_registered_in_reconcile_tree(tmp_path):
+    """reconcile_tree must dispatch it or the next branded PR re-publishes the red."""
+    root = tmp_path / "branded"
+    path = root / "tests" / "tools" / "test_approval_windows_hardline_scripts.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "def test_bare_cr_runs_scan_in_linear_time(command):\n"
+        "    assert time.perf_counter() - start < 2\n",
+        encoding="utf-8",
+    )
+    result = reconcile_tree(str(root))
+    assert "tests/tools/test_approval_windows_hardline_scripts.py" in result.fixed
 
 
 def test_windows_boot_lifecycle_accepts_already_gone_taskkill(tmp_path):
