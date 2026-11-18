@@ -10734,6 +10734,19 @@ _FORK_MERGE_PREFIXES = (
     "scripts/termux/",
     "tests/scripts/",
     ".github/workflows/",
+    # Dependency pinning is a fork-owned plane too.  Security bumps (glob,
+    # minimatch, ...) land directly on fork main with their lockfiles and the
+    # Nix pnpm-deps hash re-derived; a branded rebuild from upstream would
+    # otherwise ship upstream's unpinned lock and silently revert the fix on
+    # the next update PR.  These files all exist upstream (so fork preservation
+    # cannot carry them as fork-local) and the three-way merge replays only the
+    # fork's pin edits onto whatever upstream changed in the same window -- a
+    # collision is reported, never guessed at.
+    "pnpm-workspace.yaml",
+    "pnpm-lock.yaml",
+    "website/package.json",
+    "website/package-lock.json",
+    "nix/pnpm-deps-hash",
 )
 
 

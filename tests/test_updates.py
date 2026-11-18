@@ -9662,6 +9662,52 @@ def test_the_forks_release_fix_survives_upstreams_rewrite_of_the_same_file(tmp_p
     assert 'print("would promote", channel)' in text
 
 
+@pytest.mark.parametrize(
+    "rel,base_text,upstream_text,fork_text,pins",
+    [
+        (
+            "pnpm-workspace.yaml",
+            "packages:\n  - apps/*\noverrides:\n  glob: 10.0.0\n  minimatch: 10.0.0\n",
+            "packages:\n  - apps/*\n  - web\noverrides:\n  glob: 10.0.0\n  minimatch: 10.0.0\n",
+            "packages:\n  - apps/*\noverrides:\n  glob: 14.0.3\n  minimatch: 11.0.4\n",
+            ("14.0.3", "11.0.4", "  - web"),
+        ),
+        (
+            "website/package.json",
+            '{\n  "overrides": {\n    "minimatch": "10.0.0",\n    "react": "19.0.0",\n    "uuid": "14.0.1"\n  }\n}\n',
+            '{\n  "overrides": {\n    "minimatch": "10.0.0",\n    "react": "19.0.0",\n    "uuid": "14.0.2"\n  }\n}\n',
+            '{\n  "overrides": {\n    "minimatch": "11.0.4",\n    "react": "19.0.0",\n    "uuid": "14.0.1"\n  }\n}\n',
+            ('"minimatch": "11.0.4"', '"uuid": "14.0.2"'),
+        ),
+    ],
+)
+def test_fork_owned_dependency_pins_survive_a_branded_rebuild(
+    tmp_path, rel, base_text, upstream_text, fork_text, pins
+):
+    """Security pins land on fork main; a sync must replay them, not rebrand away.
+
+    glob/minimatch (and their lockfiles / Nix hash) are bumped directly on fork
+    main.  They exist upstream too, so fork preservation cannot carry them as
+    fork-local -- without the fork-merge replay the branded tree ships
+    upstream's vulnerable pins and the next update PR silently reverts the fix.
+    The merge must keep BOTH the fork's pins and whatever upstream changed since
+    the sync the fork is on.
+    """
+    dst, fork, hermes = _merge_tree(
+        tmp_path, upstream_text, fork_text, rel=rel, base_text=base_text
+    )
+
+    fixed, unresolved = _reconcile_fork_release_divergence(
+        dst, fork_root=fork, upstream_src=hermes
+    )
+
+    assert fixed == [rel]
+    assert unresolved == []
+    text = (Path(dst) / rel).read_text()
+    for pin in pins:
+        assert pin in text
+
+
 def test_the_replay_reads_the_factory_baseline_when_the_fork_has_no_manifest(tmp_path, monkeypatch):
     """The product tree no longer carries manifest.json, and a CI fork checkout has
     none to read -- the replay must then take the factory's recorded baseline
