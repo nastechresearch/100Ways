@@ -338,6 +338,33 @@ def test_snapshot_safety_blocks_credentials_old_dependencies_bad_modes_and_empty
     assert {"credential-signal", "dependency-vulnerability-pattern", "script-not-executable", "unexpected-empty-file"} <= codes
 
 
+def test_snapshot_safety_allows_empty_commit_subjects_receipt_sidecar(tmp_path):
+    """Replaying an already-recorded upstream SHA writes an empty subjects log.
+
+    ``commit-subjects.jsonl`` is a generated receipt sidecar, not a source file;
+    an empty one is legitimate and must not fail the hardened weekly gate.  A
+    genuinely empty source file beside it still blocks.
+    """
+    root = Path(tmp_path)
+    (root / "LICENSE").write_text("MIT License\n")
+    (root / "commit-subjects.jsonl").write_text("")
+    (root / "empty.py").write_text("")
+
+    issues = audit_snapshot_safety(str(root))
+
+    assert [issue.code for issue in issues] == ["unexpected-empty-file"]
+    assert issues[0].path == "empty.py"
+
+
+def test_snapshot_safety_allows_nonempty_commit_subjects_receipt_sidecar(tmp_path):
+    """A subjects log with real JSONL rows stays clean."""
+    root = Path(tmp_path)
+    (root / "LICENSE").write_text("MIT License\n")
+    (root / "commit-subjects.jsonl").write_text('{"subject": "fix: thing"}\n')
+
+    assert audit_snapshot_safety(str(root)) == []
+
+
 def test_inherited_security_findings_require_review_but_new_findings_block():
     from hundredways.weekly_sync import (
         AuditIssue,

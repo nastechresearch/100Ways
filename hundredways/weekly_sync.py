@@ -574,7 +574,12 @@ def audit_snapshot_safety(
         encoding="utf-8", errors="ignore"
     ).startswith("MIT License"):
         issues.append(AuditIssue("license-mit", "LICENSE", "repository license must retain the MIT License text"))
-    allowed_empty = {".gitkeep", ".keep", "__init__.py"}
+    # ``commit-subjects.jsonl`` is a generated receipt sidecar (see
+    # conformance._REPORT_PATHS and updates.split_manifest_subjects), not a
+    # source file.  Replaying an already-recorded upstream SHA yields zero new
+    # subjects, so the pipeline legitimately writes an empty log; that must not
+    # masquerade as an incomplete source transformation.
+    allowed_empty = {".gitkeep", ".keep", "__init__.py", "commit-subjects.jsonl"}
     ignored_suffixes = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".woff2", ".pdf", ".zip"}
     for entry in index.files():
         rel = entry.rel
