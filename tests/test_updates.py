@@ -4505,13 +4505,85 @@ def test_reconcile_plugin_guard_trusted_installer_hosts(tmp_path):
         "}\n"
     )
 
-    assert _reconcile_plugin_guard_trusted_installer_hosts(str(root)) == 1
+    assert _reconcile_plugin_guard_trusted_installer_hosts(str(root)) == [
+        "tools/plugin_guard_context.py"
+    ]
     text = target.read_text()
     assert '"nastechresearch.github.io", "ollama.com", "bun.sh",' in text
     assert '"nastechresearch.github.io/nastech-agent",' not in text
 
     # Idempotent once the allowlist carries the bare host.
-    assert _reconcile_plugin_guard_trusted_installer_hosts(str(root)) == 0
+    assert _reconcile_plugin_guard_trusted_installer_hosts(str(root)) == []
+
+
+def test_reconcile_plugin_guard_trusted_installer_hosts_new_scanner_layout(tmp_path):
+    """Upstream moved the allowlist into plugins_install_scan_context.py; retarget it there.
+
+    Regression for PR #201 head 13103f3: the old path is gone, so the rule was a
+    no-op and the branded install URL stayed a compound host in the allowlist,
+    making test_benign_catalog_shape_installs_safe read ``caution`` instead of
+    ``safe`` under fork CI.
+    """
+    root = tmp_path / "branded"
+    cli = root / "nastech_cli"
+    cli.mkdir(parents=True)
+    target = cli / "plugins_install_scan_context.py"
+    target.write_text(
+        "_URL_IN_LINE = re.compile(r'https?://([^\\s/\"\\'`)]+)([^\\s\"\\'`)]*)')\n"
+        "_TRUSTED_INSTALLER_HOSTS = {\n"
+        '    "nastechresearch.github.io/nastech-agent", "ollama.com", "bun.sh",\n'
+        '    "get.docker.com", "sh.rustup.rs", "deno.land", "astral.sh", "app.factory.ai",\n'
+        "}\n"
+    )
+
+    assert _reconcile_plugin_guard_trusted_installer_hosts(str(root)) == [
+        "nastech_cli/plugins_install_scan_context.py"
+    ]
+    text = target.read_text()
+    assert '"nastechresearch.github.io", "ollama.com", "bun.sh",' in text
+    assert '"nastechresearch.github.io/nastech-agent",' not in text
+    # The URL-extraction regex and every other trusted host are untouched.
+    assert "_URL_IN_LINE = re.compile" in text
+    assert '"get.docker.com", "sh.rustup.rs", "deno.land", "astral.sh", "app.factory.ai",' in text
+    assert _reconcile_plugin_guard_trusted_installer_hosts(str(root)) == []
+
+
+def test_reconcile_plugin_guard_trusted_installer_hosts_both_layouts(tmp_path):
+    """If both generations of the scanner file are present, both get fixed."""
+    root = tmp_path / "branded"
+    old = root / "tools" / "plugin_guard_context.py"
+    new = root / "nastech_cli" / "plugins_install_scan_context.py"
+    old.parent.mkdir(parents=True)
+    new.parent.mkdir(parents=True)
+    entry = (
+        "_TRUSTED_INSTALLER_HOSTS = {\n"
+        '    "nastechresearch.github.io/nastech-agent", "ollama.com", "bun.sh",\n'
+        "}\n"
+    )
+    old.write_text(entry)
+    new.write_text(entry)
+
+    assert set(_reconcile_plugin_guard_trusted_installer_hosts(str(root))) == {
+        "tools/plugin_guard_context.py",
+        "nastech_cli/plugins_install_scan_context.py",
+    }
+    assert '"nastechresearch.github.io/nastech-agent",' not in old.read_text()
+    assert '"nastechresearch.github.io/nastech-agent",' not in new.read_text()
+    assert _reconcile_plugin_guard_trusted_installer_hosts(str(root)) == []
+
+
+def test_reconcile_plugin_guard_trusted_installer_hosts_registered_in_reconcile_tree(tmp_path):
+    """reconcile_tree must dispatch the new scanner layout or the scan stays red."""
+    root = tmp_path / "branded"
+    cli = root / "nastech_cli"
+    cli.mkdir(parents=True)
+    (cli / "plugins_install_scan_context.py").write_text(
+        "_TRUSTED_INSTALLER_HOSTS = {\n"
+        '    "nastechresearch.github.io/nastech-agent", "ollama.com", "bun.sh",\n'
+        "}\n"
+    )
+    result = reconcile_tree(str(root))
+    assert "nastech_cli/plugins_install_scan_context.py" in result.fixed
 
 
 def test_reconcile_catalog_redirect_host_test(tmp_path):
@@ -4740,7 +4812,7 @@ def test_reconcile_plugin_guard_leaves_install_paths_untouched(tmp_path):
 
     # A docs/install URL keeps the path form and must not be rewritten; only the
     # trusted-installer allowlist entry collapses to the bare host.
-    assert _reconcile_plugin_guard_trusted_installer_hosts(str(root)) == 0
+    assert _reconcile_plugin_guard_trusted_installer_hosts(str(root)) == []
     assert target.read_text() == original
 
 
