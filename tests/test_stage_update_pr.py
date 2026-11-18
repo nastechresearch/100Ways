@@ -1,13 +1,15 @@
 """The #344 candidate-publication contract (``stage-update-pr.yml``).
 
 The candidate branch must accumulate, not churn: each update commits the
-branded tree on top of the branch's existing head when that head still
-descends from ``main``, pushes fast-forward only, and answers a rejected push
-by re-reading the remote head and re-deriving on top of it -- never by
-rewriting history.  A branch that stops being fast-forwardable fails the step
-instead of being forced.  The commit author is the PAT's own identity, so the
-accumulated history has a real owner, and the authorization receipt names
-exactly what the run may do.
+branded tree on top of the branch's existing head, pushes fast-forward only,
+and answers a rejected push by re-reading the remote head and re-deriving on
+top of it -- never by rewriting history.  When main has advanced past the
+commit the branch was seeded from, the two lines are rejoined with an
+ours-merge before the overlay: main becomes an ancestor, the branded tree
+stays authoritative, and the push remains a fast-forward from the branch's own
+head.  No history is rewritten and no push is forced.  The commit author is
+the PAT's own identity, so the accumulated history has a real owner, and the
+authorization receipt names exactly what the run may do.
 """
 import re
 from pathlib import Path
@@ -24,10 +26,26 @@ def test_candidate_push_is_never_forced():
 
 def test_update_commit_accumulates_on_a_descending_head():
     text = WORKFLOW.read_text(encoding="utf-8")
-    # The seed picks the branch head only while it still descends from main.
+    # The seed is the branch head; the loop rejoins main when it has advanced.
     assert "git merge-base --is-ancestor" in text
     assert "refs/factory/candidate" in text
     assert "refs/factory/base" in text
+
+
+def test_a_diverged_branch_is_rejoined_without_forcing():
+    """A branch seeded from an older main is merged, never reset or forced.
+
+    The #344 job hit this exactly: 100WAYS descended from an older main while
+    fork main advanced, so seeding from main made every push non-fast-forward.
+    An ours-merge records main as an ancestor and keeps the push fast-forward
+    from the branch's own head.
+    """
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert "git merge -q -s ours --no-edit" in text
+    # The merge happens only when main is not already an ancestor of the head.
+    assert 'if ! git merge-base --is-ancestor "$BASE_SHA" HEAD; then' in text
+    # The seed is the branch head even when it no longer descends from main.
+    assert 'git rev-parse -q --verify refs/factory/candidate >/dev/null; then' in text
 
 
 def test_a_rejected_push_rederives_instead_of_forcing():

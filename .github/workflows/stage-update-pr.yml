@@ -133,15 +133,17 @@ jobs:
           export GIT_COMMITTER_EMAIL="${ACTOR_ID}+${ACTOR_LOGIN}@users.noreply.github.com"
 
           # Read both heads up front: main is the accumulation floor, the
-          # candidate branch's head the accumulation base when it still
-          # descends from main.
+          # candidate branch's head the accumulation base.  When main has
+          # advanced past the commit the branch was seeded from, the two lines
+          # have diverged; the loop below rejoins them with an ours-merge before
+          # the overlay so the push stays a fast-forward from the branch's own
+          # head -- history is never rewritten and --force is never used.
           git fetch "$REMOTE" "refs/heads/$BASE:refs/factory/base" \
             "refs/heads/$TEST:refs/factory/candidate" 2>/dev/null \
             || git fetch "$REMOTE" "refs/heads/$BASE:refs/factory/base"
           BASE_SHA=$(git rev-parse refs/factory/base)
           pick_seed() {
-            if git rev-parse -q --verify refs/factory/candidate >/dev/null \
-               && git merge-base --is-ancestor "$BASE_SHA" refs/factory/candidate; then
+            if git rev-parse -q --verify refs/factory/candidate >/dev/null; then
               git rev-parse refs/factory/candidate
             else
               echo "$BASE_SHA"
@@ -188,6 +190,15 @@ jobs:
           for ATTEMPT in 1 2 3; do
             find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf -- {} +
             git checkout -q -B "$TEST" "$SEED"
+            # A branch seeded from an older main no longer descends from the
+            # current one.  Record main as an ancestor with an ours-merge: the
+            # tree is untouched here (the branded overlay lands next), the PR
+            # diff is measured from today's main, and the push below is still
+            # a fast-forward from the branch's previous head.
+            if ! git merge-base --is-ancestor "$BASE_SHA" HEAD; then
+              git merge -q -s ours --no-edit \
+                -m "chore: reconcile $TEST with fork $BASE" "$BASE_SHA"
+            fi
             find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf -- {} +
             cp -a "$PRISTINE"/. .
             # force-add beats the nastech-*/* gitignore pattern; -A captures
@@ -204,7 +215,7 @@ jobs:
             SEED=$(pick_seed)
           done
           if [ "$PUSHED" != 1 ]; then
-            echo "candidate push rejected three times: the branch is no longer fast-forwardable from main, and history must not be forced" >&2
+            echo "candidate push rejected three times: the remote branch could not be accumulated, and history must not be forced" >&2
             exit 1
           fi
 
