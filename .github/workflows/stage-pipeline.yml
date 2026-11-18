@@ -145,6 +145,12 @@ jobs:
           HUNDREDWAYS_AI_BASE_URL: https://ollama.com/v1
           HUNDREDWAYS_AI_MODEL: gemma4:31b-cloud
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+          # Fork-owned DocSearch triple. Search-only keys are public by design;
+          # when unset the engine keeps upstream's inherited credentials.
+          HUNDREDWAYS_ALGOLIA_APP_ID: ${{ vars.HUNDREDWAYS_ALGOLIA_APP_ID }}
+          HUNDREDWAYS_ALGOLIA_SEARCH_KEY: ${{ vars.HUNDREDWAYS_ALGOLIA_SEARCH_KEY }}
+          HUNDREDWAYS_ALGOLIA_INDEX_NAME: ${{ vars.HUNDREDWAYS_ALGOLIA_INDEX_NAME }}
+          HUNDREDWAYS_ALGOLIA_INDICES: ${{ vars.HUNDREDWAYS_ALGOLIA_INDEX_NAME }}
         run: |
           python3 -m hundredways.cli --repo nastech-agent update \
             --updates-dir "$HUNDREDWAYS_UPDATES_DIR" \

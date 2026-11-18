@@ -2125,6 +2125,70 @@ def _reconcile_docusaurus_site_config(dst: str) -> int:
     return 1
 
 
+def _reconcile_algolia_docsearch_credentials(dst: str) -> int:
+    """Point DocSearch at the fork's own Algolia app when one is configured.
+
+    Every sync rebrands a fresh upstream tree whose ``algolia`` block carries
+    the inherited app id, search-only key, and ``hermes docs`` index.  Branding
+    can only rename the index word; it cannot make the inherited credentials
+    read an index that lives in a different app.  Once an owner provisions the
+    fork's own DocSearch app and exposes the public (search-only) triple as
+    repo variables, this rule rewrites all three fields in the site config
+    *after* branding, so each generated snapshot stays wired to the fork's
+    index instead of the inherited one.  Search-only keys are public by design
+    (the inherited one is already committed in the site config), so the triple
+    travels as variables rather than secrets.
+
+    With no complete triple configured the rule is a no-op: the inherited
+    values survive exactly as before, so this cannot red a sync that has not
+    provisioned DocSearch yet.  A malformed value (quote or newline) is also
+    ignored rather than written into a broken TS string literal.
+    """
+    app_id = os.environ.get("HUNDREDWAYS_ALGOLIA_APP_ID", "").strip()
+    search_key = os.environ.get("HUNDREDWAYS_ALGOLIA_SEARCH_KEY", "").strip()
+    index_name = os.environ.get("HUNDREDWAYS_ALGOLIA_INDEX_NAME", "").strip()
+    if not (app_id and search_key and index_name):
+        return 0
+    if any(
+        char in value
+        for value in (app_id, search_key, index_name)
+        for char in ("'", '"', "\n", "\r")
+    ):
+        return 0
+    path = os.path.join(dst, "website", "docusaurus.config.ts")
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return 0
+    block = re.search(r"\balgolia:\s*\{(?P<body>.*?)\}", text, re.S)
+    if not block:
+        return 0
+    body = block.group("body")
+    updated_body = body
+    for key, value in (
+        ("appId", app_id),
+        ("apiKey", search_key),
+        ("indexName", index_name),
+    ):
+        updated_body = re.sub(
+            rf"(?P<prefix>\b{key}:\s*)(?P<q>['\"])[^'\"]*(?P=q)",
+            lambda match, v=value: (
+                f"{match.group('prefix')}{match.group('q')}{v}{match.group('q')}"
+            ),
+            updated_body,
+            count=1,
+        )
+    if updated_body == body:
+        return 0
+    updated = text[: block.start("body")] + updated_body + text[block.end("body") :]
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(updated)
+    return 1
+
+
 def _reconcile_pages_deploy_workflow(dst: str) -> int:
     """Keep the generated GitHub Pages artifact aligned with Docusaurus URLs.
 
@@ -11940,6 +12004,12 @@ def reconcile_tree(
             result.total += 1
             result.fixed.append(rel)
     if _reconcile_docusaurus_site_config(dst) and "website/docusaurus.config.ts" not in result.fixed:
+        result.total += 1
+        result.fixed.append("website/docusaurus.config.ts")
+    if (
+        _reconcile_algolia_docsearch_credentials(dst)
+        and "website/docusaurus.config.ts" not in result.fixed
+    ):
         result.total += 1
         result.fixed.append("website/docusaurus.config.ts")
     if _reconcile_pages_deploy_workflow(dst):

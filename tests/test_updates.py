@@ -91,6 +91,7 @@ from hundredways.updates import (
     _reconcile_desktop_path_fixtures,
     _reconcile_desktop_skin_alias,
     _reconcile_docusaurus_site_config,
+    _reconcile_algolia_docsearch_credentials,
     _reconcile_install_ps1_store_guard_test,
     _reconcile_js_test_timeouts,
     _reconcile_locale_key_order,
@@ -5028,6 +5029,73 @@ def test_reconcile_docusaurus_site_config_subpath_url_collapses(tmp_path):
 
     # Idempotent once the config carries the project-pages contract.
     assert _reconcile_docusaurus_site_config(str(root)) == 0
+
+
+_ALGOLIA_CONFIG = (
+    "    algolia: {\n"
+    "      appId: '2JLBVEYZN5',\n"
+    "      apiKey: '9629ec26628d1a126535fd5ef408990d',\n"
+    "      indexName: 'hermes docs',\n"
+    "      contextualSearch: true,\n"
+    "    },\n"
+)
+
+
+def _algolia_tree(tmp_path):
+    root = tmp_path / "branded"
+    website = root / "website"
+    website.mkdir(parents=True)
+    target = website / "docusaurus.config.ts"
+    target.write_text(_ALGOLIA_CONFIG)
+    return root, target
+
+
+def test_reconcile_algolia_docsearch_credentials_rewrites_full_triple(tmp_path, monkeypatch):
+    root, target = _algolia_tree(tmp_path)
+    monkeypatch.setenv("HUNDREDWAYS_ALGOLIA_APP_ID", "OWNAPP123")
+    monkeypatch.setenv("HUNDREDWAYS_ALGOLIA_SEARCH_KEY", "ownersearchonlykey")
+    monkeypatch.setenv("HUNDREDWAYS_ALGOLIA_INDEX_NAME", "nastech docs")
+
+    assert _reconcile_algolia_docsearch_credentials(str(root)) == 1
+    text = target.read_text()
+    assert "appId: 'OWNAPP123'," in text
+    assert "apiKey: 'ownersearchonlykey'," in text
+    assert "indexName: 'nastech docs'," in text
+    assert "contextualSearch: true," in text  # unrelated key preserved
+    assert "2JLBVEYZN5" not in text
+    assert "hermes docs" not in text
+
+    # Idempotent once the triple matches.
+    assert _reconcile_algolia_docsearch_credentials(str(root)) == 0
+
+
+def test_reconcile_algolia_docsearch_credentials_noop_without_full_triple(tmp_path, monkeypatch):
+    root, target = _algolia_tree(tmp_path)
+    monkeypatch.delenv("HUNDREDWAYS_ALGOLIA_APP_ID", raising=False)
+    monkeypatch.delenv("HUNDREDWAYS_ALGOLIA_SEARCH_KEY", raising=False)
+    monkeypatch.delenv("HUNDREDWAYS_ALGOLIA_INDEX_NAME", raising=False)
+
+    # Nothing configured: inherited triple is left untouched.
+    assert _reconcile_algolia_docsearch_credentials(str(root)) == 0
+    assert target.read_text() == _ALGOLIA_CONFIG
+
+    # A partial triple would split app/key/index, so it is ignored too.
+    monkeypatch.setenv("HUNDREDWAYS_ALGOLIA_APP_ID", "OWNAPP123")
+    monkeypatch.setenv("HUNDREDWAYS_ALGOLIA_SEARCH_KEY", "ownersearchonlykey")
+    assert _reconcile_algolia_docsearch_credentials(str(root)) == 0
+    assert target.read_text() == _ALGOLIA_CONFIG
+
+
+def test_reconcile_algolia_docsearch_credentials_ignores_malformed_value(tmp_path, monkeypatch):
+    root, target = _algolia_tree(tmp_path)
+    monkeypatch.setenv("HUNDREDWAYS_ALGOLIA_APP_ID", "OWN'APP")
+    monkeypatch.setenv("HUNDREDWAYS_ALGOLIA_SEARCH_KEY", "ownersearchonlykey")
+    monkeypatch.setenv("HUNDREDWAYS_ALGOLIA_INDEX_NAME", "nastech docs")
+
+    # A quote in a value would break the generated TS string literal; safer to
+    # leave the inherited triple intact than to write invalid config.
+    assert _reconcile_algolia_docsearch_credentials(str(root)) == 0
+    assert target.read_text() == _ALGOLIA_CONFIG
 
 
 # The Docs Search Monitor's live probe, as the branded tree carries it today.
