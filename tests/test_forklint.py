@@ -450,12 +450,10 @@ def test_just_style_workflow_runs_all_six_checkers(tmp_path):
 
     issues = run_fork_lint(str(fork), str(candidate))
 
-    unavailable = [
-        issue for issue in issues
-        if issue.status == UNAVAILABLE and "invokes no" in issue.detail
-    ]
-    assert unavailable == []
-    assert summarize(issues).verdict == "PASS"
+    # The six checkers are stubbed to exit 0, so each must actually resolve and run:
+    # none may be reported unavailable and none may produce a finding.  Other checks
+    # (ruff, brand inflation) are environment-dependent and out of scope here.
+    assert [issue for issue in issues if issue.script in FORK_CHECK_SCRIPTS] == []
 
 
 def test_just_style_workflow_without_a_guard_table_fails_closed(tmp_path):
