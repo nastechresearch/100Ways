@@ -94,6 +94,7 @@ from hundredways.updates import (
     _reconcile_algolia_docsearch_credentials,
     _reconcile_install_ps1_store_guard_test,
     _reconcile_js_test_timeouts,
+    _reconcile_packaged_payload_run_agent_bytes,
     _reconcile_locale_key_order,
     _reconcile_preserved_brand_text,
     _reconcile_python_slow_runner_wait_budgets,
@@ -2413,6 +2414,48 @@ def test_js_test_timeouts_reconcile_noops_on_fork_raised_probe(tmp_path):
     )
     assert _reconcile_js_test_timeouts(str(candidate)) == []
     assert "}, 60000)" in probe.read_text(encoding="utf-8")
+
+
+def _packaged_payload_tree(tmp_path, brand="nastech"):
+    candidate = tmp_path / "candidate"
+    scripts = candidate / "apps" / "desktop" / "scripts"
+    scripts.mkdir(parents=True)
+    test = scripts / "packaged-payload.test.mjs"
+    test.write_text(
+        "write(path.join(prepared, '%s-agent', 'run_agent.py'), 'print(\"%s\")\\n')\n"
+        "'missing file of 16 bytes: %s-agent/run_agent.py',\n" % (brand, brand, brand),
+        encoding="utf-8",
+    )
+    return candidate, test
+
+
+def test_packaged_payload_run_agent_bytes_tracks_branded_fixture(tmp_path):
+    candidate, test = _packaged_payload_tree(tmp_path)
+    changed = _reconcile_packaged_payload_run_agent_bytes(str(candidate))
+    assert changed == ["apps/desktop/scripts/packaged-payload.test.mjs"]
+    text = test.read_text(encoding="utf-8")
+    assert "'missing file of 17 bytes: nastech-agent/run_agent.py'," in text
+    assert "16 bytes" not in text
+    # A branded tree is a fixed point: reruns and re-branding are both no-ops.
+    assert _reconcile_packaged_payload_run_agent_bytes(str(candidate)) == []
+    assert BrandingRules().transform_text(text) == text
+
+
+def test_packaged_payload_run_agent_bytes_noop_when_already_aligned(tmp_path):
+    candidate, test = _packaged_payload_tree(tmp_path)
+    test.write_text(
+        test.read_text(encoding="utf-8").replace("16 bytes", "17 bytes"),
+        encoding="utf-8",
+    )
+    assert _reconcile_packaged_payload_run_agent_bytes(str(candidate)) == []
+    assert "16 bytes" not in test.read_text(encoding="utf-8")
+
+
+def test_packaged_payload_run_agent_bytes_noop_without_anchor(tmp_path):
+    candidate, test = _packaged_payload_tree(tmp_path)
+    test.write_text("// unrelated test\n", encoding="utf-8")
+    assert _reconcile_packaged_payload_run_agent_bytes(str(candidate)) == []
+    assert test.read_text(encoding="utf-8") == "// unrelated test\n"
 
 
 def test_python_slow_runner_wait_budgets_doubles_each_probe(tmp_path):

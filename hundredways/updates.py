@@ -7270,6 +7270,49 @@ def _reconcile_js_test_timeouts(dst: str) -> list[str]:
     return fixed
 
 
+_BRAND_PACKAGED_PAYLOAD_REL = "apps/desktop/scripts/packaged-payload.test.mjs"
+_PPP_RUN_AGENT_FIXTURE_RE = re.compile(
+    r"write\(path\.join\(prepared, 'nastech-agent', 'run_agent\.py'\), '((?:[^'\\]|\\.)*)'\)"
+)
+_PPP_RUN_AGENT_COUNT_RE = re.compile(
+    r"'missing file of (\d+) bytes: nastech-agent/run_agent\.py'"
+)
+
+
+def _reconcile_packaged_payload_run_agent_bytes(dst: str) -> list[str]:
+    """Keep the packaged-payload byte assertion aligned with the branded fixture.
+
+    Upstream writes ``print("hermes")\\n`` (16 bytes) and asserts ``missing file
+    of 16 bytes``.  Token branding expands ``hermes`` to ``nastech`` in the
+    fixture -- one byte longer -- but leaves the literal count in the assertion
+    unchanged, so the electron packaged-payload test fails on the fork with a
+    16-vs-17 mismatch (JS & TS checks, workspace).  Derive the count from the
+    branded fixture itself and rewrite only that one assertion.  A tree that
+    already carries the derived count is a fixed point.
+    """
+    rel = _BRAND_PACKAGED_PAYLOAD_REL
+    text = _reconcile_budget_read(dst, rel)
+    if text is None:
+        return []
+    fixture = _PPP_RUN_AGENT_FIXTURE_RE.search(text)
+    assertion = _PPP_RUN_AGENT_COUNT_RE.search(text)
+    if fixture is None or assertion is None:
+        return []
+    decoded = fixture.group(1).replace("\\n", "\n").replace('\\"', '"')
+    expected = len(decoded.encode("utf-8"))
+    if int(assertion.group(1)) == expected:
+        return []
+    updated = text.replace(
+        assertion.group(0),
+        f"'missing file of {expected} bytes: nastech-agent/run_agent.py'",
+        1,
+    )
+    if updated == text:
+        return []
+    _reconcile_budget_write(dst, rel, updated)
+    return [rel]
+
+
 def _reconcile_python_slow_runner_wait_budgets(dst: str) -> list[str]:
     """Widen the branded Python probes the 32-core upstream runner hides.
 
@@ -11816,6 +11859,9 @@ def reconcile_tree(
         result.total += 1
         result.fixed.append(rel)
     for rel in _reconcile_js_test_timeouts(dst):
+        result.total += 1
+        result.fixed.append(rel)
+    for rel in _reconcile_packaged_payload_run_agent_bytes(dst):
         result.total += 1
         result.fixed.append(rel)
     for rel in _reconcile_python_slow_runner_wait_budgets(dst):
