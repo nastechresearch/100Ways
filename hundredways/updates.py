@@ -8829,6 +8829,83 @@ def _reconcile_plugin_catalog_admission(dst: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Upstream plugin descriptions can quote a literal OS scratch path.
+# ---------------------------------------------------------------------------
+
+class PluginCatalogNoTmpError(ValueError):
+    """A plugin-catalog YAML carries a /tmp token in a shape the rule cannot mark."""
+
+
+# The fork's own ``scripts/check_no_tmp_literals.py`` flags a literal ``/tmp`` path
+# token in every first-party ``.yaml`` it scans, including plugin-catalog entries.
+# Upstream sometimes quotes such a path inside a third-party security disclosure:
+# memtomem 0.1.23 (upstream e93b3da9, 2026-11-18) says its writes "can follow
+# existing directory links out of them and include runtime files such as locks
+# under /tmp".  Branding keeps that prose verbatim, so the fork's checker rejects
+# the candidate in the prepublish gate.  The checker honours ``no-tmp: ok -- why``
+# on the line above a hit; an explanatory disclosure about a *third party's*
+# behaviour is exactly the documented legitimate use -- rewriting the quote would
+# falsify it, and the file is data read by humans, not a shell command or prompt.
+_PLUGIN_CATALOG_NO_TMP_MARKER = (
+    "no-tmp: ok — explanatory security disclosure quotes an upstream OS scratch "
+    "path; data, not a shell command or model prompt"
+)
+# Mirrors the fork checker's ``_TMP_TOKEN``: not glued to a path/word char,
+# not the ``${TMPDIR:-/tmp}`` idiom, not followed by a word char.
+_PLUGIN_CATALOG_TMP_TOKEN = re.compile(r"(?<![\w./~\\-])(?<!:-)/tmp(?![\w-])")
+# A top-level YAML field line, e.g. ``description: "..."``.  The rule only marks
+# these; a /tmp token anywhere else is a shape it refuses to guess about.
+_PLUGIN_CATALOG_FIELD_RE = re.compile(r"^[A-Za-z_][\w-]*:")
+
+
+def _reconcile_plugin_catalog_no_tmp(dst: str) -> list[str]:
+    """Exempt literal /tmp tokens quoted in plugin-catalog field text from fork lint.
+
+    Insert the fork checker's ``no-tmp: ok`` marker on the line above any
+    top-level plugin-catalog YAML field whose value quotes a ``/tmp`` path.  The
+    marker is what the checker itself prescribes for text that merely describes a
+    scratch path; it leaves the third-party disclosure byte-for-byte intact.
+    Idempotent: a field already carrying a marker on its own or the line above is
+    left alone, so re-running reconciliation is a fixed point.  Fail closed: a
+    /tmp token on a line that is not a YAML field raises rather than being marked
+    in a folded scalar, where a comment would corrupt the value.
+    """
+    cat_dir = os.path.join(dst, "plugin-catalog")
+    if not os.path.isdir(cat_dir):
+        return []
+    fixed: list[str] = []
+    for name in sorted(os.listdir(cat_dir)):
+        if not name.endswith((".yaml", ".yml")):
+            continue
+        rel = f"plugin-catalog/{name}"
+        if not os.path.isfile(os.path.join(dst, *rel.split("/"))):
+            continue
+        text = _reconcile_budget_read(dst, rel)
+        if text is None:
+            continue
+        out: list[str] = []
+        changed = False
+        prev_marked = False
+        for line in text.splitlines(keepends=True):
+            marked = "no-tmp: ok" in line
+            if _PLUGIN_CATALOG_TMP_TOKEN.search(line) and not marked and not prev_marked:
+                if not _PLUGIN_CATALOG_FIELD_RE.match(line.lstrip()):
+                    raise PluginCatalogNoTmpError(
+                        f"{rel}: a literal /tmp token appears outside a top-level YAML "
+                        "field, so the no-tmp marker cannot be placed without editing "
+                        "the value; re-derive this disclosure by hand"
+                    )
+                out.append(f"# {_PLUGIN_CATALOG_NO_TMP_MARKER}\n")
+                changed = True
+            out.append(line)
+            prev_marked = marked
+        if changed:
+            _reconcile_budget_write(dst, rel, "".join(out))
+            fixed.append(rel)
+    return fixed
+
+
+# ---------------------------------------------------------------------------
 # Branding can collapse two upstream identifiers into one.
 # ---------------------------------------------------------------------------
 
@@ -11775,6 +11852,9 @@ def reconcile_tree(
     if _reconcile_plugin_catalog_admission(dst):
         result.total += 1
         result.fixed.append(".github/workflows/plugin-catalog-ci.yml")
+    for rel in _reconcile_plugin_catalog_no_tmp(dst):
+        result.total += 1
+        result.fixed.append(rel)
     for rel in _reconcile_pinned_source_clones(dst):
         result.total += 1
         result.fixed.append(rel)

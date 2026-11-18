@@ -37,6 +37,7 @@ from hundredways.updates import (
     GatewayPluginGateError,
     NastechSuitePinError,
     PluginCatalogAdmissionError,
+    PluginCatalogNoTmpError,
     SetThemeCatalogLineError,
     StoreLaneGateError,
     TermuxAptKeyDocError,
@@ -117,6 +118,7 @@ from hundredways.updates import (
     _reconcile_nastech_home_env_prefix,
     _reconcile_pinned_source_clones,
     _reconcile_plugin_catalog_admission,
+    _reconcile_plugin_catalog_no_tmp,
     _reconcile_plugin_guard_trusted_installer_hosts,
     _reconcile_catalog_redirect_host_test,
     _reconcile_gateway_contract_openrpc,
@@ -6878,6 +6880,90 @@ def test_reconcile_plugin_catalog_admission_registered_in_reconcile_tree(tmp_pat
     result = reconcile_tree(str(root))
     assert ".github/workflows/plugin-catalog-ci.yml" in result.fixed
     assert "Fork 100WAYS sync PR" in target.read_text(encoding="utf-8")
+
+
+def _write_plugin_catalog_entry(tmp_path, name, description):
+    root = tmp_path / "tree"
+    cat = root / "plugin-catalog"
+    cat.mkdir(parents=True, exist_ok=True)
+    target = cat / name
+    target.write_text(
+        f'name: {name.removesuffix(".yaml")}\n'
+        'version: "0.1.23"\n'
+        f'description: "{description}"\n'
+        'maintainer: somebody\n',
+        encoding="utf-8",
+    )
+    return root, target
+
+
+def test_reconcile_plugin_catalog_no_tmp_marks_disclosure(tmp_path):
+    """The marker lands on the line above the field; the quoted text is untouched."""
+    desc = "writes such as locks under /tmp are disclosed here"
+    root, target = _write_plugin_catalog_entry(tmp_path, "memtomem.yaml", desc)
+    assert _reconcile_plugin_catalog_no_tmp(str(root)) == ["plugin-catalog/memtomem.yaml"]
+    lines = target.read_text(encoding="utf-8").splitlines()
+    field = f'description: "{desc}"'
+    assert field in lines
+    assert lines[lines.index(field) - 1].startswith("# no-tmp: ok")
+    assert "upstream OS scratch path" in lines[lines.index(field) - 1]
+
+
+def test_reconcile_plugin_catalog_no_tmp_is_a_fixed_point(tmp_path):
+    """Re-running reconciliation never stacks a second marker."""
+    root, target = _write_plugin_catalog_entry(
+        tmp_path, "memtomem.yaml", "locks under /tmp"
+    )
+    assert _reconcile_plugin_catalog_no_tmp(str(root)) == ["plugin-catalog/memtomem.yaml"]
+    once = target.read_bytes()
+    assert _reconcile_plugin_catalog_no_tmp(str(root)) == []
+    assert target.read_bytes() == once
+    assert target.read_text(encoding="utf-8").count("no-tmp: ok") == 1
+
+
+def test_reconcile_plugin_catalog_no_tmp_respects_an_existing_marker(tmp_path):
+    """A marker already on the field line is the checker's other opt-out."""
+    desc = "locks under /tmp  # no-tmp: ok — already marked"
+    root, target = _write_plugin_catalog_entry(tmp_path, "memtomem.yaml", desc)
+    before = target.read_bytes()
+    assert _reconcile_plugin_catalog_no_tmp(str(root)) == []
+    assert target.read_bytes() == before
+
+
+def test_reconcile_plugin_catalog_no_tmp_ignores_portable_idioms(tmp_path):
+    """The fork checker's own exempt spellings never draw a marker."""
+    for desc in (
+        "use ${TMPDIR:-/tmp} for scratch",
+        "stored under /var/tmp or ~/tmp",
+        "tmpfs and tmp_path are not a path",
+    ):
+        root, target = _write_plugin_catalog_entry(tmp_path, "entry.yaml", desc)
+        before = target.read_bytes()
+        assert _reconcile_plugin_catalog_no_tmp(str(root)) == [], desc
+        assert target.read_bytes() == before
+
+
+def test_reconcile_plugin_catalog_no_tmp_fails_closed_off_a_field(tmp_path):
+    """A /tmp token inside a folded value raises instead of corrupting YAML."""
+    root = tmp_path / "tree"
+    cat = root / "plugin-catalog"
+    cat.mkdir(parents=True)
+    (cat / "entry.yaml").write_text(
+        'description: >\n  a path such as /tmp appears in the continuation\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(PluginCatalogNoTmpError, match="entry.yaml"):
+        _reconcile_plugin_catalog_no_tmp(str(root))
+
+
+def test_reconcile_plugin_catalog_no_tmp_registered_in_reconcile_tree(tmp_path):
+    """reconcile_tree must dispatch it or every sync re-publishes the red."""
+    root, target = _write_plugin_catalog_entry(
+        tmp_path, "memtomem.yaml", "locks under /tmp"
+    )
+    result = reconcile_tree(str(root))
+    assert "plugin-catalog/memtomem.yaml" in result.fixed
+    assert "# no-tmp: ok" in target.read_text(encoding="utf-8")
 
 
 def test_reconcile_pinned_source_clones_names_every_external_ref(tmp_path):
