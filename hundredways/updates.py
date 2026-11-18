@@ -6016,6 +6016,21 @@ _HANDOFF_BUNDLED_WORKFLOW_NEW_8 = """\
           # archive origin, and a GitHub-pinned run must not hand it to the resolver.
           origin=$(python -c 'from scripts.releases.handoff import archive_origin; print(archive_origin())')
           printf 'public-root=%s\\npublic-base=%s\\n' \"$origin\" \"$origin\" >> \"$GITHUB_OUTPUT\"\n"""
+# The bundled workflow is fork-preferred in the divergence replay, so an earlier
+# fork copy of this admission span wins its collision hunk over NEW_8.  Keep the
+# exact old bytes as the post-merge rewrite target: the argument passed to the
+# resolver is the whole defect, and nothing else in the span is touched.
+_HANDOFF_ADMISSION_STALE_ORIGIN = (
+    "origin=$(python -c 'import os; from scripts.releases.handoff import archive_origin; "
+    'print(archive_origin(os.environ.get("CLOUDFLARE_R2_PUBLIC_URL")))\')'
+)
+_HANDOFF_ADMISSION_STALE_BLOCK = (
+    "          # The archive origin is whichever store this run pins serves from -- not a\n"
+    "          # bucket variable the GitHub-pinned plane never sets.\n"
+    f"          {_HANDOFF_ADMISSION_STALE_ORIGIN}\n"
+    "          printf 'public-root=%s\\npublic-base=%s\\n' \"$origin\" \"$origin\" "
+    ">> \"$GITHUB_OUTPUT\"\n"
+)
 _HANDOFF_BUNDLED_WORKFLOW_EDITS = (
     (_HANDOFF_BUNDLED_WORKFLOW_OLD_1, _HANDOFF_BUNDLED_WORKFLOW_NEW_1),
     (_HANDOFF_BUNDLED_WORKFLOW_OLD_2, _HANDOFF_BUNDLED_WORKFLOW_NEW_2),
@@ -6388,6 +6403,32 @@ def _reconcile_github_release_handoff_plane(dst: str) -> list[str]:
             _reconcile_budget_write(dst, rel, updated)
             fixed.append(rel)
     return fixed
+
+
+def _reconcile_handoff_admission_origin_final(dst: str) -> list[str]:
+    """Pin the admission archive-origin call after the fork-preferred replay.
+
+    ``desktop-bundled-release.yml`` is in ``_FORK_PREFERRED_DIVERGENCE_FILES``:
+    when the fork and upstream both changed the admission span, the divergence
+    replay resolves that hunk for the fork.  A fork still carrying the earlier
+    resolver call -- the one that handed the stale ``CLOUDFLARE_R2_PUBLIC_URL``
+    to ``archive_origin`` -- therefore wins over the handoff table's rewrite and
+    a GitHub-pinned run raises in ``public_base_url`` before it builds anything.
+    Admission's origin call is engine-owned; normalize it once more after every
+    merge.  The rewrite is a single hunk, idempotent, and touches no other line.
+    """
+    path = os.path.join(dst, _BUNDLED_WORKFLOW_REL)
+    if not os.path.isfile(path):
+        return []
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    updated = text.replace(
+        _HANDOFF_ADMISSION_STALE_BLOCK, _HANDOFF_BUNDLED_WORKFLOW_NEW_8)
+    if updated == text:
+        return []
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(updated)
+    return [_BUNDLED_WORKFLOW_REL]
 
 
 # ---------------------------------------------------------------------------
@@ -12018,6 +12059,13 @@ def reconcile_tree(
             "the fork and upstream changed the same release-plane region "
             "differently; resolve before this update can publish: "
             f"{', '.join(_collided)}")
+    # The bundled workflow is fork-preferred in the replay above, so a stale
+    # admission resolver call in the fork wins its hunk over the handoff table's
+    # rewrite.  Normalize that one hunk after every merge: admission must ask the
+    # pinned store with no argument, or a stale bucket variable aborts the run.
+    for rel in _reconcile_handoff_admission_origin_final(dst):
+        result.total += 1
+        result.fixed.append(rel)
     # Upstream's seed constant is dead code upstream -- a published head has
     # overridden it on every read -- but with zero fork stables published it IS
     # this fork's version line, so it is re-derived from the stable tags the

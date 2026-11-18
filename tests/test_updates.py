@@ -242,6 +242,9 @@ from hundredways.updates import (
     _HANDOFF_STAGING_TEST_REL,
     _HANDOFF_SURFACES,
     _reconcile_github_release_handoff_plane,
+    _HANDOFF_ADMISSION_STALE_BLOCK,
+    _HANDOFF_BUNDLED_WORKFLOW_NEW_8,
+    _reconcile_handoff_admission_origin_final,
     ChannelStoreSeamAnchorError,
     _CHANNEL_SEAM_CANARY_WORKFLOW_REL,
     _CHANNEL_SEAM_RELEASES_REL,
@@ -1416,6 +1419,31 @@ def owns_origin(base):
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == expected
+
+
+def test_fork_preferred_replay_cannot_restore_a_stale_admission_origin(tmp_path):
+    """The divergence merge's fork preference must not reintroduce the bucket argument.
+
+    The bundled workflow is fork-preferred, so a stale resolver call in the fork's
+    copy wins its collision hunk over the handoff rule's rewrite.  The post-merge
+    normalization is the last word: one pass fixes the call, a second pass is a
+    byte-for-byte no-op, and no other workflow line changes.
+    """
+    candidate = _handoff_plane_tree(tmp_path)
+    assert _reconcile_github_release_handoff_plane(str(candidate)) == _HANDOFF_SURFACE_RELS
+    workflow = candidate / _BUNDLED_WORKFLOW_REL
+    fixed = workflow.read_text(encoding="utf-8")
+    assert "archive_origin()" in fixed
+    assert _HANDOFF_ADMISSION_STALE_BLOCK not in fixed
+
+    # Simulate the fork-preferred hunk winning: the fork's earlier span lands back.
+    replayed = fixed.replace(_HANDOFF_BUNDLED_WORKFLOW_NEW_8, _HANDOFF_ADMISSION_STALE_BLOCK)
+    assert replayed != fixed
+    workflow.write_text(replayed, encoding="utf-8")
+
+    assert _reconcile_handoff_admission_origin_final(str(candidate)) == [_BUNDLED_WORKFLOW_REL]
+    assert workflow.read_text(encoding="utf-8") == fixed
+    assert _reconcile_handoff_admission_origin_final(str(candidate)) == []
 
 
 def _handoff_plane_union_tree(tmp_path):
