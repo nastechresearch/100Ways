@@ -6012,9 +6012,9 @@ _HANDOFF_BUNDLED_WORKFLOW_NEW_7 = """\
 _HANDOFF_BUNDLED_WORKFLOW_OLD_8 = """\
           printf 'public-root=%s\\npublic-base=%s\\n' \"$CLOUDFLARE_R2_PUBLIC_URL\" \"$CLOUDFLARE_R2_PUBLIC_URL\" >> \"$GITHUB_OUTPUT\"\n"""
 _HANDOFF_BUNDLED_WORKFLOW_NEW_8 = """\
-          # The archive origin is whichever store this run pins serves from -- not a
-          # bucket variable the GitHub-pinned plane never sets.
-          origin=$(python -c 'import os; from scripts.releases.handoff import archive_origin; print(archive_origin(os.environ.get("CLOUDFLARE_R2_PUBLIC_URL")))')
+          # The pinned store names its own archive; the bucket variable is not an
+          # archive origin, and a GitHub-pinned run must not hand it to the resolver.
+          origin=$(python -c 'from scripts.releases.handoff import archive_origin; print(archive_origin())')
           printf 'public-root=%s\\npublic-base=%s\\n' \"$origin\" \"$origin\" >> \"$GITHUB_OUTPUT\"\n"""
 _HANDOFF_BUNDLED_WORKFLOW_EDITS = (
     (_HANDOFF_BUNDLED_WORKFLOW_OLD_1, _HANDOFF_BUNDLED_WORKFLOW_NEW_1),
@@ -6322,11 +6322,11 @@ def _reconcile_github_release_handoff_plane(dst: str) -> list[str]:
 
     ``handoff.archive_origin()`` is the second half of the same decision.  Every leg that
     names an artifact asks the store where it serves bytes, so a GitHub-pinned run cannot
-    emit a URL at a bucket origin it does not have -- and cannot emit an empty one when
-    ``CLOUDFLARE_R2_PUBLIC_URL`` is unset, which is the state this plane is moving toward.
-    The admission job resolves it too, so it carries the same ``GH_TOKEN`` as the legs it
-    gates, and its CI test runs that step in a fake clone that has to carry the import
-    closure the resolver now pulls in.
+    emit a URL at a bucket origin it does not have.  Admission asks it with no argument:
+    the repository may still carry a stale ``CLOUDFLARE_R2_PUBLIC_URL``, and handing that
+    to the resolver makes ``public_base_url`` reject it before any build starts.  The
+    admission job carries the same ``GH_TOKEN`` as the legs it gates, and its CI test runs
+    that step in a fake clone that has to carry the import closure the resolver now pulls in.
 
     ``handoff.store()`` resolves in three signals, in order of authority.
     ``RELEASE_HANDOFF_STORE`` pins a whole run so a workflow's staging leg and its fetching leg

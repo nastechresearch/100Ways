@@ -1315,11 +1315,11 @@ def test_the_archive_origin_a_run_publishes_is_the_pinned_stores_and_nothing_els
     """One run, one origin: the store answers it, and no leg interpolates the bucket variable.
 
     ``public-root``/``public-base`` reach every later leg's artifact URL, so a run pinned to
-    the release store that names them from ``CLOUDFLARE_R2_PUBLIC_URL`` publishes URLs at an
-    origin it does not have -- and with that variable unset, at no origin at all, which is how
-    the plane is meant to end up. The byte-level guard against a caller trusting a URL it was
-    handed is ``r2.read_public_text``: a digest check only means something if the read it
-    digested refused to be redirected away from the origin that names the bytes.
+    the release store must let that store name them; reading them from
+    ``CLOUDFLARE_R2_PUBLIC_URL`` publishes URLs at an origin the run does not have. The
+    byte-level guard against a caller trusting a URL it was handed is ``r2.read_public_text``:
+    a digest check only means something if the read it digested refused to be redirected away
+    from the origin that names the bytes.
     """
     candidate = _handoff_plane_tree(tmp_path)
     assert _reconcile_github_release_handoff_plane(str(candidate)) == _HANDOFF_SURFACE_RELS
@@ -1353,6 +1353,69 @@ def test_the_archive_origin_a_run_publishes_is_the_pinned_stores_and_nothing_els
     assert BrandingRules().transform_text(step) == step
 
     assert _reconcile_github_release_handoff_plane(str(candidate)) == []
+
+
+def test_admission_archive_origin_ignores_a_stale_bucket_variable(tmp_path):
+    """The pinned store names the origin, even when the repo carries a stale bucket URL.
+
+    Admission publishes ``public-root``/``public-base`` for every later leg.  Handing it
+    the repository's ``CLOUDFLARE_R2_PUBLIC_URL`` makes a GitHub-pinned run raise in
+    ``public_base_url`` before any build starts; the store pin is the only signal that
+    decides which archive this run actually has.
+    """
+    candidate = _handoff_plane_tree(tmp_path)
+    assert _reconcile_github_release_handoff_plane(str(candidate)) == _HANDOFF_SURFACE_RELS
+
+    workflow = (candidate / _BUNDLED_WORKFLOW_REL).read_text(encoding="utf-8")
+    match = re.search(r"origin=\$\(python -c '([^']*)'\)", workflow)
+    assert match, "admission origin command not found in the generated workflow"
+    assert "archive_origin()" in match.group(1)
+    assert 'archive_origin(os.environ.get("CLOUDFLARE_R2_PUBLIC_URL"))' not in match.group(1)
+
+    # Replay the generated command against the resolver the rule just wrote, with the
+    # release store pinned and the fork's stale variable still present in the environment.
+    expected = "https://github.com/nastechresearch/nastech-agent/releases/download"
+    root = tmp_path / "repro"
+    pkg = root / "scripts" / "releases"
+    pkg.mkdir(parents=True)
+    (pkg.parent / "__init__.py").write_text("")
+    (pkg / "__init__.py").write_text("")
+    (pkg / "gh_transport.py").write_text("""\
+def public_base_url(explicit=None):
+    origin = "https://github.com/nastechresearch/nastech-agent/releases/download"
+    if explicit is not None and explicit.rstrip("/") != origin:
+        raise ValueError(f"Handoff base {explicit!r} is not this repository's release archive")
+    return origin
+
+
+def owns_origin(base):
+    return base.rstrip("/") == public_base_url()
+""")
+    (pkg / "r2.py").write_text("""\
+def public_base_url(explicit=None):
+    return "https://r2.invalid"
+
+
+def owns_origin(base):
+    return False
+""")
+    (pkg / "semver.py").write_text("def is_release_version(value):\n    return bool(value)\n")
+    (pkg / "handoff.py").write_text(
+        (candidate / "scripts" / "releases" / "handoff.py").read_text(encoding="utf-8")
+    )
+
+    env = os.environ.copy()
+    env.update(
+        PYTHONPATH=str(root),
+        RELEASE_HANDOFF_STORE="github",
+        GITHUB_REPOSITORY="nastechresearch/nastech-agent",
+        CLOUDFLARE_R2_PUBLIC_URL="https://nastech-assets.nastechresearch.workers.dev",
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", match.group(1)], capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == expected
 
 
 def _handoff_plane_union_tree(tmp_path):
