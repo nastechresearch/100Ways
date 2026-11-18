@@ -119,6 +119,7 @@ from hundredways.updates import (
     _reconcile_plugin_catalog_admission,
     _reconcile_plugin_guard_trusted_installer_hosts,
     _reconcile_catalog_redirect_host_test,
+    _reconcile_gateway_contract_openrpc,
     _reconcile_serve_handler_ledger,
     _reconcile_sqlite3_cli_refusal_test,
     _reconcile_portable_shebang,
@@ -4668,6 +4669,63 @@ def test_serve_handler_ledger_rows_follow_the_renamed_sort(tmp_path):
     # Idempotent once the rows are in the generator's order.
     assert _reconcile_serve_handler_ledger(str(root)) == 0
     assert target.read_text() == text
+
+
+def test_gateway_contract_openrpc_resorts_renamed_schema_keys(tmp_path):
+    """Branding renames a ``$defs`` key in place; the generator re-sorts it.
+
+    ``HermesUsageBar`` -> ``NastechUsageBar`` used to sort before
+    ``NoticePayload`` (H < N) but now sorts after it (Na < No).  The committed
+    artifact keeps the old slot and ``test_generated_files_are_current`` sees
+    a byte-stale file.  Only key order is rebuilt; every schema's facts stay.
+    """
+    import json as _json
+
+    root = tmp_path / "branded"
+    target = root / "apps" / "shared" / "src" / "gateway-contract.openrpc.json"
+    target.parent.mkdir(parents=True)
+    doc = {
+        "openrpc": "1.3.2",
+        "components": {
+            "schemas": {
+                "NoticePayload": {"title": "NoticePayload"},
+                "NastechUsageBar": {"title": "NastechUsageBar"},
+                "ConnectorErrorReason": {"type": "string", "enum": ["a"]},
+                "NastechUsageDollars": {"title": "NastechUsageDollars"},
+            }
+        },
+    }
+    # The stale render mirrors the generator's json.dumps(indent=2) spelling.
+    target.write_text(_json.dumps(doc, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+
+    assert _reconcile_gateway_contract_openrpc(str(root)) == 1
+    text = target.read_text(encoding="utf-8")
+    keys = list(_json.loads(text)["components"]["schemas"])
+    # Nastech* keys belong before Notice* now; ConnectorErrorReason stays last.
+    assert keys == [
+        "NastechUsageBar",
+        "NastechUsageDollars",
+        "NoticePayload",
+        "ConnectorErrorReason",
+    ]
+    # The renderer's exact spelling is preserved, so the test's regeneration
+    # equals the committed bytes.
+    assert text == _json.dumps(_json.loads(text), indent=2, sort_keys=False) + "\n"
+    assert _json.loads(text)["openrpc"] == "1.3.2"
+
+    # Idempotent once the keys are in generator order.
+    assert _reconcile_gateway_contract_openrpc(str(root)) == 0
+    assert target.read_text(encoding="utf-8") == text
+
+
+def test_gateway_contract_openrpc_ignores_missing_or_malformed(tmp_path):
+    root = tmp_path / "branded"
+    target = root / "apps" / "shared" / "src" / "gateway-contract.openrpc.json"
+    assert _reconcile_gateway_contract_openrpc(str(root)) == 0
+    target.parent.mkdir(parents=True)
+    target.write_text("not json", encoding="utf-8")
+    assert _reconcile_gateway_contract_openrpc(str(root)) == 0
+    assert target.read_text(encoding="utf-8") == "not json"
 
 
 def test_reconcile_plugin_guard_leaves_install_paths_untouched(tmp_path):

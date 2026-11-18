@@ -1147,6 +1147,43 @@ def _reconcile_serve_handler_ledger(dst: str) -> int:
     return 1
 
 
+def _reconcile_gateway_contract_openrpc(dst: str) -> int:
+    """Re-sort the generated OpenRPC schema keys after token branding.
+
+    ``scripts/gen_gateway_contracts.py`` renders ``components.schemas`` from
+    ``pydantic.models_json_schema`` (alphabetical ``$defs``), then appends
+    ``ConnectorErrorReason`` last.  Token branding renames class-derived keys
+    in place -- ``HermesUsageBar`` -> ``NastechUsageBar`` -- without moving
+    them, so an entry that sorted before ``NoticePayload`` (``H`` < ``N``)
+    now sorts after it (``Na`` < ``No``).  The generated artifact is then
+    byte-stale and ``test_generated_files_are_current`` fails.  Rebuild the
+    rendered bytes from the renamed rows with the generator's own ordering
+    and JSON spelling; the facts inside each schema are untouched.
+    """
+    rel = os.path.join("apps", "shared", "src", "gateway-contract.openrpc.json")
+    path = os.path.join(dst, rel)
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        schemas = data["components"]["schemas"]
+        if not isinstance(schemas, dict) or not schemas:
+            return 0
+        ordered = {k: v for k, v in sorted(schemas.items()) if k != "ConnectorErrorReason"}
+        if "ConnectorErrorReason" in schemas:
+            ordered["ConnectorErrorReason"] = schemas["ConnectorErrorReason"]
+        data["components"]["schemas"] = ordered
+        rendered = json.dumps(data, indent=2, sort_keys=False) + "\n"
+    except (OSError, ValueError, KeyError, TypeError):
+        return 0
+    if rendered == open(path, encoding="utf-8").read():
+        return 0
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(rendered)
+    return 1
+
+
 def _reconcile_fts5_trigram(dst: str) -> list[str]:
     """Fix the SQLite FTS5 trigram self-test the fork's CI runs.
 
@@ -11701,6 +11738,9 @@ def reconcile_tree(
     if _reconcile_serve_handler_ledger(dst):
         result.total += 1
         result.fixed.append("tests/nastech_cli/serve_handler_ledger.json")
+    if _reconcile_gateway_contract_openrpc(dst):
+        result.total += 1
+        result.fixed.append("apps/shared/src/gateway-contract.openrpc.json")
     if _reconcile_plugin_guard_trusted_installer_hosts(dst) and "tools/plugin_guard_context.py" not in result.fixed:
         result.total += 1
         result.fixed.append("tools/plugin_guard_context.py")
