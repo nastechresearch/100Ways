@@ -14,8 +14,10 @@ into fork code (PR #130).
 The contract this module holds:
 
 * Only the six invocations named in :data:`FORK_CHECK_SCRIPTS` run, and their
-  arguments and advisory status are read out of the fork's ``lint.yml`` instead of
-  remembered here -- so a fork step that gains ``continue-on-error: true`` stops
+  arguments and advisory status are read out of the fork instead of remembered here.
+  Steps invoked as ``python <script>`` carry their args in ``lint.yml``; steps invoked
+  as ``just check --only <recipe>`` carry theirs in the ``_GUARDS`` table of the fork's
+  ``scripts/check``. Either way a step that gains ``continue-on-error: true`` stops
   blocking the gate without an engine edit, and a checker the workflow no longer
   invokes is reported rather than guessed at.
 * Every checker runs exactly as CI runs it.  All six resolve their repository root
@@ -54,6 +56,10 @@ from .secrets import redact
 
 FORK_LINT_WORKFLOW = ".github/workflows/lint.yml"
 FORK_PYPROJECT = "pyproject.toml"
+# The fork's unified checker runner.  Its ``_GUARDS`` table maps a ``just check --only
+# <recipe>`` name to the checker script and argv that CI actually runs.  Reading the
+# fork's table keeps the simulation's rules deriving from the fork instead of a copy here.
+GUARD_RUNNER = "scripts/check"
 
 # The six ``run:`` steps of lint.yml job ``windows-footguns``, in the workflow's order.
 # The other two steps in that job (``scripts/check_profile_scope_patterns.py``,
@@ -257,6 +263,80 @@ def _workflow_step(workflow: str, script: str) -> _WorkflowStep | None:
                         _CONTINUE_ON_ERROR_RE.match(line) for line in lines[start:end]
                     ),
                 )
+    return None
+
+
+def _guard_map(fork_root: str) -> dict[str, tuple[str, ...]]:
+    """``recipe -> argv`` from the fork's own ``scripts/check`` ``_GUARDS`` table.
+
+    The fork's ``lint.yml`` now runs its blocking checkers through
+    ``just check --only <recipe>`` rather than ``python <script>`` directly.  The
+    recipe-to-script mapping lives in the fork's runner, so read it from there: a fork
+    that adds, renames or re-args a guard is followed without an engine edit.  A missing
+    or unparsable table yields no map, which leaves those steps reported unavailable --
+    never guessed at, so the simulation still fails closed.
+    """
+    path = os.path.join(fork_root, *GUARD_RUNNER.split("/"))
+    try:
+        source = _read(path)
+    except OSError:
+        return {}
+    try:
+        module = ast.parse(source)
+    except SyntaxError:
+        return {}
+    for node in module.body:
+        if not isinstance(node, ast.Assign) or not any(
+            isinstance(target, ast.Name) and target.id == "_GUARDS"
+            for target in node.targets
+        ):
+            continue
+        try:
+            guards = ast.literal_eval(node.value)
+        except (ValueError, TypeError):
+            return {}
+        if not isinstance(guards, dict):
+            return {}
+        result: dict[str, tuple[str, ...]] = {}
+        for recipe, argv in guards.items():
+            if (
+                isinstance(recipe, str)
+                and isinstance(argv, (list, tuple))
+                and argv
+                and all(isinstance(token, str) for token in argv)
+            ):
+                result[recipe] = tuple(argv)
+        return result
+    return {}
+
+
+_JUST_CHECK_RE = re.compile(r"just[ \t]+check[ \t]+--only(?:[ \t]+|=)(?P<recipes>\S+)")
+
+
+def _guard_step(
+    workflow: str, guards: Mapping[str, Sequence[str]], script: str
+) -> _WorkflowStep | None:
+    """The ``just check --only <recipe>`` step that runs ``script``, via the fork's table.
+
+    Complements :func:`_workflow_step` for the fork's unified runner: args come from the
+    fork's ``_GUARDS`` entry (e.g. footguns passes ``--all``), and advisory status is the
+    step's own ``continue-on-error`` -- the same source of truth as a direct invocation.
+    """
+    lines = workflow.splitlines()
+    for start, end in _step_blocks(workflow):
+        for index in range(start, end):
+            match = _JUST_CHECK_RE.search(lines[index])
+            if not match:
+                continue
+            for recipe in match.group("recipes").split(","):
+                argv = guards.get(recipe.strip())
+                if argv and argv[0] == script:
+                    return _WorkflowStep(
+                        args=tuple(argv[1:]),
+                        advisory=any(
+                            _CONTINUE_ON_ERROR_RE.match(line) for line in lines[start:end]
+                        ),
+                    )
     return None
 
 
@@ -533,9 +613,17 @@ def _findings(script: str, output: str, advisory: bool) -> list[ForkLintIssue]:
     return issues
 
 
-def _run_checker(fork_root: str, script: str, workflow: str, tree: str) -> list[ForkLintIssue]:
+def _run_checker(
+    fork_root: str,
+    script: str,
+    workflow: str,
+    tree: str,
+    guards: Mapping[str, Sequence[str]] | None = None,
+) -> list[ForkLintIssue]:
     """One fork checker, invoked the way the fork's own ``lint.yml`` invokes it."""
     step = _workflow_step(workflow, script)
+    if step is None and guards:
+        step = _guard_step(workflow, guards, script)
     if step is None:
         return [_unavailable(script, FORK_LINT_WORKFLOW,
                              f"{fork_root}/{FORK_LINT_WORKFLOW} invokes no {script}, so the "
@@ -1147,11 +1235,12 @@ def run_fork_lint(
     except OSError as exc:
         return [_unavailable(FORK_LINT_WORKFLOW, workflow_path,
                              f"cannot read the job that defines the checks: {exc}")]
+    guards = _guard_map(fork_root)
     issues: list[ForkLintIssue] = []
     try:
         with _staged_checkout(candidate_root) as tree:
             for script in FORK_CHECK_SCRIPTS:
-                issues.extend(_run_checker(fork_root, script, workflow, tree))
+                issues.extend(_run_checker(fork_root, script, workflow, tree, guards))
     except (OSError, shutil.Error) as exc:
         issues.extend(
             _unavailable(script, candidate_root,

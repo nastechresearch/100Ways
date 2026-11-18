@@ -114,6 +114,52 @@ jobs:
 """
 
 
+def _just_lint_yml(footguns: str = "blocking") -> str:
+    """The fork's newer job shape: the same six blockers via ``just check --only``.
+
+    Mirrors ``.github/workflows/lint.yml`` at upstream f7e2898a.  The recipe names are
+    resolved through the fork's own ``scripts/check`` ``_GUARDS`` table, not here.
+    """
+    demotion = "        continue-on-error: true\n" if footguns == "advisory" else ""
+    return f"""name: lint
+on: pull_request
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+      - name: Run footgun checker
+{demotion}        run: just check --only footguns
+      - name: Require portable Bash shebangs
+        run: just check --only shebangs
+      - name: Forbid literal /tmp paths outside the baseline
+        run: just check --only no-tmp
+      - name: Forbid config.yaml writers
+        run: just check --only config-writers
+      - name: Forbid unmarked macOS fakes in tests
+        run: just check --only os-marker-fakes
+      - name: Keep every AGENTS.md under its truncation cap
+        run: just check --only agents-md
+"""
+
+
+def _guard_check_text() -> str:
+    """The fork's ``scripts/check`` ``_GUARDS`` table for the six allow-listed checkers."""
+    return (
+        "GUARD_RUNNER_MARK = 'real runner'\n"
+        "_GUARDS = {\n"
+        '    "footguns": ["scripts/check-windows-footguns.py", "--all"],\n'
+        '    "shebangs": ["scripts/check_bash_shebangs.py"],\n'
+        '    "no-tmp": ["scripts/check_no_tmp_literals.py"],\n'
+        '    "config-writers": ["scripts/check_config_yaml_writers.py"],\n'
+        '    "os-marker-fakes": ["scripts/ci/check_os_marker_fakes.py"],\n'
+        '    "agents-md": ["scripts/ci/check_agents_md_size.py"],\n'
+        '    "shims": ["scripts/move/generate_shims.py", "--check"],\n'
+        "}\n"
+    )
+
+
 def _fork(
     tmp_path: Path,
     *,
@@ -349,6 +395,81 @@ def test_workflow_step_reads_args_and_advisory_from_the_fork(tmp_path):
         assert step is not None and step.advisory is True, shape
 
     assert forklint._workflow_step(_lint_yml(), "scripts/ci/check_public_surface.py") is None
+
+
+def test_guard_map_reads_recipe_argv_from_the_forks_runner(tmp_path):
+    """The recipe-to-script map is derived from the fork's scripts/check, not hardcoded."""
+    fork = _fork(tmp_path)
+    _write(fork / forklint.GUARD_RUNNER, _guard_check_text())
+
+    guards = forklint._guard_map(str(fork))
+
+    assert guards["footguns"] == ("scripts/check-windows-footguns.py", "--all")
+    assert guards["shebangs"] == ("scripts/check_bash_shebangs.py",)
+    assert guards["agents-md"] == ("scripts/ci/check_agents_md_size.py",)
+    assert guards["shims"] == ("scripts/move/generate_shims.py", "--check")
+
+
+def test_guard_map_fails_closed_on_a_missing_or_unparsable_runner(tmp_path):
+    fork = _fork(tmp_path)
+    assert forklint._guard_map(str(fork)) == {}  # no scripts/check
+
+    _write(fork / forklint.GUARD_RUNNER, "_GUARDS = {not-a-literal}\n")
+    assert forklint._guard_map(str(fork)) == {}
+
+
+def test_guard_step_resolves_just_recipe_to_script_args_and_advisory():
+    guards = {
+        "footguns": ("scripts/check-windows-footguns.py", "--all"),
+        "shebangs": ("scripts/check_bash_shebangs.py",),
+    }
+
+    step = forklint._guard_step(_just_lint_yml(), guards, "scripts/check-windows-footguns.py")
+    assert step is not None and step.args == ("--all",) and step.advisory is False
+
+    step = forklint._guard_step(_just_lint_yml(), guards, "scripts/check_bash_shebangs.py")
+    assert step is not None and step.args == () and step.advisory is False
+
+    advisory = forklint._guard_step(
+        _just_lint_yml(footguns="advisory"), guards, "scripts/check-windows-footguns.py"
+    )
+    assert advisory is not None and advisory.advisory is True
+
+    # A recipe the fork's table does not list is not guessed at.
+    unknown = forklint._guard_step(
+        _just_lint_yml(), guards, "scripts/ci/check_os_marker_fakes.py"
+    )
+    assert unknown is None
+
+
+def test_just_style_workflow_runs_all_six_checkers(tmp_path):
+    """The fork's unified runner keeps all six checks simulated -- none reported missing."""
+    fork = _fork(tmp_path, workflow=_just_lint_yml())
+    _write(fork / forklint.GUARD_RUNNER, _guard_check_text())
+    candidate, _ = _brand_pair(tmp_path)
+
+    issues = run_fork_lint(str(fork), str(candidate))
+
+    unavailable = [
+        issue for issue in issues
+        if issue.status == UNAVAILABLE and "invokes no" in issue.detail
+    ]
+    assert unavailable == []
+    assert summarize(issues).verdict == "PASS"
+
+
+def test_just_style_workflow_without_a_guard_table_fails_closed(tmp_path):
+    """Without the fork's recipe table the six steps stay unavailable, never assumed green."""
+    fork = _fork(tmp_path, workflow=_just_lint_yml())  # no scripts/check
+    candidate, _ = _brand_pair(tmp_path)
+
+    issues = run_fork_lint(str(fork), str(candidate))
+    missing = [
+        issue for issue in issues
+        if issue.status == UNAVAILABLE and "invokes no" in issue.detail
+    ]
+    assert len(missing) == len(FORK_CHECK_SCRIPTS)
+    assert summarize(issues).verdict == "FAIL"
 
 
 def test_checker_findings_are_genuine_divergence_and_block(tmp_path):
