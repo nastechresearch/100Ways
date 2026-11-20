@@ -61,18 +61,14 @@ FORK_PYPROJECT = "pyproject.toml"
 # fork's table keeps the simulation's rules deriving from the fork instead of a copy here.
 GUARD_RUNNER = "scripts/check"
 
-# The six ``run:`` steps of lint.yml job ``windows-footguns``, in the workflow's order.
-# The other two steps in that job (``scripts/check_profile_scope_patterns.py``,
-# ``scripts/ci/check_public_surface.py``) already carry ``continue-on-error: true`` and
-# take ``--base``/``--head`` refs of the open PR, so they describe a diff a candidate
-# does not have yet; they are absent from this list on purpose rather than approximated.
+# The blocking lint.yml checkers this module simulates.  The list follows the
+# fork's current lint contract rather than a remembered historical shape:
+# checks that moved out of lint.yml (e.g. to repo-guards) are not simulated
+# here, because this pre-flight mirrors lint.yml.
 FORK_CHECK_SCRIPTS: tuple[str, ...] = (
     "scripts/check-windows-footguns.py",
-    "scripts/check_bash_shebangs.py",
-    "scripts/check_no_tmp_literals.py",
     "scripts/check_config_yaml_writers.py",
     "scripts/ci/check_os_marker_fakes.py",
-    "scripts/ci/check_agents_md_size.py",
 )
 
 # The chain-cap checker this module predicts, and the two files that own its numbers.

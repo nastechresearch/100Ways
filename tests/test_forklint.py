@@ -443,21 +443,21 @@ def test_guard_step_resolves_just_recipe_to_script_args_and_advisory():
 
 
 def test_just_style_workflow_runs_all_six_checkers(tmp_path):
-    """The fork's unified runner keeps all six checks simulated -- none reported missing."""
+    """The fork's unified runner keeps the simulated lint.yml checks resolved -- none missing."""
     fork = _fork(tmp_path, workflow=_just_lint_yml())
     _write(fork / forklint.GUARD_RUNNER, _guard_check_text())
     candidate, _ = _brand_pair(tmp_path)
 
     issues = run_fork_lint(str(fork), str(candidate))
 
-    # The six checkers are stubbed to exit 0, so each must actually resolve and run:
+    # The simulated checkers are stubbed to exit 0, so each must actually resolve and run:
     # none may be reported unavailable and none may produce a finding.  Other checks
     # (ruff, brand inflation) are environment-dependent and out of scope here.
     assert [issue for issue in issues if issue.script in FORK_CHECK_SCRIPTS] == []
 
 
 def test_just_style_workflow_without_a_guard_table_fails_closed(tmp_path):
-    """Without the fork's recipe table the six steps stay unavailable, never assumed green."""
+    """Without the fork's recipe table the simulated steps stay unavailable, never assumed green."""
     fork = _fork(tmp_path, workflow=_just_lint_yml())  # no scripts/check
     candidate, _ = _brand_pair(tmp_path)
 
@@ -508,15 +508,15 @@ def test_findings_past_the_report_cap_are_counted_not_dropped():
 # ---------------------------------------------------------------------------
 
 def test_unavailable_outcomes_block_and_never_claim_a_triage_class(tmp_path):
-    """A workflow that runs none of the six, no fork, no candidate: all blocking, all
-    classless.
+    """A workflow that runs none of the simulated lint checks, no fork, no candidate: all
+    blocking, all classless.
 
     An unavailable is not a fork red, so it carries no triage class -- the first fix is
     making the check run; guessing a class for a check that did not execute is how a red
     gets blamed on the wrong owner.
     """
     fork = _fork(tmp_path)
-    _write(fork / FORK_LINT_WORKFLOW, "name: lint\njobs: {}\n")  # invokes none of the six
+    _write(fork / FORK_LINT_WORKFLOW, "name: lint\njobs: {}\n")  # invokes none of the simulated checks
     candidate = tmp_path / "candidate"
     _write(candidate / "AGENTS.md", "context\n")
 
