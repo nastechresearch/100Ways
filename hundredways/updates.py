@@ -10779,8 +10779,10 @@ class ForkDivergenceMergeError(ValueError):
 #: a deliberate unused-import removal -- keeping it would fail the fork's own
 #: pinned ``ruff check .`` with F401 on every sync.
 _FORK_PREFERRED_DIVERGENCE_FILES = (
+    ".github/workflows/canary-release.yml",
     ".github/workflows/deploy-site.yml",
     ".github/workflows/desktop-bundled-release.yml",
+    ".github/workflows/desktop-bundle-smoke.yml",
     ".github/workflows/js-tests.yml",
     ".github/workflows/lint.yml",
     ".github/workflows/plugin-catalog-ci.yml",
