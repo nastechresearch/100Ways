@@ -12155,7 +12155,7 @@ def test_request_tolerates_slow_worker_exit_after_result(tmp_path, monkeypatch):
         encoding="utf-8",
     )
 
-    import pm.client as client
+    from pm import client
 
     monkeypatch.setattr(client, "_worker_command", lambda spec, arguments, worker_path, environment: [sys.executable, "-I", str(worker)])
     monkeypatch.setattr(client, "runtime_environment", lambda: None)
@@ -12704,6 +12704,15 @@ def reconcile_tree(
     # raises :class:`StoreLaneGateError` when a consumed Store credential escapes the
     # gate, or when the parser cannot see the lane it is supposed to measure.
     _reconcile_store_gate_covers_the_lane(dst)
+    # Deduplicate: a later ratchet/fix pass may report a file we already fixed.
+    seen = set()
+    deduped = []
+    for rel in result.fixed:
+        if rel not in seen:
+            seen.add(rel)
+            deduped.append(rel)
+    result.fixed = deduped
+    result.total = len(deduped)
     result.fixed.sort()
     return result
 
