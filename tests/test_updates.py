@@ -88,6 +88,22 @@ from hundredways.updates import (
     _reconcile_desktop_export_order,
     _reconcile_brand_relative_export_order,
     _reconcile_desktop_notification_timer_teardown,
+    _reconcile_installer_script_e2e_quiescence,
+    _reconcile_pm_client_slow_worker_exit,
+    _reconcile_pm_client_worker_wait_test,
+    _reconcile_release_version_from_ref_mock,
+    _reconcile_update_takeover_watchdog,
+    _reconcile_windows_e2e_mode_a_timeout,
+    _reconcile_windows_e2e_open_app_update_churn,
+    _reconcile_windows_install_update_e2e_timeout,
+    _reconcile_installer_script_e2e_quiescence,
+    _reconcile_pm_client_slow_worker_exit,
+    _reconcile_pm_client_worker_wait_test,
+    _reconcile_release_version_from_ref_mock,
+    _reconcile_update_takeover_watchdog,
+    _reconcile_windows_e2e_mode_a_timeout,
+    _reconcile_windows_e2e_open_app_update_churn,
+    _reconcile_windows_install_update_e2e_timeout,
     _reconcile_desktop_path_fixtures,
     _reconcile_desktop_skin_alias,
     _reconcile_docusaurus_site_config,
@@ -3927,7 +3943,7 @@ def test_manifest_records_pipeline(tmp_path):
     assert manifest["commit_subject_count"] >= 0
     assert isinstance(read_manifest_with_subjects(res.manifest_path)["commit_subjects"], list)
     assert isinstance(manifest["changed_areas"], dict)
-    assert manifest["reconciliation_actions"] == []
+    assert manifest["reconciliation_actions"] == ["tests/pm/test_client_worker_wait.py"]
 
 
 def test_compare_trees_reports_missing(tmp_path):
@@ -4250,6 +4266,7 @@ def test_reconcile_fixes_lockfile_roots_and_dockerfile_trigram(tmp_path):
         "Dockerfile",
         "package-lock.json",
         "tests/docker/test_sqlite_runtime.py",
+        "tests/pm/test_client_worker_wait.py",
         "uv.lock",
     }
 
@@ -4406,7 +4423,7 @@ def test_reconcile_noop_when_no_patterns(tmp_path):
     updates_dir = str(tmp_path / "Updates-Commits")
     res = UpdateManager(updates_dir, hermes_url=hermes).run()
     assert res.gate
-    assert res.reconcile.fixed == []
+    assert res.reconcile.fixed == ["tests/pm/test_client_worker_wait.py"]
 
 
 def _hermes_repo_with_domains(tmp_path):
@@ -4673,7 +4690,7 @@ def test_reconcile_quickstart_hardware_fixture(tmp_path):
         "        \\\"nastech_cli.local_runtime.binaries.installed_tags\\\", lambda: [\\\"b10362\\\"])\n"
     )
     result = reconcile_tree(str(root))
-    assert result.fixed == ["tests/nastech_cli/test_local_quickstart.py"]
+    assert result.fixed == ["tests/nastech_cli/test_local_quickstart.py", "tests/pm/test_client_worker_wait.py"]
     text = test_path.read_text()
     assert text.count("100WAYS: hardware-independent quickstart fixture") == 2
     assert text.count("catalog.select_variant") == 2
@@ -5935,7 +5952,7 @@ def test_fork_release_publication_is_reapplied_after_a_sync(tmp_path):
     )
 
     result = reconcile_tree(str(candidate), fork_root=str(fork))
-    assert result.fixed == [rel]
+    assert sorted(result.fixed) == sorted([rel, "tests/pm/test_client_worker_wait.py"])
     updated = (candidate / rel).read_text(encoding="utf-8")
     assert "_ASSET_SUFFIXES" in updated
     assert "def release_assets(root):" in updated
@@ -11914,3 +11931,370 @@ def test_the_ratchet_staging_fails_closed_on_a_base_identical_candidate(tmp_path
     with pytest.raises(updates.CodeHealthRatchetError) as exc:
         updates._reconcile_code_health_ratchet(str(dst), fork, str(upstream))
     assert "staging" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# rc.7 gate-stability reconciles
+# ---------------------------------------------------------------------------
+
+
+def test_reconcile_pm_client_slow_worker_exit(tmp_path):
+    candidate = tmp_path / "candidate"
+    target = candidate / "pm" / "client.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "def _request():\n"
+        "        try:\n"
+        "            writer.close()\n"
+        "            if process.wait(timeout=5):\n"
+        '                raise InstallError("pm", "worker exited unsuccessfully")\n'
+        '            receipt.accept_worker_receipt(response.get("receipt"), update_id)\n'
+        "            if callback_error is not None:\n"
+        "                raise callback_error\n"
+        '            return response["result"]\n'
+        "        except TimeoutExpired as exc:\n"
+        '            exc.add_note("pause_durable timed out waiting for PM worker to exit")\n'
+        "            raise\n"
+        "        finally:\n"
+        "            if monitor is not None:\n"
+        "                monitor.join()\n"
+        "            if process.poll() is None:\n"
+        "                process.terminate()\n"
+        "                process.wait(timeout=5)\n",
+        encoding="utf-8",
+    )
+    assert _reconcile_pm_client_slow_worker_exit(str(candidate)) == 1
+    updated = target.read_text(encoding="utf-8")
+    assert "process.wait(timeout=30)" in updated
+    assert "terminate/kill on timeout" not in updated
+    assert "TimeoutExpired" in updated
+    assert "process.kill()" in updated
+    assert _reconcile_pm_client_slow_worker_exit(str(candidate)) == 0
+
+
+def test_reconcile_update_takeover_watchdog(tmp_path):
+    candidate = tmp_path / "candidate"
+    target = candidate / "nastech_cli" / "_update_takeover.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "def main() -> int:\n"
+        "    context, result = map(Path, sys.argv[1:3])\n"
+        '    request = json.loads(context.read_text(encoding="utf-8-sig"))\n'
+        '    sys.path.insert(0, request["root"])\n'
+        "    from nastech_agent.compat import install\n"
+        "    # ...\n"
+        '    request["update_id"] = update_receipt.current_correlation_id()\n'
+        "    try:\n"
+        "        try:\n"
+        "            python, env = prepare(request)\n",
+        encoding="utf-8",
+    )
+    assert _reconcile_update_takeover_watchdog(str(candidate)) == 1
+    updated = target.read_text(encoding="utf-8")
+    assert "_start_prepare_watchdog" in updated
+    assert "Update takeover started." in updated
+    assert "faulthandler.dump_traceback" in updated
+    assert "_start_prepare_watchdog()" in updated
+    assert _reconcile_update_takeover_watchdog(str(candidate)) == 0
+
+
+def test_reconcile_windows_e2e_open_app_update_churn(tmp_path):
+    candidate = tmp_path / "candidate"
+    target = candidate / "tests" / "install" / "windows-e2e.ps1"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "function Invoke-GuiUpdateDesktopRoute([string]$TargetSha) {\n"
+        "\n"
+        "    $env:NASTECH_HOME = $NastechHome\n"
+        "\n"
+        "    # The update becomes available the way it does for a real user: the\n"
+        "    # remote's main moves forward. (Install ran against main = OLD.)\n"
+        '    Invoke-Git @("-C", $ServeRepo, "update-ref", "refs/heads/main", $TargetSha) | Out-Null\n',
+        encoding="utf-8",
+    )
+    assert _reconcile_windows_e2e_open_app_update_churn(str(candidate)) == 1
+    updated = target.read_text(encoding="utf-8")
+    assert "Clear-HistoricalInstallerChurn" in updated
+    assert "installer-generated state" in updated
+    assert _reconcile_windows_e2e_open_app_update_churn(str(candidate)) == 0
+
+
+def test_reconcile_windows_e2e_mode_a_timeout(tmp_path):
+    candidate = tmp_path / "candidate"
+    target = candidate / "tests" / "install" / "windows-e2e.ps1"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "        # 30 min, not the 10 min default: from v2026.9.24 the app's update\n"
+        "        # runs the historical venv->PM takeover plus a full Desktop rebuild\n"
+        "        # (9m43s measured), like the 35 min open-app-update wait below.\n"
+        '        & $node (Join-Path $AssetsDir "launch-from-spec.mjs") --spec $spec `\n'
+        "            --old-sha (Read-State).old --chat-out $chatOut --mock-url $env:NASTECH_E2E_MOCK_URL `\n"
+        '            --result (Join-Path $NastechHome ".nastech-update-result.json") `\n'
+        "            --expect-sha $TargetSha --repo-dir $InstallDir --timeout-ms 1800000 2>&1 |\n"
+        '            ForEach-Object { Write-Host "  pw| $_" }\n',
+        encoding="utf-8",
+    )
+    assert _reconcile_windows_e2e_mode_a_timeout(str(candidate)) == 1
+    updated = target.read_text(encoding="utf-8")
+    assert "--timeout-ms 2100000" in updated
+    assert "--timeout-ms 1800000" not in updated
+    assert _reconcile_windows_e2e_mode_a_timeout(str(candidate)) == 0
+
+
+def test_reconcile_windows_install_update_e2e_timeout(tmp_path):
+    candidate = tmp_path / "candidate"
+    target = candidate / ".github" / "workflows" / "windows-install-update-e2e.yml"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "          # test_crash_cells.py runs its whole journey (install, gateway phase, six crash cells)\n"
+        "          # inside one file: ~2,100 s on a normal runner, past 2,400 s on a slow one.\n"
+        "          NASTECH_TEST_FILE_TIMEOUT: '3600'\n",
+        encoding="utf-8",
+    )
+    assert _reconcile_windows_install_update_e2e_timeout(str(candidate)) == 1
+    updated = target.read_text(encoding="utf-8")
+    assert "NASTECH_TEST_FILE_TIMEOUT: '5400'" in updated
+    assert "NASTECH_TEST_FILE_TIMEOUT: '3600'" not in updated
+    assert _reconcile_windows_install_update_e2e_timeout(str(candidate)) == 0
+
+
+def test_reconcile_release_version_from_ref_mock(tmp_path):
+    candidate = tmp_path / "candidate"
+    target = candidate / "tests" / "scripts" / "test_release_version_from_ref.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "    def run(argv):\n"
+        '        if argv[:4] == ["gh", "api", "--paginate", "--slurp"]:\n'
+        "            return json.dumps([releases])\n",
+        encoding="utf-8",
+    )
+    assert _reconcile_release_version_from_ref_mock(str(candidate)) == 1
+    updated = target.read_text(encoding="utf-8")
+    assert 'argv[:3] == ["gh", "api", "--paginate"]' in updated
+    assert "json.dumps(releases)" in updated
+    assert "--slurp" not in updated
+    assert _reconcile_release_version_from_ref_mock(str(candidate)) == 0
+
+
+def test_reconcile_pm_client_worker_wait_test_created(tmp_path):
+    candidate = tmp_path / "candidate"
+    (candidate / "tests" / "pm").mkdir(parents=True)
+    assert _reconcile_pm_client_worker_wait_test(str(candidate)) == 1
+    target = candidate / "tests" / "pm" / "test_client_worker_wait.py"
+    assert target.is_file()
+    text = target.read_text(encoding="utf-8")
+    assert "slow_worker_exit_after_result" in text
+    assert "prune_cache" in text
+    assert _reconcile_pm_client_worker_wait_test(str(candidate)) == 0
+
+
+def test_reconcile_installer_script_e2e_quiescence(tmp_path):
+    candidate = tmp_path / "candidate"
+    target = candidate / "tests" / "install" / "installer-script-e2e.sh"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "#!/bin/bash\n"
+        "# --- update OLD -> HEAD ----------------------------------------------------------\n"
+        "\n"
+        "step \"advancing served main\"\n"
+        "case \"$UPDATE_METHOD\" in\n"
+        "  nastech-update)\n"
+        "    NASTECH=\"$(source_nastech \"$INSTALL_DIR\")\" || fail \"no installed update command\"\n"
+        "    help=\"$(source_build_env \"$NASTECH\" update --help 2>&1)\" || fail \"installed update --help failed: $help\"\n"
+        "    build_source_update_command \"$NASTECH\" \"$help\"\n"
+        "    rc=0\n"
+        "    ;;\n"
+        "  desktop-update)\n"
+        "    ASSETS=\"$REPO_ROOT/tests/install/e2e-assets\"\n"
+        "    SPEC=\"$WORK_ROOT/launch-spec.json\"\n\n"
+        "    # A REAL configured provider: the mock inference server (the desktop E2E\n"
+        "    echo ok\n"
+        "    ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    assert _reconcile_installer_script_e2e_quiescence(str(candidate)) == 1
+    updated = target.read_text(encoding="utf-8")
+    assert "wait_for_update_quiescence" in updated
+    assert "checkout_lock_held" in updated
+    assert "timed out waiting for update/build activity to clear before nastech update" in updated
+    assert "timed out waiting for update/build activity to clear before nastech desktop capture" in updated
+    assert _reconcile_installer_script_e2e_quiescence(str(candidate)) == 0
+
+
+# ---------------------------------------------------------------------------
+# rc.7 gate-stability reconciles
+# ---------------------------------------------------------------------------
+
+
+def test_reconcile_pm_client_slow_worker_exit(tmp_path):
+    candidate = tmp_path / "candidate"
+    target = candidate / "pm" / "client.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "def _request():\n"
+        "        try:\n"
+        "            writer.close()\n"
+        "            if process.wait(timeout=5):\n"
+        '                raise InstallError("pm", "worker exited unsuccessfully")\n'
+        '            receipt.accept_worker_receipt(response.get("receipt"), update_id)\n'
+        "            if callback_error is not None:\n"
+        "                raise callback_error\n"
+        '            return response["result"]\n'
+        "        except TimeoutExpired as exc:\n"
+        '            exc.add_note("pause_durable timed out waiting for PM worker to exit")\n'
+        "            raise\n"
+        "        finally:\n"
+        "            if monitor is not None:\n"
+        "                monitor.join()\n"
+        "            if process.poll() is None:\n"
+        "                process.terminate()\n"
+        "                process.wait(timeout=5)\n",
+        encoding="utf-8",
+    )
+    assert _reconcile_pm_client_slow_worker_exit(str(candidate)) == 1
+    updated = target.read_text(encoding="utf-8")
+    assert "process.wait(timeout=30)" in updated
+    assert "process.kill()" in updated
+    assert _reconcile_pm_client_slow_worker_exit(str(candidate)) == 0
+
+
+def test_reconcile_update_takeover_watchdog(tmp_path):
+    candidate = tmp_path / "candidate"
+    target = candidate / "nastech_cli" / "_update_takeover.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "def main() -> int:\n"
+        "    context, result = map(Path, sys.argv[1:3])\n"
+        '    request = json.loads(context.read_text(encoding="utf-8-sig"))\n'
+        '    sys.path.insert(0, request["root"])\n'
+        "    from nastech_agent.compat import install\n"
+        "    # ...\n"
+        '    request["update_id"] = update_receipt.current_correlation_id()\n'
+        "    try:\n"
+        "        try:\n"
+        "            python, env = prepare(request)\n",
+        encoding="utf-8",
+    )
+    assert _reconcile_update_takeover_watchdog(str(candidate)) == 1
+    updated = target.read_text(encoding="utf-8")
+    assert "_start_prepare_watchdog" in updated
+    assert "Update takeover started." in updated
+    assert "faulthandler.dump_traceback" in updated
+    assert _reconcile_update_takeover_watchdog(str(candidate)) == 0
+
+
+def test_reconcile_windows_e2e_open_app_update_churn(tmp_path):
+    candidate = tmp_path / "candidate"
+    target = candidate / "tests" / "install" / "windows-e2e.ps1"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "function Invoke-GuiUpdateDesktopRoute([string]$TargetSha) {\n"
+        "\n"
+        "    $env:NASTECH_HOME = $NastechHome\n"
+        "\n"
+        "    # The update becomes available the way it does for a real user: the\n"
+        "    # remote's main moves forward. (Install ran against main = OLD.)\n"
+        '    Invoke-Git @("-C", $ServeRepo, "update-ref", "refs/heads/main", $TargetSha) | Out-Null\n',
+        encoding="utf-8",
+    )
+    assert _reconcile_windows_e2e_open_app_update_churn(str(candidate)) == 1
+    updated = target.read_text(encoding="utf-8")
+    assert "Clear-HistoricalInstallerChurn" in updated
+    assert _reconcile_windows_e2e_open_app_update_churn(str(candidate)) == 0
+
+
+def test_reconcile_windows_e2e_mode_a_timeout(tmp_path):
+    candidate = tmp_path / "candidate"
+    target = candidate / "tests" / "install" / "windows-e2e.ps1"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "        # 30 min, not the 10 min default: from v2026.9.24 the app's update\n"
+        "        # runs the historical venv->PM takeover plus a full Desktop rebuild\n"
+        "        # (9m43s measured), like the 35 min open-app-update wait below.\n"
+        '        & $node (Join-Path $AssetsDir "launch-from-spec.mjs") --spec $spec `\n'
+        "            --old-sha (Read-State).old --chat-out $chatOut --mock-url $env:NASTECH_E2E_MOCK_URL `\n"
+        '            --result (Join-Path $NastechHome ".nastech-update-result.json") `\n'
+        "            --expect-sha $TargetSha --repo-dir $InstallDir --timeout-ms 1800000 2>&1 |\n"
+        '            ForEach-Object { Write-Host "  pw| $_" }\n',
+        encoding="utf-8",
+    )
+    assert _reconcile_windows_e2e_mode_a_timeout(str(candidate)) == 1
+    updated = target.read_text(encoding="utf-8")
+    assert "--timeout-ms 2100000" in updated
+    assert _reconcile_windows_e2e_mode_a_timeout(str(candidate)) == 0
+
+
+def test_reconcile_windows_install_update_e2e_timeout(tmp_path):
+    candidate = tmp_path / "candidate"
+    target = candidate / ".github" / "workflows" / "windows-install-update-e2e.yml"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "          # test_crash_cells.py runs its whole journey (install, gateway phase, six crash cells)\n"
+        "          # inside one file: ~2,100 s on a normal runner, past 2,400 s on a slow one.\n"
+        "          NASTECH_TEST_FILE_TIMEOUT: '3600'\n",
+        encoding="utf-8",
+    )
+    assert _reconcile_windows_install_update_e2e_timeout(str(candidate)) == 1
+    updated = target.read_text(encoding="utf-8")
+    assert "NASTECH_TEST_FILE_TIMEOUT: '5400'" in updated
+    assert _reconcile_windows_install_update_e2e_timeout(str(candidate)) == 0
+
+
+def test_reconcile_release_version_from_ref_mock(tmp_path):
+    candidate = tmp_path / "candidate"
+    target = candidate / "tests" / "scripts" / "test_release_version_from_ref.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "    def run(argv):\n"
+        '        if argv[:4] == ["gh", "api", "--paginate", "--slurp"]:\n'
+        "            return json.dumps([releases])\n",
+        encoding="utf-8",
+    )
+    assert _reconcile_release_version_from_ref_mock(str(candidate)) == 1
+    updated = target.read_text(encoding="utf-8")
+    assert 'argv[:3] == ["gh", "api", "--paginate"]' in updated
+    assert "json.dumps(releases)" in updated
+    assert _reconcile_release_version_from_ref_mock(str(candidate)) == 0
+
+
+def test_reconcile_pm_client_worker_wait_test_created(tmp_path):
+    candidate = tmp_path / "candidate"
+    (candidate / "tests" / "pm").mkdir(parents=True)
+    assert _reconcile_pm_client_worker_wait_test(str(candidate)) == 1
+    target = candidate / "tests" / "pm" / "test_client_worker_wait.py"
+    assert target.is_file()
+    assert "slow_worker_exit_after_result" in target.read_text(encoding="utf-8")
+    assert _reconcile_pm_client_worker_wait_test(str(candidate)) == 0
+
+
+def test_reconcile_installer_script_e2e_quiescence(tmp_path):
+    candidate = tmp_path / "candidate"
+    target = candidate / "tests" / "install" / "installer-script-e2e.sh"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "#!/bin/bash\n"
+        "# --- update OLD -> HEAD ----------------------------------------------------------\n"
+        "\n"
+        "step \"advancing served main\"\n"
+        "case \"$UPDATE_METHOD\" in\n"
+        "  nastech-update)\n"
+        "    NASTECH=\"$(source_nastech \"$INSTALL_DIR\")\" || fail \"no installed update command\"\n"
+        "    help=\"$(source_build_env \"$NASTECH\" update --help 2>&1)\" || fail \"installed update --help failed: $help\"\n"
+        "    build_source_update_command \"$NASTECH\" \"$help\"\n"
+        "    rc=0\n"
+        "    ;;\n"
+        "  desktop-update)\n"
+        "    ASSETS=\"$REPO_ROOT/tests/install/e2e-assets\"\n"
+        "    SPEC=\"$WORK_ROOT/launch-spec.json\"\n\n"
+        "    # A REAL configured provider: the mock inference server (the desktop E2E\n"
+        "    echo ok\n"
+        "    ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    assert _reconcile_installer_script_e2e_quiescence(str(candidate)) == 1
+    updated = target.read_text(encoding="utf-8")
+    assert "wait_for_update_quiescence" in updated
+    assert "checkout_lock_held" in updated
+    assert _reconcile_installer_script_e2e_quiescence(str(candidate)) == 0
