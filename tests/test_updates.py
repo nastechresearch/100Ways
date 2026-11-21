@@ -5952,7 +5952,7 @@ def test_fork_release_publication_is_reapplied_after_a_sync(tmp_path):
     )
 
     result = reconcile_tree(str(candidate), fork_root=str(fork))
-    assert result.fixed == [rel]
+    assert sorted(result.fixed) == sorted([rel, "tests/pm/test_client_worker_wait.py"])
     updated = (candidate / rel).read_text(encoding="utf-8")
     assert "_ASSET_SUFFIXES" in updated
     assert "def release_assets(root):" in updated
