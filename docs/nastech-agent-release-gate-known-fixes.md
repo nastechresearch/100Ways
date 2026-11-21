@@ -2,6 +2,8 @@
 
 Durable patterns from nastech-agent stable rc gate triage. Load `100ways` and `100wayskills` before acting. Do not weaken tests, receipt semantics, or gate checks without evidence.
 
+**Brand-code enforcement:** the matching fixes are also implemented as narrow, idempotent reconciles in `hundredways/updates.py` (wired into `reconcile_tree`) with regression coverage in `tests/test_updates.py`, so future branded candidates carry them.
+
 ## 1) PM worker post-result wait (TimeoutExpired)
 
 - **Symptom**: PM operation succeeds but worker teardown is slow; old `process.wait(timeout=5)` raises `TimeoutExpired`, surfacing as update/test failure (e.g. pause_durable/worker timeout cascades).

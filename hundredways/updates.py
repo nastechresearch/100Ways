@@ -11743,6 +11743,441 @@ def _reconcile_fork_ruff_lane(dst: str, fork_root: str | None) -> list[str]:
     return sorted(set(changed))
 
 
+# ---------------------------------------------------------------------------
+# nastech-agent rc.7 gate stability reconciles
+# ---------------------------------------------------------------------------
+# These are narrow, idempotent post-brand fixes for known gate failures. Each
+# applies only when the broken pattern is present in the branded candidate; a
+# candidate that already carries the fix (or an upstream that has changed the
+# shape) is left untouched.
+
+
+def _reconcile_pm_client_slow_worker_exit(dst: str) -> int:
+    """Tolerate slow PM worker exit after a completed result.
+
+    A successful worker result must not fail because teardown takes longer than
+    the old 5s wait. Wait 30s, then terminate/kill on timeout; only raise when a
+    clean wait returns nonzero.
+    """
+    rel = "pm/client.py"
+    text = _reconcile_budget_read(dst, rel)
+    if text is None:
+        return 0
+    old = (
+        "            writer.close()\n"
+        "            if process.wait(timeout=5):\n"
+        '                raise InstallError("pm", "worker exited unsuccessfully")\n'
+        "            receipt.accept_worker_receipt(response.get(\"receipt\"), update_id)\n"
+        "            if callback_error is not None:\n"
+        "                raise callback_error\n"
+        "            return response[\"result\"]\n"
+        "        except TimeoutExpired as exc:\n"
+        "            exc.add_note(\"pause_durable timed out waiting for PM worker to exit\")\n"
+        "            raise\n"
+        "        finally:\n"
+        "            if monitor is not None:\n"
+        "                monitor.join()\n"
+        "            if process.poll() is None:\n"
+        "                process.terminate()\n"
+        "                process.wait(timeout=5)\n"
+    )
+    new = (
+        "            writer.close()\n"
+        "            try:\n"
+        "                code = process.wait(timeout=30)\n"
+        "            except subprocess.TimeoutExpired:\n"
+        "                # Result already received; a slow worker teardown must not fail the operation.\n"
+        "                process.terminate()\n"
+        "                try:\n"
+        "                    process.wait(timeout=5)\n"
+        "                except subprocess.TimeoutExpired:\n"
+        "                    process.kill()\n"
+        "                    process.wait(timeout=5)\n"
+        "            else:\n"
+        "                if code:\n"
+        '                    raise InstallError("pm", "worker exited unsuccessfully")\n'
+        "            receipt.accept_worker_receipt(response.get(\"receipt\"), update_id)\n"
+        "            if callback_error is not None:\n"
+        "                raise callback_error\n"
+        "            return response[\"result\"]\n"
+        "        except TimeoutExpired as exc:\n"
+        "            exc.add_note(\"pause_durable timed out waiting for PM worker to exit\")\n"
+        "            raise\n"
+        "        finally:\n"
+        "            if monitor is not None:\n"
+        "                monitor.join()\n"
+        "            if process.poll() is None:\n"
+        "                process.terminate()\n"
+        "                try:\n"
+        "                    process.wait(timeout=5)\n"
+        "                except subprocess.TimeoutExpired:\n"
+        "                    process.kill()\n"
+        "                    try:\n"
+        "                        process.wait(timeout=5)\n"
+        "                    except subprocess.TimeoutExpired:\n"
+        "                        pass\n"
+    )
+    if new in text or old not in text:
+        return 0
+    _reconcile_budget_write(dst, rel, text.replace(old, new, 1))
+    return 1
+
+
+def _reconcile_update_takeover_watchdog(dst: str) -> int:
+    """Add startup marker and watchdog for silent takeover hangs.
+
+    Mode A desktop update can hand off to the historical takeover and then hang
+    silently, producing no completion receipt. A faulthandler watchdog makes the
+    hang diagnosable without weakening receipt semantics.
+    """
+    rel = "nastech_cli/_update_takeover.py"
+    text = _reconcile_budget_read(dst, rel)
+    if text is None or "_start_prepare_watchdog" in text:
+        return 0
+    old_main = (
+        "def main() -> int:\n"
+        "    context, result = map(Path, sys.argv[1:3])\n"
+        "    request = json.loads(context.read_text(encoding=\"utf-8-sig\"))\n"
+        "    sys.path.insert(0, request[\"root\"])\n"
+        "    from nastech_agent.compat import install\n"
+    )
+    new_main = (
+        "def _start_prepare_watchdog(seconds: int = 1500) -> None:\n"
+        "    \"\"\"Fail loudly if takeover preparation hangs; a silent hang blocks the whole update.\"\"\"\n"
+        "    import faulthandler\n"
+        "    import threading\n"
+        "\n"
+        "    def _fire() -> None:\n"
+        "        print(f\"  ! Update takeover preparation exceeded {seconds}s; dumping stacks.\", file=sys.stderr, flush=True)\n"
+        "        faulthandler.dump_traceback(file=sys.stderr, all_threads=True)\n"
+        "        os._exit(2)\n"
+        "\n"
+        "    timer = threading.Timer(seconds, _fire)\n"
+        "    timer.daemon = True\n"
+        "    timer.start()\n"
+        "\n"
+        "\n"
+        "def main() -> int:\n"
+        "    context, result = map(Path, sys.argv[1:3])\n"
+        "    request = json.loads(context.read_text(encoding=\"utf-8-sig\"))\n"
+        "    sys.path.insert(0, request[\"root\"])\n"
+        "    print(\"-> Update takeover started.\", flush=True)\n"
+        "    from nastech_agent.compat import install\n"
+    )
+    old_prepare = (
+        "    request[\"update_id\"] = update_receipt.current_correlation_id()\n"
+        "    try:\n"
+        "        try:\n"
+        "            python, env = prepare(request)\n"
+    )
+    new_prepare = (
+        "    request[\"update_id\"] = update_receipt.current_correlation_id()\n"
+        "    try:\n"
+        "        try:\n"
+        "            _start_prepare_watchdog()\n"
+        "            python, env = prepare(request)\n"
+    )
+    if old_main not in text or old_prepare not in text:
+        return 0
+    updated = text.replace(old_main, new_main, 1).replace(old_prepare, new_prepare, 1)
+    if updated == text:
+        return 0
+    _reconcile_budget_write(dst, rel, updated)
+    return 1
+
+
+def _reconcile_windows_e2e_open_app_update_churn(dst: str) -> int:
+    """Clear historical installer churn before open-app-update desktop route.
+
+    Old installer-generated lockfile/CRLF churn can be autostashed/restored as a
+    conflict on large diffs, causing post-update read-only verification to fail.
+    The cleanup is narrow and still fails on genuine local changes.
+    """
+    rel = "tests/install/windows-e2e.ps1"
+    text = _reconcile_budget_read(dst, rel)
+    if text is None:
+        return 0
+    anchor = (
+        "function Invoke-GuiUpdateDesktopRoute([string]$TargetSha) {\n"
+        "\n"
+        "    $env:NASTECH_HOME = $NastechHome\n"
+        "\n"
+        "    # The update becomes available the way it does for a real user: the\n"
+        "    # remote's main moves forward. (Install ran against main = OLD.)\n"
+        "    Invoke-Git @(\"-C\", $ServeRepo, \"update-ref\", \"refs/heads/main\", $TargetSha) | Out-Null\n"
+    )
+    replacement = (
+        "function Invoke-GuiUpdateDesktopRoute([string]$TargetSha) {\n"
+        "\n"
+        "    $env:NASTECH_HOME = $NastechHome\n"
+        "\n"
+        "    # The desktop route drives the same production updater as the two script\n"
+        "    # routes, so it must start from the same clean checkout: old installers\n"
+        "    # leave generated lockfile/CRLF churn in the disposable tree, and the\n"
+        "    # updater autostashes before pulling. Restoring that stash on top of a\n"
+        "    # large diff conflicts, the update never completes, and the read-only\n"
+        "    # post-update verifier rejects the conflicted tree.\n"
+        "    # Clear-HistoricalInstallerChurn undoes ONLY installer-generated state\n"
+        "    # and still fails loudly on any other local change.\n"
+        "    Clear-HistoricalInstallerChurn\n"
+        "\n"
+        "    # The update becomes available the way it does for a real user: the\n"
+        "    # remote's main moves forward. (Install ran against main = OLD.)\n"
+        "    Invoke-Git @(\"-C\", $ServeRepo, \"update-ref\", \"refs/heads/main\", $TargetSha) | Out-Null\n"
+    )
+    if replacement in text or anchor not in text:
+        return 0
+    _reconcile_budget_write(dst, rel, text.replace(anchor, replacement, 1))
+    return 1
+
+
+def _reconcile_windows_e2e_mode_a_timeout(dst: str) -> int:
+    """Align Mode A desktop-app-update driver timeout with 35-min wait."""
+    rel = "tests/install/windows-e2e.ps1"
+    text = _reconcile_budget_read(dst, rel)
+    if text is None:
+        return 0
+    old = (
+        "        # 30 min, not the 10 min default: from v2026.9.24 the app's update\n"
+        "        # runs the historical venv->PM takeover plus a full Desktop rebuild\n"
+        "        # (9m43s measured), like the 35 min open-app-update wait below.\n"
+        "        & $node (Join-Path $AssetsDir \"launch-from-spec.mjs\") --spec $spec `\n"
+        "            --old-sha (Read-State).old --chat-out $chatOut --mock-url $env:NASTECH_E2E_MOCK_URL `\n"
+        "            --result (Join-Path $NastechHome \".nastech-update-result.json\") `\n"
+        "            --expect-sha $TargetSha --repo-dir $InstallDir --timeout-ms 1800000 2>&1 |\n"
+        "            ForEach-Object { Write-Host \"  pw| $_\" }\n"
+    )
+    new = (
+        "        # 35 min, matching the open-app-update detached-updater wait: from\n"
+        "        # v2026.9.24 the app's update runs the historical venv->PM takeover\n"
+        "        # plus a full Desktop rebuild; large source diffs can push PM sync\n"
+        "        # past the old 30 min driver ceiling.\n"
+        "        & $node (Join-Path $AssetsDir \"launch-from-spec.mjs\") --spec $spec `\n"
+        "            --old-sha (Read-State).old --chat-out $chatOut --mock-url $env:NASTECH_E2E_MOCK_URL `\n"
+        "            --result (Join-Path $NastechHome \".nastech-update-result.json\") `\n"
+        "            --expect-sha $TargetSha --repo-dir $InstallDir --timeout-ms 2100000 2>&1 |\n"
+        "            ForEach-Object { Write-Host \"  pw| $_\" }\n"
+    )
+    if new in text or old not in text:
+        return 0
+    _reconcile_budget_write(dst, rel, text.replace(old, new, 1))
+    return 1
+
+
+def _reconcile_windows_install_update_e2e_timeout(dst: str) -> int:
+    """Raise Windows install+update E2E file timeout with evidence-bounded headroom."""
+    rel = ".github/workflows/windows-install-update-e2e.yml"
+    text = _reconcile_budget_read(dst, rel)
+    if text is None:
+        return 0
+    old = "          NASTECH_TEST_FILE_TIMEOUT: '3600'\n"
+    new = "          NASTECH_TEST_FILE_TIMEOUT: '5400'\n"
+    if new in text or old not in text:
+        return 0
+    updated = text.replace(old, new, 1)
+    # also update adjacent comment if present in the old exact form
+    old_comment = (
+        "          # test_crash_cells.py runs its whole journey (install, gateway phase, six crash cells)\n"
+        "          # inside one file: ~2,100 s on a normal runner, past 2,400 s on a slow one.\n"
+        "          NASTECH_TEST_FILE_TIMEOUT: '5400'\n"
+    )
+    new_comment = (
+        "          # test_crash_cells.py runs its whole journey (install, gateway phase, six crash cells)\n"
+        "          # inside one module-scoped fixture, so a file timeout leaves zero tests collected and\n"
+        "          # skips the fixture's teardown. ~2,100 s on a normal runner; on the 4-core free runner\n"
+        "          # under 4-way load it exceeded 3,600 s, which leaked gateway/profile state. The job\n"
+        "          # allows 120 min, so give this file room to finish rather than killing it mid-journey.\n"
+        "          NASTECH_TEST_FILE_TIMEOUT: '5400'\n"
+    )
+    if old_comment in updated:
+        updated = updated.replace(old_comment, new_comment, 1)
+    _reconcile_budget_write(dst, rel, updated)
+    return 1
+
+
+def _reconcile_installer_script_e2e_quiescence(dst: str) -> int:
+    """Harden macOS/Linux installer-script e2e against checkout lock contention."""
+    rel = "tests/install/installer-script-e2e.sh"
+    text = _reconcile_budget_read(dst, rel)
+    if text is None or "wait_for_update_quiescence" in text:
+        return 0
+    anchor = "# --- update OLD -> HEAD ----------------------------------------------------------\n"
+    helper = r'''# --- update OLD -> HEAD ----------------------------------------------------------
+
+# A deferred source-update completion can be left running (or a Desktop build it
+# spawned can still hold the shared checkout lock) by the CLI/desktop activity
+# above. The product refuses a second updater/build while that lock is held, so
+# wait for quiescence before touching the served ref or launching an update
+# method.
+checkout_lock_held() {
+  local lock="$1"
+  [ -e "$lock" ] || return 1
+  python3 - "$lock" <<'PY'
+import fcntl
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, "r+b") as fh:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
+            raise SystemExit(0)
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+    raise SystemExit(1)
+except (FileNotFoundError,):
+    raise SystemExit(1)
+except (PermissionError, OSError):
+    raise SystemExit(0)
+PY
+}
+
+wait_for_update_quiescence() {
+  local timeout="${1:-600}" marker lock gitdir deadline
+  marker="$NASTECH_HOME/.nastech-update-in-progress"
+  deadline=$((SECONDS + timeout))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    lock=""
+    if [ -d "$INSTALL_DIR/.git" ] || [ -f "$INSTALL_DIR/.git" ]; then
+      gitdir="$(git -C "$INSTALL_DIR" rev-parse --git-common-dir 2>/dev/null || true)"
+      if [ -n "$gitdir" ]; then
+        case "$gitdir" in /*) ;; *) gitdir="$INSTALL_DIR/$gitdir" ;; esac
+        lock="$gitdir/nastech-update.lock"
+      fi
+    fi
+    [ -n "$lock" ] || lock="$INSTALL_DIR/.nastech-update.lock"
+    local marker_busy=0 lock_busy=0
+    [ -e "$marker" ] && marker_busy=1
+    checkout_lock_held "$lock" && lock_busy=1
+    if [ "$marker_busy" -eq 0 ] && [ "$lock_busy" -eq 0 ]; then
+      return 0
+    fi
+    sleep 10
+  done
+  printf 'update quiescence wait timed out (marker=%s lock=%s path=%s)\n' \
+    "$([ -e "$marker" ] && echo present || echo absent)" \
+    "$(checkout_lock_held "${lock:-/nonexistent}" >/dev/null 2>&1 && echo held || echo free)" \
+    "${lock:-}" >&2
+  return 1
+}
+
+step "waiting for any prior update or desktop install to finish"
+wait_for_update_quiescence 600 || fail "timed out waiting for prior update/build activity to clear before $UPDATE_METHOD"
+'''
+    update_anchor = (
+        '    NASTECH="$(source_nastech "$INSTALL_DIR")" || fail "no installed update command"\n'
+        '    help="$(source_build_env "$NASTECH" update --help 2>&1)" || fail "installed update --help failed: $help"\n'
+        '    build_source_update_command "$NASTECH" "$help"\n'
+        '    rc=0\n'
+    )
+    update_repl = (
+        '    NASTECH="$(source_nastech "$INSTALL_DIR")" || fail "no installed update command"\n'
+        '    help="$(source_build_env "$NASTECH" update --help 2>&1)" || fail "installed update --help failed: $help"\n'
+        '    build_source_update_command "$NASTECH" "$help"\n'
+        '    wait_for_update_quiescence 600 || fail "timed out waiting for update/build activity to clear before nastech update"\n'
+        '    rc=0\n'
+    )
+    desktop_anchor = (
+        '    ASSETS="$REPO_ROOT/tests/install/e2e-assets"\n'
+        '    SPEC="$WORK_ROOT/launch-spec.json"\n\n'
+        '    # A REAL configured provider: the mock inference server (the desktop E2E\n'
+    )
+    desktop_repl = (
+        '    ASSETS="$REPO_ROOT/tests/install/e2e-assets"\n'
+        '    SPEC="$WORK_ROOT/launch-spec.json"\n\n'
+        '    # The launch capture runs the real `nastech desktop` build preflight, which\n'
+        '    # takes the DesktopBuildLock (and the checkout lock beneath it). A deferred\n'
+        '    # completion still holding either lock exits 2 with "A Nastech update or\n'
+        '    # another desktop dependency install or build is already running".\n'
+        '    wait_for_update_quiescence 600 || fail "timed out waiting for update/build activity to clear before nastech desktop capture"\n\n'
+        '    # A REAL configured provider: the mock inference server (the desktop E2E\n'
+    )
+    if anchor not in text or update_anchor not in text or desktop_anchor not in text:
+        return 0
+    updated = text.replace(anchor, helper, 1)
+    updated = updated.replace(update_anchor, update_repl, 1)
+    updated = updated.replace(desktop_anchor, desktop_repl, 1)
+    if updated == text:
+        return 0
+    _reconcile_budget_write(dst, rel, updated)
+    return 1
+
+
+def _reconcile_release_version_from_ref_mock(dst: str) -> int:
+    """Align release version-from-ref test mock with published_release_identity contract."""
+    rel = "tests/scripts/test_release_version_from_ref.py"
+    text = _reconcile_budget_read(dst, rel)
+    if text is None:
+        return 0
+    old = (
+        "    def run(argv):\n"
+        "        if argv[:4] == [\"gh\", \"api\", \"--paginate\", \"--slurp\"]:\n"
+        "            return json.dumps([releases])\n"
+    )
+    new = (
+        "    def run(argv):\n"
+        "        if argv[:3] == [\"gh\", \"api\", \"--paginate\"]:\n"
+        "            return json.dumps(releases)\n"
+    )
+    if new in text or old not in text:
+        return 0
+    _reconcile_budget_write(dst, rel, text.replace(old, new, 1))
+    return 1
+
+
+_PM_CLIENT_WORKER_WAIT_TEST = '''"""pm.client must not fail a completed worker result because teardown is slow."""
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
+import pytest
+
+
+def test_request_tolerates_slow_worker_exit_after_result(tmp_path, monkeypatch):
+    worker = tmp_path / "slow_exit_worker.py"
+    worker.write_text(
+        textwrap.dedent(
+            """
+            import json, sys, time
+            req = json.loads(sys.stdin.readline())
+            sys.stdout.write(json.dumps({"id": req["id"], "type": "result", "result": "ok", "receipt": None}) + "\\\\n")
+            sys.stdout.flush()
+            time.sleep(7)
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    import pm.client as client
+
+    monkeypatch.setattr(client, "_worker_command", lambda spec, arguments, worker_path, environment: [sys.executable, "-I", str(worker)])
+    monkeypatch.setattr(client, "runtime_environment", lambda: None)
+    monkeypatch.setattr("pm.registry.package_definitions", lambda names: [])
+
+    result = client._request("prune_cache", {"cache": str(tmp_path / "cache")})
+    assert result == "ok"
+'''
+
+
+def _reconcile_pm_client_worker_wait_test(dst: str) -> int:
+    """Ensure regression test for slow PM worker exit exists."""
+    rel = "tests/pm/test_client_worker_wait.py"
+    path = os.path.join(dst, *rel.split("/"))
+    if os.path.isfile(path):
+        return 0
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(_PM_CLIENT_WORKER_WAIT_TEST)
+    return 1
+
+
 def reconcile_tree(
     dst: str,
     *,
@@ -12088,7 +12523,33 @@ def reconcile_tree(
     # probe clicks the docs search button before the cold Pages CDN mounts it.
     if _reconcile_docs_search_hydration_gate(dst):
         result.total += 1
-        result.fixed.append("website/scripts/check-live-search.mjs")
+        result.fixed.append("website/scripts/check-live-search.mjs")    # Gate-stability reconciles: narrow, idempotent, evidence-backed fixes for
+    # known rc gate failures. Apply only when broken pattern is present.
+    if _reconcile_pm_client_slow_worker_exit(dst):
+        result.total += 1
+        result.fixed.append("pm/client.py")
+    if _reconcile_update_takeover_watchdog(dst):
+        result.total += 1
+        result.fixed.append("nastech_cli/_update_takeover.py")
+    if _reconcile_windows_e2e_open_app_update_churn(dst):
+        result.total += 1
+        result.fixed.append("tests/install/windows-e2e.ps1")
+    if _reconcile_windows_e2e_mode_a_timeout(dst):
+        result.total += 1
+        if "tests/install/windows-e2e.ps1" not in result.fixed:
+            result.fixed.append("tests/install/windows-e2e.ps1")
+    if _reconcile_windows_install_update_e2e_timeout(dst):
+        result.total += 1
+        result.fixed.append(".github/workflows/windows-install-update-e2e.yml")
+    if _reconcile_installer_script_e2e_quiescence(dst):
+        result.total += 1
+        result.fixed.append("tests/install/installer-script-e2e.sh")
+    if _reconcile_release_version_from_ref_mock(dst):
+        result.total += 1
+        result.fixed.append("tests/scripts/test_release_version_from_ref.py")
+    if _reconcile_pm_client_worker_wait_test(dst):
+        result.total += 1
+        result.fixed.append("tests/pm/test_client_worker_wait.py")
     for rel in _reconcile_dunder_all_order(dst):
         result.total += 1
         result.fixed.append(rel)
