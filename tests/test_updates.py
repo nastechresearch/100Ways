@@ -1183,7 +1183,7 @@ def test_desktop_release_leg_guards_write_the_merged_workflow(tmp_path):
     for _label, marker in _BUNDLED_LEG_MARKERS:
         assert marker in text
     assert text.count('if [ "$SKIP_SIGNED" != true ]; then') == 2
-    assert text.count("&& inputs.skip-signed != true") == 2
+    assert text.count("&& inputs.skip-signed != true") == 1
     assert "timeout-minutes: 25" in text
     # skip-signed decides publication, never production: nothing may keep the bundled
     # package (or its scan) behind a signing precondition.

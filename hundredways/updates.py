@@ -5388,7 +5388,7 @@ _BUNDLED_UNSIGNED_LEGS_OLD_4 = """\
         # The feed input stays in the tag archive until the leg and its smoke pass.
         run: |
           args=(--include '*.dmg' --include '*.zip' --include '*.blockmap' --include '*-mac.yml')
-          if [ "$RELEASE_PHASE" = candidate ] || { [ "$NASTECH_DESKTOP_VARIANT" = bundled ] && [[ "$NASTECH_PAYLOAD_TAG" == *+canary.* ]]; }; then
+          if [ "$RELEASE_PHASE" = candidate ] || { [ "$NASTECH_DESKTOP_VARIANT" = bundled ] && [[ "$NASTECH_PAYLOAD_TAG" == canary.* ]]; }; then
 """
 _BUNDLED_UNSIGNED_LEGS_NEW_4 = """\
           SKIP_SIGNED: ${{ inputs.skip-signed }}
@@ -5398,7 +5398,7 @@ _BUNDLED_UNSIGNED_LEGS_NEW_4 = """\
           # The recorder reads the Developer ID signature an unsigned build cannot
           # carry, so an unsigned leg writes no release row, exactly as the Windows
           # leg refuses to describe bytes it did not Authenticode-sign.
-          if [ "$SKIP_SIGNED" != true ] && { [ "$RELEASE_PHASE" = candidate ] || { [ "$NASTECH_DESKTOP_VARIANT" = bundled ] && [[ "$NASTECH_PAYLOAD_TAG" == *+canary.* ]]; }; }; then
+          if [ "$SKIP_SIGNED" != true ] && { [ "$RELEASE_PHASE" = candidate ] || { [ "$NASTECH_DESKTOP_VARIANT" = bundled ] && [[ "$NASTECH_PAYLOAD_TAG" == canary.* ]]; }; }; then
 """
 _BUNDLED_UNSIGNED_LEGS_OLD_5 = """\
     needs: [validate, build-darwin-arm64]
@@ -5417,27 +5417,8 @@ _BUNDLED_UNSIGNED_LEGS_NEW_5 = """\
       && inputs.skip-signed != true
       && needs.validate.result == 'success' && needs.validate.outputs.sha != ''
 """
-_BUNDLED_UNSIGNED_LEGS_OLD_6 = """\
-    needs: [validate, build-darwin-arm64, smoke-darwin-arm64]
-    if: >-
-      !cancelled() && inputs.build_commit == '' && inputs.channel == '' && inputs.upload_release == true
-      && inputs.release-phase == ''
-      && needs.validate.outputs.darwin-arm64 == 'true'
-"""
-_BUNDLED_UNSIGNED_LEGS_NEW_6 = """\
-    needs: [validate, build-darwin-arm64, smoke-darwin-arm64]
-    # The feed is what every installed app auto-updates from, so it may point at
-    # signed bytes only. The Windows publisher gets this from its smoke gates,
-    # which an unsigned MSIX cannot install; a dmg runs unsigned, so the guard
-    # belongs on the publication itself.
-    if: >-
-      !cancelled() && inputs.build_commit == '' && inputs.channel == '' && inputs.upload_release == true
-      && inputs.release-phase == ''
-      && inputs.skip-signed != true
-      && needs.validate.outputs.darwin-arm64 == 'true'
-"""
 _BUNDLED_APT_FEED_OLD_1 = """\
-      - name: Stage the APT repo and publish to R2
+      - name: Stage the APT repo handoff to R2
 """
 _BUNDLED_APT_FEED_NEW_1 = """\
       - name: Stage the APT repo and publish the feed release
@@ -5492,7 +5473,9 @@ _BUNDLED_APT_FEED_OLD_5 = (
     '              "termux/termux-docker@$digest" bash /tmp/check-apt.sh "nastech-$CHANNEL" "$version"\n'
     '          fi\n'
     '\n'
-    "          args=(--include 'deb/*.deb' --include 'apt/**/*')\n"
+    '          python -m scripts.bundles.release_artifacts record --platform termux --arch aarch64 \\\n'
+    '            --root termux-build --tag "$NASTECH_PAYLOAD_TAG" --commit "$RELEASE_COMMIT" \\\n'
+    '            --out termux-build/metadata-termux-aarch64.json\n'
 )
 _BUNDLED_APT_FEED_NEW_5 = (
     '              -v "$PWD/termux-build/apt-flat:/apt:ro" \\\n'
@@ -5502,63 +5485,23 @@ _BUNDLED_APT_FEED_NEW_5 = (
     '              "termux/termux-docker@$digest" bash /tmp/check-apt.sh "nastech-$CHANNEL" "$version" file:/apt\n'
     '          fi\n'
     '\n'
-    "          args=(--include 'deb/*.deb')\n"
+    '          python -m scripts.bundles.release_artifacts record --platform termux --arch aarch64 \\\n'
+    '            --root termux-build --tag "$NASTECH_PAYLOAD_TAG" --commit "$RELEASE_COMMIT" \\\n'
+    '            --out termux-build/metadata-termux-aarch64.json\n'
 )
 _BUNDLED_APT_FEED_OLD_6 = """\
-              --out termux-build/metadata-termux-aarch64.json
-            args+=(--include 'metadata-*.json')
-          fi
+          python -m scripts.releases.handoff stage --tag "${NASTECH_ARCHIVE_TAG:-$NASTECH_PAYLOAD_TAG}" --commit "$RELEASE_COMMIT" \\
+            --name termux --root termux-build --include 'deb/*.deb' --include 'apt/**/*' --include 'metadata-*.json'
 """
-_BUNDLED_APT_FEED_NEW_6 = """\
-              --out termux-build/metadata-termux-aarch64.json
-            # A candidate still hands its staged tree to the tag archive, because
-            # the sequencer's `advance_termux_apt` reads the signed index from
-            # there; a claim ref is written by exactly one run, so the immutable
-            # put round-trips. The published feed itself never comes from R2.
-            args+=(--include 'apt/**/*' --include 'metadata-*.json')
-          fi
-"""
-_BUNDLED_APT_FEED_OLD_7 = (
-    '          # --key-is-full is MANDATORY on every feed-dir upload: without it\n'
-    '          # scripts.releases.r2 re-prefixes the key into the tag archive\n'
-    '          # (releases/tag/<tag>/) and the APT feed never lands at\n'
-    '          # releases/termux/<channel>/.\n'
-    '          shopt -s globstar nullglob\n'
-    '          # cd into the staged repo for the glob, but resolve the r2 client\n'
-    '          # absolutely first -- after the cd, scripts/ is no longer in the\n'
-    '          # cwd and a bare `python -m scripts.releases.r2` would ENOENT.\n'
-    '          export PYTHONPATH="$GITHUB_WORKSPACE"\n'
-    '          cd termux-build/apt\n'
-    '          files=(pool/**/*.deb "dists/nastech-$CHANNEL"/main/binary-aarch64/by-hash/*/* key.asc\n'
-    '                 "dists/nastech-$CHANNEL/main/binary-aarch64/Packages"\n'
-    '                 "dists/nastech-$CHANNEL/main/binary-aarch64/Packages.gz"\n'
-    '                 "dists/nastech-$CHANNEL/Release"\n'
-    '                 "dists/nastech-$CHANNEL/Release.gpg"\n'
-    '                 "dists/nastech-$CHANNEL/InRelease")\n'
-    '          # APT reads InRelease first. Publish it only after every referenced\n'
-    '          # index and package has been uploaded and read back successfully.\n'
-    '          for f in "${files[@]}"; do\n'
-    '            test -f "$f"\n'
-    '            python3 -m scripts.releases.r2 put \\\n'
-    '              --tag "$NASTECH_PAYLOAD_TAG" \\\n'
-    '              --key "releases/termux/$CHANNEL/$f" \\\n'
-    '              --file "$f" \\\n'
-    '              --key-is-full\n'
-    '          done\n'
+_BUNDLED_APT_FEED_NEW_6 = (
+    '          # A candidate still hands its staged tree to the tag archive, because\n'
+    '          # the sequencer\'s `advance_termux_apt` reads the signed index from\n'
+    '          # there; a claim ref is written by exactly one run, so the immutable\n'
+    '          # put round-trips. The published feed itself never comes from R2.\n'
+    '          python -m scripts.releases.handoff stage --tag "${NASTECH_ARCHIVE_TAG:-$NASTECH_PAYLOAD_TAG}" --commit "$RELEASE_COMMIT" \\\n'
+    "            --name termux --root termux-build --include 'deb/*.deb' --include 'apt/**/*' --include 'metadata-*.json'\n"
     '\n'
-    '          # Verify the public CDN path, not only the object-store origin.\n'
-    '          public_repo="${CLOUDFLARE_R2_PUBLIC_URL%/}/releases/termux/$CHANNEL"\n'
-    '          curl --fail --silent --show-error "$public_repo/key.asc" -o "$RUNNER_TEMP/termux-public-key.asc"\n'
-    '          cmp key.asc "$RUNNER_TEMP/termux-public-key.asc"\n'
-    '          docker run --rm --platform linux/arm64 --user 1000:1000 \\\n'
-    '            -v "$PWD:/apt:ro" \\\n'
-    '            -v "$GITHUB_WORKSPACE/scripts/termux/check_apt.sh:/tmp/check-apt.sh:ro" \\\n'
-    '            -v "$GITHUB_WORKSPACE/scripts/termux/validate_installed.py:/tmp/validate_installed.py:ro" \\\n'
-    '            "termux/termux-docker@$digest" bash /tmp/check-apt.sh "nastech-$CHANNEL" "$version" "$public_repo"\n'
-)
-_BUNDLED_APT_FEED_NEW_7 = (
-    '\n'
-    "          # The feed is this channel's own fixed-tag release. apt needs a base URL\n"
+    '          # The feed is this channel\'s own fixed-tag release. apt needs a base URL\n'
     '          # that does not move, and a mutable index cannot live in an object store\n'
     '          # that promises "same key, same bytes" -- which is the 412 that killed\n'
     '          # the R2 publish for every canary re-dispatched under one tag.\n'
@@ -5610,14 +5553,12 @@ _BUNDLED_WORKFLOW_EDITS = (
     (_BUNDLED_UNSIGNED_LEGS_OLD_3, _BUNDLED_UNSIGNED_LEGS_NEW_3),
     (_BUNDLED_UNSIGNED_LEGS_OLD_4, _BUNDLED_UNSIGNED_LEGS_NEW_4),
     (_BUNDLED_UNSIGNED_LEGS_OLD_5, _BUNDLED_UNSIGNED_LEGS_NEW_5),
-    (_BUNDLED_UNSIGNED_LEGS_OLD_6, _BUNDLED_UNSIGNED_LEGS_NEW_6),
     (_BUNDLED_APT_FEED_OLD_1, _BUNDLED_APT_FEED_NEW_1),
     (_BUNDLED_APT_FEED_OLD_2, _BUNDLED_APT_FEED_NEW_2),
     (_BUNDLED_APT_FEED_OLD_3, _BUNDLED_APT_FEED_NEW_3),
     (_BUNDLED_APT_FEED_OLD_4, _BUNDLED_APT_FEED_NEW_4),
     (_BUNDLED_APT_FEED_OLD_5, _BUNDLED_APT_FEED_NEW_5),
     (_BUNDLED_APT_FEED_OLD_6, _BUNDLED_APT_FEED_NEW_6),
-    (_BUNDLED_APT_FEED_OLD_7, _BUNDLED_APT_FEED_NEW_7),
 )
 
 _BUNDLED_STORE_MARKER = """\
@@ -6056,28 +5997,6 @@ _HANDOFF_BUNDLED_WORKFLOW_NEW_4 = """\
       GH_TOKEN: ${{ github.token }}
       CHANNEL_BUILD: ${{ needs.validate.outputs.channel-build }}
 """
-_HANDOFF_BUNDLED_WORKFLOW_OLD_5 = """\
-      group: win32-updater-feed-canary
-      cancel-in-progress: false
-    env:
-"""
-_HANDOFF_BUNDLED_WORKFLOW_NEW_5 = """\
-      group: win32-updater-feed-canary
-      cancel-in-progress: false
-    env:
-      GH_TOKEN: ${{ github.token }}
-"""
-_HANDOFF_BUNDLED_WORKFLOW_OLD_6 = """\
-      group: darwin-updater-feed-${{ needs.validate.outputs.channel }}
-      cancel-in-progress: false
-    env:
-"""
-_HANDOFF_BUNDLED_WORKFLOW_NEW_6 = """\
-      group: darwin-updater-feed-${{ needs.validate.outputs.channel }}
-      cancel-in-progress: false
-    env:
-      GH_TOKEN: ${{ github.token }}
-"""
 # Admission resolves the store from its own job, so it carries the token like the
 # legs it gates.
 # The upstream admission leg was extended to 60 minutes after real archive
@@ -6127,8 +6046,6 @@ _HANDOFF_BUNDLED_WORKFLOW_EDITS = (
     (_HANDOFF_BUNDLED_WORKFLOW_OLD_2, _HANDOFF_BUNDLED_WORKFLOW_NEW_2),
     (_HANDOFF_BUNDLED_WORKFLOW_OLD_3, _HANDOFF_BUNDLED_WORKFLOW_NEW_3),
     (_HANDOFF_BUNDLED_WORKFLOW_OLD_4, _HANDOFF_BUNDLED_WORKFLOW_NEW_4),
-    (_HANDOFF_BUNDLED_WORKFLOW_OLD_5, _HANDOFF_BUNDLED_WORKFLOW_NEW_5),
-    (_HANDOFF_BUNDLED_WORKFLOW_OLD_6, _HANDOFF_BUNDLED_WORKFLOW_NEW_6),
     (_HANDOFF_BUNDLED_WORKFLOW_OLD_7, _HANDOFF_BUNDLED_WORKFLOW_NEW_7),
     (_HANDOFF_BUNDLED_WORKFLOW_OLD_8, _HANDOFF_BUNDLED_WORKFLOW_NEW_8),
 )
