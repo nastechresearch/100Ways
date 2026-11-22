@@ -6851,7 +6851,7 @@ _CHANNEL_RELEASES_PY_NEW_9 = r"""        # Explicit bootstrap may have reserved 
 
 
 _CHANNEL_RELEASES_PY_OLD_10 = """\
-        match_accepted_packages(manifest, accepted)
+    match_accepted_packages(manifest, accepted)
     prefix = build_prefix(request["buildId"])
     log(f"Build {request['buildId']}: writing {len(feeds)} immutable feeds under {prefix}")
     for file in feeds:
@@ -6866,7 +6866,7 @@ _CHANNEL_RELEASES_PY_OLD_10 = """\
 
 
 _CHANNEL_RELEASES_PY_NEW_10 = """\
-        match_accepted_packages(manifest, accepted)
+    match_accepted_packages(manifest, accepted)
     prefix = build_prefix(request["buildId"])
     log(f"Build {request['buildId']}: writing {len(feeds)} immutable feeds under {prefix}")
     write_immutable_feeds(publisher.store, publisher.reader, prefix, root, feeds)
