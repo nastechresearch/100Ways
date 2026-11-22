@@ -6128,6 +6128,68 @@ def test_fork_canary_test_reconcile_fails_closed_when_an_anchor_is_gone(tmp_path
         reconcile_tree(str(tmp_path / "candidate"), fork_root=str(tmp_path / "fork"))
 
 
+def test_fork_canary_test_reconcile_uses_fork_file_when_upstream_rewrote_test(tmp_path):
+    """If upstream rewrote the canary publication test, keep the fork's file.
+
+    The span-graft model assumes the upstream test still has the same
+    canary-publication shape.  When upstream replaces it with a different test
+    (e.g. metadata receipt staging), grafting fork spans would produce a
+    meaningless hybrid and the attached-assets anchor is gone.  The fork still
+    owns the canary-publication behaviour, so the fork's file is authoritative.
+    """
+    rel = "tests/ci/test_protected_canary_publication.py"
+    candidate = tmp_path / "candidate" / rel
+    fork = tmp_path / "fork" / rel
+    candidate.parent.mkdir(parents=True)
+    fork.parent.mkdir(parents=True)
+    fork_text = (
+        "def test_published_canary_workflow_advances_only_after_every_gate():\n"
+        "    assets = tmp_path / \"release-assets\"\n"
+        "    assets.mkdir()\n"
+        "    release_state = tmp_path / \"github-release.json\"\n"
+        "    gh.write_text(\n"
+        "        \"assets=Path(os.environ['FIXTURE_ASSETS'])\\n\"\n"
+        "        \"if args[:1]==['api']: print('main')\\n\"\n"
+        "        # prune_canaries lists prereleases before deleting the ones past the keep window.\n"
+        "        \"elif args[:2]==['release','list']: print('[]')\\n\"\n"
+        "        \"elif args[:2]==['release','edit']:\\n\"\n"
+        "        # The release is the distribution point: attachments are recorded so the\n"
+        "        \"elif args[:2]==['release','delete']: pass\\n\"\n"
+        "        \"else: raise SystemExit('unexpected gh call: '+repr(args))\\n\"\n"
+        "    )\n"
+        "    env = {\n"
+        "           \"FIXTURE_RELEASE\": str(release_state), \"FIXTURE_ASSETS\": str(assets),\n"
+        "           \"FIXTURE_WINDOWS_VERSION\": windows_version,\n"
+        "    }\n"
+        "    # Publishing attaches the release's assets:\n"
+        "    assert any(name.endswith(\".blockmap\") for name in attached)\n"
+        "    resolved = ChannelReader(env[\"CLOUDFLARE_R2_PUBLIC_URL\"], repository=env[\"GITHUB_REPOSITORY\"]).resolve(\"canary\")\n"
+    )
+    fork.write_text(fork_text, encoding="utf-8")
+    # Upstream rewrote the file to a different test shape (no fork gate, no
+    # attached-assets anchor, different test name, no canary_publisher).
+    candidate.write_text(
+        "def test_canary_metadata_is_recorded_and_receipt_bound():\n"
+        "    release_state = tmp_path / \"github-release.json\"\n"
+        "    gh.write_text(\n"
+        "        \"if args[:1]==['api']: print('main')\\n\"\n"
+        "        \"elif args[:2]==['release','edit']:\\n\"\n"
+        "        \"else: raise SystemExit('unexpected gh call: '+repr(args))\\n\"\n"
+        "    )\n"
+        "    env = {\n"
+        "           \"FIXTURE_RELEASE\": str(release_state), \"FIXTURE_WINDOWS_VERSION\": windows_version,\n"
+        "    }\n",
+        encoding="utf-8",
+    )
+
+    result = reconcile_tree(str(tmp_path / "candidate"), fork_root=str(tmp_path / "fork"))
+
+    assert rel in result.fixed
+    assert candidate.read_text(encoding="utf-8") == fork_text
+    # Idempotent.
+    assert rel not in reconcile_tree(str(tmp_path / "candidate"), fork_root=str(tmp_path / "fork")).fixed
+
+
 def test_reconcile_apt_pool_first_char_rewrites_stale_pool_dirs(tmp_path):
     """Branded deb names leave the test's hardcoded first-char pool dir stale.
 

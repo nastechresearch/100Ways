@@ -2938,6 +2938,10 @@ def _reconcile_fork_release_test(dst: str, fork_root: str | None = None) -> bool
     upstream's lines are never removed: a sync can add to this test but never
     subtract from it.  A missing anchor fails the pipeline instead of shipping
     the fork's module with a test that cannot pass.
+
+    If upstream has structurally rewritten the file so the canary-publication
+    test shape no longer exists, keep the fork's own file: the fork still owns
+    that behaviour and the span-graft model no longer applies.
     """
     if not fork_root:
         return False
@@ -2945,11 +2949,35 @@ def _reconcile_fork_release_test(dst: str, fork_root: str | None = None) -> bool
     if spans is None:
         return False
     target = os.path.join(dst, _FORK_CANARY_TEST_FILE)
+    fork_path = os.path.join(fork_root, _FORK_CANARY_TEST_FILE)
     try:
         with open(target, encoding="utf-8") as fh:
             text = fh.read()
     except OSError:
         return False
+
+    fork_gate = "def test_published_canary_workflow_advances_only_after_every_gate("
+    attached_anchor = (
+        '    resolved = ChannelReader(env["CLOUDFLARE_R2_PUBLIC_URL"], '
+        'repository=env["GITHUB_REPOSITORY"]).resolve("canary")\n'
+    )
+    upstream_rewritten = (
+        fork_gate not in text
+        and attached_anchor not in text
+        and "def test_canary_metadata_is_recorded_and_receipt_bound" in text
+        and "canary_publisher" not in text
+    )
+    if upstream_rewritten and os.path.isfile(fork_path):
+        try:
+            with open(fork_path, encoding="utf-8") as fh:
+                fork_text = fh.read()
+        except OSError:
+            fork_text = None
+        if fork_text and fork_gate in fork_text and fork_text != text:
+            with open(target, "w", encoding="utf-8") as fh:
+                fh.write(fork_text)
+            return True
+
     changed = False
 
     def _insert_before(block: str, anchor: str, where: str) -> None:
@@ -3000,8 +3028,7 @@ def _reconcile_fork_release_test(dst: str, fork_root: str | None = None) -> bool
         changed = True
     _insert_before(
         spans["assertions"],
-        '    resolved = ChannelReader(env["CLOUDFLARE_R2_PUBLIC_URL"], '
-        'repository=env["GITHUB_REPOSITORY"]).resolve("canary")\n',
+        attached_anchor,
         "attached-assets",
     )
     if not changed:
