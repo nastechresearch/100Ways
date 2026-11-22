@@ -14652,7 +14652,7 @@ _UNSIGNED_DESKTOP_JOBS = tuple(job for job, _, _ in _UNSIGNED_DESKTOP_CALLER_EDI
 # The other job group the workflow hands to the bundled builder.  It builds nothing this
 # fork signs, so it takes no ``skip-signed`` -- but it is listed so the caller check below
 # can tell a leg it may leave alone from a leg it has never seen.
-_UNSIGNED_NON_DESKTOP_JOBS = ("termux",)
+_UNSIGNED_NON_DESKTOP_JOBS = ("linux-arm64", "linux-x64", "termux")
 _CALLER_JOB_RE = re.compile(r"^      jobs: (\S+)[ \t]*$", re.M)
 
 
