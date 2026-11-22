@@ -14844,8 +14844,12 @@ _RELEASE_LANES_TESTS_EDITS = (
         r'''from scripts.releases import lanes as lane_set
 
 
-def test_the_default_builds_everything_but_termux():
-    assert lane_set.DEFAULT == set(lane_set.NAMES) - {"termux"}
+def test_the_default_builds_everything_but_termux_and_diagnostic_linux():
+    assert lane_set.DEFAULT == set(lane_set.NAMES) - {"termux", "linux"}
+    assert lane_set.select() == lane_set.DEFAULT
+    assert "linux" in lane_set.CANARY
+    assert not lane_set.has_bundles(["linux"])
+    assert lane_set.DIAGNOSTIC_CALLS.isdisjoint(lane_set.CANDIDATE_CALLS)
 ''',
         r'''from scripts.releases import lanes as lane_set
 
@@ -14853,15 +14857,16 @@ def test_the_default_builds_everything_but_termux():
 # build is in the default set.  What stays out: windows-store (Partner Center needs the
 # MS_STORE_* credentials this fork has never had), and smoke and upgrade (they gate on a
 # signed desktop channel).
-OUT_OF_DEFAULT = {"windows-store", "smoke", "upgrade"}
+OUT_OF_DEFAULT = {"windows-store", "smoke", "upgrade", "linux"}
 
 
 def test_the_default_ships_every_lane_this_fork_publishes():
     assert lane_set.DEFAULT == (set(lane_set.NAMES) - OUT_OF_DEFAULT) | {"termux"}
+    assert lane_set.select() == lane_set.DEFAULT
 ''',
     ),
     (
-        r'''    ({"with_": ["termux"]}, set(lane_set.NAMES)),
+        r'''    ({"with_": ["termux", "linux"]}, set(lane_set.NAMES)),
 ''',
         r'''    # Termux is in this fork's default already, so opting into it adds no lane.
     ({"with_": ["termux"]}, set(lane_set.DEFAULT)),
