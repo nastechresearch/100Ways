@@ -8887,6 +8887,11 @@ def test_fork_lane_release_default_set_and_its_test_agree(tmp_path):
     # upstream's to retire and the sync carries that deletion instead of re-growing
     # the row.
     fork_opt_in = _opt_in_lanes_added_by_the_fork(tmp_path / "lane-seed")
+    produced = (tmp_path / "lane-seed" / "scripts" / "releases" / "lanes.py").read_text(encoding="utf-8")
+    fork_names = set(re.findall(r'Lane\("([a-z0-9-]+)"', produced))
+    # Only upstream opt-ins that exist in the fork's lane table belong in OUT_OF_DEFAULT;
+    # a lane upstream added but the fork has not adopted yet is not in NAMES.
+    upstream_opt_in = upstream_opt_in & fork_names
     assert test_names == source_names | (upstream_opt_in - added) | fork_opt_in
     # Termux is the one lane both sides put back in: it needs no signing.
     assert added == {"termux"}

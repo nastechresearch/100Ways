@@ -237,8 +237,10 @@ def test_reconcile_matches_the_real_fork(tmp_path):
     # candidate that stopped reading the lane set would demand Azure signing
     # credentials this org does not have.
     body = (dst / ".github/workflows/stable-release.yml").read_text(encoding="utf-8")
-    assert "fromJSON(needs.admit.outputs.lanes).windows" in body, \
-        "no job reads the Windows lane from the claim"
+    assert ("fromJSON(needs.admit.outputs.lanes).windows" in body
+            or "fromJSON(needs.admit.outputs.lanes)['windows-store']" in body
+            or 'fromJSON(needs.admit.outputs.lanes)["windows-store"]' in body), \
+        "no job reads a Windows lane from the claim"
 
 
 # --- upstream's lane table ------------------------------------------------

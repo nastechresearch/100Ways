@@ -14857,7 +14857,7 @@ def test_the_default_builds_everything_but_termux_and_diagnostic_linux():
 # build is in the default set.  What stays out: windows-store (Partner Center needs the
 # MS_STORE_* credentials this fork has never had), and smoke and upgrade (they gate on a
 # signed desktop channel).
-OUT_OF_DEFAULT = {"windows-store", "smoke", "upgrade", "linux"}
+OUT_OF_DEFAULT = {"windows-store", "smoke", "upgrade"}
 
 
 def test_the_default_ships_every_lane_this_fork_publishes():
