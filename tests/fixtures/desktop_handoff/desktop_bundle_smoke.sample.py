@@ -1,4 +1,4 @@
-"""Replay artifact handoffs and publication against a fake R2."""
+"""Replay artifact handoffs and smoke fetches against a fake R2."""
 import hashlib
 import json
 import shutil

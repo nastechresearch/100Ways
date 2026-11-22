@@ -6093,7 +6093,7 @@ _HANDOFF_STAGING_TEST_EDITS = (
 )
 
 _HANDOFF_SMOKE_TEST_OLD_1 = '''\
-"""Replay artifact handoffs and publication against a fake R2."""
+"""Replay artifact handoffs and smoke fetches against a fake R2."""
 '''
 _HANDOFF_SMOKE_TEST_NEW_1 = '''\
 """Replay the artifact handoffs and publication a desktop release run performs.
