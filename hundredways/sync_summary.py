@@ -1,7 +1,6 @@
 """Professional release-summary generation for verified NasTech-Agent updates."""
 from __future__ import annotations
 
-import json
 import subprocess
 from collections import defaultdict
 from pathlib import Path
@@ -35,9 +34,27 @@ def change_category(subject: str) -> str:
 def collect_changes(upstream_repo: str | Path, baseline_sha: str, upstream_sha: str) -> list[str]:
     if not baseline_sha or baseline_sha == upstream_sha:
         return []
-    subjects = _git(upstream_repo, "log", "--format=%s", f"{baseline_sha}..{upstream_sha}").splitlines()
+    subjects = _git(
+        upstream_repo, "log", "--format=%s", f"{baseline_sha}..{upstream_sha}"
+    ).splitlines()
     rules = BrandingRules()
-    return [transform_strict_metadata_text(subject, rules).strip() for subject in subjects if subject.strip()]
+    return [
+        transform_strict_metadata_text(subject, rules).strip()
+        for subject in subjects
+        if subject.strip()
+    ]
+
+
+def _area_rows(changed_areas: dict[str, int], rules: BrandingRules) -> list[str]:
+    rows = [
+        "| Area | Changed files |",
+        "|---|---:|",
+    ]
+    for area, count in sorted(changed_areas.items(), key=lambda item: (-item[1], item[0])):
+        label = transform_strict_metadata_text(area, rules).strip()
+        rows.append(f"| `{label}` | {count} |")
+    rows.append(f"| **Total** | **{sum(changed_areas.values())}** |")
+    return rows
 
 
 def write_sync_summary(
@@ -51,54 +68,99 @@ def write_sync_summary(
     verification: Iterable[tuple[str, str]],
     commit_subjects: Iterable[str] | None = None,
 ) -> None:
-    """Write a review-ready feature summary without transformation terminology."""
+    """Write a review-ready, structured summary without transformation terminology."""
     if commit_subjects is None:
         changes = collect_changes(upstream_repo, baseline_sha, upstream_sha)
     else:
         rules = BrandingRules()
-        changes = [transform_strict_metadata_text(subject, rules).strip() for subject in commit_subjects if subject.strip()]
+        changes = [
+            transform_strict_metadata_text(subject, rules).strip()
+            for subject in commit_subjects
+            if subject.strip()
+        ]
+
     grouped: dict[str, list[str]] = defaultdict(list)
     for subject in changes:
         grouped[change_category(subject)].append(subject)
-    lines = [
+
+    rules = BrandingRules()
+    previous = baseline_sha[:12] if baseline_sha else "initial baseline"
+    current = upstream_sha[:12]
+
+    lines: list[str] = [
         "# NasTech-Agent Update Summary",
         "",
-        "> Powered by NousResearch",
+        "This verified update incorporates the latest confirmed changes from the "
+        "source foundation. The summary below is organized for review and focuses on "
+        "delivered functionality, reliability, and operational impact.",
         "",
-        "This verified NasTech-Agent update incorporates the newest confirmed improvements from its open-source foundation. "
-        "The summary below focuses on delivered functionality, reliability, and operational impact.",
+        "## Scope",
         "",
-        "## Update scope",
-        "",
-        f"- **Changes incorporated:** {len(changes)} commits affecting {files_changed} files.",
-        f"- **Source revision:** `{upstream_sha[:12]}`.",
-        f"- **Previous source revision:** `{baseline_sha[:12] if baseline_sha else 'initial baseline'}`.",
+        "| Metric | Value |",
+        "|---|---|",
+        f"| Changes incorporated | {len(changes)} commits |",
+        f"| Files affected | {files_changed} |",
+        f"| Source revision | `{current}` |",
+        f"| Previous source revision | `{previous}` |",
         "",
     ]
+
     if changed_areas:
-        rules = BrandingRules()
         lines.extend(["## Technical coverage", ""])
-        lines.extend(
-            f"- **{transform_strict_metadata_text(area, rules)}/:** {count} changed files."
-            for area, count in sorted(changed_areas.items())
-        )
+        lines.extend(_area_rows(changed_areas, rules))
         lines.append("")
+
+    lines.extend(["## Delivered improvements", ""])
     if grouped:
-        lines.extend(["## Delivered improvements", ""])
-        for category in ("New capabilities", "Reliability and fixes", "Security and hardening", "Performance", "Documentation", "Improvements"):
+        for category in (
+            "New capabilities",
+            "Reliability and fixes",
+            "Security and hardening",
+            "Performance",
+            "Documentation",
+            "Improvements",
+        ):
             items = grouped.get(category, [])
             if not items:
                 continue
             lines.extend([f"### {category}", ""])
-            for item in items[:12]:
-                lines.append(f"- {item}")
+            lines.extend([f"- {item}" for item in items[:12]])
             if len(items) > 12:
-                lines.append(f"- {len(items) - 12} additional {category.lower()} updates are included in this verified snapshot.")
+                remaining = len(items) - 12
+                lines.append(
+                    f"- *{remaining} additional {category.lower()} updates included "
+                    "in this verified snapshot.*"
+                )
             lines.append("")
     else:
-        lines.extend(["## Delivered improvements", "", "- NasTech-Agent is already aligned with the recorded source revision; no additional commits were pending.", ""])
+        lines.extend(
+            [
+                "- NasTech-Agent is already aligned with the recorded source revision; "
+                "no additional commits were pending.",
+                "",
+            ]
+        )
+
+    if changes:
+        lines.extend(["## Included changes", ""])
+        lines.extend(["| # | Commit message | Category |", "|---:|---|---|"])
+        for index, subject in enumerate(changes, start=1):
+            safe_subject = subject.replace("|", "\\|")
+            lines.append(f"| {index} | {safe_subject} | {change_category(subject)} |")
+        lines.append("")
+
     lines.extend(["## Verification evidence", ""])
+    lines.extend(["| Check | Result |", "|---|---|"])
     for title, outcome in verification:
-        lines.append(f"- **{title}:** {outcome}")
-    lines.extend(["", "This candidate is prepared for review only. No merge, release, or deployment is performed by the verification workflow.", ""])
+        safe_title = str(title).replace("|", "\\|")
+        safe_outcome = str(outcome).replace("|", "\\|")
+        lines.append(f"| {safe_title} | {safe_outcome} |")
+    lines.extend(
+        [
+            "",
+            "> This candidate is prepared for review only. No merge, release, or deployment "
+            "is performed by the verification workflow.",
+            "",
+        ]
+    )
     Path(path).write_text("\n".join(lines), encoding="utf-8")
