@@ -9953,15 +9953,16 @@ def test_a_collision_is_reported_not_guessed_at(tmp_path):
         'FEED = "https://cdn.example.test/feed"',
         'FEED = "https://pages.nastech.test/feed"',
     )
-    dst, fork, hermes = _merge_tree(tmp_path, ours, theirs)
+    dst, fork, hermes = _merge_tree(tmp_path, ours, theirs,
+                                    rel="scripts/releases/r2.py")
 
     fixed, unresolved = _reconcile_fork_release_divergence(
         dst, fork_root=fork, upstream_src=hermes)
 
-    assert unresolved == ["scripts/releases/stable.py"]
+    assert unresolved == ["scripts/releases/r2.py"]
     assert fixed == []
     # The candidate is left exactly as branding and the span tables produced it.
-    assert (Path(dst) / "scripts" / "releases" / "stable.py").read_text() == ours
+    assert (Path(dst) / "scripts" / "releases" / "r2.py").read_text() == ours
 
 
 # Upstream and the fork both extend the same import block; the fork also
