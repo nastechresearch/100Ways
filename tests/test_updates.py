@@ -3413,9 +3413,10 @@ _CANARY_WORKFLOW_TEXT = (
 )
 _CANARY_RELEASE_TEXT = (
     "def dispatch(tag, canary):\n"
-    "    cmd = ['gh', 'workflow', 'run', 'desktop-bundled-release.yml', '--ref', 'main']\n"
-    "    if canary:\n"
-    "        cmd += [\"-f\", \"upload_release=true\"]\n"
+    '    workflow = "stable-release.yml"\n'
+    '    cmd = ["gh", "workflow", "run", workflow, "--ref", "main", "-f", f"tag={tag}"]\n'
+    '    if gh_repo:\n'
+    '        cmd += ["--repo", gh_repo]\n'
     "    return cmd\n"
 )
 
@@ -3465,7 +3466,7 @@ def test_canary_unsigned_dispatch_is_a_fixed_point(tmp_path):
 
 
 def test_canary_unsigned_dispatch_raises_when_the_dispatch_moves(tmp_path):
-    text = _CANARY_RELEASE_TEXT.replace("upload_release=true", "upload_release=false")
+    text = _CANARY_RELEASE_TEXT.replace('workflow = "stable-release.yml"', 'workflow = "stable-release.yaml"')
     candidate, wf, rp = _canary_candidate(tmp_path, release_py=text)
 
     with pytest.raises(CanaryUnsignedDispatchError) as excinfo:
@@ -3484,8 +3485,8 @@ def test_canary_unsigned_dispatch_absent_files_are_a_no_op(tmp_path):
 
 _CANARY_PIN_TEXT = (
     "    assert dispatch == [\n"
-    '        "gh", "workflow", "run", "desktop-bundled-release.yml", "--ref", "main",\n'
-    '        "-f", f"tag={tag}", "-f", "upload_release=true", "--repo", "fixture/release",\n'
+    '        "gh", "workflow", "run", "stable-release.yml", "--ref", "main",\n'
+    '        "-f", f"tag={tag}", "--repo", "fixture/release",\n'
     "    ]\n"
 )
 
@@ -3515,7 +3516,7 @@ def test_canary_unsigned_dispatch_raises_when_the_pin_moves(tmp_path):
     candidate, _, _ = _canary_candidate(tmp_path)
     pin = candidate / _CANARY_DISPATCH_TEST_REL
     pin.parent.mkdir(parents=True, exist_ok=True)
-    moved = _CANARY_PIN_TEXT.replace("upload_release=true", "upload_release=yes")
+    moved = _CANARY_PIN_TEXT.replace("stable-release.yml", "stable-release.yaml")
     pin.write_text(moved, encoding="utf-8")
 
     with pytest.raises(CanaryUnsignedDispatchError) as excinfo:

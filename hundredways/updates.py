@@ -8342,20 +8342,35 @@ _CANARY_DISPATCH_INPUT_AFTER = _CANARY_DISPATCH_INPUT_BEFORE + (
     "        type: boolean\n"
     "        default: false\n"
 )
-_CANARY_RELEASE_PY_BEFORE = '    if canary:\n        cmd += ["-f", "upload_release=true"]\n'
+_CANARY_RELEASE_PY_BEFORE = (
+    '    workflow = "stable-release.yml"\n'
+    '    cmd = ["gh", "workflow", "run", workflow, "--ref", "main", "-f", f"tag={tag}"]\n'
+    '    if gh_repo:\n'
+    '        cmd += ["--repo", gh_repo]\n'
+)
 _CANARY_DISPATCH_TEST_REL = "tests/scripts/test_release_canary_git.py"
 _CANARY_DISPATCH_TEST_BEFORE = (
-    '        "-f", f"tag={tag}", "-f", "upload_release=true", "--repo", "fixture/release",\n'
+    '    assert dispatch == [\n'
+    '        "gh", "workflow", "run", "stable-release.yml", "--ref", "main",\n'
+    '        "-f", f"tag={tag}", "--repo", "fixture/release",\n'
+    '    ]\n'
 )
 _CANARY_DISPATCH_TEST_AFTER = (
+    '    assert dispatch == [\n'
+    '        "gh", "workflow", "run", "desktop-bundled-release.yml", "--ref", "main",\n'
     '        "-f", f"tag={tag}", "-f", "upload_release=true", "-f", "skip-signed=true",\n'
     '        "--repo", "fixture/release",\n'
+    '    ]\n'
 )
 _CANARY_RELEASE_PY_AFTER = (
-    "    if canary:\n"
-    "        # NasTech ships unsigned: declare it here too, or the dispatched build stops\n"
-    "        # at the Apple/Azure credential gates before it builds anything.\n"
+    '    workflow = "desktop-bundled-release.yml" if canary else "stable-release.yml"\n'
+    '    cmd = ["gh", "workflow", "run", workflow, "--ref", "main", "-f", f"tag={tag}"]\n'
+    '    if canary:\n'
+    '        # NasTech ships unsigned: declare it here too, or the dispatched build stops\n'
+    '        # at the Apple/Azure credential gates before it builds anything.\n'
     '        cmd += ["-f", "upload_release=true", "-f", "skip-signed=true"]\n'
+    '    if gh_repo:\n'
+    '        cmd += ["--repo", gh_repo]\n'
 )
 
 
