@@ -1183,7 +1183,7 @@ def test_desktop_release_leg_guards_write_the_merged_workflow(tmp_path):
     for _label, marker in _BUNDLED_LEG_MARKERS:
         assert marker in text
     assert text.count('if [ "$SKIP_SIGNED" != true ]; then') == 2
-    assert text.count("&& inputs.skip-signed != true") == 2
+    assert text.count("&& inputs.skip-signed != true") == 1
     assert "timeout-minutes: 25" in text
     # skip-signed decides publication, never production: nothing may keep the bundled
     # package (or its scan) behind a signing precondition.
@@ -3413,9 +3413,10 @@ _CANARY_WORKFLOW_TEXT = (
 )
 _CANARY_RELEASE_TEXT = (
     "def dispatch(tag, canary):\n"
-    "    cmd = ['gh', 'workflow', 'run', 'desktop-bundled-release.yml', '--ref', 'main']\n"
-    "    if canary:\n"
-    "        cmd += [\"-f\", \"upload_release=true\"]\n"
+    '    workflow = "stable-release.yml"\n'
+    '    cmd = ["gh", "workflow", "run", workflow, "--ref", "main", "-f", f"tag={tag}"]\n'
+    '    if gh_repo:\n'
+    '        cmd += ["--repo", gh_repo]\n'
     "    return cmd\n"
 )
 
@@ -3465,7 +3466,7 @@ def test_canary_unsigned_dispatch_is_a_fixed_point(tmp_path):
 
 
 def test_canary_unsigned_dispatch_raises_when_the_dispatch_moves(tmp_path):
-    text = _CANARY_RELEASE_TEXT.replace("upload_release=true", "upload_release=false")
+    text = _CANARY_RELEASE_TEXT.replace('workflow = "stable-release.yml"', 'workflow = "stable-release.yaml"')
     candidate, wf, rp = _canary_candidate(tmp_path, release_py=text)
 
     with pytest.raises(CanaryUnsignedDispatchError) as excinfo:
@@ -3484,8 +3485,8 @@ def test_canary_unsigned_dispatch_absent_files_are_a_no_op(tmp_path):
 
 _CANARY_PIN_TEXT = (
     "    assert dispatch == [\n"
-    '        "gh", "workflow", "run", "desktop-bundled-release.yml", "--ref", "main",\n'
-    '        "-f", f"tag={tag}", "-f", "upload_release=true", "--repo", "fixture/release",\n'
+    '        "gh", "workflow", "run", "stable-release.yml", "--ref", "main",\n'
+    '        "-f", f"tag={tag}", "--repo", "fixture/release",\n'
     "    ]\n"
 )
 
@@ -3515,7 +3516,7 @@ def test_canary_unsigned_dispatch_raises_when_the_pin_moves(tmp_path):
     candidate, _, _ = _canary_candidate(tmp_path)
     pin = candidate / _CANARY_DISPATCH_TEST_REL
     pin.parent.mkdir(parents=True, exist_ok=True)
-    moved = _CANARY_PIN_TEXT.replace("upload_release=true", "upload_release=yes")
+    moved = _CANARY_PIN_TEXT.replace("stable-release.yml", "stable-release.yaml")
     pin.write_text(moved, encoding="utf-8")
 
     with pytest.raises(CanaryUnsignedDispatchError) as excinfo:
@@ -6126,6 +6127,68 @@ def test_fork_canary_test_reconcile_fails_closed_when_an_anchor_is_gone(tmp_path
 
     with pytest.raises(RuntimeError, match="cannot place the fork attached-assets span"):
         reconcile_tree(str(tmp_path / "candidate"), fork_root=str(tmp_path / "fork"))
+
+
+def test_fork_canary_test_reconcile_uses_fork_file_when_upstream_rewrote_test(tmp_path):
+    """If upstream rewrote the canary publication test, keep the fork's file.
+
+    The span-graft model assumes the upstream test still has the same
+    canary-publication shape.  When upstream replaces it with a different test
+    (e.g. metadata receipt staging), grafting fork spans would produce a
+    meaningless hybrid and the attached-assets anchor is gone.  The fork still
+    owns the canary-publication behaviour, so the fork's file is authoritative.
+    """
+    rel = "tests/ci/test_protected_canary_publication.py"
+    candidate = tmp_path / "candidate" / rel
+    fork = tmp_path / "fork" / rel
+    candidate.parent.mkdir(parents=True)
+    fork.parent.mkdir(parents=True)
+    fork_text = (
+        "def test_published_canary_workflow_advances_only_after_every_gate():\n"
+        "    assets = tmp_path / \"release-assets\"\n"
+        "    assets.mkdir()\n"
+        "    release_state = tmp_path / \"github-release.json\"\n"
+        "    gh.write_text(\n"
+        "        \"assets=Path(os.environ['FIXTURE_ASSETS'])\\n\"\n"
+        "        \"if args[:1]==['api']: print('main')\\n\"\n"
+        "        # prune_canaries lists prereleases before deleting the ones past the keep window.\n"
+        "        \"elif args[:2]==['release','list']: print('[]')\\n\"\n"
+        "        \"elif args[:2]==['release','edit']:\\n\"\n"
+        "        # The release is the distribution point: attachments are recorded so the\n"
+        "        \"elif args[:2]==['release','delete']: pass\\n\"\n"
+        "        \"else: raise SystemExit('unexpected gh call: '+repr(args))\\n\"\n"
+        "    )\n"
+        "    env = {\n"
+        "           \"FIXTURE_RELEASE\": str(release_state), \"FIXTURE_ASSETS\": str(assets),\n"
+        "           \"FIXTURE_WINDOWS_VERSION\": windows_version,\n"
+        "    }\n"
+        "    # Publishing attaches the release's assets:\n"
+        "    assert any(name.endswith(\".blockmap\") for name in attached)\n"
+        "    resolved = ChannelReader(env[\"CLOUDFLARE_R2_PUBLIC_URL\"], repository=env[\"GITHUB_REPOSITORY\"]).resolve(\"canary\")\n"
+    )
+    fork.write_text(fork_text, encoding="utf-8")
+    # Upstream rewrote the file to a different test shape (no fork gate, no
+    # attached-assets anchor, different test name, no canary_publisher).
+    candidate.write_text(
+        "def test_canary_metadata_is_recorded_and_receipt_bound():\n"
+        "    release_state = tmp_path / \"github-release.json\"\n"
+        "    gh.write_text(\n"
+        "        \"if args[:1]==['api']: print('main')\\n\"\n"
+        "        \"elif args[:2]==['release','edit']:\\n\"\n"
+        "        \"else: raise SystemExit('unexpected gh call: '+repr(args))\\n\"\n"
+        "    )\n"
+        "    env = {\n"
+        "           \"FIXTURE_RELEASE\": str(release_state), \"FIXTURE_WINDOWS_VERSION\": windows_version,\n"
+        "    }\n",
+        encoding="utf-8",
+    )
+
+    result = reconcile_tree(str(tmp_path / "candidate"), fork_root=str(tmp_path / "fork"))
+
+    assert rel in result.fixed
+    assert candidate.read_text(encoding="utf-8") == fork_text
+    # Idempotent.
+    assert rel not in reconcile_tree(str(tmp_path / "candidate"), fork_root=str(tmp_path / "fork")).fixed
 
 
 def test_reconcile_apt_pool_first_char_rewrites_stale_pool_dirs(tmp_path):
@@ -8825,6 +8888,11 @@ def test_fork_lane_release_default_set_and_its_test_agree(tmp_path):
     # upstream's to retire and the sync carries that deletion instead of re-growing
     # the row.
     fork_opt_in = _opt_in_lanes_added_by_the_fork(tmp_path / "lane-seed")
+    produced = (tmp_path / "lane-seed" / "scripts" / "releases" / "lanes.py").read_text(encoding="utf-8")
+    fork_names = set(re.findall(r'Lane\("([a-z0-9-]+)"', produced))
+    # Only upstream opt-ins that exist in the fork's lane table belong in OUT_OF_DEFAULT;
+    # a lane upstream added but the fork has not adopted yet is not in NAMES.
+    upstream_opt_in = upstream_opt_in & fork_names
     assert test_names == source_names | (upstream_opt_in - added) | fork_opt_in
     # Termux is the one lane both sides put back in: it needs no signing.
     assert added == {"termux"}
@@ -9885,15 +9953,16 @@ def test_a_collision_is_reported_not_guessed_at(tmp_path):
         'FEED = "https://cdn.example.test/feed"',
         'FEED = "https://pages.nastech.test/feed"',
     )
-    dst, fork, hermes = _merge_tree(tmp_path, ours, theirs)
+    dst, fork, hermes = _merge_tree(tmp_path, ours, theirs,
+                                    rel="scripts/releases/r2.py")
 
     fixed, unresolved = _reconcile_fork_release_divergence(
         dst, fork_root=fork, upstream_src=hermes)
 
-    assert unresolved == ["scripts/releases/stable.py"]
+    assert unresolved == ["scripts/releases/r2.py"]
     assert fixed == []
     # The candidate is left exactly as branding and the span tables produced it.
-    assert (Path(dst) / "scripts" / "releases" / "stable.py").read_text() == ours
+    assert (Path(dst) / "scripts" / "releases" / "r2.py").read_text() == ours
 
 
 # Upstream and the fork both extend the same import block; the fork also

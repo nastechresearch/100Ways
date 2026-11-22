@@ -2938,6 +2938,10 @@ def _reconcile_fork_release_test(dst: str, fork_root: str | None = None) -> bool
     upstream's lines are never removed: a sync can add to this test but never
     subtract from it.  A missing anchor fails the pipeline instead of shipping
     the fork's module with a test that cannot pass.
+
+    If upstream has structurally rewritten the file so the canary-publication
+    test shape no longer exists, keep the fork's own file: the fork still owns
+    that behaviour and the span-graft model no longer applies.
     """
     if not fork_root:
         return False
@@ -2945,11 +2949,35 @@ def _reconcile_fork_release_test(dst: str, fork_root: str | None = None) -> bool
     if spans is None:
         return False
     target = os.path.join(dst, _FORK_CANARY_TEST_FILE)
+    fork_path = os.path.join(fork_root, _FORK_CANARY_TEST_FILE)
     try:
         with open(target, encoding="utf-8") as fh:
             text = fh.read()
     except OSError:
         return False
+
+    fork_gate = "def test_published_canary_workflow_advances_only_after_every_gate("
+    attached_anchor = (
+        '    resolved = ChannelReader(env["CLOUDFLARE_R2_PUBLIC_URL"], '
+        'repository=env["GITHUB_REPOSITORY"]).resolve("canary")\n'
+    )
+    upstream_rewritten = (
+        fork_gate not in text
+        and attached_anchor not in text
+        and "def test_canary_metadata_is_recorded_and_receipt_bound" in text
+        and "canary_publisher" not in text
+    )
+    if upstream_rewritten and os.path.isfile(fork_path):
+        try:
+            with open(fork_path, encoding="utf-8") as fh:
+                fork_text = fh.read()
+        except OSError:
+            fork_text = None
+        if fork_text and fork_gate in fork_text and fork_text != text:
+            with open(target, "w", encoding="utf-8") as fh:
+                fh.write(fork_text)
+            return True
+
     changed = False
 
     def _insert_before(block: str, anchor: str, where: str) -> None:
@@ -3000,8 +3028,7 @@ def _reconcile_fork_release_test(dst: str, fork_root: str | None = None) -> bool
         changed = True
     _insert_before(
         spans["assertions"],
-        '    resolved = ChannelReader(env["CLOUDFLARE_R2_PUBLIC_URL"], '
-        'repository=env["GITHUB_REPOSITORY"]).resolve("canary")\n',
+        attached_anchor,
         "attached-assets",
     )
     if not changed:
@@ -5361,7 +5388,7 @@ _BUNDLED_UNSIGNED_LEGS_OLD_4 = """\
         # The feed input stays in the tag archive until the leg and its smoke pass.
         run: |
           args=(--include '*.dmg' --include '*.zip' --include '*.blockmap' --include '*-mac.yml')
-          if [ "$RELEASE_PHASE" = candidate ] || { [ "$NASTECH_DESKTOP_VARIANT" = bundled ] && [[ "$NASTECH_PAYLOAD_TAG" == *+canary.* ]]; }; then
+          if [ "$RELEASE_PHASE" = candidate ] || { [ "$NASTECH_DESKTOP_VARIANT" = bundled ] && [[ "$NASTECH_PAYLOAD_TAG" == canary.* ]]; }; then
 """
 _BUNDLED_UNSIGNED_LEGS_NEW_4 = """\
           SKIP_SIGNED: ${{ inputs.skip-signed }}
@@ -5371,7 +5398,7 @@ _BUNDLED_UNSIGNED_LEGS_NEW_4 = """\
           # The recorder reads the Developer ID signature an unsigned build cannot
           # carry, so an unsigned leg writes no release row, exactly as the Windows
           # leg refuses to describe bytes it did not Authenticode-sign.
-          if [ "$SKIP_SIGNED" != true ] && { [ "$RELEASE_PHASE" = candidate ] || { [ "$NASTECH_DESKTOP_VARIANT" = bundled ] && [[ "$NASTECH_PAYLOAD_TAG" == *+canary.* ]]; }; }; then
+          if [ "$SKIP_SIGNED" != true ] && { [ "$RELEASE_PHASE" = candidate ] || { [ "$NASTECH_DESKTOP_VARIANT" = bundled ] && [[ "$NASTECH_PAYLOAD_TAG" == canary.* ]]; }; }; then
 """
 _BUNDLED_UNSIGNED_LEGS_OLD_5 = """\
     needs: [validate, build-darwin-arm64]
@@ -5390,27 +5417,8 @@ _BUNDLED_UNSIGNED_LEGS_NEW_5 = """\
       && inputs.skip-signed != true
       && needs.validate.result == 'success' && needs.validate.outputs.sha != ''
 """
-_BUNDLED_UNSIGNED_LEGS_OLD_6 = """\
-    needs: [validate, build-darwin-arm64, smoke-darwin-arm64]
-    if: >-
-      !cancelled() && inputs.build_commit == '' && inputs.channel == '' && inputs.upload_release == true
-      && inputs.release-phase == ''
-      && needs.validate.outputs.darwin-arm64 == 'true'
-"""
-_BUNDLED_UNSIGNED_LEGS_NEW_6 = """\
-    needs: [validate, build-darwin-arm64, smoke-darwin-arm64]
-    # The feed is what every installed app auto-updates from, so it may point at
-    # signed bytes only. The Windows publisher gets this from its smoke gates,
-    # which an unsigned MSIX cannot install; a dmg runs unsigned, so the guard
-    # belongs on the publication itself.
-    if: >-
-      !cancelled() && inputs.build_commit == '' && inputs.channel == '' && inputs.upload_release == true
-      && inputs.release-phase == ''
-      && inputs.skip-signed != true
-      && needs.validate.outputs.darwin-arm64 == 'true'
-"""
 _BUNDLED_APT_FEED_OLD_1 = """\
-      - name: Stage the APT repo and publish to R2
+      - name: Stage the APT repo handoff to R2
 """
 _BUNDLED_APT_FEED_NEW_1 = """\
       - name: Stage the APT repo and publish the feed release
@@ -5465,7 +5473,9 @@ _BUNDLED_APT_FEED_OLD_5 = (
     '              "termux/termux-docker@$digest" bash /tmp/check-apt.sh "nastech-$CHANNEL" "$version"\n'
     '          fi\n'
     '\n'
-    "          args=(--include 'deb/*.deb' --include 'apt/**/*')\n"
+    '          python -m scripts.bundles.release_artifacts record --platform termux --arch aarch64 \\\n'
+    '            --root termux-build --tag "$NASTECH_PAYLOAD_TAG" --commit "$RELEASE_COMMIT" \\\n'
+    '            --out termux-build/metadata-termux-aarch64.json\n'
 )
 _BUNDLED_APT_FEED_NEW_5 = (
     '              -v "$PWD/termux-build/apt-flat:/apt:ro" \\\n'
@@ -5475,63 +5485,23 @@ _BUNDLED_APT_FEED_NEW_5 = (
     '              "termux/termux-docker@$digest" bash /tmp/check-apt.sh "nastech-$CHANNEL" "$version" file:/apt\n'
     '          fi\n'
     '\n'
-    "          args=(--include 'deb/*.deb')\n"
+    '          python -m scripts.bundles.release_artifacts record --platform termux --arch aarch64 \\\n'
+    '            --root termux-build --tag "$NASTECH_PAYLOAD_TAG" --commit "$RELEASE_COMMIT" \\\n'
+    '            --out termux-build/metadata-termux-aarch64.json\n'
 )
 _BUNDLED_APT_FEED_OLD_6 = """\
-              --out termux-build/metadata-termux-aarch64.json
-            args+=(--include 'metadata-*.json')
-          fi
+          python -m scripts.releases.handoff stage --tag "${NASTECH_ARCHIVE_TAG:-$NASTECH_PAYLOAD_TAG}" --commit "$RELEASE_COMMIT" \\
+            --name termux --root termux-build --include 'deb/*.deb' --include 'apt/**/*' --include 'metadata-*.json'
 """
-_BUNDLED_APT_FEED_NEW_6 = """\
-              --out termux-build/metadata-termux-aarch64.json
-            # A candidate still hands its staged tree to the tag archive, because
-            # the sequencer's `advance_termux_apt` reads the signed index from
-            # there; a claim ref is written by exactly one run, so the immutable
-            # put round-trips. The published feed itself never comes from R2.
-            args+=(--include 'apt/**/*' --include 'metadata-*.json')
-          fi
-"""
-_BUNDLED_APT_FEED_OLD_7 = (
-    '          # --key-is-full is MANDATORY on every feed-dir upload: without it\n'
-    '          # scripts.releases.r2 re-prefixes the key into the tag archive\n'
-    '          # (releases/tag/<tag>/) and the APT feed never lands at\n'
-    '          # releases/termux/<channel>/.\n'
-    '          shopt -s globstar nullglob\n'
-    '          # cd into the staged repo for the glob, but resolve the r2 client\n'
-    '          # absolutely first -- after the cd, scripts/ is no longer in the\n'
-    '          # cwd and a bare `python -m scripts.releases.r2` would ENOENT.\n'
-    '          export PYTHONPATH="$GITHUB_WORKSPACE"\n'
-    '          cd termux-build/apt\n'
-    '          files=(pool/**/*.deb "dists/nastech-$CHANNEL"/main/binary-aarch64/by-hash/*/* key.asc\n'
-    '                 "dists/nastech-$CHANNEL/main/binary-aarch64/Packages"\n'
-    '                 "dists/nastech-$CHANNEL/main/binary-aarch64/Packages.gz"\n'
-    '                 "dists/nastech-$CHANNEL/Release"\n'
-    '                 "dists/nastech-$CHANNEL/Release.gpg"\n'
-    '                 "dists/nastech-$CHANNEL/InRelease")\n'
-    '          # APT reads InRelease first. Publish it only after every referenced\n'
-    '          # index and package has been uploaded and read back successfully.\n'
-    '          for f in "${files[@]}"; do\n'
-    '            test -f "$f"\n'
-    '            python3 -m scripts.releases.r2 put \\\n'
-    '              --tag "$NASTECH_PAYLOAD_TAG" \\\n'
-    '              --key "releases/termux/$CHANNEL/$f" \\\n'
-    '              --file "$f" \\\n'
-    '              --key-is-full\n'
-    '          done\n'
+_BUNDLED_APT_FEED_NEW_6 = (
+    '          # A candidate still hands its staged tree to the tag archive, because\n'
+    '          # the sequencer\'s `advance_termux_apt` reads the signed index from\n'
+    '          # there; a claim ref is written by exactly one run, so the immutable\n'
+    '          # put round-trips. The published feed itself never comes from R2.\n'
+    '          python -m scripts.releases.handoff stage --tag "${NASTECH_ARCHIVE_TAG:-$NASTECH_PAYLOAD_TAG}" --commit "$RELEASE_COMMIT" \\\n'
+    "            --name termux --root termux-build --include 'deb/*.deb' --include 'apt/**/*' --include 'metadata-*.json'\n"
     '\n'
-    '          # Verify the public CDN path, not only the object-store origin.\n'
-    '          public_repo="${CLOUDFLARE_R2_PUBLIC_URL%/}/releases/termux/$CHANNEL"\n'
-    '          curl --fail --silent --show-error "$public_repo/key.asc" -o "$RUNNER_TEMP/termux-public-key.asc"\n'
-    '          cmp key.asc "$RUNNER_TEMP/termux-public-key.asc"\n'
-    '          docker run --rm --platform linux/arm64 --user 1000:1000 \\\n'
-    '            -v "$PWD:/apt:ro" \\\n'
-    '            -v "$GITHUB_WORKSPACE/scripts/termux/check_apt.sh:/tmp/check-apt.sh:ro" \\\n'
-    '            -v "$GITHUB_WORKSPACE/scripts/termux/validate_installed.py:/tmp/validate_installed.py:ro" \\\n'
-    '            "termux/termux-docker@$digest" bash /tmp/check-apt.sh "nastech-$CHANNEL" "$version" "$public_repo"\n'
-)
-_BUNDLED_APT_FEED_NEW_7 = (
-    '\n'
-    "          # The feed is this channel's own fixed-tag release. apt needs a base URL\n"
+    '          # The feed is this channel\'s own fixed-tag release. apt needs a base URL\n'
     '          # that does not move, and a mutable index cannot live in an object store\n'
     '          # that promises "same key, same bytes" -- which is the 412 that killed\n'
     '          # the R2 publish for every canary re-dispatched under one tag.\n'
@@ -5583,14 +5553,12 @@ _BUNDLED_WORKFLOW_EDITS = (
     (_BUNDLED_UNSIGNED_LEGS_OLD_3, _BUNDLED_UNSIGNED_LEGS_NEW_3),
     (_BUNDLED_UNSIGNED_LEGS_OLD_4, _BUNDLED_UNSIGNED_LEGS_NEW_4),
     (_BUNDLED_UNSIGNED_LEGS_OLD_5, _BUNDLED_UNSIGNED_LEGS_NEW_5),
-    (_BUNDLED_UNSIGNED_LEGS_OLD_6, _BUNDLED_UNSIGNED_LEGS_NEW_6),
     (_BUNDLED_APT_FEED_OLD_1, _BUNDLED_APT_FEED_NEW_1),
     (_BUNDLED_APT_FEED_OLD_2, _BUNDLED_APT_FEED_NEW_2),
     (_BUNDLED_APT_FEED_OLD_3, _BUNDLED_APT_FEED_NEW_3),
     (_BUNDLED_APT_FEED_OLD_4, _BUNDLED_APT_FEED_NEW_4),
     (_BUNDLED_APT_FEED_OLD_5, _BUNDLED_APT_FEED_NEW_5),
     (_BUNDLED_APT_FEED_OLD_6, _BUNDLED_APT_FEED_NEW_6),
-    (_BUNDLED_APT_FEED_OLD_7, _BUNDLED_APT_FEED_NEW_7),
 )
 
 _BUNDLED_STORE_MARKER = """\
@@ -6029,28 +5997,6 @@ _HANDOFF_BUNDLED_WORKFLOW_NEW_4 = """\
       GH_TOKEN: ${{ github.token }}
       CHANNEL_BUILD: ${{ needs.validate.outputs.channel-build }}
 """
-_HANDOFF_BUNDLED_WORKFLOW_OLD_5 = """\
-      group: win32-updater-feed-canary
-      cancel-in-progress: false
-    env:
-"""
-_HANDOFF_BUNDLED_WORKFLOW_NEW_5 = """\
-      group: win32-updater-feed-canary
-      cancel-in-progress: false
-    env:
-      GH_TOKEN: ${{ github.token }}
-"""
-_HANDOFF_BUNDLED_WORKFLOW_OLD_6 = """\
-      group: darwin-updater-feed-${{ needs.validate.outputs.channel }}
-      cancel-in-progress: false
-    env:
-"""
-_HANDOFF_BUNDLED_WORKFLOW_NEW_6 = """\
-      group: darwin-updater-feed-${{ needs.validate.outputs.channel }}
-      cancel-in-progress: false
-    env:
-      GH_TOKEN: ${{ github.token }}
-"""
 # Admission resolves the store from its own job, so it carries the token like the
 # legs it gates.
 # The upstream admission leg was extended to 60 minutes after real archive
@@ -6100,8 +6046,6 @@ _HANDOFF_BUNDLED_WORKFLOW_EDITS = (
     (_HANDOFF_BUNDLED_WORKFLOW_OLD_2, _HANDOFF_BUNDLED_WORKFLOW_NEW_2),
     (_HANDOFF_BUNDLED_WORKFLOW_OLD_3, _HANDOFF_BUNDLED_WORKFLOW_NEW_3),
     (_HANDOFF_BUNDLED_WORKFLOW_OLD_4, _HANDOFF_BUNDLED_WORKFLOW_NEW_4),
-    (_HANDOFF_BUNDLED_WORKFLOW_OLD_5, _HANDOFF_BUNDLED_WORKFLOW_NEW_5),
-    (_HANDOFF_BUNDLED_WORKFLOW_OLD_6, _HANDOFF_BUNDLED_WORKFLOW_NEW_6),
     (_HANDOFF_BUNDLED_WORKFLOW_OLD_7, _HANDOFF_BUNDLED_WORKFLOW_NEW_7),
     (_HANDOFF_BUNDLED_WORKFLOW_OLD_8, _HANDOFF_BUNDLED_WORKFLOW_NEW_8),
 )
@@ -6149,7 +6093,7 @@ _HANDOFF_STAGING_TEST_EDITS = (
 )
 
 _HANDOFF_SMOKE_TEST_OLD_1 = '''\
-"""Replay artifact handoffs and publication against a fake R2."""
+"""Replay artifact handoffs and smoke fetches against a fake R2."""
 '''
 _HANDOFF_SMOKE_TEST_NEW_1 = '''\
 """Replay the artifact handoffs and publication a desktop release run performs.
@@ -6907,7 +6851,7 @@ _CHANNEL_RELEASES_PY_NEW_9 = r"""        # Explicit bootstrap may have reserved 
 
 
 _CHANNEL_RELEASES_PY_OLD_10 = """\
-        match_accepted_packages(manifest, accepted)
+    match_accepted_packages(manifest, accepted)
     prefix = build_prefix(request["buildId"])
     log(f"Build {request['buildId']}: writing {len(feeds)} immutable feeds under {prefix}")
     for file in feeds:
@@ -6922,7 +6866,7 @@ _CHANNEL_RELEASES_PY_OLD_10 = """\
 
 
 _CHANNEL_RELEASES_PY_NEW_10 = """\
-        match_accepted_packages(manifest, accepted)
+    match_accepted_packages(manifest, accepted)
     prefix = build_prefix(request["buildId"])
     log(f"Build {request['buildId']}: writing {len(feeds)} immutable feeds under {prefix}")
     write_immutable_feeds(publisher.store, publisher.reader, prefix, root, feeds)
@@ -8315,20 +8259,35 @@ _CANARY_DISPATCH_INPUT_AFTER = _CANARY_DISPATCH_INPUT_BEFORE + (
     "        type: boolean\n"
     "        default: false\n"
 )
-_CANARY_RELEASE_PY_BEFORE = '    if canary:\n        cmd += ["-f", "upload_release=true"]\n'
+_CANARY_RELEASE_PY_BEFORE = (
+    '    workflow = "stable-release.yml"\n'
+    '    cmd = ["gh", "workflow", "run", workflow, "--ref", "main", "-f", f"tag={tag}"]\n'
+    '    if gh_repo:\n'
+    '        cmd += ["--repo", gh_repo]\n'
+)
 _CANARY_DISPATCH_TEST_REL = "tests/scripts/test_release_canary_git.py"
 _CANARY_DISPATCH_TEST_BEFORE = (
-    '        "-f", f"tag={tag}", "-f", "upload_release=true", "--repo", "fixture/release",\n'
+    '    assert dispatch == [\n'
+    '        "gh", "workflow", "run", "stable-release.yml", "--ref", "main",\n'
+    '        "-f", f"tag={tag}", "--repo", "fixture/release",\n'
+    '    ]\n'
 )
 _CANARY_DISPATCH_TEST_AFTER = (
+    '    assert dispatch == [\n'
+    '        "gh", "workflow", "run", "desktop-bundled-release.yml", "--ref", "main",\n'
     '        "-f", f"tag={tag}", "-f", "upload_release=true", "-f", "skip-signed=true",\n'
     '        "--repo", "fixture/release",\n'
+    '    ]\n'
 )
 _CANARY_RELEASE_PY_AFTER = (
-    "    if canary:\n"
-    "        # NasTech ships unsigned: declare it here too, or the dispatched build stops\n"
-    "        # at the Apple/Azure credential gates before it builds anything.\n"
+    '    workflow = "desktop-bundled-release.yml" if canary else "stable-release.yml"\n'
+    '    cmd = ["gh", "workflow", "run", workflow, "--ref", "main", "-f", f"tag={tag}"]\n'
+    '    if canary:\n'
+    '        # NasTech ships unsigned: declare it here too, or the dispatched build stops\n'
+    '        # at the Apple/Azure credential gates before it builds anything.\n'
     '        cmd += ["-f", "upload_release=true", "-f", "skip-signed=true"]\n'
+    '    if gh_repo:\n'
+    '        cmd += ["--repo", gh_repo]\n'
 )
 
 
@@ -10788,10 +10747,13 @@ _FORK_PREFERRED_DIVERGENCE_FILES = (
     ".github/workflows/plugin-catalog-ci.yml",
     ".github/workflows/stable-release.yml",
     ".github/workflows/tests.yml",
+    ".github/workflows/windows-install-update-e2e.yml",
     "scripts/bundles/release_artifacts.py",
     "scripts/releases/channel_publish.py",
     "scripts/releases/channel_releases.py",
     "scripts/releases/darwin.py",
+    "scripts/releases/lanes.py",
+    "scripts/releases/stable.py",
     "tests/scripts/test_release_artifacts.py",
     "tests/scripts/test_release_channels.py",
     "tests/scripts/test_release_entrypoint.py",
@@ -14625,7 +14587,7 @@ _UNSIGNED_DESKTOP_JOBS = tuple(job for job, _, _ in _UNSIGNED_DESKTOP_CALLER_EDI
 # The other job group the workflow hands to the bundled builder.  It builds nothing this
 # fork signs, so it takes no ``skip-signed`` -- but it is listed so the caller check below
 # can tell a leg it may leave alone from a leg it has never seen.
-_UNSIGNED_NON_DESKTOP_JOBS = ("termux",)
+_UNSIGNED_NON_DESKTOP_JOBS = ("linux-arm64", "linux-x64", "termux")
 _CALLER_JOB_RE = re.compile(r"^      jobs: (\S+)[ \t]*$", re.M)
 
 
@@ -14817,8 +14779,12 @@ _RELEASE_LANES_TESTS_EDITS = (
         r'''from scripts.releases import lanes as lane_set
 
 
-def test_the_default_builds_everything_but_termux():
-    assert lane_set.DEFAULT == set(lane_set.NAMES) - {"termux"}
+def test_the_default_builds_everything_but_termux_and_diagnostic_linux():
+    assert lane_set.DEFAULT == set(lane_set.NAMES) - {"termux", "linux"}
+    assert lane_set.select() == lane_set.DEFAULT
+    assert "linux" in lane_set.CANARY
+    assert not lane_set.has_bundles(["linux"])
+    assert lane_set.DIAGNOSTIC_CALLS.isdisjoint(lane_set.CANDIDATE_CALLS)
 ''',
         r'''from scripts.releases import lanes as lane_set
 
@@ -14831,10 +14797,11 @@ OUT_OF_DEFAULT = {"windows-store", "smoke", "upgrade"}
 
 def test_the_default_ships_every_lane_this_fork_publishes():
     assert lane_set.DEFAULT == (set(lane_set.NAMES) - OUT_OF_DEFAULT) | {"termux"}
+    assert lane_set.select() == lane_set.DEFAULT
 ''',
     ),
     (
-        r'''    ({"with_": ["termux"]}, set(lane_set.NAMES)),
+        r'''    ({"with_": ["termux", "linux"]}, set(lane_set.NAMES)),
 ''',
         r'''    # Termux is in this fork's default already, so opting into it adds no lane.
     ({"with_": ["termux"]}, set(lane_set.DEFAULT)),
@@ -14919,7 +14886,7 @@ LEGACY_DEFAULT = frozenset(set(lane_set.NAMES) - {"termux"})
 ''',
     ),
     (
-        r'''        "autopublish": False, "lanes": lane_set.DEFAULT,
+        r'''        "autopublish": False, "lanes": lane_set.DEFAULT, "require_green": True,
 ''',
         r'''        "autopublish": False, "lanes": LEGACY_DEFAULT,
 ''',
@@ -14935,11 +14902,13 @@ LEGACY_DEFAULT = frozenset(set(lane_set.NAMES) - {"termux"})
         tmp_path, r2_server, https_origin, monkeypatch):
     from scripts.releases import stable
 
-    off = {"candidates-termux", "termux-checks"}
+    # A stable release never runs the canary's publication job.
+    off = {"candidates-termux", "termux-checks", "candidates-linux-x64", "candidates-linux-arm64", "publish-canary"}
     required = ["admit", *lane_set.JOB_LANES]
     default = stable.gate_expectations(required, lane_set.DEFAULT)
     assert {name for name, result in default.items() if result == "skipped"} == off
-    assert set(stable.gate_expectations(required, lane_set.NAMES).values()) == {"success"}
+    everything = stable.gate_expectations(required, lane_set.NAMES)
+    assert {name for name, result in everything.items() if result == "skipped"} == {"publish-canary"}
     # A lane that is off removes its jobs even when its test lane is on.
     assert stable.gate_expectations(["candidates-termux", "termux-checks"],
                                     lane_set.select(without=["termux"])) == \
@@ -14950,8 +14919,9 @@ LEGACY_DEFAULT = frozenset(set(lane_set.NAMES) - {"termux"})
 ''',
         r'''def test_a_default_claim_ships_unsigned_desktops_and_lanes_restore_them(
         tmp_path, r2_server, https_origin, monkeypatch):
-    """NasTech DEFAULT builds every desktop package, unsigned: what still leaves are the
-    smoke- and upgrade-gated arms, which need a signed channel this fork never carried."""
+    """NasTech DEFAULT builds every desktop package, unsigned: what still leaves is the
+    smoke- and upgrade-gated arms, which need a signed channel to upgrade, and the inline
+    packaging gates this fork does not run."""
     from scripts.releases import stable
 
     off = {"transitions-darwin-arm64", "transitions-win32",
@@ -14959,7 +14929,8 @@ LEGACY_DEFAULT = frozenset(set(lane_set.NAMES) - {"termux"})
     required = ["admit", *lane_set.JOB_LANES]
     default = stable.gate_expectations(required, lane_set.DEFAULT)
     assert {name for name, result in default.items() if result == "skipped"} == off
-    assert set(stable.gate_expectations(required, lane_set.NAMES).values()) == {"success"}
+    everything = stable.gate_expectations(required, lane_set.NAMES)
+    assert {name for name, result in everything.items() if result == "skipped"} == set()
     # A lane that is off removes its jobs even when its test lane is on.
     assert stable.gate_expectations(["candidates-termux", "termux-checks"],
                                     lane_set.select(without=["termux"])) == \
