@@ -14951,7 +14951,7 @@ LEGACY_DEFAULT = frozenset(set(lane_set.NAMES) - {"termux"})
 ''',
     ),
     (
-        r'''        "autopublish": False, "lanes": lane_set.DEFAULT,
+        r'''        "autopublish": False, "lanes": lane_set.DEFAULT, "require_green": True,
 ''',
         r'''        "autopublish": False, "lanes": LEGACY_DEFAULT,
 ''',
@@ -14967,11 +14967,13 @@ LEGACY_DEFAULT = frozenset(set(lane_set.NAMES) - {"termux"})
         tmp_path, r2_server, https_origin, monkeypatch):
     from scripts.releases import stable
 
-    off = {"candidates-termux", "termux-checks"}
+    # A stable release never runs the canary's publication job.
+    off = {"candidates-termux", "termux-checks", "candidates-linux-x64", "candidates-linux-arm64", "publish-canary"}
     required = ["admit", *lane_set.JOB_LANES]
     default = stable.gate_expectations(required, lane_set.DEFAULT)
     assert {name for name, result in default.items() if result == "skipped"} == off
-    assert set(stable.gate_expectations(required, lane_set.NAMES).values()) == {"success"}
+    everything = stable.gate_expectations(required, lane_set.NAMES)
+    assert {name for name, result in everything.items() if result == "skipped"} == {"publish-canary"}
     # A lane that is off removes its jobs even when its test lane is on.
     assert stable.gate_expectations(["candidates-termux", "termux-checks"],
                                     lane_set.select(without=["termux"])) == \
@@ -14982,8 +14984,9 @@ LEGACY_DEFAULT = frozenset(set(lane_set.NAMES) - {"termux"})
 ''',
         r'''def test_a_default_claim_ships_unsigned_desktops_and_lanes_restore_them(
         tmp_path, r2_server, https_origin, monkeypatch):
-    """NasTech DEFAULT builds every desktop package, unsigned: what still leaves are the
-    smoke- and upgrade-gated arms, which need a signed channel this fork never carried."""
+    """NasTech DEFAULT builds every desktop package, unsigned: what still leaves is the
+    smoke- and upgrade-gated arms, which need a signed channel to upgrade, and the inline
+    packaging gates this fork does not run."""
     from scripts.releases import stable
 
     off = {"transitions-darwin-arm64", "transitions-win32",
@@ -14991,7 +14994,8 @@ LEGACY_DEFAULT = frozenset(set(lane_set.NAMES) - {"termux"})
     required = ["admit", *lane_set.JOB_LANES]
     default = stable.gate_expectations(required, lane_set.DEFAULT)
     assert {name for name, result in default.items() if result == "skipped"} == off
-    assert set(stable.gate_expectations(required, lane_set.NAMES).values()) == {"success"}
+    everything = stable.gate_expectations(required, lane_set.NAMES)
+    assert {name for name, result in everything.items() if result == "skipped"} == set()
     # A lane that is off removes its jobs even when its test lane is on.
     assert stable.gate_expectations(["candidates-termux", "termux-checks"],
                                     lane_set.select(without=["termux"])) == \
