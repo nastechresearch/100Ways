@@ -5317,6 +5317,34 @@ _BUNDLED_UNSIGNED_BUILD_NEW_1 = """\
           python scripts/bundles/desktop.py --prepared "$env:RUNNER_TEMP/desktop-job/prepared.json" --variant bundled
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 """
+# The same bundled-build leg carries an extra commit-identity preamble on the newer
+# layout.  Both layouts are accepted so the guard survives either shape; the fork's
+# edit still lifts the signing precondition and keeps every upstream line in place.
+_BUNDLED_UNSIGNED_BUILD_OLD_1_MOVED = """\
+        run: |
+          if ($env:LEGACY_COMMIT_BUILD -eq 'true') {
+              Remove-Item Env:NASTECH_PAYLOAD_TAG -ErrorAction SilentlyContinue
+              $env:NASTECH_PAYLOAD_VERSION = $env:NASTECH_CORE_VERSION
+          }
+          if ($env:SKIP_SIGNED -ne 'true') {
+              python scripts/bundles/desktop.py --prepared "$env:RUNNER_TEMP/desktop-job/prepared.json" --variant bundled
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+"""
+_BUNDLED_UNSIGNED_BUILD_NEW_1_MOVED = """\
+        run: |
+          if ($env:LEGACY_COMMIT_BUILD -eq 'true') {
+              Remove-Item Env:NASTECH_PAYLOAD_TAG -ErrorAction SilentlyContinue
+              $env:NASTECH_PAYLOAD_VERSION = $env:NASTECH_CORE_VERSION
+          }
+          # The bundled package is built whether or not it can be signed: the lane ships
+          # these bytes, the architecture audit scans them and the handoff stages them.
+          # Signing is masked off above, so electron-builder's windowsSigning() gets no
+          # certificate and emits unsigned bytes -- the same way the macOS legs have always
+          # built without a Developer ID. What skip-signed gates is publication.
+          python scripts/bundles/desktop.py --prepared "$env:RUNNER_TEMP/desktop-job/prepared.json" --variant bundled
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+"""
 _BUNDLED_UNSIGNED_BUILD_OLD_2 = """\
           args=()
           if [ "$RELEASE_PHASE" = candidate ]; then args+=(--candidate); fi
@@ -5394,6 +5422,27 @@ _BUNDLED_UNSIGNED_LEGS_NEW_4 = """\
           SKIP_SIGNED: ${{ inputs.skip-signed }}
         # The feed input stays in the tag archive until the leg and its smoke pass.
         run: |
+          args=(--include '*.dmg' --include '*.zip' --include '*.blockmap' --include '*-mac.yml')
+          # The recorder reads the Developer ID signature an unsigned build cannot
+          # carry, so an unsigned leg writes no release row, exactly as the Windows
+          # leg refuses to describe bytes it did not Authenticode-sign.
+          if [ "$SKIP_SIGNED" != true ] && { [ "$RELEASE_PHASE" = candidate ] || { [ "$NASTECH_DESKTOP_VARIANT" = bundled ] && [[ "$NASTECH_PAYLOAD_TAG" == canary.* ]]; }; }; then
+"""
+# The updater-feed staging step gained a release root line on the newer layout.
+# Both layouts are accepted; the fork still adds its SKIP_SIGNED env entry and
+# gates the recorder, leaving every upstream line (including the root) intact.
+_BUNDLED_UNSIGNED_LEGS_OLD_4_MOVED = """\
+        # The feed input stays in the tag archive until the leg and its smoke pass.
+        run: |
+          root="$GITHUB_WORKSPACE/apps/desktop/release"
+          args=(--include '*.dmg' --include '*.zip' --include '*.blockmap' --include '*-mac.yml')
+          if [ "$RELEASE_PHASE" = candidate ] || { [ "$NASTECH_DESKTOP_VARIANT" = bundled ] && [[ "$NASTECH_PAYLOAD_TAG" == canary.* ]]; }; then
+"""
+_BUNDLED_UNSIGNED_LEGS_NEW_4_MOVED = """\
+          SKIP_SIGNED: ${{ inputs.skip-signed }}
+        # The feed input stays in the tag archive until the leg and its smoke pass.
+        run: |
+          root="$GITHUB_WORKSPACE/apps/desktop/release"
           args=(--include '*.dmg' --include '*.zip' --include '*.blockmap' --include '*-mac.yml')
           # The recorder reads the Developer ID signature an unsigned build cannot
           # carry, so an unsigned leg writes no release row, exactly as the Windows
@@ -5561,6 +5610,20 @@ _BUNDLED_WORKFLOW_EDITS = (
     (_BUNDLED_APT_FEED_OLD_6, _BUNDLED_APT_FEED_NEW_6),
 )
 
+# Two legs changed shape without changing what the fork needs from them: the
+# bundled-build step gained a commit-identity preamble, and the updater-feed
+# step gained a release root line.  Keep the earlier anchors too, keyed by the
+# table entry they stand in for, so a candidate carrying either layout gets the
+# same fork post-image.  A file that carries both, or neither, still fails.
+_BUNDLED_MOVED_LEG_EDITS = {
+    _BUNDLED_UNSIGNED_BUILD_OLD_1: (
+        (_BUNDLED_UNSIGNED_BUILD_OLD_1_MOVED, _BUNDLED_UNSIGNED_BUILD_NEW_1_MOVED),
+    ),
+    _BUNDLED_UNSIGNED_LEGS_OLD_4: (
+        (_BUNDLED_UNSIGNED_LEGS_OLD_4_MOVED, _BUNDLED_UNSIGNED_LEGS_NEW_4_MOVED),
+    ),
+}
+
 _BUNDLED_STORE_MARKER = """\
   RELEASE_CHANNEL_STORE: github
 """
@@ -5633,9 +5696,11 @@ def _reconcile_desktop_release_leg_guards(dst: str) -> list[str]:
     updated = text
     if any(old in updated for old, _ in _BUNDLED_WORKFLOW_EDITS):
         for old, new in _BUNDLED_WORKFLOW_EDITS:
-            if new in updated:
+            variants = ((old, new),) + _BUNDLED_MOVED_LEG_EDITS.get(old, ())
+            if any(replacement in updated for _, replacement in variants):
                 continue
-            if updated.count(old) != 1:
+            matches = [(before, after) for before, after in variants if before in updated]
+            if len(matches) != 1 or updated.count(matches[0][0]) != 1:
                 raise DesktopReleaseLegAnchorError(
                     f"{rel} carries part of the release-leg shapes this rule rewrites but not all "
                     "of them. Upstream moved the legs: re-derive the table from its current text. "
@@ -5643,7 +5708,8 @@ def _reconcile_desktop_release_leg_guards(dst: str) -> list[str]:
                     "bytes no receipt describes and points the channel reader at a store the "
                     "publisher never wrote."
                 )
-            updated = updated.replace(old, new, 1)
+            before, after = matches[0]
+            updated = updated.replace(before, after, 1)
     missing = [label for label, marker in _BUNDLED_LEG_MARKERS if marker not in updated]
     if missing:
         raise DesktopReleaseLegAnchorError(
