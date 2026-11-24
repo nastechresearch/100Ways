@@ -204,9 +204,23 @@ jobs:
             echo "the branded lock already derives the committed pnpm-deps hash"
             got=$(sed -n '1s/[[:space:]]*$//p' nix/pnpm-deps-hash)
             if [ -z "$got" ]; then
+              # A branded snapshot can carry an empty hash when the engine did
+              # not carry the fork's recorded value. Restore the value the fork
+              # actually ships, then let the derivation decide: if it matches
+              # the branded lock, reuse it; otherwise Nix names the real one.
+              echo "branded pnpm-deps hash is empty; restoring the fork's recorded hash"
+              cp "$GITHUB_WORKSPACE/nastech-agent/nix/pnpm-deps-hash" nix/pnpm-deps-hash
+              if nix build .#pnpm-deps --no-link --print-build-logs 2>&1 | tee "$RUNNER_TEMP/pnpm-deps.log"; then
+                got=$(sed -n '1s/[[:space:]]*$//p' nix/pnpm-deps-hash)
+              else
+                got=$(sed -n 's/^ *got: *\(sha256-[A-Za-z0-9+/=]*\)$/\1/p' "$RUNNER_TEMP/pnpm-deps.log")
+              fi
+            fi
+            if [ -z "$got" ]; then
               echo "::error::the branded nix/pnpm-deps-hash is empty"
               exit 1
             fi
+            printf '%s\n' "$got" > nix/pnpm-deps-hash
           else
             got=$(sed -n 's/^ *got: *\(sha256-[A-Za-z0-9+/=]*\)$/\1/p' "$RUNNER_TEMP/pnpm-deps.log")
             if [ -z "$got" ]; then
