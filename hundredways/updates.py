@@ -10827,6 +10827,35 @@ _FORK_PREFERRED_DIVERGENCE_FILES = (
     "tests/scripts/test_stable_release.py",
 )
 
+# Upstream reshaped the whole release plane around per-dispatch claim tags while
+# this fork deliberately keeps its own unsigned-canary/direct-dispatch plane.
+# A per-hunk merge of those two designs produces code that calls symbols the
+# other side never defines (verified: 12 failing tests in the two release test
+# files).  When the candidate actually carries that claim-tag plane, carry the
+# fork's file whole for these paths instead of guessing a hybrid.  Every other
+# path -- including synthetic collisions in the unit tests -- stays under the
+# fail-closed three-way replay.
+_FORK_RELEASE_PLANE_PATHS = (
+    ".github/workflows/sandbox-image.yml",
+    ".github/workflows/stable-release-publication.yml",
+    "scripts/bundles/desktop_prepare.py",
+    "scripts/release.py",
+    "scripts/releases/handoff.py",
+    "scripts/releases/r2.py",
+    "scripts/termux/build_deb.sh",
+    "scripts/termux/deb_version.py",
+    "scripts/termux/stage_apt_repo.py",
+    "tests/scripts/test_release_build_commit.py",
+    "tests/scripts/test_release_canary_git.py",
+    "tests/scripts/test_release_handoff.py",
+    "tests/scripts/test_stage_apt_repo.py",
+    "tests/scripts/test_termux_deb_version.py",
+)
+_UPSTREAM_CLAIM_PLANE_MARKERS = (
+    "claim_tag", "claim-tag", "COMMIT_KEEP_DAYS", "is_commit_tag",
+    "commit.<stamp", "commit.20", "Commit release", "commit build", "claim",
+)
+
 #: Tests whose caps belong to the checker the candidate actually ships, not to
 #: the fork's copy of it.  ``tests/scripts/test_check_agents_md_size.py`` reads
 #: ``ROOT_MAX_CHARS``/``CHAIN_MAX_CHARS`` out of ``scripts/ci/check_agents_md_size.py``.
@@ -11226,6 +11255,12 @@ def _reconcile_fork_release_divergence(
         except (OSError, UnicodeDecodeError):
             continue
         if ours == theirs:
+            continue
+        if (rel in _FORK_RELEASE_PLANE_PATHS
+                and any(marker in ours for marker in _UPSTREAM_CLAIM_PLANE_MARKERS)):
+            with open(ours_path, "w", encoding="utf-8") as fh:
+                fh.write(theirs)
+            fixed.append(rel)
             continue
         ancestor = _upstream_text_at(upstream_src, baseline, rel)
         if ancestor is None:
