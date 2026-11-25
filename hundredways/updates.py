@@ -10860,7 +10860,12 @@ _UPSTREAM_CLAIM_PLANE_MARKERS = (
 # carries it and the hunk replay does not reliably carry its removal, which
 # fails the fork's pinned ruff with F841 on every branded tree. This one file
 # is carried whole from the fork so its lint-clean version wins.
-_FORK_OWNED_LINT_FIX_FILES = ("scripts/bundles/release_artifacts.py",)
+_FORK_OWNED_LINT_FIX_FILES = (
+    "scripts/bundles/release_artifacts.py",
+    ".github/workflows/README.md",
+    "scripts/releases/channels.py",
+    "tests/scripts/test_render_builds_publication.py",
+)
 
 #: Tests whose caps belong to the checker the candidate actually ships, not to
 #: the fork's copy of it.  ``tests/scripts/test_check_agents_md_size.py`` reads
