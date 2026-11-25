@@ -10856,6 +10856,12 @@ _UPSTREAM_CLAIM_PLANE_MARKERS = (
     "commit.<stamp", "commit.20", "Commit release", "commit build", "claim",
 )
 
+# The fork removed an unused `expected_version` from this file; upstream still
+# carries it and the hunk replay does not reliably carry its removal, which
+# fails the fork's pinned ruff with F841 on every branded tree. This one file
+# is carried whole from the fork so its lint-clean version wins.
+_FORK_OWNED_LINT_FIX_FILES = ("scripts/bundles/release_artifacts.py",)
+
 #: Tests whose caps belong to the checker the candidate actually ships, not to
 #: the fork's copy of it.  ``tests/scripts/test_check_agents_md_size.py`` reads
 #: ``ROOT_MAX_CHARS``/``CHAIN_MAX_CHARS`` out of ``scripts/ci/check_agents_md_size.py``.
@@ -11255,6 +11261,11 @@ def _reconcile_fork_release_divergence(
         except (OSError, UnicodeDecodeError):
             continue
         if ours == theirs:
+            continue
+        if rel in _FORK_OWNED_LINT_FIX_FILES:
+            with open(ours_path, "w", encoding="utf-8") as fh:
+                fh.write(theirs)
+            fixed.append(rel)
             continue
         if (rel in _FORK_RELEASE_PLANE_PATHS
                 and any(marker in ours for marker in _UPSTREAM_CLAIM_PLANE_MARKERS)):
